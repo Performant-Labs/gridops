@@ -81,7 +81,9 @@ function AddMachineFlow({ onDone }: { onDone: () => void }) {
             description: target.kind === "github_organization" ? "Organization" : "Repository",
           }))}
           placeholder="Choose where this machine can run jobs…"
+          maxSelected={64}
           searchPlaceholder="Search repositories and organizations…"
+          selectAll
           selectedNoun="targets"
           values={targetIds}
         />

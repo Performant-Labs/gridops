@@ -234,6 +234,7 @@ function ApprovalSection({ host }: { host: HostItem }) {
             }))}
             placeholder="Choose repositories and organizations…"
             searchPlaceholder="Search…"
+            selectAll
             selectedNoun="targets"
             values={values}
           />

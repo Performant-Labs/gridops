@@ -20,6 +20,8 @@ type SearchableMultiSelectProps<TValue extends SearchableSelectValue> = {
   disabled?: boolean;
   maxSelected?: number;
   selectedNoun?: string;
+  /** Offer selecting or clearing every option that matches the search. */
+  selectAll?: boolean;
 };
 
 export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
@@ -34,6 +36,7 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
   disabled = false,
   maxSelected,
   selectedNoun = "options",
+  selectAll = false,
 }: SearchableMultiSelectProps<TValue>) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -75,6 +78,22 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
     }
     if (maxSelected !== undefined && values.length >= maxSelected) return;
     onValueChange([...values, value]);
+  }
+
+  const allFilteredSelected =
+    filteredOptions.length > 0 && filteredOptions.every((option) => values.includes(option.value));
+
+  function toggleAllFiltered() {
+    const filtered = new Set(filteredOptions.map((option) => option.value));
+    if (allFilteredSelected) {
+      onValueChange(values.filter((value) => !filtered.has(value)));
+      return;
+    }
+    const added = filteredOptions
+      .map((option) => option.value)
+      .filter((value) => !values.includes(value));
+    const room = maxSelected === undefined ? added.length : Math.max(0, maxSelected - values.length);
+    onValueChange([...values, ...added.slice(0, room)]);
   }
 
   function moveActive(direction: 1 | -1) {
@@ -181,9 +200,22 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
                 value={query}
               />
             </div>
-            {maxSelected !== undefined ? (
-              <div className="mt-2 text-2xs text-muted-foreground">
-                {values.length} of {maxSelected} {selectedNoun} selected
+            {maxSelected !== undefined || selectAll ? (
+              <div className="mt-1 flex items-center justify-between gap-2 px-1 pb-0.5">
+                <span className="text-2xs text-muted-foreground">
+                  {maxSelected !== undefined ? `${values.length} of ${maxSelected} ${selectedNoun} selected` : `${values.length} selected`}
+                </span>
+                {selectAll && filteredOptions.length > 0 ? (
+                  <button
+                    className="rounded px-1.5 py-0.5 text-2xs font-medium text-primary hover:bg-popover-hover"
+                    onClick={toggleAllFiltered}
+                    type="button"
+                  >
+                    {allFilteredSelected
+                      ? query ? "Clear matches" : "Clear all"
+                      : query ? `Select ${filteredOptions.length} matches` : "Select all"}
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
