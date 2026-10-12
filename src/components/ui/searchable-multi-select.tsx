@@ -8,6 +8,9 @@ import {
 } from "~/components/ui/searchable-select";
 import { cn } from "~/lib/utils";
 
+/** Selected chips shown before the rest collapse into "+N more". */
+const CHIP_LIMIT = 12;
+
 type SearchableMultiSelectProps<TValue extends SearchableSelectValue> = {
   options: Array<SearchableSelectOption<TValue>>;
   values: TValue[];
@@ -41,6 +44,7 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [showAllChips, setShowAllChips] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -113,7 +117,8 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
       : `${selectedOptions.length} ${selectedNoun} selected`;
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div ref={rootRef}>
+      <div className="relative">
       <button
         aria-controls={listboxId}
         aria-expanded={open}
@@ -140,26 +145,8 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
         <ChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
 
-      {selectedOptions.length > 0 ? (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {selectedOptions.map((option) => (
-            <button
-              aria-label={`Remove ${option.label}`}
-              className="inline-flex h-6 max-w-full items-center gap-1 rounded-full border border-border-strong bg-panel-subtle px-2 text-2xs font-medium text-secondary-foreground hover:border-faint hover:text-foreground"
-              disabled={disabled}
-              key={option.value}
-              onClick={() => toggle(option.value)}
-              type="button"
-            >
-              <span className="max-w-56 truncate">{option.label}</span>
-              <X className="size-3 text-muted-foreground" />
-            </button>
-          ))}
-        </div>
-      ) : null}
-
       {open ? (
-        <div className="absolute z-50 mt-1 w-full min-w-72 overflow-hidden rounded-lg border border-border-strong bg-popover text-left shadow-popover">
+        <div className="absolute left-0 top-full z-50 mt-1 w-full min-w-72 overflow-hidden rounded-lg border border-border-strong bg-popover text-left shadow-popover">
           <div className="border-b border-border p-1">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -258,6 +245,34 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
           </div>
         </div>
       ) : null}
+      </div>
+      {selectedOptions.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {(showAllChips ? selectedOptions : selectedOptions.slice(0, CHIP_LIMIT)).map((option) => (
+            <button
+              aria-label={`Remove ${option.label}`}
+              className="inline-flex h-6 max-w-full items-center gap-1 rounded-full border border-border-strong bg-panel-subtle px-2 text-2xs font-medium text-secondary-foreground hover:border-faint hover:text-foreground"
+              disabled={disabled}
+              key={option.value}
+              onClick={() => toggle(option.value)}
+              type="button"
+            >
+              <span className="max-w-56 truncate">{option.label}</span>
+              <X className="size-3 text-muted-foreground" />
+            </button>
+          ))}
+          {selectedOptions.length > CHIP_LIMIT ? (
+            <button
+              className="inline-flex h-6 items-center rounded-full px-2 text-2xs font-medium text-primary hover:bg-hover"
+              onClick={() => setShowAllChips((current) => !current)}
+              type="button"
+            >
+              {showAllChips ? "Show less" : `+${selectedOptions.length - CHIP_LIMIT} more`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
     </div>
   );
 }
