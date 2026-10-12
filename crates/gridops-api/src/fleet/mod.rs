@@ -31,6 +31,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/v1/fleet/pools/{pool_id}/profile",
             get(profiles::profile).put(profiles::save_profile),
         )
+        .route("/api/v1/fleet/pools/{pool_id}/queue", get(profiles::queue))
         .route("/api/v1/fleet/hosts", get(query::hosts))
         .route("/api/v1/fleet/hosts/{host_id}", get(query::host))
         .route(
@@ -93,6 +94,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v1/fleet/hosts/{host_id}/grants/{target_id}",
             post(enrollment::set_grant),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/retire",
+            post(enrollment::retire),
         )
         .route(
             "/api/v1/fleet/hosts/{host_id}/lifecycle",

@@ -245,14 +245,72 @@ pub(crate) async fn admit_operation(
         insert_admission(tx, &intent, &candidate, now).await?;
         return Ok(AdmissionOutcome::Admitted);
     }
-    persist_rejection(
-        tx,
-        &intent.id,
-        last_reason.unwrap_or("no_eligible_host"),
-        now,
-    )
-    .await?;
+    let reason = match last_reason {
+        Some(reason) => reason,
+        None => diagnose(tx, &intent, now).await?,
+    };
+    persist_rejection(tx, &intent.id, reason, now).await?;
     Ok(AdmissionOutcome::Queued)
+}
+
+/// Names the first requirement no machine meets, so an operator can tell why
+/// work is waiting: none approved and active, none online, none granted the
+/// repository, no backend of the right kind, backend switched off, native
+/// trust missing, or every candidate under pressure.
+async fn diagnose(
+    tx: &mut Transaction<'_, Sqlite>,
+    intent: &store::IntentRow,
+    now: i64,
+) -> Result<&'static str, FleetError> {
+    let Some(row) = sqlx::query(
+        "WITH p AS (SELECT runtime_kind,execution_os,architecture FROM pool_execution_profiles WHERE id=?),
+              active AS (SELECT * FROM fleet_hosts WHERE enrollment_state='approved' AND lifecycle_state='active'),
+              online AS (SELECT * FROM active WHERE last_heartbeat_at>? AND authority_expires_at>?),
+              granted AS (SELECT o.* FROM online o JOIN host_target_grants g ON g.host_id=o.id
+                           WHERE g.target_id=? AND g.allow_schedule=1 AND g.revoked_at IS NULL),
+              matching AS (SELECT b.*,h.pressure_state FROM granted h JOIN host_backends b ON b.host_id=h.id, p
+                           WHERE b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
+                             AND b.architecture=p.architecture)
+         SELECT (SELECT COUNT(*) FROM active) AS active,
+                (SELECT COUNT(*) FROM online) AS online,
+                (SELECT COUNT(*) FROM granted) AS granted,
+                (SELECT COUNT(*) FROM matching) AS matching,
+                (SELECT COUNT(*) FROM matching WHERE enabled=1 AND readiness='ready') AS enabled,
+                (SELECT COUNT(*) FROM matching m WHERE m.enabled=1 AND m.pressure_state='normal') AS calm,
+                (SELECT runtime_kind FROM p) AS runtime,
+                (SELECT COUNT(*) FROM matching m JOIN host_target_grants g ON g.host_id=m.host_id
+                  WHERE g.target_id=? AND g.allow_native=1 AND g.revoked_at IS NULL) AS native",
+    )
+    .bind(&intent.profile_id)
+    .bind(now - 45_000)
+    .bind(now)
+    .bind(&intent.target_id)
+    .bind(&intent.target_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok("no_eligible_host");
+    };
+    let count = |name: &str| row.get::<i64, _>(name);
+    Ok(if count("active") == 0 {
+        "no_active_machine"
+    } else if count("online") == 0 {
+        "machines_offline"
+    } else if count("granted") == 0 {
+        "target_not_granted"
+    } else if count("matching") == 0 {
+        "no_matching_backend"
+    } else if count("enabled") == 0 {
+        "backend_disabled"
+    } else if row.get::<Option<String>, _>("runtime").as_deref() == Some("native_process")
+        && count("native") == 0
+    {
+        "native_not_trusted"
+    } else if count("calm") == 0 {
+        "machines_under_pressure"
+    } else {
+        "no_eligible_host"
+    })
 }
 
 fn is_durable_candidate_error(error: &FleetError) -> bool {

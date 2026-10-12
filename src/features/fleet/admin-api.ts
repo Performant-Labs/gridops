@@ -8,8 +8,7 @@ import { FleetRequestError } from "./registry-api";
 import {
   backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
-  type GrantPolicy, type HostLifecycle, type ProfileInput,
-} from "./admin-contracts";
+  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema } from "./admin-contracts";
 
 type Options = { signal?: AbortSignal; body?: unknown; method?: "GET" | "POST" | "PUT" };
 
@@ -39,6 +38,10 @@ export const setHostLifecycle = (hostId: string, expectedRevision: number, lifec
   request(`${hostPath(hostId)}/lifecycle`, emptyResponse, {
     method: "POST", body: lifecycleRequestSchema.parse({ expectedRevision, lifecycle }), signal,
   });
+export const retireHost = (hostId: string, expectedRevision: number, signal?: AbortSignal) =>
+  request(`${hostPath(hostId)}/retire`, emptyResponse, {
+    method: "POST", body: { expectedRevision }, signal,
+  });
 export const setBackendEnabled = (hostId: string, backendId: string, enabled: boolean, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/backends/${fleetIdSchema.parse(backendId)}/enabled`, emptyResponse, {
     method: "POST", body: backendEnabledRequestSchema.parse({ enabled }), signal,
@@ -51,6 +54,8 @@ export const setHostGrant = (hostId: string, targetId: string, policy: GrantPoli
   });
 export const listTargets = (signal?: AbortSignal) =>
   request("/api/v1/fleet/targets", fleetTargetListSchema, { signal });
+export const getPoolQueue = (poolId: string, signal?: AbortSignal) =>
+  request(`${profilePath(poolId).replace(/\/profile$/, "")}/queue`, poolQueueSchema, { signal });
 export const getPoolProfile = (poolId: string, signal?: AbortSignal) =>
   request(profilePath(poolId), profileResultSchema, { signal });
 export const savePoolProfile = (poolId: string, input: ProfileInput, signal?: AbortSignal) =>

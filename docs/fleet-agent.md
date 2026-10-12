@@ -45,16 +45,27 @@ first use.
 
 ## Enroll
 
+On the machine, run the agent with no arguments:
+
 ```sh
-export GRIDOPS_FLEET_URL=https://gridops.example.com
-export GRIDOPS_AGENT_STATE_DIR="$HOME/Library/Application Support/GridOps/agent"   # macOS
-export GRIDOPS_ENROLLMENT_CODE=<code from GridOps>
-gridops-host-agent enroll
+gridops-host-agent
 ```
 
-The code works once and expires after 10 minutes. The agent stores its
-credential in `journal.sqlite` in the state directory, readable only by its
-user. Then approve the machine in GridOps.
+It asks for the GridOps address and the one-time code from **Machines → Add
+machine**, enrolls the machine, and starts it. The code works once and expires
+after 10 minutes. The address is saved, so later runs need no settings. Then
+approve the machine in GridOps.
+
+The agent keeps its state in `~/.gridops/host-agent` (`%USERPROFILE%\.gridops\host-agent`
+on Windows): the journal with its credential, the saved address, and native
+runner files. Only its user can read the journal.
+
+For scripted installs, set `GRIDOPS_FLEET_URL` and `GRIDOPS_ENROLLMENT_CODE`
+and run `gridops-host-agent enroll`; nothing is asked.
+
+To recover a machine (after a quarantine or a lost credential), issue a
+recovery code from its page in GridOps and run
+`gridops-host-agent enroll --replace`.
 
 ## Run as a service
 
@@ -79,8 +90,8 @@ sudo systemctl enable --now gridops-host-agent
 
 | Variable | Purpose |
 |---|---|
-| `GRIDOPS_FLEET_URL` | GridOps address. Must be HTTPS except on loopback. |
-| `GRIDOPS_AGENT_STATE_DIR` | Journal, credential and native runner files. |
+| `GRIDOPS_FLEET_URL` | GridOps address, overriding the one saved at enrollment. Must be HTTPS except on loopback. |
+| `GRIDOPS_AGENT_STATE_DIR` | Journal, credential, saved address and native runner files (default `~/.gridops/host-agent`). |
 | `GRIDOPS_AGENT_NAME` | Machine name shown in GridOps (default: hostname). |
 | `GRIDOPS_AGENT_IMAGES` | Comma-separated runner images Docker profiles may use. Images outside this list are refused. |
 | `GRIDOPS_AGENT_DOCKER_NETWORK` | Docker network for runner containers. |

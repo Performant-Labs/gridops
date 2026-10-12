@@ -56,6 +56,24 @@ pub(super) async fn profile(
     Ok(Json(ProfileResponse { item }))
 }
 
+#[derive(Serialize)]
+pub(super) struct QueueResponse {
+    items: Vec<targets::QueuedRunner>,
+}
+
+pub(super) async fn queue(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetUser,
+    FleetPath(path): FleetPath<PoolPath>,
+) -> Result<Json<QueueResponse>, FleetApiError> {
+    require_admin(&state, &context, user.principal()).await?;
+    let items = targets::pool_queue(&state.database, &path.pool_id)
+        .await
+        .map_err(|error| fleet_error(context, &error))?;
+    Ok(Json(QueueResponse { items }))
+}
+
 pub(super) async fn save_profile(
     State(state): State<AppState>,
     context: RequestContext,

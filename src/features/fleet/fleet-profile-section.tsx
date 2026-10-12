@@ -11,7 +11,7 @@ import { SettingsRow, SettingsSection, Switch, UnitField } from "~/components/se
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { SearchableSelect } from "~/components/ui/searchable-select";
-import { getPoolProfile, savePoolProfile } from "./admin-api";
+import { getPoolProfile, getPoolQueue, savePoolProfile } from "./admin-api";
 import type { Profile, ProfileInput } from "./admin-contracts";
 import { fleetErrorMessage, isForbidden } from "./fleet-ui";
 
@@ -59,6 +59,42 @@ export function FleetExecutionSection({ poolId }: { poolId: string }) {
   }
   const item = profile.data.item;
   return <ProfileEditor description={description} key={item ? `${item.id}:${item.revision}` : "new"} poolId={poolId} profile={item} />;
+}
+
+const waitingReason: Record<string, string> = {
+  no_active_machine: "No machine is approved and active.",
+  machines_offline: "No active machine is online.",
+  target_not_granted: "No online machine is approved for this repository.",
+  no_matching_backend: "No approved machine has a runtime of this kind, OS and architecture.",
+  backend_disabled: "The matching runtime is switched off on every machine.",
+  native_not_trusted: "No machine allows native runs for this repository.",
+  machines_under_pressure: "Every matching machine is under memory or CPU pressure.",
+  physical_resource_exhausted: "Matching machines don’t have enough free CPU, memory or disk.",
+  child_resource_exhausted: "The machine’s VM or container budget is full.",
+  pool_capacity_exhausted: "The pool is at its maximum runner count.",
+  image_unavailable: "No machine allows this image. Add it to GRIDOPS_AGENT_IMAGES on the machine.",
+  capability_unverified: "The machine hasn’t confirmed this runtime recently.",
+  unsupported_mode: "The machine’s runtime doesn’t support this runner mode.",
+};
+
+/** Runners this pool queued that no machine has taken yet, and why. */
+function WaitingRunners({ poolId }: { poolId: string }) {
+  const queue = useQuery({
+    queryKey: ["fleet", "queue", poolId],
+    queryFn: ({ signal }) => getPoolQueue(poolId, signal),
+    refetchInterval: 10_000,
+  });
+  const items = queue.data?.items ?? [];
+  if (items.length === 0) return null;
+  const reason = items.find((item) => item.reason)?.reason;
+  return (
+    <div className="px-4 py-3">
+      <Callout title={`${items.length} ${items.length === 1 ? "runner is" : "runners are"} waiting for a machine`} tone="warning">
+        {(reason && waitingReason[reason]) ?? "No machine can take it yet."}{" "}
+        <Link className="underline underline-offset-2" to="/fleet">Check machines</Link>
+      </Callout>
+    </div>
+  );
 }
 
 function ProfileEditor({ poolId, profile, description }: { poolId: string; profile: Profile | null; description: ReactNode }) {
@@ -122,6 +158,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
       >
         <Switch aria-label="Run on machines" checked={enabled} onCheckedChange={setEnabled} />
       </SettingsRow>
+      {profile?.enabled ? <WaitingRunners poolId={poolId} /> : null}
       <SettingsRow description={runtimeKind === "native_process" ? "Jobs run directly on the machine. The machine must allow native runs for this repository." : "How each runner is isolated on the machine."} label="Runtime">
         <SearchableSelect
           ariaLabel="Fleet runtime"

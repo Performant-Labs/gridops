@@ -57,6 +57,15 @@ export const profileSchema = profileInputSchema.extend({
 export const profileResultSchema = z.strictObject({ item: profileSchema.nullable() });
 export const savedProfileResultSchema = z.strictObject({ item: profileSchema });
 
+export const queuedRunnerSchema = z.strictObject({
+  runnerId: z.string().min(1).max(128),
+  runnerName: z.string().max(256).nullable(),
+  reason: z.string().max(64).nullable(),
+  queuedAt: z.number().int().nonnegative(),
+});
+export const poolQueueSchema = z.strictObject({ items: z.array(queuedRunnerSchema).max(50) });
+export type QueuedRunner = z.infer<typeof queuedRunnerSchema>;
+
 export type HostLifecycle = z.infer<typeof hostLifecycleSchema>;
 export type GrantPolicy = z.infer<typeof grantPolicySchema>;
 export type HostGrant = z.infer<typeof hostGrantSchema>;

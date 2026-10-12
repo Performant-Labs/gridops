@@ -431,3 +431,60 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
     assert_eq!(running.await??, Stop::Shutdown);
     Ok(())
 }
+
+#[tokio::test]
+async fn waiting_runners_explain_what_is_missing() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let profile: Value = f
+        .client
+        .put(f.url("/pools/fleet-pool/profile"))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(&json!({
+            "enabled": true, "runtimeKind": "docker", "executionOs": "linux",
+            "architecture": "arm64", "mode": "ephemeral", "image": "runner:fixture",
+            "labels": [], "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let service = FleetService::new(f.database.clone());
+    service
+        .submit_intent(
+            &Principal::Reconciler,
+            SubmitIntent {
+                idempotency_key: "runner:waiting".into(),
+                pool_id: "fleet-pool".into(),
+                profile_id: profile["item"]["id"].as_str().context("profile")?.parse()?,
+                target_id: profile["item"]["targetIds"][0]
+                    .as_str()
+                    .context("target")?
+                    .parse()?,
+                workload_id: WorkloadId::try_new(Uuid::new_v4())?,
+                generation: Generation::new(1)?,
+                kind: WorkloadKind::CiRunner,
+                agent_run_id: None,
+                expected_profile_revision: Some(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        service
+            .admit_queued(&Principal::Reconciler, 10)
+            .await?
+            .admitted,
+        0
+    );
+    let queue: Value = f
+        .client
+        .get(f.url("/pools/fleet-pool/queue"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(queue["items"][0]["reason"], "no_active_machine");
+    Ok(())
+}

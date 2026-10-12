@@ -446,6 +446,28 @@ pub(super) async fn set_grant(
     Ok(StatusCode::OK.into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RetireBody {
+    expected_revision: BrowserCounter,
+}
+
+pub(super) async fn retire(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(host_id): FleetPath<HostId>,
+    FleetJson(body): FleetJson<RetireBody>,
+) -> Result<Response, FleetApiError> {
+    let expected_revision = Revision::new(body.expected_revision.get())
+        .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
+    RegistryService::new(state.database, state.vault)
+        .retire_host(user.principal(), host_id, expected_revision)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(StatusCode::OK.into_response())
+}
+
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,

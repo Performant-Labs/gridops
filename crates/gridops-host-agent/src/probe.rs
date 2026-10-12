@@ -50,6 +50,14 @@ pub fn boot_id() -> String {
             return id;
         }
     }
+    #[cfg(target_os = "windows")]
+    if let Some(boot) = powershell(
+        "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",
+    ) {
+        if !boot.is_empty() {
+            return format!("windows-{boot}");
+        }
+    }
     PROCESS_BOOT
         .get_or_init(|| format!("process-{}", uuid::Uuid::new_v4()))
         .clone()
@@ -128,8 +136,46 @@ pub fn measure() -> Measurement {
             uptime_seconds: None,
         };
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Total/free physical memory in KiB and average CPU load percent.
+        let reading = powershell(
+            "$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; '{0} {1} {2}' -f $o.TotalVisibleMemorySize,$o.FreePhysicalMemory,$c",
+        )
+        .unwrap_or_default();
+        let mut fields = reading
+            .split_whitespace()
+            .map(|value| value.parse::<f64>().ok());
+        let (total, free, load) = (
+            fields.next().flatten(),
+            fields.next().flatten(),
+            fields.next().flatten(),
+        );
+        let cores = std::thread::available_parallelism().map_or(1, |count| count.get()) as f64;
+        return Measurement {
+            memory_total_mib: total.map(|kib| (kib / 1024.0) as u64),
+            memory_used_mib: total
+                .zip(free)
+                .map(|(total, free)| ((total - free).max(0.0) / 1024.0) as u64),
+            cpu_used_millis: load.map(|percent| (percent / 100.0 * cores * 1000.0) as u64),
+            uptime_seconds: None,
+        };
+    }
     #[allow(unreachable_code)]
     Measurement::default()
+}
+
+/// Runs one PowerShell expression and returns its trimmed output.
+#[cfg(target_os = "windows")]
+fn powershell(script: &str) -> Option<String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Active, wired and compressed pages: memory the system can't reclaim.

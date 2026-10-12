@@ -909,6 +909,78 @@ impl RegistryService {
         Ok(())
     }
 
+    /// Retires an approved host: its credentials are revoked, it gets no more
+    /// work, and its history stays. A host still running work must be drained
+    /// first, so nothing it owns is left behind unmanaged.
+    pub async fn retire_host(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+        expected_revision: crate::fleet::Revision,
+    ) -> Result<(), RegistryError> {
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        let mut tx = self.begin().await?;
+        let now = self.clock.now_millis();
+        ensure_system_admin(&mut tx, user_id).await?;
+        let expected = i64::try_from(expected_revision.get())
+            .map_err(|_| RegistryError::InvalidRequest("revision exceeds SQLite integer"))?;
+        let Some(row) = sqlx::query("SELECT revision,lifecycle_state FROM fleet_hosts WHERE id=?")
+            .bind(host_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(RegistryError::NotFound);
+        };
+        if row.get::<String, _>("lifecycle_state") == "retired" {
+            tx.commit().await?;
+            return Ok(());
+        }
+        if row.get::<i64, _>("revision") != expected {
+            return Err(RegistryError::StaleRevision);
+        }
+        let busy: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workload_placements WHERE host_id=? AND state NOT IN ('cleaned','failed')",
+        )
+        .bind(host_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        if busy > 0 {
+            return Err(RegistryError::InvalidRequest(
+                "the machine still runs work; drain it first",
+            ));
+        }
+        sqlx::query(
+            "UPDATE fleet_hosts SET lifecycle_state='retired',retired_at=?,authority_expires_at=NULL,
+               revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(host_id.to_string())
+        .bind(expected)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE host_credentials SET revoked_at=? WHERE host_id=? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(host_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        audit_and_event(
+            &mut tx,
+            Some(user_id),
+            Some(host_id),
+            "fleet.host.retired",
+            "host",
+            &host_id.to_string(),
+            json!({}),
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Enables or disables one execution backend. A new backend starts
     /// disabled, so a runtime appearing on a host never takes work until an
     /// administrator turns it on.

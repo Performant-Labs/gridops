@@ -1095,7 +1095,7 @@ async fn changed_idempotency_body_and_revoked_policy_are_rejected_at_the_right_s
         .bind("52000000-0000-4000-8000-000000000005")
         .fetch_one(&database.pool)
         .await?,
-        "no_eligible_host"
+        "target_not_granted"
     );
     database.close().await
 }

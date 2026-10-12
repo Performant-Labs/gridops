@@ -6,6 +6,7 @@ import type * as React from "react";
 import { toast } from "sonner";
 
 import { confirmAction } from "~/components/confirm-dialog";
+import { CopyButton } from "~/components/copy-button";
 import {
   Callout, EmptyState, InlineLoading, PageBody, PageHeader, PropertiesPanel, PropertyGroup, PropertyRow, SectionHeading,
 } from "~/components/page";
@@ -14,7 +15,7 @@ import { Switch } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
-import { listHostGrants, listTargets, setBackendEnabled, setHostGrant, setHostLifecycle } from "~/features/fleet/admin-api";
+import { listHostGrants, listTargets, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle } from "~/features/fleet/admin-api";
 import type { GrantPolicy, HostGrant, HostLifecycle } from "~/features/fleet/admin-contracts";
 import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden,
@@ -22,7 +23,7 @@ import {
 } from "~/features/fleet/fleet-ui";
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
 import type { BackendReadV1, HostEventReadV1, HostReadV1 } from "~/features/fleet/query-contracts";
-import { FleetRequestError, approveHost, rotateHostCredential } from "~/features/fleet/registry-api";
+import { FleetRequestError, approveHost, recoverHost, rotateHostCredential } from "~/features/fleet/registry-api";
 import { cn, formatDateTime, formatRelativeTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/fleet/machines/$hostId")({
@@ -131,6 +132,7 @@ function MachineDetail({ host }: { host: HostItem }) {
         <HostAlerts host={host} />
         {host.enrollment === "pending" ? <ApprovalSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" ? <LifecycleSection host={host} /> : null}
+        {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
         <EventsSection items={events.data?.items} query={events} />
@@ -291,6 +293,57 @@ function LifecycleSection({ host }: { host: HostItem }) {
         })}
       </div>
       <p className="text-xs text-muted-foreground">Currently {lifecycleLabel[host.lifecycle]?.toLowerCase()}. Jobs start only on active machines with an enabled backend.</p>
+      <Button
+        disabled={pending !== null}
+        onClick={async () => {
+          if (!(await confirmAction("Retire this machine? Its credential stops working and it gets no more jobs. Drain it first if it’s running any. This can’t be undone; enroll it again to reuse it.", { confirmLabel: "Retire" }))) return;
+          await run("retire", () => retireHost(host.id, host.policyRevision), "Machine retired.");
+        }}
+        size="sm"
+        variant="destructive"
+      >
+        {pending === "retire" ? <LoaderCircle className="animate-spin" /> : null}Retire machine
+      </Button>
+    </section>
+  );
+}
+
+/** A quarantined or lost machine gets a one-time recovery code to re-enroll as itself. */
+function RecoverSection({ host }: { host: HostItem }) {
+  const { pending, run } = useFleetAction();
+  const [code, setCode] = useState<{ code: string; expiresAt: string } | null>(null);
+  const script = code ? `gridops-host-agent enroll --replace\n# Recovery code: ${code.code}` : "";
+  return (
+    <section className="space-y-3">
+      <SectionHeading>Recover machine</SectionHeading>
+      {code ? (
+        <Callout title="Copy this code now" tone="warning">
+          <p className="mb-2">It’s shown once and expires {formatDateTime(code.expiresAt)}. Run this on the machine, paste the code when asked, then approve the machine again.</p>
+          <div className="flex items-start gap-2 rounded-md border border-border bg-panel-subtle p-2">
+            <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-xs">{script}</pre>
+            <CopyButton label="Recovery commands" size="icon-sm" value={script} variant="ghost" />
+          </div>
+        </Callout>
+      ) : (
+        <>
+          <p className="text-sm text-muted-foreground">
+            {host.integrity === "quarantined"
+              ? "This machine was quarantined because its credential was used from two places at once. Recover it to give it a new credential."
+              : "If this machine lost its credential or was rebuilt, recover it to re-enroll it as the same machine."}
+          </p>
+          <Button
+            disabled={pending !== null}
+            onClick={() => void run("recover", async () => {
+              const result = await recoverHost(host.id, host.policyRevision, newIdempotencyKey());
+              if (result.status === "created") setCode({ code: result.code, expiresAt: result.expiresAt });
+            }, "Recovery code issued.")}
+            size="sm"
+            variant="outline"
+          >
+            {pending === "recover" ? <LoaderCircle className="animate-spin" /> : <KeyRound />}Issue recovery code
+          </Button>
+        </>
+      )}
     </section>
   );
 }

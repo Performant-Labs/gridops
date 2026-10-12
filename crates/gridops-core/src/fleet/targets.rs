@@ -371,3 +371,34 @@ fn serde_value<T: Serialize>(value: &T) -> Result<String, FleetError> {
         _ => Err(FleetError::Invariant("enum value")),
     }
 }
+
+/// A runner waiting for a fleet machine, with the reason admission recorded.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedRunner {
+    pub runner_id: String,
+    pub runner_name: Option<String>,
+    pub reason: Option<String>,
+    pub queued_at: i64,
+}
+
+/// The pool's runners still waiting for a machine, oldest first.
+pub async fn pool_queue(pool: &SqlitePool, pool_id: &str) -> Result<Vec<QueuedRunner>, FleetError> {
+    let rows = sqlx::query(
+        "SELECT i.workload_id,r.name,i.reason_code,i.created_at FROM workload_intents i
+           LEFT JOIN runners r ON r.id=i.workload_id
+          WHERE i.pool_id=? AND i.status='queued' ORDER BY i.created_at LIMIT 50",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| QueuedRunner {
+            runner_id: row.get("workload_id"),
+            runner_name: row.get("name"),
+            reason: row.get("reason_code"),
+            queued_at: row.get("created_at"),
+        })
+        .collect())
+}
