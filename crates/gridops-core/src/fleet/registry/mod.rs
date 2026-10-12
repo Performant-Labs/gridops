@@ -212,6 +212,17 @@ impl From<super::ids::FleetIdParseError> for RegistryError {
 }
 
 /// Clone-cheap database/vault handles for registry workflows.
+/// What one host may run for one CI target.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostGrant {
+    pub target_id: String,
+    pub label: String,
+    pub allow_schedule: bool,
+    pub allow_native: bool,
+    pub allow_docker_socket: bool,
+}
+
 #[derive(Clone)]
 pub struct RegistryService {
     pool: SqlitePool,
@@ -930,6 +941,87 @@ impl RegistryService {
             "backend",
             &backend_id.to_string(),
             json!({"enabled": enabled}),
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The host's target grants with readable labels.
+    pub async fn host_grants(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+    ) -> Result<Vec<HostGrant>, RegistryError> {
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        let mut tx = self.begin().await?;
+        ensure_system_admin(&mut tx, user_id).await?;
+        let rows = sqlx::query(
+            "SELECT g.target_id,g.allow_schedule,g.allow_native,g.allow_docker_socket,
+                    COALESCE(r.full_name,i.account_login,t.canonical_key) AS label
+               FROM host_target_grants g JOIN fleet_ci_targets t ON t.id=g.target_id
+               LEFT JOIN repositories r ON r.id=t.repository_id
+               LEFT JOIN installations i ON i.id=t.installation_id AND t.kind='github_organization'
+              WHERE g.host_id=? AND g.revoked_at IS NULL ORDER BY label",
+        )
+        .bind(host_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| HostGrant {
+                target_id: row.get("target_id"),
+                label: row.get("label"),
+                allow_schedule: row.get("allow_schedule"),
+                allow_native: row.get("allow_native"),
+                allow_docker_socket: row.get("allow_docker_socket"),
+            })
+            .collect())
+    }
+
+    /// Changes what a host may run for one granted target. Native execution
+    /// and Docker socket access are separate, explicit trust decisions.
+    pub async fn set_host_grant(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+        target_id: &str,
+        allow_schedule: bool,
+        allow_native: bool,
+        allow_docker_socket: bool,
+    ) -> Result<(), RegistryError> {
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        let mut tx = self.begin().await?;
+        let now = self.clock.now_millis();
+        ensure_system_admin(&mut tx, user_id).await?;
+        let changed = sqlx::query(
+            "UPDATE host_target_grants SET allow_schedule=?,allow_native=?,allow_docker_socket=?,
+                    revision=revision+1,granted_by=?
+              WHERE host_id=? AND target_id=? AND revoked_at IS NULL",
+        )
+        .bind(allow_schedule)
+        .bind(allow_native)
+        .bind(allow_docker_socket)
+        .bind(user_id)
+        .bind(host_id.to_string())
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RegistryError::NotFound);
+        }
+        audit_and_event(
+            &mut tx,
+            Some(user_id),
+            Some(host_id),
+            "fleet.grant.changed",
+            "host",
+            &host_id.to_string(),
+            json!({"target_id": target_id, "allow_schedule": allow_schedule,
+                   "allow_native": allow_native, "allow_docker_socket": allow_docker_socket}),
             now,
         )
         .await?;

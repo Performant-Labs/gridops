@@ -12,5 +12,7 @@ pub mod dispatch;
 pub mod docker;
 pub mod helper;
 pub mod journal;
+pub mod native;
 pub mod probe;
+pub mod runtime;
 pub mod supervisor;

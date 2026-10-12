@@ -405,7 +405,7 @@ fn started(
     })
 }
 
-fn cleaned(resource: &LocalResourceIdentity) -> HelperResponse {
+pub(crate) fn cleaned(resource: &LocalResourceIdentity) -> HelperResponse {
     let (Ok(now), Ok(absence), Ok(exclusion)) = (
         WireTimestamp::from_millis(gridops_core::now_millis()),
         DiagnosticId::try_new(Uuid::new_v4()),

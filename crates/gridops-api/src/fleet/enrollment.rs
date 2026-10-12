@@ -393,6 +393,59 @@ pub(super) async fn backend_enabled(
     Ok(StatusCode::OK.into_response())
 }
 
+#[derive(Serialize)]
+pub(super) struct GrantList {
+    items: Vec<gridops_core::fleet::registry::HostGrant>,
+}
+
+pub(super) async fn grants(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(host_id): FleetPath<HostId>,
+) -> Result<Json<GrantList>, FleetApiError> {
+    let items = RegistryService::new(state.database, state.vault)
+        .host_grants(user.principal(), host_id)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(GrantList { items }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct GrantBody {
+    allow_schedule: bool,
+    allow_native: bool,
+    allow_docker_socket: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GrantPath {
+    host_id: HostId,
+    target_id: gridops_core::fleet::CiTargetId,
+}
+
+pub(super) async fn set_grant(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(path): FleetPath<GrantPath>,
+    FleetJson(body): FleetJson<GrantBody>,
+) -> Result<Response, FleetApiError> {
+    RegistryService::new(state.database, state.vault)
+        .set_host_grant(
+            user.principal(),
+            path.host_id,
+            &path.target_id.to_string(),
+            body.allow_schedule,
+            body.allow_native,
+            body.allow_docker_socket,
+        )
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(StatusCode::OK.into_response())
+}
+
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,

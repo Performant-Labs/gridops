@@ -4,6 +4,7 @@
 //!   `GRIDOPS_ENROLLMENT_CODE` or stdin, so it never appears in a process list.
 //! - `gridops-host-agent run` keeps the fleet session open.
 //! - `gridops-host-agent helper <socket>` runs the privileged runtime helper.
+//! - `gridops-host-agent probe` prints what this host would report.
 //!
 //! Configuration: `GRIDOPS_FLEET_URL` (required for enroll/run),
 //! `GRIDOPS_AGENT_STATE_DIR` (journal location), `GRIDOPS_AGENT_NAME`
@@ -23,6 +24,8 @@ use gridops_host_agent::{
     dispatch::Trust,
     docker::DockerRuntime,
     journal::Journal,
+    native::NativeRuntime,
+    runtime::HostRuntime,
     supervisor::{Stop, Supervisor},
 };
 
@@ -45,6 +48,18 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_default();
+    if command == "probe" {
+        // What this host would report: measurements and execution backends.
+        use gridops_host_agent::helper::RuntimeHelper as _;
+        let report = serde_json::json!({
+            "os": gridops_host_agent::probe::host_os(),
+            "architecture": gridops_host_agent::probe::architecture(),
+            "measurement": format!("{:?}", gridops_host_agent::probe::measure()),
+            "backends": host_runtime()?.backends().await,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     if command == "helper" {
         return helper(
             args.next()
@@ -106,7 +121,7 @@ async fn run() -> Result<ExitCode> {
                 }
             })
         }
-        _ => anyhow::bail!("usage: gridops-host-agent <enroll|run|helper>"),
+        _ => anyhow::bail!("usage: gridops-host-agent <enroll|run|helper|probe>"),
     }
 }
 
@@ -116,13 +131,20 @@ async fn helper(socket: String) -> Result<ExitCode> {
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket)?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    gridops_host_agent::helper::serve(listener, Arc::new(docker_runtime())).await?;
+    gridops_host_agent::helper::serve(listener, Arc::new(host_runtime()?)).await?;
     Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(not(unix))]
 async fn helper(_socket: String) -> Result<ExitCode> {
     anyhow::bail!("the runtime helper socket isn't available on this platform yet")
+}
+
+fn host_runtime() -> Result<HostRuntime> {
+    Ok(HostRuntime::new(
+        docker_runtime(),
+        NativeRuntime::new(state_dir()?.join("native")),
+    ))
 }
 
 fn docker_runtime() -> DockerRuntime {

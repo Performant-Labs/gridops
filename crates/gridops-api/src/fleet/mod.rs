@@ -87,6 +87,14 @@ pub(crate) fn router() -> Router<AppState> {
             post(enrollment::backend_enabled),
         )
         .route(
+            "/api/v1/fleet/hosts/{host_id}/grants",
+            get(enrollment::grants),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/grants/{target_id}",
+            post(enrollment::set_grant),
+        )
+        .route(
             "/api/v1/fleet/hosts/{host_id}/lifecycle",
             post(enrollment::lifecycle),
         )

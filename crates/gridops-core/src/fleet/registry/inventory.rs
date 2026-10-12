@@ -989,8 +989,11 @@ async fn pending_rotation(
 /// Renews (when `grant_at` is set) and returns the session's work authority.
 /// Only a ready session of an approved, active, verified host with a complete
 /// inventory from this session receives it.
-/// Memory above this share of capacity, or CPU demand above it, is pressure.
-const PRESSURE_PERCENT: u64 = 90;
+/// Memory use above this share of capacity is pressure.
+const MEMORY_PRESSURE_PERCENT: u64 = 92;
+/// CPU demand is a load average, which routinely exceeds the core count on a
+/// busy but healthy host; only sustained overload counts as pressure.
+const CPU_PRESSURE_PERCENT: u64 = 200;
 
 /// Host pressure from the root domain's latest sample. Without both a
 /// capacity and a measurement it stays unknown, which admission won't place
@@ -1017,19 +1020,24 @@ async fn pressure_from(
     else {
         return Ok("unknown");
     };
-    let over = |used: Option<u64>, capacity: Option<i64>| match (used, capacity) {
-        (Some(used), Some(capacity)) if capacity > 0 => {
-            Some(used * 100 > u64::try_from(capacity).unwrap_or(u64::MAX) * PRESSURE_PERCENT)
-        }
+    let over = |used: Option<u64>, capacity: Option<i64>, percent: u64| match (used, capacity) {
+        (Some(used), Some(capacity)) if capacity > 0 => Some(
+            used.saturating_mul(100)
+                > u64::try_from(capacity)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(percent),
+        ),
         _ => None,
     };
     let memory = over(
         sample.memory_used_mib.map(|value| value.get()),
         root.get("memory_mib"),
+        MEMORY_PRESSURE_PERCENT,
     );
     let cpu = over(
         sample.cpu_used_millis.map(|value| value.get()),
         root.get("cpu_millis"),
+        CPU_PRESSURE_PERCENT,
     );
     Ok(match (memory, cpu) {
         (Some(true), _) | (_, Some(true)) => "pressured",
