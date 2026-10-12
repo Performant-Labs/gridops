@@ -149,6 +149,7 @@ const hostReadV1HostSchema = z.strictObject({
   latestRootMeasurement: fleetMeasurementSchema.nullable(),
   inventoryEvidence: fleetInventoryEvidenceSchema,
   approvalEvidence: fleetApprovalEvidenceSchema,
+  duplicateHardware: z.boolean(),
 });
 
 const hostReadV1TargetSchema = z.strictObject({

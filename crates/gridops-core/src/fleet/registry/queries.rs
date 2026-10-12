@@ -1972,6 +1972,15 @@ impl RegistryService {
         let inventory_evidence = inventory_evidence(tx, snapshot, &row).await?;
         let approval_evidence =
             approval_evidence(tx, snapshot, host_id, inventory_evidence.clone()).await?;
+        let duplicate_hardware: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fleet_hosts this JOIN fleet_hosts other
+             ON other.hardware_fingerprint=this.hardware_fingerprint AND other.id<>this.id
+             WHERE this.id=? AND other.enrollment_state='approved'
+             AND other.lifecycle_state<>'retired')",
+        )
+        .bind(host_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
         Ok(HostReadV1::Host {
             id,
             name,
@@ -1997,6 +2006,7 @@ impl RegistryService {
             latest_root_measurement: latest_measurement(tx, snapshot, host_id, root_id).await?,
             inventory_evidence,
             approval_evidence,
+            duplicate_hardware,
         })
     }
 

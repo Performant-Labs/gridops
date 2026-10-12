@@ -103,3 +103,30 @@ fn server_factories_and_error_mapping_preserve_browser_contracts() -> anyhow::Re
     }
     Ok(())
 }
+
+/// Examples in the contract documentation are parsed, so prose cannot drift
+/// from the transport types.
+#[test]
+fn documented_examples_match_contracts() -> anyhow::Result<()> {
+    use gridops_core::fleet::protocol::limits::{LimitsConfig, ProtocolLimits};
+    let doc = include_str!("../../../docs/fleet-api.md");
+    let mut checked = 0;
+    for block in doc.split("```json ").skip(1) {
+        let (tag, rest) = block.split_once('\n').unwrap_or_default();
+        let body = rest.split("```").next().unwrap_or_default();
+        match tag.trim() {
+            "fleet-error" => {
+                let error: FleetErrorResponse = serde_json::from_str(body)?;
+                assert_eq!(error.code.status(), 409);
+            }
+            "fleet-limits" => {
+                let limits: ProtocolLimits = serde_json::from_str(body)?;
+                assert_eq!(limits.values(), &LimitsConfig::default());
+            }
+            other => anyhow::bail!("untested documentation example: {other}"),
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 2);
+    Ok(())
+}

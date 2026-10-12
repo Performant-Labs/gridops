@@ -150,6 +150,10 @@ pub enum HostReadV1 {
         latest_root_measurement: Option<MeasurementReadV1>,
         inventory_evidence: InventoryEvidenceV1,
         approval_evidence: ApprovalEvidenceV1,
+        /// Another approved, unretired host reports the same hardware
+        /// fingerprint. This is a hint for the approver, never proof of
+        /// identity or ownership.
+        duplicate_hardware: bool,
     },
     Target {
         id: HostId,

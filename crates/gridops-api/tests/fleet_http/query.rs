@@ -585,3 +585,48 @@ async fn sealed_read_cursors_bind_user_resource_and_durable_retention() -> Resul
     .await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn matching_hardware_keeps_a_new_host_pending_and_flags_it_for_the_approver() -> Result<()> {
+    let (f, first) = observed_fixture().await?;
+    let read: Value = get(&f, &format!("/hosts/{first}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let evidence = &read["item"]["approvalEvidence"];
+    assert_eq!(evidence["state"], "available");
+    let approved = f
+        .admin_post(&format!("/hosts/{first}/approve"))
+        .json(&json!({
+            "expectedRevision": evidence["expectedRevision"],
+            "expectedInventoryRevision": evidence["expectedInventoryRevision"],
+            "expectedInventoryDigest": evidence["expectedInventoryDigest"],
+            "targetIds": [],
+        }))
+        .send()
+        .await?;
+    assert_eq!(approved.status(), StatusCode::OK);
+
+    let issued = f.issue("duplicate-hardware-enrollment").await?;
+    let response = f.consume(issued["code"].as_str().context("code")?).await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let second: Value = response.json().await?;
+    let second = second["host_id"].as_str().context("host ID")?;
+
+    let read: Value = get(&f, &format!("/hosts/{second}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(read["item"]["enrollment"], "pending");
+    assert_eq!(read["item"]["duplicateHardware"], true);
+    let read: Value = get(&f, &format!("/hosts/{first}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(read["item"]["enrollment"], "approved");
+    assert_eq!(read["item"]["duplicateHardware"], false);
+    Ok(())
+}
