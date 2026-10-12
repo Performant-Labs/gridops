@@ -339,6 +339,29 @@ pub(super) async fn recover(
 }
 
 /// Approval records enrollment scope while leaving execution policy and authority separate.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct LifecycleBody {
+    expected_revision: BrowserCounter,
+    lifecycle: gridops_core::fleet::domain::HostIntent,
+}
+
+pub(super) async fn lifecycle(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(host_id): FleetPath<HostId>,
+    FleetJson(body): FleetJson<LifecycleBody>,
+) -> Result<Response, FleetApiError> {
+    let expected_revision = Revision::new(body.expected_revision.get())
+        .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
+    RegistryService::new(state.database, state.vault)
+        .set_host_lifecycle(user.principal(), host_id, expected_revision, body.lifecycle)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(StatusCode::OK.into_response())
+}
+
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,

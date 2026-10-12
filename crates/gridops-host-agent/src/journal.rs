@@ -11,7 +11,9 @@ use gridops_core::fleet::{
     domain::{ExecutionOs, RuntimeKind},
     ids::{Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId},
     protocol::{
-        agent::{AgentCommandEnvelope, LocalResourceIdentity, PreparedWorkload},
+        agent::{
+            AgentCommandEnvelope, LocalResourceIdentity, PrepareEnvironment, PreparedWorkload,
+        },
         outcomes::AgentCommandResult,
     },
 };
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS environments (
   runtime_kind TEXT NOT NULL,
   execution_os TEXT NOT NULL,
   docker_socket INTEGER NOT NULL,
+  prepare TEXT NOT NULL,
   local_identity TEXT,
   UNIQUE (placement_id, generation)
 ) STRICT;
@@ -86,6 +89,7 @@ pub struct Environment {
     pub runtime_kind: RuntimeKind,
     pub execution_os: ExecutionOs,
     pub docker_socket: bool,
+    pub prepare: PrepareEnvironment,
     pub local_identity: Option<LocalResourceIdentity>,
 }
 
@@ -262,8 +266,8 @@ impl Journal {
     pub async fn record_environment(&self, environment: &Environment) -> Result<()> {
         sqlx::query(
             "INSERT INTO environments
-             (id,placement_id,generation,workload,runtime_kind,execution_os,docker_socket,local_identity)
-             VALUES (?,?,?,?,?,?,?,?)",
+             (id,placement_id,generation,workload,runtime_kind,execution_os,docker_socket,prepare,local_identity)
+             VALUES (?,?,?,?,?,?,?,?,?)",
         )
         .bind(environment.id.to_string())
         .bind(environment.placement_id.to_string())
@@ -272,6 +276,7 @@ impl Journal {
         .bind(to_json(&environment.runtime_kind)?)
         .bind(to_json(&environment.execution_os)?)
         .bind(environment.docker_socket)
+        .bind(to_json(&environment.prepare)?)
         .bind(environment.local_identity.as_ref().map(to_json).transpose()?)
         .execute(&self.pool)
         .await?;
@@ -337,6 +342,7 @@ fn environment(row: &sqlx::sqlite::SqliteRow) -> Result<Environment> {
         runtime_kind: from_json(row.get("runtime_kind"))?,
         execution_os: from_json(row.get("execution_os"))?,
         docker_socket: row.get("docker_socket"),
+        prepare: from_json(row.get("prepare"))?,
         local_identity: row
             .get::<Option<String>, _>("local_identity")
             .map(|value| from_json(&value))

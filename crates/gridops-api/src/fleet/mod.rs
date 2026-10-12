@@ -3,6 +3,7 @@
 
 mod auth;
 mod boundary;
+mod commands;
 mod credentials;
 mod enrollment;
 mod error;
@@ -60,8 +61,24 @@ pub(crate) fn router() -> Router<AppState> {
             post(inventory::submit),
         )
         .route(
+            "/api/v1/fleet/agent/hosts/{host_id}/bootstrap",
+            post(commands::bootstrap),
+        )
+        .route(
+            "/api/v1/fleet/agent/hosts/{host_id}/commands/poll",
+            post(commands::poll),
+        )
+        .route(
+            "/api/v1/fleet/agent/hosts/{host_id}/commands/result",
+            post(commands::result),
+        )
+        .route(
             "/api/v1/fleet/agent/hosts/{host_id}/heartbeat",
             post(inventory::heartbeat),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/lifecycle",
+            post(enrollment::lifecycle),
         )
         .route(
             "/api/v1/fleet/hosts/{host_id}/approve",

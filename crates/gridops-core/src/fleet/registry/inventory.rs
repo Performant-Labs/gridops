@@ -34,6 +34,7 @@ use crate::fleet::{
 
 const OBSERVATION_LEASE_MILLIS: i64 = 90_000;
 const HEARTBEAT_INTERVAL_MILLIS: u64 = 15_000;
+const WORK_AUTHORITY_MILLIS: i64 = 90_000;
 
 /// Safe errors suitable for mapping to a typed fleet envelope.  No bearer,
 /// verifier, raw inventory JSON, or local runtime path is retained here.
@@ -277,10 +278,12 @@ impl RegistryService {
                     .current_heartbeat_state
                     .ok_or(InventoryError::HeartbeatConflict)?;
                 let rotation = pending_rotation(&mut tx, &session, now).await?;
+                let authority = work_authority(&mut tx, &session, None).await?;
                 let response = heartbeat_response(
                     &request,
                     &session,
                     rotation,
+                    authority,
                     received,
                     session
                         .current_heartbeat_lease_expires_at
@@ -305,6 +308,15 @@ impl RegistryService {
                 })
                 .collect();
         insert_samples(&mut tx, &session, &request.samples, &known_domains, now).await?;
+        // A reconciling session becomes ready once its complete inventory is
+        // current and no placement on the host awaits review.
+        let state = if session.state == ObservationSessionState::Reconciling
+            && reconciled(&mut tx, &session).await?
+        {
+            ObservationSessionState::Ready
+        } else {
+            session.state
+        };
         let lease_expires =
             now.checked_add(OBSERVATION_LEASE_MILLIS)
                 .ok_or(RegistryError::InvalidRequest(
@@ -314,9 +326,19 @@ impl RegistryService {
             "UPDATE fleet_observation_sessions SET last_seen_at=?,lease_expires_at=?,current_heartbeat_sequence=?,current_heartbeat_digest=?,current_heartbeat_received_at=?,current_heartbeat_lease_expires_at=?,current_heartbeat_state=? WHERE session_id=? AND host_id=?",
         )
         .bind(now).bind(lease_expires).bind(sequence_i64).bind(&digest).bind(now)
-        .bind(lease_expires).bind(state_name(session.state))
+        .bind(lease_expires).bind(state_name(state))
         .bind(session.authority_session_id.to_string()).bind(session.host_id.to_string())
         .execute(&mut *tx).await?;
+        if state != session.state {
+            sqlx::query(
+                "UPDATE fleet_observation_sessions SET state=? WHERE session_id=? AND host_id=?",
+            )
+            .bind(state_name(state))
+            .bind(session.authority_session_id.to_string())
+            .bind(session.host_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("UPDATE fleet_hosts SET last_heartbeat_at=?,updated_at=? WHERE id=?")
             .bind(now)
             .bind(now)
@@ -335,14 +357,21 @@ impl RegistryService {
         )
         .await?;
         let rotation = pending_rotation(&mut tx, &session, now).await?;
+        let authority = work_authority(
+            &mut tx,
+            &session,
+            Some((now, state == ObservationSessionState::Ready)),
+        )
+        .await?;
         tx.commit().await?;
         heartbeat_response(
             &request,
             &session,
             rotation,
+            authority,
             now,
             lease_expires,
-            session.state,
+            state,
         )
     }
 }
@@ -934,10 +963,84 @@ async fn pending_rotation(
     }))
 }
 
+/// Renews (when `grant_at` is set) and returns the session's work authority.
+/// Only a ready session of an approved, active, verified host with a complete
+/// inventory from this session receives it.
+async fn reconciled(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session: &CurrentInventorySession,
+) -> Result<bool, InventoryError> {
+    let current: bool = sqlx::query_scalar(
+        "SELECT inventory_complete=1 AND inventory_session_id=? AND NOT EXISTS (
+            SELECT 1 FROM workload_placements p WHERE p.host_id=fleet_hosts.id AND p.state='uncertain')
+           FROM fleet_hosts WHERE id=?",
+    )
+    .bind(session.authority_session_id.to_string())
+    .bind(session.host_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(false);
+    Ok(current)
+}
+
+async fn work_authority(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session: &CurrentInventorySession,
+    grant_at: Option<(i64, bool)>,
+) -> Result<Option<WireTimestamp>, InventoryError> {
+    let session_id = session.authority_session_id.to_string();
+    let host_id = session.host_id.to_string();
+    if let Some((now, ready)) = grant_at {
+        let expires = now
+            .checked_add(WORK_AUTHORITY_MILLIS)
+            .ok_or(RegistryError::InvalidRequest("authority overflowed"))?;
+        sqlx::query(
+            "UPDATE fleet_hosts SET authority_expires_at=CASE WHEN ? THEN ? ELSE NULL END
+              WHERE id=? AND agent_session_id=?
+                AND (NOT ? OR (enrollment_state='approved' AND lifecycle_state IN ('active','draining')
+                     AND integrity_state='verified' AND inventory_complete=1 AND inventory_session_id=?))",
+        )
+        .bind(ready)
+        .bind(expires)
+        .bind(&host_id)
+        .bind(&session_id)
+        .bind(ready)
+        .bind(&session_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE fleet_hosts SET authority_expires_at=NULL
+              WHERE id=? AND agent_session_id=? AND authority_expires_at IS NOT NULL
+                AND NOT (enrollment_state='approved' AND lifecycle_state IN ('active','draining')
+                     AND integrity_state='verified' AND inventory_complete=1 AND inventory_session_id=?)",
+        )
+        .bind(&host_id)
+        .bind(&session_id)
+        .bind(&session_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    let expires: Option<i64> = sqlx::query_scalar(
+        "SELECT authority_expires_at FROM fleet_hosts WHERE id=? AND agent_session_id=?",
+    )
+    .bind(&host_id)
+    .bind(&session_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
+    expires
+        .map(|value| {
+            WireTimestamp::from_millis(value)
+                .map_err(|_| RegistryError::InvalidRequest("authority is malformed").into())
+        })
+        .transpose()
+}
+
 fn heartbeat_response(
     request: &HeartbeatRequest,
     session: &CurrentInventorySession,
     pending_rotation: Option<PendingRotation>,
+    work_authority_expires_at: Option<WireTimestamp>,
     received: i64,
     lease_expires: i64,
     state: ObservationSessionState,
@@ -954,6 +1057,7 @@ fn heartbeat_response(
         state,
         lease: lease(lease_expires)?,
         pending_rotation,
+        work_authority_expires_at,
     })
 }
 

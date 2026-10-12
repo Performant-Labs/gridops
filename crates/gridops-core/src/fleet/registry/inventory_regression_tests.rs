@@ -763,7 +763,9 @@ async fn heartbeat_receipt_state_is_stable_across_inventory_transition() -> Resu
         .service
         .heartbeat(&authenticated, second_request.clone())
         .await?;
-    assert_eq!(second.state, ObservationSessionState::Reconciling);
+    // A complete inventory with nothing awaiting review makes the session
+    // ready on the next heartbeat.
+    assert_eq!(second.state, ObservationSessionState::Ready);
     assert_eq!(
         fixture
             .service

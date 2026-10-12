@@ -549,6 +549,10 @@ pub struct HeartbeatResponse {
     /// finished. The agent exchanges a new secret with its current credential
     /// and acknowledges with the new one.
     pub pending_rotation: Option<PendingRotation>,
+    /// Until when this session may run work. Present only for an approved,
+    /// active, verified host whose current session has a complete inventory;
+    /// each heartbeat renews it for 90 seconds.
+    pub work_authority_expires_at: Option<WireTimestamp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

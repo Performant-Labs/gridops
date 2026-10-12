@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     config.validate_api()?;
     let database = connect_database(&config).await?;
+    gridops_core::fleet::ensure_control_plane(&database).await?;
     let vault = Vault::from_config(&config)?;
     let github = GitHubClient::new(config.clone())?;
     let bitbucket = BitbucketClient::new()?;

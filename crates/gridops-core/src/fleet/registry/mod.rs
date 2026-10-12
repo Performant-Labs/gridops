@@ -6,6 +6,7 @@
 //! state transition rechecks authorization inside a short `BEGIN IMMEDIATE`
 //! transaction and records an audit/event pair before commit.
 
+mod commands;
 mod credentials;
 mod enrollment;
 mod handshake;
@@ -18,6 +19,8 @@ mod query_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+pub use commands::ResultDisposition;
 
 use std::{fmt, sync::Arc};
 
@@ -819,6 +822,82 @@ impl RegistryService {
     }
 
     /// Approve exact targets after checking current target-administration grants.
+    /// Changes an approved host's lifecycle intent. Pausing or maintenance
+    /// stops new work immediately (authority isn't renewed); draining lets
+    /// running work finish. Retirement has its own cleanup flow.
+    pub async fn set_host_lifecycle(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+        expected_revision: crate::fleet::Revision,
+        intent: crate::fleet::domain::HostIntent,
+    ) -> Result<(), RegistryError> {
+        use crate::fleet::domain::HostIntent;
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        let state = match intent {
+            HostIntent::Active => "active",
+            HostIntent::Paused => "paused",
+            HostIntent::Draining => "draining",
+            HostIntent::Maintenance => "maintenance",
+            HostIntent::Retired => {
+                return Err(RegistryError::InvalidRequest(
+                    "retire hosts through retirement",
+                ));
+            }
+        };
+        let mut tx = self.begin().await?;
+        let now = self.clock.now_millis();
+        ensure_system_admin(&mut tx, user_id).await?;
+        let Some(row) = sqlx::query(
+            "SELECT revision,enrollment_state,lifecycle_state FROM fleet_hosts WHERE id=?",
+        )
+        .bind(host_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Err(RegistryError::NotFound);
+        };
+        if row.get::<String, _>("enrollment_state") != "approved"
+            || row.get::<String, _>("lifecycle_state") == "retired"
+        {
+            return Err(RegistryError::InvalidRequest("host is not approved"));
+        }
+        let expected = i64::try_from(expected_revision.get())
+            .map_err(|_| RegistryError::InvalidRequest("revision exceeds SQLite integer"))?;
+        if row.get::<i64, _>("revision") != expected {
+            return Err(RegistryError::StaleRevision);
+        }
+        if row.get::<String, _>("lifecycle_state") == state {
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE fleet_hosts SET lifecycle_state=?,revision=revision+1,updated_at=?,
+               authority_expires_at=CASE WHEN ? IN ('active','draining') THEN authority_expires_at ELSE NULL END
+             WHERE id=? AND revision=?",
+        )
+        .bind(state)
+        .bind(now)
+        .bind(state)
+        .bind(host_id.to_string())
+        .bind(expected)
+        .execute(&mut *tx)
+        .await?;
+        audit_and_event(
+            &mut tx,
+            Some(user_id),
+            Some(host_id),
+            "fleet.host.lifecycle_changed",
+            "host",
+            &host_id.to_string(),
+            json!({"lifecycle": state}),
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn approve_host(
         &self,
         principal: &Principal,

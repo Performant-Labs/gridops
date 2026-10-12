@@ -22,7 +22,7 @@ pub(super) async fn enrolled(f: &Fixture) -> Result<(String, String)> {
 
 pub(super) async fn control_plane(f: &Fixture) -> Result<String> {
     let incarnation = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO fleet_control_plane (singleton,incarnation,readiness,schema_version,protocol_min,protocol_max,updated_at) VALUES (1,?,'paused',1,1,1,?)")
+    sqlx::query("INSERT INTO fleet_control_plane (singleton,incarnation,readiness,schema_version,protocol_min,protocol_max,updated_at) VALUES (1,?,'paused',1,1,1,?) ON CONFLICT(singleton) DO UPDATE SET incarnation=excluded.incarnation,readiness=excluded.readiness")
         .bind(&incarnation).bind(gridops_core::now_millis()).execute(&f.database).await?;
     Ok(incarnation)
 }
@@ -487,6 +487,11 @@ async fn observation_routes_enforce_agent_auth_and_strict_payloads_before_mutati
         )
         .await?;
     }
+    // The API creates the control plane at startup; a missing row is a
+    // dependency failure, not an empty fleet.
+    sqlx::query("DELETE FROM fleet_control_plane")
+        .execute(&f.database)
+        .await?;
     error(
         agent_post(&f, &host, &secret, "handshake")
             .json(&body)

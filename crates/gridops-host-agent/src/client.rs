@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use gridops_core::fleet::{
     domain::{Architecture, ExecutionOs},
-    ids::{Generation, HostId, OperationId},
+    ids::{AuthoritySessionId, Generation, HostId, OperationId},
     protocol::{
         browser::{ErrorCode, FleetErrorResponse},
         inventory::{
             HandshakeRequest, HandshakeResponse, HeartbeatRequest, HeartbeatResponse,
             InventoryRequest, InventoryResponse,
         },
+        outcomes::AgentCommandResult,
     },
 };
 use reqwest::StatusCode;
@@ -145,6 +146,58 @@ impl Client {
     ) -> Result<(), ClientError> {
         let body = serde_json::json!({ "operation_id": operation_id });
         self.agent::<_, serde_json::Value>(host, next_credential, "credentials/ack", &body)
+            .await
+            .map(drop)
+    }
+
+    /// Long-polls (up to 25 s) for commands bound to this session.
+    pub async fn poll_commands(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        session: AuthoritySessionId,
+    ) -> Result<Vec<serde_json::Value>, ClientError> {
+        #[derive(Deserialize)]
+        struct Poll {
+            commands: Vec<serde_json::Value>,
+        }
+        let body = serde_json::json!({
+            "authority_session_id": session, "wait_ms": 25_000, "limit": 8,
+        });
+        let request = self
+            .http
+            .post(self.url(&format!("agent/hosts/{host}/commands/poll"))?)
+            .timeout(Duration::from_secs(40))
+            .bearer_auth(credential.expose_secret())
+            .json(&body);
+        Ok(send::<Poll>(request).await?.commands)
+    }
+
+    /// One-time registration material for a start command.
+    pub async fn bootstrap(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        reference: &str,
+    ) -> Result<String, ClientError> {
+        #[derive(Deserialize)]
+        struct Material {
+            material: String,
+        }
+        let body = serde_json::json!({ "reference": reference });
+        Ok(self
+            .agent::<_, Material>(host, credential, "bootstrap", &body)
+            .await?
+            .material)
+    }
+
+    pub async fn post_result(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        result: &AgentCommandResult,
+    ) -> Result<(), ClientError> {
+        self.agent::<_, serde_json::Value>(host, credential, "commands/result", result)
             .await
             .map(drop)
     }

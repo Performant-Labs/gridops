@@ -23,7 +23,7 @@ use gridops_core::fleet::{
 use uuid::Uuid;
 
 use crate::{
-    helper::{HelperRequest, HelperResponse, RuntimeHelper},
+    helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper},
     journal::{Environment, Journal, JournalError, Receipt},
 };
 
@@ -69,6 +69,17 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         session: &ExpectedAgentSession,
         now: WireTimestamp,
     ) -> Result<AgentCommandResult, DispatchError> {
+        self.dispatch_with(body, session, now, None).await
+    }
+
+    /// Like [`Self::dispatch`], with registration material for a start.
+    pub async fn dispatch_with(
+        &self,
+        body: &[u8],
+        session: &ExpectedAgentSession,
+        now: WireTimestamp,
+        bootstrap: Option<Bootstrap>,
+    ) -> Result<AgentCommandResult, DispatchError> {
         let envelope: AgentCommandEnvelope = parse_json(body, DEFAULT_JSON_BYTES)?;
         envelope.validate_against(session, now)?;
         let outcome = match self.journal.receive(&envelope).await? {
@@ -77,7 +88,7 @@ impl<H: RuntimeHelper> Dispatcher<H> {
                 code: UncertainCode::LocalStateUnknown,
                 diagnostic: None,
             },
-            Receipt::New => self.execute(&envelope).await?,
+            Receipt::New => self.execute(&envelope, bootstrap).await?,
         };
         let mut result = result(&envelope, outcome, now)?;
         if result.validate_against(&envelope).is_err() {
@@ -92,7 +103,11 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         Ok(result)
     }
 
-    async fn execute(&self, envelope: &AgentCommandEnvelope) -> anyhow::Result<CommandOutcome> {
+    async fn execute(
+        &self,
+        envelope: &AgentCommandEnvelope,
+        bootstrap: Option<Bootstrap>,
+    ) -> anyhow::Result<CommandOutcome> {
         let placement = match &envelope.scope {
             CommandScope::Placement {
                 placement_id,
@@ -162,16 +177,21 @@ impl<H: RuntimeHelper> Dispatcher<H> {
             },
             (AgentOperation::InspectHost | AgentOperation::DrainHost, None) => {
                 return Ok(outcome(
-                    self.helper.call(self.request(None, operation)).await,
+                    self.helper.call(self.request(None, operation, None)).await,
                 ));
             }
             // Upgrades arrive with the signed release work; until then the
             // agent refuses them rather than replace itself.
             _ => return Ok(refused(FailureCode::Unsupported)),
         };
+        let bootstrap = if matches!(operation, AgentOperation::StartRunner(_)) {
+            bootstrap
+        } else {
+            None
+        };
         let response = self
             .helper
-            .call(self.request(Some(&environment), operation))
+            .call(self.request(Some(&environment), operation, bootstrap))
             .await;
         if let HelperResponse::Succeeded { evidence } = &response {
             if let SuccessEvidence::RunnerStarted { local_identity, .. } = evidence.as_ref() {
@@ -200,11 +220,12 @@ impl<H: RuntimeHelper> Dispatcher<H> {
             runtime_kind: prepare.runtime_kind,
             execution_os: prepare.execution_os,
             docker_socket: prepare.configuration.requires_docker_socket,
+            prepare: prepare.clone(),
             local_identity: None,
         };
         let response = self
             .helper
-            .call(self.request(Some(&environment), &envelope.operation))
+            .call(self.request(Some(&environment), &envelope.operation, None))
             .await;
         if let HelperResponse::Succeeded { evidence } = &response {
             match evidence.as_ref() {
@@ -228,11 +249,14 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         &self,
         environment: Option<&Environment>,
         operation: &AgentOperation,
+        bootstrap: Option<Bootstrap>,
     ) -> HelperRequest {
         HelperRequest {
             environment_id: environment.map(|environment| environment.id),
             docker_socket: self.trust.docker_socket
                 && environment.is_some_and(|environment| environment.docker_socket),
+            prepared: environment.map(|environment| environment.prepare.clone()),
+            bootstrap,
             operation: operation.clone(),
         }
     }

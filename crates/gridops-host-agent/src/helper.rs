@@ -12,7 +12,8 @@ use std::future::Future;
 use gridops_core::fleet::{
     ids::PreparedEnvironmentId,
     protocol::{
-        agent::AgentOperation,
+        agent::{AgentOperation, PrepareEnvironment},
+        inventory::ObservedBackend,
         outcomes::{FailureCode, SuccessEvidence},
     },
 };
@@ -29,7 +30,25 @@ pub struct HelperRequest {
     /// Whether the operator declared Docker socket sharing as trusted on this
     /// host. The helper mounts the socket only when this and the profile agree.
     pub docker_socket: bool,
+    /// What the environment was prepared with, from the journal. Start and
+    /// later operations need it; the start command itself doesn't repeat it.
+    #[serde(default)]
+    pub prepared: Option<PrepareEnvironment>,
+    /// One-time registration material for a start, fetched by the agent.
+    #[serde(default)]
+    pub bootstrap: Option<Bootstrap>,
     pub operation: AgentOperation,
+}
+
+/// Runner registration material. Never printed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Bootstrap(pub String);
+
+impl std::fmt::Debug for Bootstrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bootstrap([redacted])")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,11 +60,20 @@ pub enum HelperResponse {
 
 pub trait RuntimeHelper: Send + Sync {
     fn call(&self, request: HelperRequest) -> impl Future<Output = HelperResponse> + Send;
+
+    /// Execution backends this host can offer right now, for inventory.
+    fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {
+        async { Vec::new() }
+    }
 }
 
 impl<H: RuntimeHelper> RuntimeHelper for std::sync::Arc<H> {
     fn call(&self, request: HelperRequest) -> impl Future<Output = HelperResponse> + Send {
         (**self).call(request)
+    }
+
+    fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {
+        (**self).backends()
     }
 }
 
@@ -76,7 +104,10 @@ mod socket {
         net::{UnixListener, UnixStream},
     };
 
-    use super::{HelperRequest, HelperResponse, MAX_MESSAGE_BYTES, RuntimeHelper};
+    use super::{HelperRequest, HelperResponse, MAX_MESSAGE_BYTES, ObservedBackend, RuntimeHelper};
+
+    /// The one request that isn't an operation: list execution backends.
+    const BACKENDS: &[u8] = br#""backends""#;
 
     /// Sandbox commands may run for five minutes; the socket allows a margin.
     const CALL_TIMEOUT: Duration = Duration::from_secs(330);
@@ -91,9 +122,8 @@ mod socket {
             Self { path }
         }
 
-        async fn exchange(&self, request: &HelperRequest) -> Result<HelperResponse> {
+        async fn exchange<T: serde::de::DeserializeOwned>(&self, mut line: Vec<u8>) -> Result<T> {
             let mut stream = UnixStream::connect(&self.path).await?;
-            let mut line = serde_json::to_vec(request)?;
             line.push(b'\n');
             stream.write_all(&line).await?;
             let response = read_line(&mut BufReader::new(stream)).await?;
@@ -103,7 +133,10 @@ mod socket {
 
     impl RuntimeHelper for SocketHelper {
         async fn call(&self, request: HelperRequest) -> HelperResponse {
-            match tokio::time::timeout(CALL_TIMEOUT, self.exchange(&request)).await {
+            let Ok(line) = serde_json::to_vec(&request) else {
+                return unavailable();
+            };
+            match tokio::time::timeout(CALL_TIMEOUT, self.exchange(line)).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "runtime helper call failed");
@@ -111,6 +144,14 @@ mod socket {
                 }
                 Err(_) => unavailable(),
             }
+        }
+
+        async fn backends(&self) -> Vec<ObservedBackend> {
+            tokio::time::timeout(Duration::from_secs(30), self.exchange(BACKENDS.to_vec()))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
         }
     }
 
@@ -127,6 +168,13 @@ mod socket {
             tokio::spawn(async move {
                 let (read, mut write) = stream.into_split();
                 let response = match read_line(&mut BufReader::new(read)).await {
+                    Ok(line) if line == BACKENDS => {
+                        if let Ok(mut line) = serde_json::to_vec(&helper.backends().await) {
+                            line.push(b'\n');
+                            let _ = write.write_all(&line).await;
+                        }
+                        return;
+                    }
                     Ok(line) => match parse_json::<HelperRequest>(&line, MAX_MESSAGE_BYTES) {
                         Ok(request) => helper.call(request).await,
                         Err(_) => HelperResponse::Failed {

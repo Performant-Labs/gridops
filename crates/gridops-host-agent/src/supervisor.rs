@@ -4,13 +4,17 @@
 //! long outage never strands the host. A rejected credential or an
 //! incompatible server stops the loop, because retrying can't fix either.
 
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use gridops_core::fleet::{
-    ids::{AuthoritySessionId, HostId, OperationId, UpstreamText},
+    ids::{
+        AuthoritySessionId, ControlPlaneIncarnation, Generation, HostEpoch, HostId, OperationId,
+        UpstreamText,
+    },
     protocol::{
+        agent::ExpectedAgentSession,
         inventory::{
             HandshakeRequest, HeartbeatRequest, InventoryReport, InventoryRequest, PendingRotation,
             ProtocolNegotiation, ProtocolRange,
@@ -20,15 +24,19 @@ use gridops_core::fleet::{
 };
 use rand::RngExt as _;
 use secrecy::SecretString;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
     client::{Client, ClientError},
+    dispatch::{Dispatcher, Trust},
+    helper::{Bootstrap, NoRuntime, RuntimeHelper},
     journal::{Identity, Journal},
     probe,
 };
 
 const MAX_HEARTBEAT: Duration = Duration::from_secs(15);
+const INVENTORY_REFRESH: Duration = Duration::from_secs(30);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -43,20 +51,48 @@ pub enum Stop {
     CredentialRejected,
 }
 
-pub struct Supervisor {
+pub struct Supervisor<H = NoRuntime> {
     client: Client,
     journal: Journal,
     name: String,
     heartbeat: Duration,
+    dispatcher: Dispatcher<Arc<H>>,
+    probe: Arc<H>,
 }
 
-impl Supervisor {
-    pub const fn new(client: Client, journal: Journal, name: String) -> Self {
+/// What the heartbeat loop learns and the command loop needs.
+#[derive(Clone)]
+struct Authority {
+    credential: Arc<SecretString>,
+    generation: Generation,
+    expires_at: Option<WireTimestamp>,
+}
+
+impl Supervisor<NoRuntime> {
+    pub fn new(client: Client, journal: Journal, name: String) -> Self {
+        let runtime = Arc::new(NoRuntime);
         Self {
+            dispatcher: Dispatcher::new(journal.clone(), Arc::clone(&runtime), Trust::default()),
             client,
             journal,
             name,
             heartbeat: MAX_HEARTBEAT,
+            probe: runtime,
+        }
+    }
+}
+
+impl<H: RuntimeHelper> Supervisor<H> {
+    /// Runs commands through `runtime`, with the operator's declared trust.
+    pub fn with_runtime<R: RuntimeHelper>(self, runtime: R, trust: Trust) -> Supervisor<R> {
+        let runtime = Arc::new(runtime);
+        Supervisor {
+            dispatcher: Dispatcher::new(self.journal.clone(), Arc::clone(&runtime), trust),
+            client: self.client,
+            journal: self.journal,
+            name: self.name,
+            heartbeat: self.heartbeat,
+            probe: runtime,
         }
     }
 
@@ -125,7 +161,7 @@ impl Supervisor {
             .await
             .map_err(internal)?
             .ok_or_else(|| internal("identity is missing"))?;
-        let mut credential = identity.credential;
+        let credential = identity.credential;
         let session_id = new_id::<AuthoritySessionId>()?;
         let boot_id = text(&probe::boot_id())?;
         let handshake = self
@@ -155,7 +191,7 @@ impl Supervisor {
             BrowserCounter::new(1).map_err(internal)?,
             observed_at,
             vec![probe::root_domain(&self.name).map_err(internal)?],
-            Vec::new(),
+            self.probe.backends().await,
             Vec::new(),
             vec![probe::root_sample(observed_at).map_err(internal)?],
         )
@@ -171,36 +207,165 @@ impl Supervisor {
         *failures = 0;
         let interval =
             Duration::from_millis(inventory.lease.heartbeat_ms.get()).min(self.heartbeat);
-        let mut sequence = 1_u64;
-        loop {
-            tokio::time::sleep(interval).await;
-            sequence += 1;
-            let observed_at = now()?;
-            let heartbeat = self
-                .client
-                .heartbeat(
-                    identity.host_id,
-                    &credential,
-                    &HeartbeatRequest::new(
-                        new_id::<OperationId>()?,
+        let (authority, watcher) = watch::channel(Authority {
+            credential: Arc::new(credential),
+            generation: identity.credential_generation,
+            expires_at: None,
+        });
+        let context = SessionContext {
+            host_id: identity.host_id,
+            host_epoch: handshake.host_epoch,
+            control_plane_incarnation: handshake.control_plane_incarnation,
+            authority_session_id: session_id,
+        };
+        let heartbeats = async {
+            let mut sequence = 1_u64;
+            let mut inventory_sequence = 1_u64;
+            let mut inventory_at = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(interval).await;
+                sequence += 1;
+                let current = authority.borrow().clone();
+                if inventory_at.elapsed() >= INVENTORY_REFRESH {
+                    // Backend probes count as fresh for 45 seconds.
+                    inventory_sequence += 1;
+                    let observed_at = now()?;
+                    let report = InventoryReport::new(
                         handshake.host_epoch,
                         handshake.control_plane_incarnation,
                         session_id,
                         boot_id.clone(),
-                        BrowserCounter::new(sequence).map_err(internal)?,
+                        BrowserCounter::new(inventory_sequence).map_err(internal)?,
                         observed_at,
+                        vec![probe::root_domain(&self.name).map_err(internal)?],
+                        self.probe.backends().await,
+                        Vec::new(),
                         vec![probe::root_sample(observed_at).map_err(internal)?],
                     )
-                    .map_err(internal)?,
-                )
-                .await?;
-            if let Some(rotation) = heartbeat.pending_rotation {
-                // The session continues; only the credential changes.
-                credential = self.rotate(identity.host_id, &credential, rotation).await?;
+                    .map_err(internal)?;
+                    self.client
+                        .inventory(
+                            identity.host_id,
+                            &current.credential,
+                            &InventoryRequest::new(new_id::<OperationId>()?, report)
+                                .map_err(internal)?,
+                        )
+                        .await?;
+                    inventory_at = tokio::time::Instant::now();
+                }
+                let observed_at = now()?;
+                let heartbeat = self
+                    .client
+                    .heartbeat(
+                        identity.host_id,
+                        &current.credential,
+                        &HeartbeatRequest::new(
+                            new_id::<OperationId>()?,
+                            handshake.host_epoch,
+                            handshake.control_plane_incarnation,
+                            session_id,
+                            boot_id.clone(),
+                            BrowserCounter::new(sequence).map_err(internal)?,
+                            observed_at,
+                            vec![probe::root_sample(observed_at).map_err(internal)?],
+                        )
+                        .map_err(internal)?,
+                    )
+                    .await?;
+                let mut next = current.clone();
+                next.expires_at = heartbeat.work_authority_expires_at;
+                if let Some(rotation) = heartbeat.pending_rotation {
+                    // The session continues; only the credential changes.
+                    next.credential = Arc::new(
+                        self.rotate(identity.host_id, &current.credential, rotation)
+                            .await?,
+                    );
+                    next.generation = rotation.next_generation;
+                }
+                authority.send_replace(next);
             }
+        };
+        tokio::select! {
+            result = heartbeats => result,
+            result = self.commands(&context, watcher) => result,
         }
     }
 
+    /// Long-polls for commands while the session holds work authority and
+    /// runs each through the journal-backed dispatcher.
+    async fn commands(
+        &self,
+        context: &SessionContext,
+        mut authority: watch::Receiver<Authority>,
+    ) -> Result<Stop, ClientError> {
+        loop {
+            let current = authority.borrow_and_update().clone();
+            let Some(expires_at) = current
+                .expires_at
+                .filter(|expires| *expires > now().unwrap_or(*expires))
+            else {
+                // No authority yet: wait for the next heartbeat.
+                if authority.changed().await.is_err() {
+                    return Err(internal("session ended"));
+                }
+                continue;
+            };
+            let commands = self
+                .client
+                .poll_commands(
+                    context.host_id,
+                    &current.credential,
+                    context.authority_session_id,
+                )
+                .await?;
+            let session = ExpectedAgentSession {
+                host_id: context.host_id,
+                host_epoch: context.host_epoch,
+                control_plane_incarnation: context.control_plane_incarnation,
+                authority_session_id: context.authority_session_id,
+                credential_generation: current.generation,
+                authority_expires_at: expires_at,
+            };
+            for command in commands {
+                let body = serde_json::to_vec(&command).map_err(internal)?;
+                let bootstrap = match command["operation"]["bootstrap_reference"].as_str() {
+                    Some(reference) => self
+                        .client
+                        .bootstrap(context.host_id, &current.credential, reference)
+                        .await
+                        .map(Bootstrap)
+                        .map_err(
+                            |error| tracing::warn!(%error, "registration material unavailable"),
+                        )
+                        .ok(),
+                    None => None,
+                };
+                match self
+                    .dispatcher
+                    .dispatch_with(&body, &session, now()?, bootstrap)
+                    .await
+                {
+                    Ok(result) => {
+                        let latest = authority.borrow().credential.clone();
+                        self.client
+                            .post_result(context.host_id, &latest, &result)
+                            .await?;
+                    }
+                    Err(error) => tracing::warn!(%error, "refused a fleet command"),
+                }
+            }
+        }
+    }
+}
+
+struct SessionContext {
+    host_id: HostId,
+    host_epoch: HostEpoch,
+    control_plane_incarnation: ControlPlaneIncarnation,
+    authority_session_id: AuthoritySessionId,
+}
+
+impl<H: RuntimeHelper> Supervisor<H> {
     async fn rotate(
         &self,
         host_id: HostId,

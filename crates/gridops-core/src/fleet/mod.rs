@@ -6,6 +6,7 @@ pub mod capabilities;
 pub mod cursor;
 pub mod domain;
 pub mod ids;
+pub mod placement;
 pub mod protocol;
 pub mod registry;
 pub mod service;
@@ -35,3 +36,18 @@ pub use ids::{
     OperationId, PlacementId, ProfileId, ResourceDomainId, Revision, SessionId, UpstreamText,
     WorkloadId,
 };
+
+/// Creates the fleet control plane on first start. An existing row keeps its
+/// incarnation and readiness, so restarts never invalidate agent sessions.
+pub async fn ensure_control_plane(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO fleet_control_plane
+         (singleton,incarnation,readiness,schema_version,protocol_min,protocol_max,updated_at)
+         VALUES (1,?,'active',1,1,1,?) ON CONFLICT(singleton) DO NOTHING",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(crate::now_millis())
+    .execute(pool)
+    .await?;
+    Ok(())
+}

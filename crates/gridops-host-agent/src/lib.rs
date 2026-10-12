@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod dispatch;
+pub mod docker;
 pub mod helper;
 pub mod journal;
 pub mod probe;

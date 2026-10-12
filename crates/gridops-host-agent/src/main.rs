@@ -6,14 +6,22 @@
 //! - `gridops-host-agent helper <socket>` runs the privileged runtime helper.
 //!
 //! Configuration: `GRIDOPS_FLEET_URL` (required for enroll/run),
-//! `GRIDOPS_AGENT_STATE_DIR` (journal location) and `GRIDOPS_AGENT_NAME`
-//! (defaults to the hostname).
+//! `GRIDOPS_AGENT_STATE_DIR` (journal location), `GRIDOPS_AGENT_NAME`
+//! (defaults to the hostname), `GRIDOPS_AGENT_HELPER_SOCKET` (use a separate
+//! privileged helper; otherwise the runtime runs in-process),
+//! `GRIDOPS_AGENT_IMAGES` (comma-separated runner image allowlist),
+//! `GRIDOPS_AGENT_DOCKER_NETWORK` and `GRIDOPS_AGENT_DOCKER_SOCKET` (share
+//! this socket with profiles granted Docker access).
 
 use std::{env, io::BufRead as _, path::PathBuf, process::ExitCode};
 
 use anyhow::{Context as _, Result};
+#[cfg(unix)]
+use gridops_host_agent::helper::SocketHelper;
 use gridops_host_agent::{
     client::Client,
+    dispatch::Trust,
+    docker::DockerRuntime,
     journal::Journal,
     supervisor::{Stop, Supervisor},
 };
@@ -63,11 +71,27 @@ async fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         "run" => {
-            let stop = supervisor
-                .run(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await?;
+            let trust = Trust {
+                docker_socket: env::var("GRIDOPS_AGENT_DOCKER_SOCKET").is_ok(),
+            };
+            let shutdown = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let stop = match env::var("GRIDOPS_AGENT_HELPER_SOCKET") {
+                #[cfg(unix)]
+                Ok(socket) => {
+                    supervisor
+                        .with_runtime(SocketHelper::new(socket.into()), trust)
+                        .run(shutdown)
+                        .await?
+                }
+                _ => {
+                    supervisor
+                        .with_runtime(docker_runtime(), trust)
+                        .run(shutdown)
+                        .await?
+                }
+            };
             Ok(match stop {
                 Stop::Shutdown => ExitCode::SUCCESS,
                 Stop::Incompatible => {
@@ -92,14 +116,27 @@ async fn helper(socket: String) -> Result<ExitCode> {
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket)?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    gridops_host_agent::helper::serve(listener, Arc::new(gridops_host_agent::helper::NoRuntime))
-        .await?;
+    gridops_host_agent::helper::serve(listener, Arc::new(docker_runtime())).await?;
     Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(not(unix))]
 async fn helper(_socket: String) -> Result<ExitCode> {
     anyhow::bail!("the runtime helper socket isn't available on this platform yet")
+}
+
+fn docker_runtime() -> DockerRuntime {
+    let images = env::var("GRIDOPS_AGENT_IMAGES")
+        .unwrap_or_else(|_| "ghcr.io/actions/actions-runner:latest".into())
+        .split(',')
+        .map(|image| image.trim().to_owned())
+        .filter(|image| !image.is_empty())
+        .collect();
+    DockerRuntime::new(
+        images,
+        env::var("GRIDOPS_AGENT_DOCKER_NETWORK").ok(),
+        env::var("GRIDOPS_AGENT_DOCKER_SOCKET").ok(),
+    )
 }
 
 fn state_dir() -> Result<PathBuf> {
