@@ -167,7 +167,12 @@ impl RegistryService {
                 == i64::try_from(epoch.get())
                     .map_err(|_| RegistryError::InvalidRequest("epoch exceeds SQLite integer"))?
                 && existing_incarnation == incarnation.to_string();
+            // A new session from the same boot is this machine's agent
+            // reconnecting or restarting; it replaces the old session. A
+            // live session from a different boot means the credential is in
+            // use on two machines at once.
             if same_authority_lineage
+                && existing_boot != request.boot_id.as_str()
                 && (lease_expires_at > now
                     || work_authority_expires_at.is_some_and(|expires| expires > now))
             {

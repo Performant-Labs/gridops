@@ -81,7 +81,11 @@ async fn run() -> Result<ExitCode> {
                     .next()
                     .context("no enrollment code on stdin")??,
             };
-            supervisor.enroll(code.trim(), None).await?;
+            if args.any(|arg| arg == "--replace") {
+                supervisor.enroll_replacing(code.trim(), None).await?;
+            } else {
+                supervisor.enroll(code.trim(), None).await?;
+            }
             tracing::info!("enrolled; waiting for an administrator to approve this host");
             Ok(ExitCode::SUCCESS)
         }
@@ -102,7 +106,7 @@ async fn run() -> Result<ExitCode> {
                 }
                 _ => {
                     supervisor
-                        .with_runtime(docker_runtime(), trust)
+                        .with_runtime(host_runtime()?, trust)
                         .run(shutdown)
                         .await?
                 }

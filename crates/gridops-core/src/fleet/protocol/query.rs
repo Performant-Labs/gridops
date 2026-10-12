@@ -154,6 +154,11 @@ pub enum HostReadV1 {
         /// fingerprint. This is a hint for the approver, never proof of
         /// identity or ownership.
         duplicate_hardware: bool,
+        /// The current credential generation, which a rotation request names.
+        credential_generation: BrowserUint53,
+        /// Targets the host's enrollment was issued for; approval may grant
+        /// only these.
+        enrollment_target_ids: Vec<crate::fleet::ids::CiTargetId>,
     },
     Target {
         id: HostId,

@@ -6,6 +6,7 @@ import {
   GitPullRequestArrow,
   PackageSearch,
   Radio,
+  Server,
   Settings,
   Webhook,
   type LucideIcon,
@@ -35,6 +36,7 @@ export const navigation: NavGroup[] = [
     items: [
       { label: "Runner pools", to: "/runner-pools", icon: Boxes, shortcut: "p" },
       { label: "Runners", to: "/runners", icon: Activity, shortcut: "r", alert: "failedRunners" },
+      { label: "Machines", to: "/fleet", icon: Server, shortcut: "m" },
       { label: "Workflow runs", to: "/workflow-runs", icon: GitPullRequestArrow, shortcut: "w", alert: "queuedJobs" },
       { label: "Repositories", to: "/repositories", icon: PackageSearch, shortcut: "e" },
     ],

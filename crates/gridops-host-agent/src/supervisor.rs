@@ -122,6 +122,17 @@ impl<H: RuntimeHelper> Supervisor<H> {
             self.journal.identity().await?.is_none(),
             "this agent is already enrolled"
         );
+        self.enroll_replacing(code, hardware_fingerprint).await
+    }
+
+    /// Enrolls even when an identity exists: used with a recovery code after
+    /// an administrator recovered the machine. The new credential replaces
+    /// the old one; the server decides whether it's the same host.
+    pub async fn enroll_replacing(
+        &self,
+        code: &str,
+        hardware_fingerprint: Option<&str>,
+    ) -> Result<()> {
         let enrollment = self
             .client
             .enroll(code, &self.name, hardware_fingerprint)
@@ -186,7 +197,9 @@ impl<H: RuntimeHelper> Supervisor<H> {
                     boot_id.clone(),
                     ProtocolRange::new(1, 1).map_err(internal)?,
                     text(env!("CARGO_PKG_VERSION"))?,
-                    Some(identity.host_epoch),
+                    // The credential is bound to the host's epoch; the server
+                    // reports it, which also covers recovery.
+                    None,
                 ),
             )
             .await?;

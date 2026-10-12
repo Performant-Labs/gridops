@@ -58,7 +58,9 @@
           "inventoryReceivedAt": "2026-10-09T11:59:00.000Z",
           "observationLeaseExpiresAt": "2026-10-09T12:00:45.000Z"
         },
-        "duplicateHardware": false
+        "duplicateHardware": false,
+        "credentialGeneration": 1,
+        "enrollmentTargetIds": []
       }
     },
     {

@@ -1,0 +1,25 @@
+[Unit]
+Description=GridOps fleet host agent
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=gridops-agent
+# The agent's account needs the docker group to run container jobs.
+SupplementaryGroups=docker
+Environment=GRIDOPS_FLEET_URL=https://gridops.example.com
+Environment=GRIDOPS_AGENT_STATE_DIR=/var/lib/gridops-agent
+Environment=GRIDOPS_AGENT_IMAGES=ghcr.io/actions/actions-runner:latest
+Environment=RUST_LOG=gridops_host_agent=info
+ExecStart=/usr/local/bin/gridops-host-agent run
+Restart=always
+RestartSec=10
+StateDirectory=gridops-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

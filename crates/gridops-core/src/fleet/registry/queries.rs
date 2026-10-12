@@ -1981,6 +1981,18 @@ impl RegistryService {
         .bind(host_id.to_string())
         .fetch_one(&mut **tx)
         .await?;
+        let (generation, scope): (i64, Option<String>) = sqlx::query_as(
+            "SELECT h.current_credential_generation,e.scope_json FROM fleet_hosts h
+               LEFT JOIN host_enrollments e ON e.id=h.current_enrollment_id WHERE h.id=?",
+        )
+        .bind(host_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+        let enrollment_target_ids = scope
+            .and_then(|scope| serde_json::from_str::<serde_json::Value>(&scope).ok())
+            .and_then(|scope| scope.get("target_ids").cloned())
+            .and_then(|ids| serde_json::from_value(ids).ok())
+            .unwrap_or_default();
         Ok(HostReadV1::Host {
             id,
             name,
@@ -2007,6 +2019,10 @@ impl RegistryService {
             inventory_evidence,
             approval_evidence,
             duplicate_hardware,
+            credential_generation: BrowserUint53::new(
+                u64::try_from(generation).map_err(|_| QueryError::MalformedData)?,
+            )?,
+            enrollment_target_ids,
         })
     }
 

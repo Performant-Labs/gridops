@@ -213,17 +213,20 @@ impl RegistryService {
         .bind(session.host_id.to_string())
         .execute(&mut *tx)
         .await?;
-        audit_and_event(
-            &mut tx,
-            None,
-            Some(session.host_id),
-            "fleet.observation.inventory_received",
-            "host",
-            &session.host_id.to_string(),
-            json!({"inventory_sequence": sequence, "inventory_revision": next_revision}),
-            now,
-        )
-        .await?;
+        // Only a session's first inventory is an event; refreshes are routine.
+        if sequence_i64 == 1 {
+            audit_and_event(
+                &mut tx,
+                None,
+                Some(session.host_id),
+                "fleet.observation.inventory_received",
+                "host",
+                &session.host_id.to_string(),
+                json!({"inventory_sequence": sequence, "inventory_revision": next_revision}),
+                now,
+            )
+            .await?;
+        }
         tx.commit().await?;
         inventory_response(
             &request,
@@ -348,17 +351,7 @@ impl RegistryService {
         .bind(session.host_id.to_string())
         .execute(&mut *tx)
         .await?;
-        audit_and_event(
-            &mut tx,
-            None,
-            Some(session.host_id),
-            "fleet.observation.heartbeat_received",
-            "host",
-            &session.host_id.to_string(),
-            json!({"heartbeat_sequence": request.heartbeat_sequence.get()}),
-            now,
-        )
-        .await?;
+        // Heartbeats are routine and aren't recorded as events.
         let rotation = pending_rotation(&mut tx, &session, now).await?;
         let authority = work_authority(
             &mut tx,

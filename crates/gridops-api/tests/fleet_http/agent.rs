@@ -71,6 +71,48 @@ async fn enrolled_agent_reports_inventory_and_stops_cleanly() -> Result<()> {
     assert_eq!((enrollment.as_str(), domains), ("pending", 1));
     let _ = stop.send(());
     assert_eq!(running.await??, Stop::Shutdown);
+
+    // Restarting while the old session's lease is live replaces the session;
+    // only a different boot would mean a copied credential.
+    let (restarted, journal) = (
+        Supervisor::new(
+            Client::new(&f.origin)?,
+            journal.clone(),
+            "agent-host".into(),
+        ),
+        journal,
+    );
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(async move {
+        restarted
+            .run(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let mut sessions = 0;
+    for _ in 0..100 {
+        sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM fleet_observation_sessions WHERE host_id=?",
+        )
+        .bind(&host)
+        .fetch_one(&f.database)
+        .await?;
+        if sessions == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sessions, 2);
+    let integrity: String =
+        sqlx::query_scalar("SELECT integrity_state FROM fleet_hosts WHERE id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert_ne!(integrity, "quarantined");
+    let _ = stop.send(());
+    assert_eq!(running.await??, Stop::Shutdown);
+    drop(journal);
     Ok(())
 }
 

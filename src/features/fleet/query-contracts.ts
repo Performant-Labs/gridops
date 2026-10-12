@@ -150,6 +150,8 @@ const hostReadV1HostSchema = z.strictObject({
   inventoryEvidence: fleetInventoryEvidenceSchema,
   approvalEvidence: fleetApprovalEvidenceSchema,
   duplicateHardware: z.boolean(),
+  credentialGeneration: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  enrollmentTargetIds: z.array(fleetIdSchema).max(64),
 });
 
 const hostReadV1TargetSchema = z.strictObject({

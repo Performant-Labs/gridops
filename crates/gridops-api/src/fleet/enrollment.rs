@@ -401,7 +401,7 @@ pub(super) struct GrantList {
 pub(super) async fn grants(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetUser,
     FleetPath(host_id): FleetPath<HostId>,
 ) -> Result<Json<GrantList>, FleetApiError> {
     let items = RegistryService::new(state.database, state.vault)
