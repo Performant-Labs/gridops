@@ -7,11 +7,12 @@
 use std::{future::Future, time::Duration};
 
 use anyhow::{Context as _, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use gridops_core::fleet::{
-    ids::{AuthoritySessionId, OperationId, UpstreamText},
+    ids::{AuthoritySessionId, HostId, OperationId, UpstreamText},
     protocol::{
         inventory::{
-            HandshakeRequest, HeartbeatRequest, InventoryReport, InventoryRequest,
+            HandshakeRequest, HeartbeatRequest, InventoryReport, InventoryRequest, PendingRotation,
             ProtocolNegotiation, ProtocolRange,
         },
         primitives::{BrowserCounter, WireTimestamp},
@@ -46,6 +47,7 @@ pub struct Supervisor {
     client: Client,
     journal: Journal,
     name: String,
+    heartbeat: Duration,
 }
 
 impl Supervisor {
@@ -54,7 +56,16 @@ impl Supervisor {
             client,
             journal,
             name,
+            heartbeat: MAX_HEARTBEAT,
         }
+    }
+
+    /// Heartbeats more often than the server's lease requires (tests, or a
+    /// host that wants faster command pickup). Never slower than the lease.
+    #[must_use]
+    pub const fn with_heartbeat(mut self, interval: Duration) -> Self {
+        self.heartbeat = interval;
+        self
     }
 
     /// Consumes a one-time enrollment code and stores the credential. The
@@ -79,8 +90,7 @@ impl Supervisor {
     }
 
     pub async fn run(&self, shutdown: impl Future<Output = ()>) -> Result<Stop> {
-        let identity = self
-            .journal
+        self.journal
             .identity()
             .await?
             .context("this agent isn't enrolled yet")?;
@@ -89,7 +99,7 @@ impl Supervisor {
         loop {
             let error = tokio::select! {
                 () = &mut shutdown => return Ok(Stop::Shutdown),
-                result = self.session(&identity, &mut failures) => match result {
+                result = self.session(&mut failures) => match result {
                     Ok(stop) => return Ok(stop),
                     Err(error) => error,
                 },
@@ -108,14 +118,21 @@ impl Supervisor {
     }
 
     /// One session. Returns only on failure or a terminal stop.
-    async fn session(&self, identity: &Identity, failures: &mut u32) -> Result<Stop, ClientError> {
+    async fn session(&self, failures: &mut u32) -> Result<Stop, ClientError> {
+        let identity = self
+            .journal
+            .identity()
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| internal("identity is missing"))?;
+        let mut credential = identity.credential;
         let session_id = new_id::<AuthoritySessionId>()?;
         let boot_id = text(&probe::boot_id())?;
         let handshake = self
             .client
             .handshake(
                 identity.host_id,
-                &identity.credential,
+                &credential,
                 &HandshakeRequest::new(
                     new_id::<OperationId>()?,
                     session_id,
@@ -147,21 +164,23 @@ impl Supervisor {
             .client
             .inventory(
                 identity.host_id,
-                &identity.credential,
+                &credential,
                 &InventoryRequest::new(new_id::<OperationId>()?, report).map_err(internal)?,
             )
             .await?;
         *failures = 0;
-        let interval = Duration::from_millis(inventory.lease.heartbeat_ms.get()).min(MAX_HEARTBEAT);
+        let interval =
+            Duration::from_millis(inventory.lease.heartbeat_ms.get()).min(self.heartbeat);
         let mut sequence = 1_u64;
         loop {
             tokio::time::sleep(interval).await;
             sequence += 1;
             let observed_at = now()?;
-            self.client
+            let heartbeat = self
+                .client
                 .heartbeat(
                     identity.host_id,
-                    &identity.credential,
+                    &credential,
                     &HeartbeatRequest::new(
                         new_id::<OperationId>()?,
                         handshake.host_epoch,
@@ -175,7 +194,41 @@ impl Supervisor {
                     .map_err(internal)?,
                 )
                 .await?;
+            if let Some(rotation) = heartbeat.pending_rotation {
+                // The session continues; only the credential changes.
+                credential = self.rotate(identity.host_id, &credential, rotation).await?;
+            }
         }
+    }
+
+    async fn rotate(
+        &self,
+        host_id: HostId,
+        credential: &SecretString,
+        rotation: PendingRotation,
+    ) -> Result<SecretString, ClientError> {
+        let next = self
+            .journal
+            .rotation_secret(rotation.operation_id, rotation.next_generation, || {
+                URL_SAFE_NO_PAD.encode(rand::rng().random::<[u8; 32]>())
+            })
+            .await
+            .map_err(internal)?;
+        self.client
+            .exchange_rotation(host_id, credential, rotation.operation_id, &next)
+            .await?;
+        self.client
+            .acknowledge_rotation(host_id, &next, rotation.operation_id)
+            .await?;
+        self.journal
+            .finish_rotation(&next, rotation.next_generation)
+            .await
+            .map_err(internal)?;
+        tracing::info!(
+            generation = rotation.next_generation.get(),
+            "host credential rotated"
+        );
+        Ok(next)
     }
 }
 

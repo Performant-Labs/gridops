@@ -17,7 +17,8 @@ async fn agent(f: &Fixture) -> Result<(Supervisor, Journal)> {
         Client::new(&f.origin)?,
         journal.clone(),
         "agent-host".into(),
-    );
+    )
+    .with_heartbeat(Duration::from_millis(200));
     Ok((supervisor, journal))
 }
 
@@ -109,5 +110,74 @@ async fn incompatible_server_and_rejected_credentials_stop_the_agent() -> Result
         supervisor.run(std::future::pending()).await?,
         Stop::CredentialRejected
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_completes_a_requested_credential_rotation() -> Result<()> {
+    let f = Fixture::new().await?;
+    control_plane(&f).await?;
+    let (supervisor, journal) = agent(&f).await?;
+    let code = f.issue("agent-rotation").await?;
+    supervisor
+        .enroll(code["code"].as_str().context("code")?, None)
+        .await?;
+    let host = journal
+        .identity()
+        .await?
+        .context("identity")?
+        .host_id
+        .to_string();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(async move {
+        supervisor
+            .run(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+
+    let response = f
+        .admin_post(&format!("/hosts/{host}/credentials/rotate"))
+        .header("idempotency-key", "agent-rotate")
+        .json(&json!({"expectedGeneration":1}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let mut generation = 1;
+    for _ in 0..100 {
+        generation = journal
+            .identity()
+            .await?
+            .context("identity")?
+            .credential_generation
+            .get();
+        if generation == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(generation, 2, "agent never rotated its credential");
+    let phase: String =
+        sqlx::query_scalar("SELECT phase FROM host_credential_rotations WHERE host_id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert_eq!(phase, "acknowledged");
+    // The session keeps heartbeating with the new credential.
+    let before: i64 =
+        sqlx::query_scalar("SELECT COALESCE(last_heartbeat_at,0) FROM fleet_hosts WHERE id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let after: i64 =
+        sqlx::query_scalar("SELECT COALESCE(last_heartbeat_at,0) FROM fleet_hosts WHERE id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert!(after > before, "no heartbeats after rotation");
+    let _ = stop.send(());
+    assert_eq!(running.await??, Stop::Shutdown);
     Ok(())
 }

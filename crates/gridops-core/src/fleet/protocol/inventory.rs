@@ -545,6 +545,17 @@ pub struct HeartbeatResponse {
     pub received_at: WireTimestamp,
     pub state: ObservationSessionState,
     pub lease: ObservationLease,
+    /// An administrator requested a credential rotation the agent hasn't
+    /// finished. The agent exchanges a new secret with its current credential
+    /// and acknowledges with the new one.
+    pub pending_rotation: Option<PendingRotation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRotation {
+    pub operation_id: OperationId,
+    pub next_generation: crate::fleet::ids::Generation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]

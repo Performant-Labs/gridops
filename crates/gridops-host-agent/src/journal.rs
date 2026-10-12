@@ -9,7 +9,7 @@ use std::{path::Path, str::FromStr, time::Duration};
 use anyhow::{Context as _, Result};
 use gridops_core::fleet::{
     domain::{ExecutionOs, RuntimeKind},
-    ids::{Generation, HostEpoch, HostId, PlacementId, PreparedEnvironmentId},
+    ids::{Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId},
     protocol::{
         agent::{AgentCommandEnvelope, LocalResourceIdentity, PreparedWorkload},
         outcomes::AgentCommandResult,
@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS identity (
   host_epoch INTEGER NOT NULL,
   credential TEXT NOT NULL,
   credential_generation INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS rotation (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  operation_id TEXT NOT NULL,
+  next_generation INTEGER NOT NULL,
+  next_secret TEXT NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS commands (
   command_id TEXT PRIMARY KEY,
@@ -156,6 +162,57 @@ impl Journal {
         .bind(i64::try_from(identity.credential_generation.get())?)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// The replacement secret for a rotation, created and stored before the
+    /// exchange so a crash can replay the same secret instead of conflicting.
+    pub async fn rotation_secret(
+        &self,
+        operation_id: OperationId,
+        next_generation: Generation,
+        fresh: impl FnOnce() -> String,
+    ) -> Result<SecretString> {
+        let operation = operation_id.to_string();
+        if let Some(row) = sqlx::query("SELECT operation_id,next_secret FROM rotation")
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            if row.get::<String, _>("operation_id") == operation {
+                return Ok(SecretString::from(row.get::<String, _>("next_secret")));
+            }
+        }
+        let secret = fresh();
+        sqlx::query(
+            "INSERT INTO rotation (singleton,operation_id,next_generation,next_secret) VALUES (1,?,?,?)
+             ON CONFLICT(singleton) DO UPDATE SET operation_id=excluded.operation_id,
+             next_generation=excluded.next_generation,next_secret=excluded.next_secret",
+        )
+        .bind(&operation)
+        .bind(i64::try_from(next_generation.get())?)
+        .bind(&secret)
+        .execute(&self.pool)
+        .await?;
+        Ok(SecretString::from(secret))
+    }
+
+    /// Switches to the acknowledged credential and forgets the pending secret
+    /// in one transaction.
+    pub async fn finish_rotation(
+        &self,
+        credential: &SecretString,
+        generation: Generation,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE identity SET credential=?,credential_generation=?")
+            .bind(credential.expose_secret())
+            .bind(i64::try_from(generation.get())?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM rotation")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

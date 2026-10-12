@@ -26,7 +26,7 @@ use crate::fleet::{
             DomainKind, HeartbeatRequest, HeartbeatResponse, HelperState, InventoryIdMapping,
             InventoryPayloadError, InventoryReport, InventoryRequest, InventoryResponse,
             ObservationLease, ObservationSessionState, ObservedBackend, ObservedDomain,
-            ObservedInteractiveSession, ObservedSample, SampleCoverage,
+            ObservedInteractiveSession, ObservedSample, PendingRotation, SampleCoverage,
         },
         primitives::{BrowserCounter, BrowserUint53, Sha256Digest, WireTimestamp},
     },
@@ -276,9 +276,11 @@ impl RegistryService {
                 let receipt_state = session
                     .current_heartbeat_state
                     .ok_or(InventoryError::HeartbeatConflict)?;
+                let rotation = pending_rotation(&mut tx, &session, now).await?;
                 let response = heartbeat_response(
                     &request,
                     &session,
+                    rotation,
                     received,
                     session
                         .current_heartbeat_lease_expires_at
@@ -332,8 +334,16 @@ impl RegistryService {
             now,
         )
         .await?;
+        let rotation = pending_rotation(&mut tx, &session, now).await?;
         tx.commit().await?;
-        heartbeat_response(&request, &session, now, lease_expires, session.state)
+        heartbeat_response(
+            &request,
+            &session,
+            rotation,
+            now,
+            lease_expires,
+            session.state,
+        )
     }
 }
 
@@ -894,9 +904,40 @@ fn inventory_response(
         lease: lease(lease_expires)?,
     })
 }
+async fn pending_rotation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session: &CurrentInventorySession,
+    now: i64,
+) -> Result<Option<PendingRotation>, InventoryError> {
+    let Some(row) = sqlx::query(
+        "SELECT id,next_generation FROM host_credential_rotations
+         WHERE host_id=? AND phase IN ('requested','exchanged') AND revoked_at IS NULL
+         AND (phase='exchanged' OR expires_at>?) ORDER BY requested_at DESC LIMIT 1",
+    )
+    .bind(session.host_id.to_string())
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let malformed = || RegistryError::InvalidRequest("rotation row is malformed");
+    Ok(Some(PendingRotation {
+        operation_id: row
+            .get::<String, _>("id")
+            .parse()
+            .map_err(|_| malformed())?,
+        next_generation: crate::fleet::ids::Generation::new(
+            u64::try_from(row.get::<i64, _>("next_generation")).map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?,
+    }))
+}
+
 fn heartbeat_response(
     request: &HeartbeatRequest,
     session: &CurrentInventorySession,
+    pending_rotation: Option<PendingRotation>,
     received: i64,
     lease_expires: i64,
     state: ObservationSessionState,
@@ -912,6 +953,7 @@ fn heartbeat_response(
             .map_err(|_| RegistryError::InvalidRequest("receipt timestamp is malformed"))?,
         state,
         lease: lease(lease_expires)?,
+        pending_rotation,
     })
 }
 

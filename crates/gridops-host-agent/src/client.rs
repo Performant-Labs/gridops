@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gridops_core::fleet::{
     domain::{Architecture, ExecutionOs},
-    ids::{Generation, HostId},
+    ids::{Generation, HostId, OperationId},
     protocol::{
         browser::{ErrorCode, FleetErrorResponse},
         inventory::{
@@ -117,6 +117,36 @@ impl Client {
         body: &HeartbeatRequest,
     ) -> Result<HeartbeatResponse, ClientError> {
         self.agent(host, credential, "heartbeat", body).await
+    }
+
+    /// Proposes the next credential, authenticated with the current one.
+    pub async fn exchange_rotation(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        operation_id: OperationId,
+        next_secret: &SecretString,
+    ) -> Result<(), ClientError> {
+        let body = serde_json::json!({
+            "operation_id": operation_id,
+            "next_secret": next_secret.expose_secret(),
+        });
+        self.agent::<_, serde_json::Value>(host, credential, "credentials/rotate", &body)
+            .await
+            .map(drop)
+    }
+
+    /// Confirms the agent holds the new credential, authenticated with it.
+    pub async fn acknowledge_rotation(
+        &self,
+        host: HostId,
+        next_credential: &SecretString,
+        operation_id: OperationId,
+    ) -> Result<(), ClientError> {
+        let body = serde_json::json!({ "operation_id": operation_id });
+        self.agent::<_, serde_json::Value>(host, next_credential, "credentials/ack", &body)
+            .await
+            .map(drop)
     }
 
     async fn agent<B: Serialize, T: DeserializeOwned>(
