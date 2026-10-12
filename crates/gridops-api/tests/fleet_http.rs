@@ -24,6 +24,8 @@ use uuid::Uuid;
 const SESSION_SECRET: &str = "fleet-http-test-session-key";
 const SESSION_TOKEN: &str = "fleet-http-test-session-token";
 
+#[path = "fleet_http/agent.rs"]
+mod agent;
 #[path = "fleet_http/inventory.rs"]
 mod inventory;
 #[path = "fleet_http/query.rs"]

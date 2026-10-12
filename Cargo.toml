@@ -3,6 +3,7 @@ members = [
   "crates/gridops-agent",
   "crates/gridops-api",
   "crates/gridops-core",
+  "crates/gridops-host-agent",
   "crates/gridops-manager",
   "crates/gridops-reconciler",
   "crates/gridops-tart-agent",
