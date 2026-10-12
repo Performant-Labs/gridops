@@ -766,7 +766,8 @@ async fn pool_has_capacity(
     };
     let legacy: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM runners r WHERE r.pool_id=? AND r.deleted_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM workload_placements p WHERE p.runner_id=r.id)",
+          AND NOT EXISTS (SELECT 1 FROM workload_placements p WHERE p.runner_id=r.id)
+          AND NOT EXISTS (SELECT 1 FROM workload_intents i WHERE i.workload_id=r.id)",
     )
     .bind(&intent.pool_id)
     .fetch_one(&mut **tx)

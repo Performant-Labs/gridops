@@ -282,6 +282,19 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
     })
     .await?;
 
+    // As the reconciler does: the runner row exists before placement, and
+    // must not count against a pool that allows exactly one runner.
+    let workload = Uuid::new_v4();
+    sqlx::query("UPDATE runner_pools SET max_count=1 WHERE id='fleet-pool'")
+        .execute(&f.database)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runners (id,pool_id,name,provider,ci_platform,os,architecture,status,ephemeral,configuration_version,created_at,updated_at)
+         VALUES (?,'fleet-pool','fleet-runner','docker','github','linux','ARM64','starting',1,1,1,1)",
+    )
+    .bind(workload.to_string())
+    .execute(&f.database)
+    .await?;
     let service = FleetService::new(f.database.clone());
     let profile_id = profile["item"]["id"].as_str().context("profile id")?;
     service
@@ -292,7 +305,7 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
                 pool_id: "fleet-pool".into(),
                 profile_id: profile_id.parse()?,
                 target_id: target.parse()?,
-                workload_id: WorkloadId::try_new(Uuid::new_v4())?,
+                workload_id: WorkloadId::try_new(workload)?,
                 generation: Generation::new(1)?,
                 kind: WorkloadKind::CiRunner,
                 agent_run_id: None,
