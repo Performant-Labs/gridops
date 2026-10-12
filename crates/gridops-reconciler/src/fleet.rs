@@ -14,7 +14,7 @@
 
 use anyhow::{Context as _, Result};
 use gridops_core::{
-    JitRequest, RunnerTarget, effective_runner_labels,
+    JitRequest, RunnerTarget,
     fleet::{
         CiTarget, ExternalId, FleetService, Principal, SubmitIntent, WorkloadKind,
         ids::{Generation, ProfileId, WorkloadId},
@@ -197,7 +197,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
         .await?
         .context("prepare command is missing")?;
     let runner = sqlx::query(
-        "SELECT r.id,r.name,r.provider,r.status,p.installation_id AS pool_installation,inst.account_login,p.scope,
+        "SELECT r.id,r.name,r.status,p.installation_id AS pool_installation,inst.account_login,p.scope,
                 p.labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
            FROM runners r JOIN runner_pools p ON p.id=r.pool_id
            JOIN installations inst ON inst.id=p.installation_id
@@ -231,7 +231,6 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
     };
     let labels: Vec<String> =
         serde_json::from_str(&runner.get::<String, _>("labels")).unwrap_or_default();
-    let provider: String = runner.get("provider");
     let material = if prepare.mode == RunnerMode::Ephemeral {
         let jit = app
             .github
@@ -241,7 +240,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
                 &JitRequest {
                     name: name.clone(),
                     runner_group_id: runner.get("runner_group_id"),
-                    labels: effective_runner_labels(&provider, &labels),
+                    labels: runner_labels(&prepare, &labels),
                     work_folder: "_work".into(),
                 },
             )
@@ -281,7 +280,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
             "token": registration.token,
             "url": runner_registration_url(&account_login, repository_target.as_ref()),
             "name": name,
-            "labels": effective_runner_labels(&provider, &labels),
+            "labels": runner_labels(&prepare, &labels),
             "group": null,
         })
     };
@@ -426,6 +425,31 @@ async fn finish(app: &Reconciler, placement: &Placement) -> Result<()> {
     .execute(&app.database)
     .await?;
     Ok(())
+}
+
+/// GitHub's system labels for where the runner actually runs, then the
+/// pool's own labels. They come from the placement, not from the machine
+/// running the reconciler.
+fn runner_labels(
+    prepare: &gridops_core::fleet::protocol::agent::PrepareEnvironment,
+    configured: &[String],
+) -> Vec<String> {
+    let os = match prepare.execution_os {
+        gridops_core::fleet::ExecutionOs::Linux => "Linux",
+        gridops_core::fleet::ExecutionOs::Macos => "macOS",
+        gridops_core::fleet::ExecutionOs::Windows => "Windows",
+    };
+    let arch = match prepare.architecture {
+        gridops_core::fleet::Architecture::X64 => "X64",
+        gridops_core::fleet::Architecture::Arm64 => "ARM64",
+    };
+    let mut labels = vec!["self-hosted".to_owned(), os.to_owned(), arch.to_owned()];
+    for label in configured {
+        if !gridops_core::is_runner_system_label(label) && !labels.contains(label) {
+            labels.push(label.clone());
+        }
+    }
+    labels
 }
 
 fn external(value: i64) -> Result<ExternalId> {

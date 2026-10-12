@@ -123,7 +123,8 @@ impl NativeRuntime {
         let releases = self.root.join("releases");
         let (version, url, digest) = latest_release().await?;
         let target = releases.join(&version);
-        if tokio::fs::try_exists(target.join("run.sh"))
+        let entry = if cfg!(windows) { "run.cmd" } else { "run.sh" };
+        if tokio::fs::try_exists(target.join(entry))
             .await
             .unwrap_or(false)
         {
@@ -181,6 +182,8 @@ impl RuntimeHelper for NativeRuntime {
             "macos"
         } else if cfg!(target_os = "linux") {
             "linux"
+        } else if cfg!(target_os = "windows") {
+            "windows"
         } else {
             return Vec::new();
         };
@@ -218,24 +221,48 @@ impl RuntimeHelper for NativeRuntime {
     }
 }
 
-/// Starts `run.sh` in its own process group and feeds it the secret.
+/// The shell that reads the secret line from stdin and execs the runner, in
+/// its own process group (Unix) or without a console window (Windows).
+#[cfg(not(windows))]
+fn runner_command() -> Command {
+    let mut command = Command::new("/bin/bash");
+    command.args([
+        "-c",
+        "set -euo pipefail\nIFS= read -r S\n[ -n \"$S\" ]\nexec ./run.sh --jitconfig \"$S\"",
+    ]);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
+#[cfg(windows)]
+fn runner_command() -> Command {
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$s=[Console]::In.ReadLine(); if (-not $s) { exit 1 }; & .\\run.cmd --jitconfig $s; exit $LASTEXITCODE",
+        ])
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    command
+}
+
+/// Starts the runner in its own process group and feeds it the secret.
 async fn launch(root: &Path, jit_config: &str) -> Result<LocalResourceIdentity> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(root.join("gridops-runner.log"))?;
-    let mut command = Command::new("/bin/bash");
+    let mut command = runner_command();
     command
-        .args([
-            "-c",
-            "set -euo pipefail\nIFS= read -r S\n[ -n \"$S\" ]\nexec ./run.sh --jitconfig \"$S\"",
-        ])
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
-    #[cfg(unix)]
-    command.process_group(0);
     let mut child = command.spawn()?;
     let pid = child.id().context("runner has no process ID")?;
     let mut stdin = child.stdin.take().context("runner stdin unavailable")?;
@@ -286,6 +313,17 @@ async fn alive(identity: &LocalResourceIdentity) -> bool {
 }
 
 async fn start_time(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    let script = format!(
+        "(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')"
+    );
+    #[cfg(windows)]
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .output()
+        .await
+        .ok()?;
+    #[cfg(not(windows))]
     let output = Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .output()
@@ -295,7 +333,21 @@ async fn start_time(pid: u32) -> Option<String> {
     (output.status.success() && !value.is_empty()).then_some(value)
 }
 
+/// Stops the runner's whole process tree.
+#[cfg(windows)]
+async fn signal(identity: &LocalResourceIdentity, kill: bool) {
+    if let LocalResourceIdentity::NativeProcess { process_id, .. } = identity {
+        let pid = process_id.get().to_string();
+        let mut args = vec!["/PID", pid.as_str(), "/T"];
+        if kill {
+            args.push("/F");
+        }
+        let _ = Command::new("taskkill").args(args).status().await;
+    }
+}
+
 /// Signals the runner's whole process group.
+#[cfg(not(windows))]
 async fn signal(identity: &LocalResourceIdentity, kill: bool) {
     if let LocalResourceIdentity::NativeProcess { process_id, .. } = identity {
         let _ = Command::new("kill")
@@ -334,17 +386,19 @@ async fn latest_release() -> Result<(String, String, Option<String>)> {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')),
         "release tag is malformed"
     );
-    let platform = if cfg!(target_os = "macos") {
-        "osx"
+    let (platform, extension) = if cfg!(target_os = "macos") {
+        ("osx", "tar.gz")
+    } else if cfg!(target_os = "windows") {
+        ("win", "zip")
     } else {
-        "linux"
+        ("linux", "tar.gz")
     };
     let arch = if cfg!(target_arch = "aarch64") {
         "arm64"
     } else {
         "x64"
     };
-    let name = format!("actions-runner-{platform}-{arch}-{version}.tar.gz");
+    let name = format!("actions-runner-{platform}-{arch}-{version}.{extension}");
     let asset = release["assets"]
         .as_array()
         .and_then(|assets| assets.iter().find(|asset| asset["name"] == name.as_str()))
@@ -390,10 +444,15 @@ async fn download(url: &str, digest: Option<&str>, target: &Path) -> Result<()> 
             "release digest mismatch"
         );
     }
-    let tarball = staging.join("actions-runner.tar.gz");
+    // Windows 10 and later ship bsdtar, which also extracts the zip release.
+    let tarball = staging.join(if cfg!(windows) {
+        "actions-runner.zip"
+    } else {
+        "actions-runner.tar.gz"
+    });
     tokio::fs::write(&tarball, &archive).await?;
     let status = Command::new("tar")
-        .arg("-xzf")
+        .arg("-xf")
         .arg(&tarball)
         .arg("-C")
         .arg(&staging)
@@ -406,7 +465,30 @@ async fn download(url: &str, digest: Option<&str>, target: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Copies the release into the environment.
+#[cfg(windows)]
+async fn copy_release(release: &Path, root: &Path) -> Result<()> {
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+    let _ = tokio::fs::remove_dir_all(root).await;
+    let (from, to) = (release.to_path_buf(), root.to_path_buf());
+    tokio::task::spawn_blocking(move || copy(&from, &to)).await??;
+    Ok(())
+}
+
 /// Copies the release into the environment (an APFS clone on macOS).
+#[cfg(not(windows))]
 async fn copy_release(release: &Path, root: &Path) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(root).await;
     if let Some(parent) = root.parent() {

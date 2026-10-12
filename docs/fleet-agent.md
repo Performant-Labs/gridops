@@ -39,9 +39,11 @@ Check what the machine will report:
 gridops-host-agent probe
 ```
 
-Docker appears when the agent's user can run `docker`. Native runners appear
-on macOS and Linux and download the current GitHub `actions-runner` release on
-first use.
+Docker appears when the agent's user can run `docker`; if it doesn't, `probe`
+shows why under `docker_problem`. On Windows, Docker Desktop must be running in
+Linux-containers mode. Native runners appear on macOS, Linux and Windows and
+download the current GitHub `actions-runner` release on first use. A Windows
+native runner runs as the agent's user, without a console window.
 
 ## Enroll
 
@@ -76,6 +78,16 @@ URL, state directory, a `PATH` that includes your Docker CLI, log file), then:
 
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.gridops.host-agent.plist
+```
+
+**Windows** (a logon task, so Docker Desktop is available): in PowerShell,
+
+```powershell
+$exe = (Resolve-Path .\gridops-host-agent.exe).Path
+$action = New-ScheduledTaskAction -Execute $exe -Argument "run"
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName "GridOps host agent" -Action $action -Trigger $trigger -Settings $settings
 ```
 
 **Linux**: install `deploy/systemd/gridops-host-agent.service` to

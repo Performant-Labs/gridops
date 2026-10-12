@@ -211,6 +211,16 @@ impl DockerRuntime {
     }
 }
 
+impl DockerRuntime {
+    /// Why Docker can't be offered on this host, if it can't.
+    pub async fn problem(&self) -> Option<String> {
+        docker_backend(self)
+            .await
+            .err()
+            .map(|error| format!("{error:#}"))
+    }
+}
+
 impl RuntimeHelper for DockerRuntime {
     async fn call(&self, request: HelperRequest) -> HelperResponse {
         match &request.operation {
@@ -287,7 +297,9 @@ async fn docker_backend(runtime: &DockerRuntime) -> anyhow::Result<ObservedBacke
     let architecture = match platform.as_str() {
         "linux/arm64" => Architecture::Arm64,
         "linux/amd64" => Architecture::X64,
-        other => anyhow::bail!("unsupported Docker platform {other}"),
+        other => anyhow::bail!(
+            "Docker reports {other:?}; GridOps runs Linux containers, so switch Docker Desktop to Linux containers"
+        ),
     };
     let engine = docker(&["info", "--format", "{{.ID}}"]).await?;
     let mut environments = Vec::new();
@@ -381,11 +393,17 @@ async fn docker(args: &[&str]) -> anyhow::Result<String> {
             .kill_on_drop(true)
             .output(),
     )
-    .await??;
+    .await?
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "couldn't run `docker` ({error}); is Docker installed and on this user's PATH?"
+        )
+    })?;
     anyhow::ensure!(
         output.status.success(),
-        "docker {} failed",
-        args.first().unwrap_or(&"")
+        "`docker {}` failed: {}",
+        args.first().unwrap_or(&""),
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

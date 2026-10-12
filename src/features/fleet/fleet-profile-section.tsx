@@ -26,7 +26,7 @@ const defaultImage: Record<Runtime, string> = {
 };
 const osOptions: Record<Runtime, Os[]> = {
   docker: ["linux"],
-  native_process: ["linux", "macos"],
+  native_process: ["linux", "macos", "windows"],
   tart_vm: ["macos"],
 };
 const osLabels: Record<Os, string> = { linux: "Linux", macos: "macOS", windows: "Windows" };
@@ -165,7 +165,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
           onValueChange={(next) => next && changeRuntime(next)}
           options={[
             { value: "docker", label: "Docker container", description: "Linux containers" },
-            { value: "native_process", label: "Native process", description: "Directly on a Linux or macOS machine" },
+            { value: "native_process", label: "Native process", description: "Directly on a Linux, macOS or Windows machine" },
             { value: "tart_vm", label: "Tart VM", description: "macOS virtual machines" },
           ]}
           searchable={false}

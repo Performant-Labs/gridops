@@ -74,6 +74,7 @@ async fn run() -> Result<ExitCode> {
                 "architecture": gridops_host_agent::probe::architecture(),
                 "measurement": format!("{:?}", gridops_host_agent::probe::measure()),
                 "backends": host_runtime()?.backends().await,
+                "docker_problem": docker_runtime().problem().await,
             });
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(ExitCode::SUCCESS)
@@ -165,6 +166,10 @@ async fn serve(journal: Journal) -> Result<ExitCode> {
     let trust = Trust {
         docker_socket: env::var("GRIDOPS_AGENT_DOCKER_SOCKET").is_ok(),
     };
+    if let Some(problem) = docker_runtime().problem().await {
+        tracing::warn!("Docker jobs unavailable on this machine: {problem}");
+    }
+    tracing::info!("connecting to {url}");
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
