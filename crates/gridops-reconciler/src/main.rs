@@ -1,4 +1,5 @@
 mod agent;
+mod fleet;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -196,6 +197,9 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     }
     if let Err(error) = retry_github_runner_cleanup(app).await {
         tracing::warn!(error = ?error, "deferred GitHub runner cleanup pass failed");
+    }
+    if let Err(error) = fleet::tick(app).await {
+        tracing::warn!(error = ?error, "fleet reconciliation pass failed");
     }
     let provisioning_paused = setting_bool(&app.database, "provisioningPaused", false).await;
     if let Err(error) = manager_request::<Value>(
@@ -1162,6 +1166,9 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
 }
 
 async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
+    if let Some(profile) = fleet::profile(app, &pool.id).await? {
+        return fleet::provision(app, pool, &profile).await;
+    }
     let runner_id = uuid::Uuid::new_v4().to_string();
     let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
     let runner_name = format!("{}-{suffix}", pool.name);

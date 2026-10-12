@@ -339,12 +339,15 @@ impl RegistryService {
             .execute(&mut *tx)
             .await?;
         }
-        sqlx::query("UPDATE fleet_hosts SET last_heartbeat_at=?,updated_at=? WHERE id=?")
-            .bind(now)
-            .bind(now)
-            .bind(session.host_id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE fleet_hosts SET last_heartbeat_at=?,pressure_state=?,updated_at=? WHERE id=?",
+        )
+        .bind(now)
+        .bind(pressure_from(&mut tx, &session, &request.samples).await?)
+        .bind(now)
+        .bind(session.host_id.to_string())
+        .execute(&mut *tx)
+        .await?;
         audit_and_event(
             &mut tx,
             None,
@@ -680,6 +683,26 @@ async fn reconcile_inventory(
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(host_id,local_key) DO UPDATE SET parent_local_key=excluded.parent_local_key,observed_name=excluded.observed_name,runtime_identity=excluded.runtime_identity,cpu_millis=excluded.cpu_millis,memory_mib=excluded.memory_mib,disk_bytes=excluded.disk_bytes,session_id=excluded.session_id,host_epoch=excluded.host_epoch,control_plane_incarnation=excluded.control_plane_incarnation,inventory_sequence=excluded.inventory_sequence,received_at=excluded.received_at",
         ).bind(session.host_id.to_string()).bind(domain.local_key.as_str()).bind(id.to_string()).bind(parent_key).bind(domain_kind(domain.kind)).bind(domain.name.as_str()).bind(domain.runtime_identity.as_ref().map(|value| value.as_str())).bind(opt_u64(domain.capacity.cpu_millis)).bind(opt_u64(domain.capacity.memory_mib)).bind(opt_u64(domain.capacity.disk_bytes)).bind(session.authority_session_id.to_string()).bind(i64::try_from(session.host_epoch.get()).map_err(|_| RegistryError::InvalidRequest("epoch exceeds SQLite integer"))?).bind(session.control_plane_incarnation.to_string()).bind(i64::try_from(report.inventory_sequence.get()).map_err(|_| RegistryError::InvalidRequest("sequence exceeds SQLite integer"))?).bind(now).execute(&mut **tx).await?;
+        // A budget nobody has set yet starts at 80% of what the host reports,
+        // leaving headroom for the host itself. Set budgets are never changed.
+        let share = |value: Option<crate::fleet::protocol::primitives::BrowserUint53>| {
+            value.map_or(0, |value| {
+                i64::try_from(value.get() / 5 * 4).unwrap_or(i64::MAX)
+            })
+        };
+        sqlx::query(
+            "UPDATE host_resource_domains SET cpu_millis=?,memory_mib=?,disk_bytes=?,revision=revision+1
+              WHERE id=? AND host_id=? AND cpu_millis=0 AND memory_mib=0 AND disk_bytes=0 AND ?>0 AND ?>0",
+        )
+        .bind(share(domain.capacity.cpu_millis))
+        .bind(share(domain.capacity.memory_mib))
+        .bind(share(domain.capacity.disk_bytes))
+        .bind(id.to_string())
+        .bind(session.host_id.to_string())
+        .bind(share(domain.capacity.cpu_millis))
+        .bind(share(domain.capacity.memory_mib))
+        .execute(&mut **tx)
+        .await?;
         domain_map.insert(domain.local_key.as_str().to_owned(), id);
     }
     sqlx::query("UPDATE host_backends SET readiness='unknown',reason_code='stale_inventory',last_probed_at=NULL,probe_epoch=NULL,probe_session_id=NULL,probe_boot_id=NULL,probe_incarnation=NULL,updated_at=? WHERE host_id=?")
@@ -966,6 +989,55 @@ async fn pending_rotation(
 /// Renews (when `grant_at` is set) and returns the session's work authority.
 /// Only a ready session of an approved, active, verified host with a complete
 /// inventory from this session receives it.
+/// Memory above this share of capacity, or CPU demand above it, is pressure.
+const PRESSURE_PERCENT: u64 = 90;
+
+/// Host pressure from the root domain's latest sample. Without both a
+/// capacity and a measurement it stays unknown, which admission won't place
+/// work on.
+async fn pressure_from(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session: &CurrentInventorySession,
+    samples: &[crate::fleet::protocol::inventory::ObservedSample],
+) -> Result<&'static str, InventoryError> {
+    let Some(root) = sqlx::query(
+        "SELECT local_key,cpu_millis,memory_mib FROM fleet_observed_domains
+          WHERE host_id=? AND parent_local_key IS NULL",
+    )
+    .bind(session.host_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok("unknown");
+    };
+    let key: String = root.get("local_key");
+    let Some(sample) = samples
+        .iter()
+        .find(|sample| sample.domain_local_key.as_str() == key)
+    else {
+        return Ok("unknown");
+    };
+    let over = |used: Option<u64>, capacity: Option<i64>| match (used, capacity) {
+        (Some(used), Some(capacity)) if capacity > 0 => {
+            Some(used * 100 > u64::try_from(capacity).unwrap_or(u64::MAX) * PRESSURE_PERCENT)
+        }
+        _ => None,
+    };
+    let memory = over(
+        sample.memory_used_mib.map(|value| value.get()),
+        root.get("memory_mib"),
+    );
+    let cpu = over(
+        sample.cpu_used_millis.map(|value| value.get()),
+        root.get("cpu_millis"),
+    );
+    Ok(match (memory, cpu) {
+        (Some(true), _) | (_, Some(true)) => "pressured",
+        (Some(false), Some(false) | None) => "normal",
+        _ => "unknown",
+    })
+}
+
 async fn reconciled(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     session: &CurrentInventorySession,

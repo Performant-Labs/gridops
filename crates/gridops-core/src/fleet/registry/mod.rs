@@ -898,6 +898,45 @@ impl RegistryService {
         Ok(())
     }
 
+    /// Enables or disables one execution backend. A new backend starts
+    /// disabled, so a runtime appearing on a host never takes work until an
+    /// administrator turns it on.
+    pub async fn set_backend_enabled(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+        backend_id: crate::fleet::BackendId,
+        enabled: bool,
+    ) -> Result<(), RegistryError> {
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        let mut tx = self.begin().await?;
+        let now = self.clock.now_millis();
+        ensure_system_admin(&mut tx, user_id).await?;
+        let changed = sqlx::query("UPDATE host_backends SET enabled=? WHERE id=? AND host_id=?")
+            .bind(enabled)
+            .bind(backend_id.to_string())
+            .bind(host_id.to_string())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed != 1 {
+            return Err(RegistryError::NotFound);
+        }
+        audit_and_event(
+            &mut tx,
+            Some(user_id),
+            Some(host_id),
+            "fleet.backend.enabled_changed",
+            "backend",
+            &backend_id.to_string(),
+            json!({"enabled": enabled}),
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn approve_host(
         &self,
         principal: &Principal,
@@ -1082,7 +1121,7 @@ impl RegistryService {
                     sqlx::query(
                         "INSERT INTO host_target_grants
                          (host_id,target_id,allow_schedule,allow_native,allow_interactive,allow_docker_socket,revision,granted_by)
-                         VALUES (?, ?, 0, 0, 0, 0, 1, ?)",
+                         VALUES (?, ?, 1, 0, 0, 0, 1, ?)",
                     )
                     .bind(request.host_id.to_string())
                     .bind(&target_id)

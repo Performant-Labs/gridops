@@ -362,6 +362,37 @@ pub(super) async fn lifecycle(
     Ok(StatusCode::OK.into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct BackendEnabledBody {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BackendPath {
+    host_id: HostId,
+    backend_id: gridops_core::fleet::BackendId,
+}
+
+pub(super) async fn backend_enabled(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(path): FleetPath<BackendPath>,
+    FleetJson(body): FleetJson<BackendEnabledBody>,
+) -> Result<Response, FleetApiError> {
+    RegistryService::new(state.database, state.vault)
+        .set_backend_enabled(
+            user.principal(),
+            path.host_id,
+            path.backend_id,
+            body.enabled,
+        )
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(StatusCode::OK.into_response())
+}
+
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,

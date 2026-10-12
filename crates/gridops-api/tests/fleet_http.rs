@@ -28,6 +28,8 @@ const SESSION_TOKEN: &str = "fleet-http-test-session-token";
 mod agent;
 #[path = "fleet_http/inventory.rs"]
 mod inventory;
+#[path = "fleet_http/placement.rs"]
+mod placement;
 #[path = "fleet_http/query.rs"]
 mod query;
 

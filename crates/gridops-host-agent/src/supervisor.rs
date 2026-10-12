@@ -58,6 +58,7 @@ pub struct Supervisor<H = NoRuntime> {
     heartbeat: Duration,
     dispatcher: Dispatcher<Arc<H>>,
     probe: Arc<H>,
+    measure: fn() -> probe::Measurement,
 }
 
 /// What the heartbeat loop learns and the command loop needs.
@@ -78,6 +79,7 @@ impl Supervisor<NoRuntime> {
             name,
             heartbeat: MAX_HEARTBEAT,
             probe: runtime,
+            measure: probe::measure,
         }
     }
 }
@@ -93,7 +95,16 @@ impl<H: RuntimeHelper> Supervisor<H> {
             name: self.name,
             heartbeat: self.heartbeat,
             probe: runtime,
+            measure: self.measure,
         }
+    }
+
+    /// Replaces how the host's memory and load are read (tests, or hosts
+    /// with their own metrics source).
+    #[must_use]
+    pub const fn with_measurements(mut self, measure: fn() -> probe::Measurement) -> Self {
+        self.measure = measure;
+        self
     }
 
     /// Heartbeats more often than the server's lease requires (tests, or a
@@ -190,10 +201,10 @@ impl<H: RuntimeHelper> Supervisor<H> {
             boot_id.clone(),
             BrowserCounter::new(1).map_err(internal)?,
             observed_at,
-            vec![probe::root_domain(&self.name).map_err(internal)?],
+            vec![probe::root_domain(&self.name, (self.measure)()).map_err(internal)?],
             self.probe.backends().await,
             Vec::new(),
-            vec![probe::root_sample(observed_at).map_err(internal)?],
+            vec![probe::root_sample(observed_at, (self.measure)()).map_err(internal)?],
         )
         .map_err(internal)?;
         let inventory = self
@@ -237,10 +248,10 @@ impl<H: RuntimeHelper> Supervisor<H> {
                         boot_id.clone(),
                         BrowserCounter::new(inventory_sequence).map_err(internal)?,
                         observed_at,
-                        vec![probe::root_domain(&self.name).map_err(internal)?],
+                        vec![probe::root_domain(&self.name, (self.measure)()).map_err(internal)?],
                         self.probe.backends().await,
                         Vec::new(),
-                        vec![probe::root_sample(observed_at).map_err(internal)?],
+                        vec![probe::root_sample(observed_at, (self.measure)()).map_err(internal)?],
                     )
                     .map_err(internal)?;
                     self.client
@@ -267,7 +278,10 @@ impl<H: RuntimeHelper> Supervisor<H> {
                             boot_id.clone(),
                             BrowserCounter::new(sequence).map_err(internal)?,
                             observed_at,
-                            vec![probe::root_sample(observed_at).map_err(internal)?],
+                            vec![
+                                probe::root_sample(observed_at, (self.measure)())
+                                    .map_err(internal)?,
+                            ],
                         )
                         .map_err(internal)?,
                     )

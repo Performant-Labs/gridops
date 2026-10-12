@@ -55,7 +55,116 @@ pub fn boot_id() -> String {
         .clone()
 }
 
-pub fn root_domain(name: &str) -> anyhow::Result<ObservedDomain> {
+/// One reading of the host's capacity and use. Missing values stay unknown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Measurement {
+    pub memory_total_mib: Option<u64>,
+    pub memory_used_mib: Option<u64>,
+    /// One-minute load average as CPU demand, in thousandths of a CPU.
+    pub cpu_used_millis: Option<u64>,
+    pub uptime_seconds: Option<u64>,
+}
+
+/// Reads memory and load without privileges.
+pub fn measure() -> Measurement {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let field = |name: &str| {
+            meminfo
+                .lines()
+                .find(|line| line.starts_with(name))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|kib| kib / 1024)
+        };
+        let total = field("MemTotal:");
+        let available = field("MemAvailable:");
+        let load = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|value| value.split_whitespace().next().map(str::to_owned));
+        let uptime = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|value| value.split_whitespace().next().map(str::to_owned));
+        return Measurement {
+            memory_total_mib: total,
+            memory_used_mib: total
+                .zip(available)
+                .map(|(total, free)| total.saturating_sub(free)),
+            cpu_used_millis: load.as_deref().and_then(millis),
+            uptime_seconds: uptime
+                .as_deref()
+                .and_then(|value| value.split('.').next()?.parse().ok()),
+        };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sysctl = |name: &str| {
+            std::process::Command::new("/usr/sbin/sysctl")
+                .args(["-n", name])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
+        let total = sysctl("hw.memsize")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|bytes| bytes / (1024 * 1024));
+        let used = std::process::Command::new("/usr/bin/vm_stat")
+            .output()
+            .ok()
+            .and_then(|output| vm_stat_used_mib(&String::from_utf8_lossy(&output.stdout)));
+        let load = sysctl("vm.loadavg").and_then(|value| {
+            value
+                .trim_matches(['{', '}', ' '])
+                .split_whitespace()
+                .next()
+                .and_then(millis)
+        });
+        return Measurement {
+            memory_total_mib: total,
+            memory_used_mib: used,
+            cpu_used_millis: load,
+            uptime_seconds: None,
+        };
+    }
+    #[allow(unreachable_code)]
+    Measurement::default()
+}
+
+/// Active, wired and compressed pages: memory the system can't reclaim.
+#[cfg(target_os = "macos")]
+fn vm_stat_used_mib(output: &str) -> Option<u64> {
+    let page = output
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    let pages = |name: &str| {
+        output
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.rsplit(':').next())
+            .and_then(|value| value.trim().trim_end_matches('.').parse::<u64>().ok())
+    };
+    let used = pages("Pages active")?
+        + pages("Pages wired down")?
+        + pages("Pages occupied by compressor").unwrap_or(0);
+    Some(used * page / (1024 * 1024))
+}
+
+fn millis(load: &str) -> Option<u64> {
+    load.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| (value * 1000.0) as u64)
+}
+
+pub fn root_domain(name: &str, measurement: Measurement) -> anyhow::Result<ObservedDomain> {
     let cpu_millis = std::thread::available_parallelism()
         .ok()
         .and_then(|count| u64::try_from(count.get()).ok())
@@ -70,20 +179,40 @@ pub fn root_domain(name: &str) -> anyhow::Result<ObservedDomain> {
         runtime_identity: None,
         capacity: ObservedCapacity {
             cpu_millis,
-            memory_mib: None,
+            memory_mib: measurement
+                .memory_total_mib
+                .map(BrowserUint53::new)
+                .transpose()?,
             disk_bytes: None,
         },
     })
 }
 
-pub fn root_sample(observed_at: WireTimestamp) -> anyhow::Result<ObservedSample> {
+pub fn root_sample(
+    observed_at: WireTimestamp,
+    measurement: Measurement,
+) -> anyhow::Result<ObservedSample> {
+    let known = measurement.memory_used_mib.is_some() || measurement.cpu_used_millis.is_some();
     Ok(ObservedSample {
         domain_local_key: UpstreamText::new(ROOT_DOMAIN)?,
         observed_at,
-        coverage: SampleCoverage::Unknown,
-        cpu_used_millis: None,
-        memory_used_mib: None,
+        coverage: if known {
+            SampleCoverage::Partial
+        } else {
+            SampleCoverage::Unknown
+        },
+        cpu_used_millis: measurement
+            .cpu_used_millis
+            .map(BrowserUint53::new)
+            .transpose()?,
+        memory_used_mib: measurement
+            .memory_used_mib
+            .map(BrowserUint53::new)
+            .transpose()?,
         disk_free_bytes: None,
-        uptime_seconds: None,
+        uptime_seconds: measurement
+            .uptime_seconds
+            .map(BrowserUint53::new)
+            .transpose()?,
     })
 }

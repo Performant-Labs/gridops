@@ -170,7 +170,9 @@ async fn windows_host_reports_linux_backend_with_stable_receipts_and_no_work_aut
     assert_eq!(root_count, 1);
     let budget: (i64, i64, i64) = sqlx::query_as("SELECT SUM(cpu_millis),SUM(memory_mib),SUM(disk_bytes) FROM host_resource_domains WHERE host_id=?")
         .bind(&host).fetch_one(&f.database).await?;
-    assert_eq!(budget, (0, 0, 0));
+    // Unset budgets start at 80% of observed capacity: root 8000/16384 and
+    // the Linux VM 4000/8192.
+    assert_eq!(budget, (6400 + 3200, 13104 + 6552, 0));
 
     let beat = heartbeat_body(&handshake, &incarnation);
     let heartbeat = receipt(

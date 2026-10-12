@@ -542,7 +542,9 @@ async fn approval_preserves_policy_grants_and_history_across_recovery() -> Resul
     .bind(TARGET_2)
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(removed.0, 0);
+    // Approval grants scheduling; revocation keeps the bytes but admission
+    // ignores revoked grants.
+    assert_eq!(removed.0, 1);
     assert_eq!(removed.1, 1, "revoked history keeps its prior policy bytes");
     assert_eq!(removed.2, 0);
     assert_eq!(removed.3, 0);

@@ -110,6 +110,52 @@ impl FleetService {
         Self { pool }
     }
 
+    /// Tries to place up to `limit` queued intents, oldest first. Intents
+    /// without a fitting host stay queued with their reason recorded.
+    pub async fn admit_queued(
+        &self,
+        controller: &Principal,
+        limit: usize,
+    ) -> Result<super::admission::SliceReport, FleetError> {
+        super::admission::run_slice(
+            &self.pool,
+            controller,
+            super::admission::ScanLimit::new(limit)?,
+        )
+        .await
+    }
+
+    /// Cancels a queued intent that was never placed, e.g. because no host
+    /// had room before the reconciler gave up on it.
+    pub async fn cancel_queued(
+        &self,
+        operation_id: &str,
+        reason: &str,
+    ) -> Result<bool, FleetError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = crate::now_millis();
+        let changed = sqlx::query(
+            "UPDATE workload_intents SET status='cancelled',reason_code=?,updated_at=?
+              WHERE id=? AND status='queued'
+                AND NOT EXISTS (SELECT 1 FROM workload_placements p WHERE p.intent_id=workload_intents.id)",
+        )
+        .bind(reason)
+        .bind(now)
+        .bind(operation_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            sqlx::query("UPDATE fleet_operations SET status='cancelled',updated_at=? WHERE id=? AND status='queued'")
+                .bind(now)
+                .bind(operation_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(changed == 1)
+    }
+
     #[must_use]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool

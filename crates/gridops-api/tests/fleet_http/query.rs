@@ -69,7 +69,7 @@ async fn fleet_reads_keep_windows_host_and_linux_backend_identity_separate() -> 
     assert_eq!(detail["item"]["hostOs"], "windows");
     assert_eq!(detail["item"]["backendCount"], 2);
     assert_eq!(detail["item"]["approvalEvidence"]["state"], "available");
-    assert_eq!(detail["item"]["physicalBudget"]["cpuMillis"], 0);
+    assert_eq!(detail["item"]["physicalBudget"]["cpuMillis"], 6400);
     assert_eq!(
         detail["item"]["latestRootMeasurement"]["provenance"],
         "current"

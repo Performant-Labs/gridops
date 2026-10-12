@@ -223,9 +223,15 @@ impl RuntimeHelper for DockerRuntime {
                         .is_ok_and(|state| state == "true"),
                     None => false,
                 };
-                succeeded(SuccessEvidence::Inspected {
-                    local_identity: running.then(|| expected_resource.clone()),
-                })
+                // A stopped or missing runner is reported as unavailable, which
+                // tells the reconciler to clean it up.
+                if running {
+                    succeeded(SuccessEvidence::Inspected {
+                        local_identity: Some(expected_resource.clone()),
+                    })
+                } else {
+                    failed(FailureCode::ResourceUnavailable, false)
+                }
             }
             AgentOperation::Stop {
                 expected_resource,

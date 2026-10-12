@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod registry;
 pub mod service;
 mod store;
+pub mod targets;
 
 pub use service::{
     FleetError, FleetService, OperationStatus, Submission, SubmissionState, SubmitIntent,

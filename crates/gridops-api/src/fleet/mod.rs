@@ -8,6 +8,7 @@ mod credentials;
 mod enrollment;
 mod error;
 mod inventory;
+mod profiles;
 mod query;
 mod query_boundary;
 
@@ -25,6 +26,11 @@ use crate::state::AppState;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/fleet/targets", get(profiles::targets))
+        .route(
+            "/api/v1/fleet/pools/{pool_id}/profile",
+            get(profiles::profile).put(profiles::save_profile),
+        )
         .route("/api/v1/fleet/hosts", get(query::hosts))
         .route("/api/v1/fleet/hosts/{host_id}", get(query::host))
         .route(
@@ -75,6 +81,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v1/fleet/agent/hosts/{host_id}/heartbeat",
             post(inventory::heartbeat),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled",
+            post(enrollment::backend_enabled),
         )
         .route(
             "/api/v1/fleet/hosts/{host_id}/lifecycle",

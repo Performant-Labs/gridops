@@ -16,7 +16,7 @@ use super::{
         Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId, Revision,
     },
     protocol::{
-        agent::{AgentCommandEnvelope, AgentOperation, CommandScope},
+        agent::{AgentCommandEnvelope, AgentOperation, CommandScope, PrepareEnvironment},
         outcomes::{AgentCommandResult, CommandOutcome, SuccessEvidence},
         primitives::{IdempotencyKey, ProtocolVersion, WireTimestamp},
     },
@@ -27,6 +27,7 @@ use crate::Vault;
 #[derive(Debug, Clone)]
 pub struct Placement {
     pub id: PlacementId,
+    pub workload_id: String,
     pub host_id: HostId,
     pub state: String,
     pub runner_id: Option<String>,
@@ -43,7 +44,7 @@ pub struct Placement {
 pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placement>, FleetError> {
     let states = serde_json::to_string(states).map_err(|_| FleetError::Invariant("states"))?;
     let rows = sqlx::query(
-        "SELECT p.id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
+        "SELECT p.id,p.workload_id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
                 pr.runtime_kind,pr.mode,pr.labels_json
            FROM workload_placements p
            JOIN workload_intents i ON i.id=p.intent_id
@@ -58,6 +59,7 @@ pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placem
         .map(|row| {
             Ok(Placement {
                 id: parse(row.get("id"))?,
+                workload_id: row.get("workload_id"),
                 host_id: parse(row.get("host_id"))?,
                 state: row.get("state"),
                 runner_id: row.get("runner_id"),
@@ -90,6 +92,45 @@ pub async fn prepared_environment(
         }))
 }
 
+/// What the placement was prepared with, from its prepare command.
+pub async fn prepared_with(
+    pool: &SqlitePool,
+    placement: PlacementId,
+) -> Result<Option<PrepareEnvironment>, FleetError> {
+    let Some(json) = sqlx::query_scalar::<_, String>(
+        "SELECT payload_json FROM host_commands WHERE placement_id=? AND kind='prepare_environment'
+          ORDER BY cursor DESC LIMIT 1",
+    )
+    .bind(placement.to_string())
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let envelope: AgentCommandEnvelope =
+        serde_json::from_str(&json).map_err(|_| FleetError::Invariant("stored command"))?;
+    Ok(match envelope.operation {
+        AgentOperation::PrepareEnvironment(prepare) => Some(prepare),
+        _ => None,
+    })
+}
+
+/// Whether the placement's host can receive commands right now.
+pub async fn host_has_authority(
+    pool: &SqlitePool,
+    placement: PlacementId,
+) -> Result<bool, FleetError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT h.authority_expires_at>? AND p.host_epoch=h.epoch FROM workload_placements p
+           JOIN fleet_hosts h ON h.id=p.host_id WHERE p.id=?",
+    )
+    .bind(crate::now_millis() + 5_000)
+    .bind(placement.to_string())
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false))
+}
+
 /// Evidence from the latest applied, successful command of `kind`.
 pub async fn succeeded_evidence(
     pool: &SqlitePool,
@@ -114,6 +155,36 @@ pub async fn succeeded_evidence(
         CommandOutcome::Succeeded { evidence } => Some(*evidence),
         _ => None,
     })
+}
+
+/// Whether the newest result of `kind` reported the runtime object gone: a
+/// failed inspect with `resource_unavailable` means it exited or was removed.
+pub async fn reported_gone(
+    pool: &SqlitePool,
+    placement: PlacementId,
+    kind: &str,
+) -> Result<bool, FleetError> {
+    let Some(json) = sqlx::query_scalar::<_, String>(
+        "SELECT r.result_json FROM host_command_results r JOIN host_commands c ON c.id=r.command_id
+          WHERE c.placement_id=? AND c.kind=? AND r.disposition='applied'
+          ORDER BY r.received_at DESC LIMIT 1",
+    )
+    .bind(placement.to_string())
+    .bind(kind)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(false);
+    };
+    let result: AgentCommandResult =
+        serde_json::from_str(&json).map_err(|_| FleetError::Invariant("stored result"))?;
+    Ok(matches!(
+        result.outcome,
+        CommandOutcome::Failed {
+            code: crate::fleet::protocol::outcomes::FailureCode::ResourceUnavailable,
+            ..
+        }
+    ))
 }
 
 /// State of the newest command of `kind` for this placement, if any.

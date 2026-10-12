@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(test)]
 use sqlx::SqlitePool;
 use sqlx::{Row as _, Sqlite, Transaction};
 use uuid::Uuid;
@@ -39,11 +38,9 @@ use super::{
     store,
 };
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScanLimit(usize);
 
-#[cfg(test)]
 impl ScanLimit {
     pub(crate) const fn new(value: usize) -> Result<Self, FleetError> {
         if value == 0 || value > 100 {
@@ -60,12 +57,11 @@ impl ScanLimit {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct SliceReport {
-    pub(crate) scanned: usize,
-    pub(crate) admitted: usize,
-    pub(crate) queued: usize,
+pub struct SliceReport {
+    pub scanned: usize,
+    pub admitted: usize,
+    pub queued: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +112,6 @@ struct DomainRow {
     revision: i64,
 }
 
-#[cfg(test)]
 pub(crate) async fn run_slice(
     pool: &SqlitePool,
     controller: &Principal,
@@ -172,13 +167,6 @@ pub(crate) enum AdmissionOutcome {
     Noop,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Awaiting persisted fairness scheduler integration"
-    )
-)]
 pub(crate) async fn admit_operation(
     tx: &mut Transaction<'_, Sqlite>,
     controller: &Principal,
