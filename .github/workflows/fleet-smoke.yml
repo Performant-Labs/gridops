@@ -1,0 +1,20 @@
+# Manually triggered check that a fleet machine can run a job end to end.
+# Runs on runners from a pool whose fleet profile adds the
+# `gridops-fleet-test` label.
+name: Fleet smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, gridops-fleet-test]
+    timeout-minutes: 10
+    steps:
+      - name: Report the runner
+        run: |
+          echo "Runner: $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
+          uname -a
