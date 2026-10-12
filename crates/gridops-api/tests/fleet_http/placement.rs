@@ -488,3 +488,70 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
     assert_eq!(queue["items"][0]["reason"], "no_active_machine");
     Ok(())
 }
+
+#[tokio::test]
+async fn pools_take_turns_when_work_waits() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    sqlx::raw_sql(
+        "INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,provider,providers,labels,image,docker_image,tart_image,created_at,updated_at)
+           VALUES ('other-pool',1,10,'other','repository','docker','[\"docker\"]','[]','runner:fixture','runner:fixture','macos',1,1);
+         INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('other-pool',10,1);",
+    )
+    .execute(&f.database)
+    .await?;
+    let mut profiles = Vec::new();
+    for pool in ["fleet-pool", "other-pool"] {
+        let profile: Value = f
+            .client
+            .put(f.url(&format!("/pools/{pool}/profile")))
+            .header(header::COOKIE, &f.cookie)
+            .header(header::ORIGIN, &f.origin)
+            .json(&json!({
+                "enabled": true, "runtimeKind": "docker", "executionOs": "linux",
+                "architecture": "arm64", "mode": "ephemeral", "image": "runner:fixture",
+                "labels": [], "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        profiles.push((pool, profile));
+    }
+    let service = FleetService::new(f.database.clone());
+    // The busy pool queues three runners before the other pool queues one.
+    for (index, (pool, profile)) in [&profiles[0], &profiles[0], &profiles[0], &profiles[1]]
+        .into_iter()
+        .enumerate()
+    {
+        service
+            .submit_intent(
+                &Principal::Reconciler,
+                SubmitIntent {
+                    idempotency_key: format!("runner:turn-{index}"),
+                    pool_id: (*pool).into(),
+                    profile_id: profile["item"]["id"].as_str().context("profile")?.parse()?,
+                    target_id: profile["item"]["targetIds"][0]
+                        .as_str()
+                        .context("target")?
+                        .parse()?,
+                    workload_id: WorkloadId::try_new(Uuid::new_v4())?,
+                    generation: Generation::new(1)?,
+                    kind: WorkloadKind::CiRunner,
+                    agent_run_id: None,
+                    expected_profile_revision: Some(1),
+                },
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Two admission attempts: one per pool, not the busy pool's first two.
+    service.admit_queued(&Principal::Reconciler, 2).await?;
+    let considered: Vec<String> = sqlx::query_scalar(
+        "SELECT pool_id FROM workload_intents WHERE reason_code IS NOT NULL ORDER BY pool_id",
+    )
+    .fetch_all(&f.database)
+    .await?;
+    assert_eq!(considered, ["fleet-pool", "other-pool"]);
+    Ok(())
+}

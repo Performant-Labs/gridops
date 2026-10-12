@@ -124,12 +124,15 @@ pub(crate) async fn run_slice(
         return Err(FleetError::Forbidden);
     }
     let rows = sqlx::query(
+        // Pools take turns: every pool's oldest waiting intent comes before
+        // any pool's second, so one busy pool can't starve the others.
         "SELECT i.id,i.workload_id,i.generation,i.kind,i.pool_id,i.profile_id,i.target_id,
-                i.agent_run_id,i.expected_profile_revision
+                i.agent_run_id,i.expected_profile_revision,
+                ROW_NUMBER() OVER (PARTITION BY i.pool_id ORDER BY i.created_at,i.id) AS turn
           FROM workload_intents i
           WHERE i.status = 'queued'
             AND NOT EXISTS (SELECT 1 FROM workload_placements p WHERE p.intent_id=i.id)
-          ORDER BY i.created_at,i.id
+          ORDER BY turn,i.created_at,i.id
           LIMIT ?",
     )
     .bind(
