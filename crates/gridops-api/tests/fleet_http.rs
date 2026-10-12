@@ -26,6 +26,8 @@ const SESSION_TOKEN: &str = "fleet-http-test-session-token";
 
 #[path = "fleet_http/inventory.rs"]
 mod inventory;
+#[path = "fleet_http/query.rs"]
+mod query;
 
 struct Fixture {
     _process: ApiProcess,

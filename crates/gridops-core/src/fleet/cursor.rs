@@ -21,6 +21,7 @@ pub const MAX_CURSOR_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub enum CursorStream {
     Hosts,
     Backends,
+    Domains,
     Runners,
     Samples,
     FleetEvents,
@@ -245,7 +246,10 @@ fn check_position(stream: CursorStream, position: &CursorPosition) -> Result<(),
         CursorStream::Logs | CursorStream::Artifacts => {
             matches!(position, CursorPosition::Bytes { .. })
         }
-        CursorStream::Hosts | CursorStream::Backends | CursorStream::ExternalRunners => {
+        CursorStream::Hosts
+        | CursorStream::Backends
+        | CursorStream::Domains
+        | CursorStream::ExternalRunners => {
             matches!(position, CursorPosition::Entity { .. })
         }
         CursorStream::Runners => matches!(position, CursorPosition::LegacyEntity { .. }),

@@ -12,6 +12,9 @@ mod handshake;
 mod inventory;
 #[cfg(test)]
 mod inventory_tests;
+mod queries;
+#[cfg(test)]
+mod query_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
@@ -40,6 +43,7 @@ pub use enrollment::{
     RecoverHost, RecoveryIssue,
 };
 pub use inventory::InventoryError;
+pub use queries::QueryError;
 
 use credentials::{Verifier, validate_secret_for_authentication};
 use enrollment::{ROTATION_OVERLAP_MILLIS, ROTATION_TTL_MILLIS, require_user};

@@ -15,7 +15,11 @@ use gridops_core::fleet::{authorization::Principal, protocol::browser::ErrorCode
 use serde::de::DeserializeOwned;
 
 use super::error::{FleetApiError, RequestContext};
-use crate::{auth::AuthUser, error::ApiError, state::AppState};
+use crate::{
+    auth::{AuthUser, authenticate_session},
+    error::ApiError,
+    state::AppState,
+};
 
 pub(super) fn context(parts: &Parts) -> RequestContext {
     parts
@@ -107,6 +111,43 @@ impl FromRequestParts<AppState> for FleetUser {
             })?;
         Ok(Self {
             principal: Principal::AuthenticatedUser { user_id: user.id },
+        })
+    }
+}
+
+/// Proves cookie authentication for read-only queries without refreshing session activity.
+pub(super) struct FleetReadUser {
+    principal: Principal,
+}
+
+impl FleetReadUser {
+    pub(super) fn principal(&self) -> &Principal {
+        &self.principal
+    }
+}
+
+impl FromRequestParts<AppState> for FleetReadUser {
+    type Rejection = FleetApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let context = context(parts);
+        if parts.headers.contains_key(header::AUTHORIZATION) {
+            return Err(context.error(ErrorCode::Unauthenticated));
+        }
+        let session = authenticate_session(parts, state).await.map_err(|error| {
+            context.error(match error {
+                ApiError::Unauthorized => ErrorCode::Unauthenticated,
+                ApiError::Forbidden => ErrorCode::Forbidden,
+                _ => ErrorCode::DependencyUnavailable,
+            })
+        })?;
+        Ok(Self {
+            principal: Principal::AuthenticatedUser {
+                user_id: session.user.id,
+            },
         })
     }
 }

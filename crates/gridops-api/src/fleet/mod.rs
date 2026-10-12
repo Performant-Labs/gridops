@@ -7,6 +7,8 @@ mod credentials;
 mod enrollment;
 mod error;
 mod inventory;
+mod query;
+mod query_boundary;
 
 use axum::{
     Router,
@@ -22,6 +24,23 @@ use crate::state::AppState;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/fleet/hosts", get(query::hosts))
+        .route("/api/v1/fleet/hosts/{host_id}", get(query::host))
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/backends",
+            get(query::backends),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}",
+            get(query::backend),
+        )
+        .route("/api/v1/fleet/hosts/{host_id}/domains", get(query::domains))
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/domains/{domain_id}",
+            get(query::domain),
+        )
+        .route("/api/v1/fleet/hosts/{host_id}/samples", get(query::samples))
+        .route("/api/v1/fleet/hosts/{host_id}/events", get(query::events))
         .route("/api/v1/fleet/enrollments", post(enrollment::issue))
         .route(
             "/api/v1/fleet/enrollments/{enrollment_id}",

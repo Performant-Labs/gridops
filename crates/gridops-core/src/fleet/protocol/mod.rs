@@ -10,4 +10,5 @@ pub mod inventory;
 pub mod limits;
 pub mod outcomes;
 pub mod primitives;
+pub mod query;
 pub mod renewal;

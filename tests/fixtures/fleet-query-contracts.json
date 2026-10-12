@@ -1,0 +1,302 @@
+{
+  "hostResults": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "projection": "host",
+        "id": "00000001-0000-4000-8000-000000000001",
+        "name": "Windows fleet host",
+        "hostOs": "windows",
+        "architecture": "x64",
+        "enrollment": "approved",
+        "lifecycle": "active",
+        "integrity": "verified",
+        "heartbeatFreshness": "fresh",
+        "pressure": "normal",
+        "policyRevision": 3,
+        "agentVersion": "1.2.3",
+        "lastHeartbeatAt": "2026-10-09T11:59:59.000Z",
+        "lastInventoryAt": "2026-10-09T11:59:00.000Z",
+        "backendCount": 2,
+        "counts": {
+          "scope": "host",
+          "knownManagedRunnerCount": 1,
+          "chargedCiPlacementCount": 2,
+          "chargedFixPlacementCount": 1,
+          "runningCiPlacementCount": 1,
+          "runningFixPlacementCount": 0,
+          "uncertainPlacementCount": 1
+        },
+        "tags": { "environment": "production", "empty-value": "" },
+        "physicalBudget": { "cpuMillis": 4000, "memoryMib": 8192, "diskBytes": 1000000000 },
+        "physicalAllocation": {
+          "charged": { "cpuMillis": 1000, "memoryMib": 2048, "diskBytes": 100000000 },
+          "uncertain": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 }
+        },
+        "latestRootMeasurement": {
+          "observedAt": "2026-10-09T11:58:00.000Z",
+          "receivedAt": "2026-10-09T11:58:01.000Z",
+          "coverage": "partial",
+          "provenance": "current",
+          "cpuUsedMillis": null,
+          "memoryUsedMib": 0,
+          "diskFreeBytes": 500000000,
+          "uptimeSeconds": null
+        },
+        "inventoryEvidence": {
+          "state": "current",
+          "inventoryRevision": 8,
+          "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "receivedAt": "2026-10-09T11:59:00.000Z"
+        },
+        "approvalEvidence": {
+          "state": "available",
+          "expectedRevision": 3,
+          "expectedInventoryRevision": 8,
+          "expectedInventoryDigest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "inventoryReceivedAt": "2026-10-09T11:59:00.000Z",
+          "observationLeaseExpiresAt": "2026-10-09T12:00:45.000Z"
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "projection": "target",
+        "id": "00000001-0000-4000-8000-000000000001",
+        "name": "Windows fleet host",
+        "hostOs": "windows",
+        "architecture": "x64",
+        "counts": {
+          "scope": "visible_targets",
+          "knownManagedRunnerCount": 0,
+          "chargedCiPlacementCount": 1,
+          "chargedFixPlacementCount": 0,
+          "runningCiPlacementCount": 1,
+          "runningFixPlacementCount": 0,
+          "uncertainPlacementCount": 0
+        }
+      }
+    }
+  ],
+  "hostPages": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "items": [],
+      "nextCursor": null
+    }
+  ],
+  "backendResults": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "projection": "host",
+        "id": "00000002-0000-4000-8000-000000000001",
+        "hostId": "00000001-0000-4000-8000-000000000001",
+        "domainId": "00000003-0000-4000-8000-000000000001",
+        "runtimeKind": "docker",
+        "executionOs": "linux",
+        "architecture": "x64",
+        "enabled": true,
+        "policyRevision": 2,
+        "observedReadiness": "ready",
+        "probeFreshness": "fresh",
+        "safeReason": null,
+        "counts": {
+          "scope": "host",
+          "knownManagedRunnerCount": 1,
+          "chargedCiPlacementCount": 1,
+          "chargedFixPlacementCount": 0,
+          "runningCiPlacementCount": 1,
+          "runningFixPlacementCount": 0,
+          "uncertainPlacementCount": 0
+        },
+        "allocation": {
+          "charged": { "cpuMillis": 500, "memoryMib": 1024, "diskBytes": 10000000 },
+          "uncertain": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 }
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "projection": "target",
+        "id": "00000002-0000-4000-8000-000000000001",
+        "hostId": "00000001-0000-4000-8000-000000000001",
+        "runtimeKind": "native_process",
+        "executionOs": "windows",
+        "architecture": "x64",
+        "counts": {
+          "scope": "visible_targets",
+          "knownManagedRunnerCount": 0,
+          "chargedCiPlacementCount": 0,
+          "chargedFixPlacementCount": 0,
+          "runningCiPlacementCount": 0,
+          "runningFixPlacementCount": 0,
+          "uncertainPlacementCount": 0
+        }
+      }
+    }
+  ],
+  "backendPages": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "items": [],
+      "nextCursor": "q1.cGF5bG9hZA"
+    }
+  ],
+  "domainResults": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "id": "00000003-0000-4000-8000-000000000001",
+        "hostId": "00000001-0000-4000-8000-000000000001",
+        "parentId": null,
+        "name": "Physical root",
+        "kind": "physical",
+        "policyRevision": 1,
+        "budget": { "cpuMillis": 4000, "memoryMib": 8192, "diskBytes": 1000000000 },
+        "allocation": {
+          "charged": { "cpuMillis": 1000, "memoryMib": 2048, "diskBytes": 100000000 },
+          "uncertain": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 }
+        },
+        "observedCapacity": {
+          "state": "current",
+          "receivedAt": "2026-10-09T11:58:01.000Z",
+          "cpuMillis": 4000,
+          "memoryMib": 8192,
+          "diskBytes": null
+        },
+        "latestMeasurement": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "id": "00000004-0000-4000-8000-000000000001",
+        "hostId": "00000001-0000-4000-8000-000000000001",
+        "parentId": "00000003-0000-4000-8000-000000000001",
+        "name": "Retained container",
+        "kind": "container",
+        "policyRevision": 1,
+        "budget": { "cpuMillis": 1000, "memoryMib": 2048, "diskBytes": 100000000 },
+        "allocation": {
+          "charged": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 },
+          "uncertain": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 }
+        },
+        "observedCapacity": {
+          "state": "historical",
+          "receivedAt": "2026-10-09T10:00:00.000Z",
+          "cpuMillis": null,
+          "memoryMib": 0,
+          "diskBytes": 100000000
+        },
+        "latestMeasurement": null
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "item": {
+        "id": "00000005-0000-4000-8000-000000000001",
+        "hostId": "00000001-0000-4000-8000-000000000001",
+        "parentId": null,
+        "name": "Unobserved domain",
+        "kind": null,
+        "policyRevision": 1,
+        "budget": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 },
+        "allocation": {
+          "charged": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 },
+          "uncertain": { "cpuMillis": 0, "memoryMib": 0, "diskBytes": 0 }
+        },
+        "observedCapacity": { "state": "missing" },
+        "latestMeasurement": null
+      }
+    }
+  ],
+  "domainPages": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "items": [],
+      "nextCursor": null
+    }
+  ],
+  "samplePages": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "items": [
+        {
+          "domainId": null,
+          "observedAt": "2026-10-09T11:57:00.000Z",
+          "receivedAt": "2026-10-09T11:58:01.000Z",
+          "coverage": "partial",
+          "provenance": "current",
+          "cpuUsedMillis": null,
+          "memoryUsedMib": 0,
+          "diskFreeBytes": 500000000,
+          "uptimeSeconds": null
+        },
+        {
+          "domainId": "00000004-0000-4000-8000-000000000001",
+          "observedAt": "2026-10-08T11:57:00.000Z",
+          "receivedAt": "2026-10-08T11:58:01.000Z",
+          "coverage": "complete",
+          "provenance": "historical",
+          "cpuUsedMillis": 100,
+          "memoryUsedMib": null,
+          "diskFreeBytes": null,
+          "uptimeSeconds": 60
+        },
+        {
+          "domainId": null,
+          "observedAt": "2026-10-07T11:57:00.000Z",
+          "receivedAt": "2026-10-07T11:58:01.000Z",
+          "coverage": "unknown",
+          "provenance": "legacy_unknown",
+          "cpuUsedMillis": null,
+          "memoryUsedMib": null,
+          "diskFreeBytes": null,
+          "uptimeSeconds": null
+        }
+      ],
+      "nextCursor": null
+    }
+  ],
+  "eventPages": [
+    {
+      "schemaVersion": 1,
+      "readAt": "2026-10-09T12:00:00.000Z",
+      "items": [
+        {
+          "id": "00000006-0000-4000-8000-000000000001",
+          "hostId": "00000001-0000-4000-8000-000000000001",
+          "targetId": null,
+          "placementId": null,
+          "kind": "inventory_received",
+          "occurredAt": "2026-10-09T11:59:00.000Z",
+          "cursor": "q1.c3RhYmxlLWV2ZW50"
+        },
+        {
+          "id": "00000007-0000-4000-8000-000000000001",
+          "hostId": "00000001-0000-4000-8000-000000000001",
+          "targetId": "00000008-0000-4000-8000-000000000001",
+          "placementId": "00000009-0000-4000-8000-000000000001",
+          "kind": "other",
+          "occurredAt": "2026-10-09T11:59:30.000Z",
+          "cursor": "q1.c2Vjb25kLWV2ZW50"
+        }
+      ],
+      "nextCursor": null
+    }
+  ]
+}

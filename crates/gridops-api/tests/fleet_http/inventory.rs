@@ -6,7 +6,7 @@ use gridops_core::fleet::protocol::inventory::{
     HandshakeResponse, HeartbeatResponse, InventoryResponse,
 };
 
-async fn enrolled(f: &Fixture) -> Result<(String, String)> {
+pub(super) async fn enrolled(f: &Fixture) -> Result<(String, String)> {
     let issued = f.issue("inventory-enrollment").await?;
     let response = f.consume(issued["code"].as_str().context("code")?).await?;
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -20,14 +20,14 @@ async fn enrolled(f: &Fixture) -> Result<(String, String)> {
     ))
 }
 
-async fn control_plane(f: &Fixture) -> Result<String> {
+pub(super) async fn control_plane(f: &Fixture) -> Result<String> {
     let incarnation = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO fleet_control_plane (singleton,incarnation,readiness,schema_version,protocol_min,protocol_max,updated_at) VALUES (1,?,'paused',1,1,1,?)")
         .bind(&incarnation).bind(gridops_core::now_millis()).execute(&f.database).await?;
     Ok(incarnation)
 }
 
-fn handshake_body() -> Value {
+pub(super) fn handshake_body() -> Value {
     json!({
         "request_id":Uuid::new_v4(),"agent_session_id":Uuid::new_v4(),
         "boot_id":"http-inventory-boot","supported_protocol":{"min":1,"max":1},
@@ -35,13 +35,18 @@ fn handshake_body() -> Value {
     })
 }
 
-fn agent_post(f: &Fixture, host: &str, secret: &str, action: &str) -> reqwest::RequestBuilder {
+pub(super) fn agent_post(
+    f: &Fixture,
+    host: &str,
+    secret: &str,
+    action: &str,
+) -> reqwest::RequestBuilder {
     f.client
         .post(f.url(&format!("/agent/hosts/{host}/{action}")))
         .bearer_auth(secret)
 }
 
-async fn receipt(response: Response) -> Result<Value> {
+pub(super) async fn receipt(response: Response) -> Result<Value> {
     let status = response.status();
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert!(response.headers().contains_key("x-request-id"));
@@ -50,7 +55,7 @@ async fn receipt(response: Response) -> Result<Value> {
     Ok(body)
 }
 
-fn inventory_body(handshake: &Value, incarnation: &str) -> Value {
+pub(super) fn inventory_body(handshake: &Value, incarnation: &str) -> Value {
     let backend = |key: &str, domain: &str, runtime: &str, os: &str| {
         json!({
             "local_key":key,"known_id":null,"domain_local_key":domain,
