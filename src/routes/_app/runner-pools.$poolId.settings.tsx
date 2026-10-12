@@ -10,6 +10,7 @@ import { Button, buttonVariants } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import { SearchableSelect } from "~/components/ui/searchable-select";
+import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { formatResourceNumber, hostResourceWarning } from "~/features/runner-pools/resource-risk";
 import {
@@ -305,6 +306,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             <UnitField unit="minutes"><Input className="pr-16" defaultValue={pool.idleTimeoutMinutes} id="idle-timeout" max="1440" min="1" name="idleTimeoutMinutes" required type="number" /></UnitField>
           </SettingsRow>
         </SettingsSection>
+
+        <FleetExecutionSection poolId={pool.id} />
 
         {error ? <Callout title="Could not save" tone="danger">{error}</Callout> : null}
       </SettingsLayout>

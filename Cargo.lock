@@ -1075,6 +1075,7 @@ dependencies = [
  "futures-util",
  "gridops-agent",
  "gridops-core",
+ "gridops-host-agent",
  "hex",
  "hmac 0.12.1",
  "rand 0.10.2",
@@ -1116,6 +1117,28 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "gridops-host-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "gridops-core",
+ "rand 0.10.2",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.gridops.host-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BINARY__</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>GRIDOPS_FLEET_URL</key>
+    <string>__FLEET_URL__</string>
+    <key>GRIDOPS_AGENT_STATE_DIR</key>
+    <string>__STATE_DIR__</string>
+    <key>GRIDOPS_AGENT_IMAGES</key>
+    <string>ghcr.io/actions/actions-runner:latest</string>
+    <!-- launchd starts with a minimal PATH; the Docker CLI must be on it. -->
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>RUST_LOG</key>
+    <string>gridops_host_agent=info</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

@@ -20,6 +20,24 @@ pub struct Vault {
 }
 
 impl Vault {
+    #[cfg(test)]
+    pub(crate) fn test_with_secret(session_secret: &[u8]) -> Self {
+        Self {
+            encryption_key: [7; 32],
+            session_secret: session_secret.to_vec(),
+        }
+    }
+
+    /// A vault from raw key material, for tools and tests that don't load
+    /// the full configuration.
+    #[must_use]
+    pub const fn new(encryption_key: [u8; 32], session_secret: Vec<u8>) -> Self {
+        Self {
+            encryption_key,
+            session_secret,
+        }
+    }
+
     pub fn from_config(config: &Config) -> Result<Self> {
         let encoded = config
             .encryption_key()

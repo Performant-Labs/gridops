@@ -1,6 +1,7 @@
 mod agent;
 mod auth;
 mod error;
+mod fleet;
 mod github_app;
 mod oauth;
 mod resources;
@@ -46,6 +47,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     config.validate_api()?;
     let database = connect_database(&config).await?;
+    gridops_core::fleet::ensure_control_plane(&database).await?;
     let vault = Vault::from_config(&config)?;
     let github = GitHubClient::new(config.clone())?;
     let bitbucket = BitbucketClient::new()?;
@@ -65,6 +67,8 @@ async fn main() -> Result<()> {
         .fallback(ServeFile::new(web_root.join("index.html")));
 
     let app = Router::new()
+        .merge(fleet::router())
+        .merge(fleet::operation_router())
         .route("/api/health", get(resources::health))
         .route("/api/v1/auth/session", get(auth::session))
         .route("/api/v1/auth/me", get(auth::me))
@@ -275,7 +279,9 @@ async fn main() -> Result<()> {
                 .allow_headers([
                     header::CONTENT_TYPE,
                     HeaderName::from_static("x-csrf-token"),
-                ]),
+                    HeaderName::from_static("idempotency-key"),
+                ])
+                .expose_headers([HeaderName::from_static("x-request-id")]),
         );
 
     let listener = tokio::net::TcpListener::bind(config.api_bind()).await?;

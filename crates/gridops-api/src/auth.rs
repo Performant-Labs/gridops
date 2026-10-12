@@ -1,3 +1,6 @@
+//! Authenticates `GridOps` sessions and owns legacy activity refresh behavior.
+//! Read-only callers can share credential validation without updating session activity.
+
 use axum::{
     Json,
     extract::{FromRequestParts, Path, State},
@@ -31,6 +34,11 @@ pub struct AuthUser {
 
 pub struct OptionalAuth(pub Option<AuthUser>);
 
+pub(crate) struct AuthenticatedSession {
+    pub(crate) user: AuthUser,
+    pub(crate) session_id: String,
+}
+
 #[derive(Deserialize)]
 pub struct UserRoleInput {
     role: String,
@@ -43,46 +51,58 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let value = cookie(
-            parts
-                .headers
-                .get(header::COOKIE)
-                .and_then(|value| value.to_str().ok()),
-            SESSION_COOKIE,
-        )
-        .ok_or(ApiError::Unauthorized)?;
-        let (token, signature) = value.split_once('.').ok_or(ApiError::Unauthorized)?;
-        if !state.vault.verify(token, signature) {
-            return Err(ApiError::Unauthorized);
-        }
-        let row = sqlx::query(
-            r#"
+        let session = authenticate_session(parts, state).await?;
+        sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
+            .bind(now_millis())
+            .bind(&session.session_id)
+            .execute(&state.database)
+            .await?;
+        Ok(session.user)
+    }
+}
+
+/// Verifies the signed session cookie and resolves its active user without mutating activity.
+pub(crate) async fn authenticate_session(
+    parts: &Parts,
+    state: &AppState,
+) -> Result<AuthenticatedSession, ApiError> {
+    let value = cookie(
+        parts
+            .headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok()),
+        SESSION_COOKIE,
+    )
+    .ok_or(ApiError::Unauthorized)?;
+    let (token, signature) = value.split_once('.').ok_or(ApiError::Unauthorized)?;
+    if !state.vault.verify(token, signature) {
+        return Err(ApiError::Unauthorized);
+    }
+    let row = sqlx::query(
+        r#"
             SELECT u.id, u.login, u.github_id, u.role, s.id AS session_id, s.expires_at
             FROM sessions s JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ?
         "#,
-        )
-        .bind(hash_token(token))
-        .fetch_optional(&state.database)
-        .await?;
-        let Some(row) = row else {
-            return Err(ApiError::Unauthorized);
-        };
-        if row.get::<i64, _>("expires_at") <= now_millis() {
-            return Err(ApiError::Unauthorized);
-        }
-        sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
-            .bind(now_millis())
-            .bind(row.get::<String, _>("session_id"))
-            .execute(&state.database)
-            .await?;
-        Ok(Self {
+    )
+    .bind(hash_token(token))
+    .fetch_optional(&state.database)
+    .await?;
+    let Some(row) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+    if row.get::<i64, _>("expires_at") <= now_millis() {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(AuthenticatedSession {
+        user: AuthUser {
             id: row.get("id"),
             login: row.get("login"),
             github_id: row.get("github_id"),
             role: row.get("role"),
-        })
-    }
+        },
+        session_id: row.get("session_id"),
+    })
 }
 
 impl FromRequestParts<AppState> for OptionalAuth {
