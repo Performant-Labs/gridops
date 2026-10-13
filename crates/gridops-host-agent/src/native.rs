@@ -241,9 +241,15 @@ fn runner_command() -> Command {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("powershell");
     command
+        // Job steps run as PowerShell scripts, which Windows blocks by
+        // default. Like GitHub's hosted runners, allow them for this runner's
+        // process tree only; the machine's own policy is unchanged.
+        .env("PSExecutionPolicyPreference", "Bypass")
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
             "$s=[Console]::In.ReadLine(); if (-not $s) { exit 1 }; & .\\run.cmd --jitconfig $s; exit $LASTEXITCODE",
         ])
