@@ -209,8 +209,8 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
     .await?
     .context("runner row is missing")?;
     if runner.get::<String, _>("status") != "starting" {
-        // Deleted before it started: abandon the placement.
-        placement::set_state(&app.database, placement.id, "registering", "failed").await?;
+        // Deleted before it started: abandon the placement and free its room.
+        placement::abandon_unstarted(&app.database, placement.id).await?;
         return Ok(());
     }
     let name: String = runner.get("name");
@@ -402,6 +402,9 @@ async fn follow(app: &Reconciler, placement: &Placement) -> Result<()> {
 /// An uncertain placement whose runtime object is known is cleaned up, which
 /// proves it gone and frees its capacity.
 async fn finish(app: &Reconciler, placement: &Placement) -> Result<()> {
+    if placement.state == "failed" {
+        placement::abandon_unstarted(&app.database, placement.id).await?;
+    }
     if placement.state == "uncertain"
         && let Some(SuccessEvidence::RunnerStarted { local_identity, .. }) =
             placement::succeeded_evidence(&app.database, placement.id, "start_runner").await?

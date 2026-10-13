@@ -337,6 +337,51 @@ pub async fn mark_starting(
     Ok(())
 }
 
+/// Ends a placement that was never told to start and frees its capacity.
+/// With no start command ever issued, no runner of it can exist on the host,
+/// which is the proof releasing needs. Returns whether anything changed.
+pub async fn abandon_unstarted(
+    pool: &SqlitePool,
+    placement: PlacementId,
+) -> Result<bool, FleetError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let now = crate::now_millis();
+    let id = placement.to_string();
+    let started: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM host_commands WHERE placement_id=? AND kind='start_runner')",
+    )
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if started {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE workload_placements SET state='failed',
+           local_absence_proven_at=COALESCE(local_absence_proven_at,?),
+           delayed_starts_excluded_at=COALESCE(delayed_starts_excluded_at,?),updated_at=?
+         WHERE id=? AND state IN ('preparing','registering','failed')",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    let released = sqlx::query(
+        "UPDATE capacity_allocations SET state='released',released_at=?,updated_at=?
+          WHERE placement_id=? AND state!='released'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(released > 0)
+}
+
 /// Moves a placement to `state` when no command result already did.
 pub async fn set_state(
     pool: &SqlitePool,

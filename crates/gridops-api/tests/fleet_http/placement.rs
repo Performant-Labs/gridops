@@ -419,6 +419,9 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
     .fetch_one(&f.database)
     .await?;
     assert_eq!(held, 0, "capacity was not released");
+    // A placement that was told to start is never released by abandonment;
+    // only cleanup can prove its runner gone.
+    assert!(!placement::abandon_unstarted(&f.database, placement_id).await?);
     assert_eq!(
         *runtime
             .operations
