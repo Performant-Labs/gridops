@@ -14,7 +14,6 @@ jobs:
     runs-on: [self-hosted, gridops-fleet-test]
     timeout-minutes: 10
     steps:
+      # Expressions keep this working in bash and PowerShell alike.
       - name: Report the runner
-        run: |
-          echo "Runner: $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
-          uname -a
+        run: echo "Runner ${{ runner.name }} (${{ runner.os }}/${{ runner.arch }})"
