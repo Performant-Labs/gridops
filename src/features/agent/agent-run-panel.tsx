@@ -4,13 +4,23 @@ import {
   CircleDot,
   CircleX,
   ExternalLink,
+  FileDiff,
+  FilePen,
+  FilePlus,
+  FileText,
+  FolderTree,
   GitBranch,
+  GitCommitHorizontal,
   GitPullRequestArrow,
   LoaderCircle,
+  type LucideIcon,
   MessageSquareText,
   RotateCcw,
+  ScrollText,
+  Search,
   Sparkles,
   Square,
+  SquareTerminal,
   Wrench,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -244,9 +254,35 @@ const eventIcons = {
   error: { icon: CircleX, className: "text-danger" },
 } as const;
 
+// Tool and status titles start with a fixed verb (see `tool_title` in
+// gridops-agent), so the verb picks the icon.
+const titleIcons: [RegExp, LucideIcon, string][] = [
+  [/^List /, FolderTree, "text-muted-foreground"],
+  [/^Read the failure/, ScrollText, "text-warning"],
+  [/^Read /, FileText, "text-info"],
+  [/^Search /, Search, "text-info"],
+  [/^Edit /, FilePen, "text-warning"],
+  [/^Write /, FilePlus, "text-warning"],
+  [/^Run .* → exit 0$/, SquareTerminal, "text-success"],
+  [/^Run failed$/, CircleX, "text-danger"],
+  [/^Run /, SquareTerminal, "text-muted-foreground"],
+  [/^Checked out /, GitCommitHorizontal, "text-muted-foreground"],
+  [/^Changes$/, FileDiff, "text-warning"],
+  [/^Opened pull request/, GitPullRequestArrow, "text-success"],
+];
+
+function eventIcon(event: AgentRunEvent): { icon: LucideIcon; className: string } {
+  const fallback = eventIcons[event.kind] ?? eventIcons.status;
+  if (event.kind !== "tool" && event.kind !== "status") return fallback;
+  const match = titleIcons.find(([pattern]) => pattern.test(event.title));
+  if (!match) return fallback;
+  const failed = event.kind === "tool" && /→ exit [1-9]/.test(event.title);
+  return { icon: match[1], className: failed ? "text-danger" : match[2] };
+}
+
 function AgentEventRow({ event, start, onExpand }: { event: AgentRunEvent; start: string; onExpand: () => void }) {
   const [open, setOpen] = useState(false);
-  const { icon: Icon, className } = eventIcons[event.kind] ?? eventIcons.status;
+  const { icon: Icon, className } = eventIcon(event);
   const offset = formatElapsed(start, event.createdAt);
   const title = (
     <>
