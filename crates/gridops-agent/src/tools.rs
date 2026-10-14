@@ -587,9 +587,14 @@ async fn edit_file(sandbox: &dyn Sandbox, args: EditArgs) -> Result<ToolResult> 
     };
     let count = contents.matches(&args.old_text).count();
     if count == 0 {
-        bail!(
-            "old_text was not found in {path}. Read the file again and copy the text exactly, including indentation."
-        );
+        match closest_region(&contents, &args.old_text) {
+            Some(region) => bail!(
+                "old_text was not found in {path}. It must match exactly, whitespace included. {region}"
+            ),
+            None => bail!(
+                "old_text was not found in {path}, and nothing similar either. Check the path and read the file again."
+            ),
+        }
     }
     if count > 1 && !args.replace_all {
         bail!(
@@ -612,6 +617,63 @@ async fn edit_file(sandbox: &dyn Sandbox, args: EditArgs) -> Result<ToolResult> 
         ),
         is_error: false,
     })
+}
+
+// `closest_region` and `similarity` are adapted from aster
+// (https://github.com/Zfinix/aster, `crates/aster-cli/src/edits.rs`), licensed
+// under the Apache License 2.0. Changed to cap the snippet length.
+
+const REGION_CONTEXT_LINES: usize = 5;
+const REGION_MAX_LINES: usize = 60;
+const MIN_SIMILARITY: f64 = 0.5;
+
+/// The lines most like the start of `search`, numbered, so a missed edit can
+/// be retried without reading the file again.
+fn closest_region(content: &str, search: &str) -> Option<String> {
+    let anchor = search.lines().find(|line| !line.trim().is_empty())?.trim();
+    let lines: Vec<&str> = content.lines().collect();
+    let (best, score) = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| (index, similarity(anchor, line.trim())))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if score < MIN_SIMILARITY {
+        return None;
+    }
+    let span = (search.lines().count() + REGION_CONTEXT_LINES).min(REGION_MAX_LINES);
+    let start = best.saturating_sub(REGION_CONTEXT_LINES);
+    let end = (best + span).min(lines.len());
+    let mut region = format!("Closest match (lines {}-{end}):\n", start + 1);
+    for (offset, line) in lines[start..end].iter().enumerate() {
+        let _ = writeln!(region, "{:>5} | {line}", start + offset + 1);
+    }
+    region.push_str("Retry the edit with old_text copied exactly from this snippet.");
+    Some(region)
+}
+
+/// Dice coefficient over character bigrams, ignoring whitespace.
+fn similarity(a: &str, b: &str) -> f64 {
+    let bigrams = |text: &str| -> Vec<(char, char)> {
+        let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        chars.windows(2).map(|pair| (pair[0], pair[1])).collect()
+    };
+    let (a, b) = (bigrams(a), bigrams(b));
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut pool = b.clone();
+    let shared = a
+        .iter()
+        .filter(|bigram| {
+            pool.iter()
+                .position(|candidate| candidate == *bigram)
+                .inspect(|&index| {
+                    pool.swap_remove(index);
+                })
+                .is_some()
+        })
+        .count();
+    (2.0 * shared as f64) / (a.len() + b.len()) as f64
 }
 
 async fn write_file_tool(sandbox: &dyn Sandbox, args: WriteArgs) -> Result<ToolResult> {
@@ -837,6 +899,28 @@ mod tests {
         .await;
         assert!(result.is_error);
         assert!(result.text.contains("appears 2 times"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_shows_the_closest_match_when_old_text_misses() {
+        let sandbox = ScriptedSandbox::with(vec![stdout(
+            "fn main() {\n    let total = items.len();\n}\n",
+        )]);
+        let result = execute(
+            &sandbox,
+            &call(
+                "edit_file",
+                json!({ "path": "a.rs", "old_text": "let total = item.len();", "new_text": "x" }),
+            ),
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.text.contains("Closest match (lines 1-3)"),
+            "{}",
+            result.text
+        );
+        assert!(result.text.contains("    2 |     let total = items.len();"));
     }
 
     #[tokio::test]

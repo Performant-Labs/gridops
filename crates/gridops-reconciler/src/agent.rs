@@ -112,7 +112,9 @@ pub async fn worker(app: Reconciler) {
                 let failure = match task.await {
                     Ok(Ok(())) => None,
                     Ok(Err(error)) => Some(format!("{error:#}")),
-                    Err(error) => Some(format!("GridOps hit an internal error while running the agent: {error}")),
+                    Err(error) => Some(format!(
+                        "GridOps hit an internal error while running the agent: {error}"
+                    )),
                 };
                 if let Some(message) = failure {
                     tracing::error!(agent_run_id = %run_id, error = %message, "agent run failed");

@@ -15,3 +15,12 @@ not the MIT License that covers the rest of GridOps.
 pinned to a reviewed commit, for provider-neutral messages, tool definitions,
 and the OpenAI-compatible and Anthropic clients. Agent Runtime is licensed under
 the MIT License.
+
+## aster
+
+`closest_region` and `similarity` in `crates/gridops-agent/src/tools.rs` are
+adapted from [Zfinix/aster](https://github.com/Zfinix/aster)
+(`crates/aster-cli/src/edits.rs`), licensed under the
+[Apache License 2.0](https://github.com/Zfinix/aster/blob/main/LICENSE). Agent
+Runtime's tool-argument repair (`src/tool_args.rs`) is adapted from the same
+project.

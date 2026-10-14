@@ -5,10 +5,11 @@
 //! It guarantees every tool call gets a result, since providers reject a
 //! history with an unanswered call, and it never lets a tool error end the run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use agent_runtime::{AssistantTurn, ChatMessage, MessageRole, ToolDefinition};
+use agent_runtime::{AssistantTurn, ChatMessage, MessageRole, ProviderError, ToolDefinition};
 use anyhow::Result;
 use async_trait::async_trait;
 use secrecy::SecretString;
@@ -27,9 +28,13 @@ use crate::{
 const CONTEXT_BUDGET_CHARS: usize = 400_000;
 /// Recent messages that keep their tool output when compacting.
 const KEEP_RECENT_MESSAGES: usize = 12;
-const ELIDED: &str = "[Earlier output removed to save space. Run the tool again if you need it.]";
+const ELIDED: &str = "[Earlier output removed to save space. If you still need part of it, fetch only that part: a line range of the file, a narrower search, or the tail of a command's output.]";
 const MAX_TURN_ATTEMPTS: u32 = 3;
 const MAX_IDLE_TURNS: usize = 2;
+/// Identical failing calls before the model is told to change approach.
+const REPEATED_FAILURE_LIMIT: usize = 2;
+/// Longest wait a provider's Retry-After is allowed to impose per attempt.
+const MAX_RETRY_WAIT: Duration = Duration::from_mins(1);
 
 /// The model, as the loop needs it. Implemented by [`AgentModel`]; tests
 /// script it.
@@ -92,13 +97,59 @@ pub struct AgentEvent {
 }
 
 impl AgentEvent {
+    /// Credential-shaped tokens are masked, since events are stored and shown
+    /// to everyone who can see the job.
     pub fn new(kind: EventKind, title: impl Into<String>, detail: Option<String>) -> Self {
         Self {
             kind,
-            title: title.into(),
-            detail,
+            title: redact(&title.into()),
+            detail: detail.map(|detail| redact(&detail)),
         }
     }
+}
+
+/// Prefixes of well-known credential formats: GitHub, `OpenAI` and Anthropic,
+/// AWS access keys, Slack and GitLab.
+const SECRET_PREFIXES: [&str; 10] = [
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "sk-",
+    "AKIA",
+    "xoxb-",
+    "glpat-",
+];
+const SECRET_MIN_LEN: usize = 16;
+
+/// Masks tokens that start with a known credential prefix and are long enough
+/// to be a real secret.
+fn redact(text: &str) -> String {
+    let is_token = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| is_token(c)) {
+        out.push_str(&rest[..start]);
+        let token_len = rest[start..]
+            .find(|c: char| !is_token(c))
+            .unwrap_or(rest.len() - start);
+        let token = &rest[start..start + token_len];
+        match SECRET_PREFIXES
+            .iter()
+            .find(|prefix| token.starts_with(**prefix))
+        {
+            Some(prefix) if token.len() - prefix.len() >= SECRET_MIN_LEN => {
+                out.push_str(prefix);
+                out.push_str("[redacted]");
+            }
+            _ => out.push_str(token),
+        }
+        rest = &rest[start + token_len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Where the loop reports progress, and how it learns it should stop.
@@ -157,8 +208,8 @@ pub async fn run_session(
     let mut history = vec![ChatMessage::user(task_message(context))];
     let mut tool_calls = 0;
     let mut idle_turns = 0;
-    let mut edited = BTreeSet::new();
-    let mut side_effects_confirmed = false;
+    let mut progress = Progress::default();
+    let mut failures: HashMap<String, usize> = HashMap::new();
     let mut warned_about_budget = false;
 
     for turn_index in 0..limits.max_turns {
@@ -226,17 +277,13 @@ pub async fn run_session(
                     Ok(_) if finished.is_some() => {
                         "Error: finish was already called this turn.".to_owned()
                     }
-                    Ok(request) => {
-                        match check_finish(sandbox, &request, &edited, &mut side_effects_confirmed)
-                            .await
-                        {
-                            Ok(()) => {
-                                finished = Some(request);
-                                "Recorded. GridOps will take it from here.".to_owned()
-                            }
-                            Err(message) => message,
+                    Ok(request) => match check_finish(sandbox, &request, &mut progress).await {
+                        Ok(()) => {
+                            finished = Some(request);
+                            "Recorded. GridOps will take it from here.".to_owned()
                         }
-                    }
+                        Err(message) => message,
+                    },
                 };
                 history.push(ChatMessage::tool(call.id.clone(), reply));
                 continue;
@@ -253,10 +300,27 @@ pub async fn run_session(
                     .and_then(serde_json::Value::as_str)
                     .and_then(|path| repo_relative_path(path).ok())
             {
-                edited.insert(path);
+                progress.edited.insert(path);
+                progress.checked_since_edit = false;
+            }
+            if call.name == "run_command" && !result.is_error {
+                progress.checked_since_edit = true;
             }
             record_tool(observer, &result).await;
-            history.push(ChatMessage::tool(call.id.clone(), result.text));
+            let mut text = result.text;
+            if result.is_error {
+                let repeats = failures
+                    .entry(format!("{}:{}", call.name, call.arguments))
+                    .or_default();
+                *repeats += 1;
+                if *repeats >= REPEATED_FAILURE_LIMIT {
+                    let _ = write!(
+                        text,
+                        "\n\nThis exact call has now failed {repeats} times. Repeating it will not help: change the arguments or try a different approach."
+                    );
+                }
+            }
+            history.push(ChatMessage::tool(call.id.clone(), text));
         }
         if let Some(finish) = finished {
             return Ok(AgentOutcome {
@@ -291,7 +355,12 @@ async fn request_turn(
         match result {
             Ok(turn) => return Ok(turn),
             Err(error) if attempt < MAX_TURN_ATTEMPTS && transient(&error) => {
-                let wait = Duration::from_secs(10 * u64::from(attempt));
+                let wait = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<ProviderError>())
+                    .and_then(ProviderError::retry_after)
+                    .unwrap_or(Duration::from_secs(10 * u64::from(attempt)))
+                    .min(MAX_RETRY_WAIT);
                 observer
                     .record(AgentEvent::new(
                         EventKind::Status,
@@ -348,15 +417,26 @@ async fn record_tool(observer: &dyn RunObserver, result: &ToolResult) {
         .await;
 }
 
+/// What the loop has seen of the model's work, for judging a finish.
+#[derive(Default)]
+struct Progress {
+    /// Files changed through `edit_file` or `write_file`.
+    edited: BTreeSet<String>,
+    /// A command ran after the most recent edit.
+    checked_since_edit: bool,
+    side_effects_confirmed: bool,
+    verification_requested: bool,
+}
+
 /// Accepts a finish, or explains to the model why not yet. A pull request
-/// needs changes, and files changed only as a side effect of commands (lock
-/// files, build output) are shown to the model once so it can keep or revert
-/// them deliberately.
+/// needs changes, and a check run after the last edit; files changed only as
+/// a side effect of commands (lock files, build output) are shown to the model
+/// once so it can keep or revert them deliberately. Each objection is raised
+/// once, so a model that cannot satisfy it can still finish.
 async fn check_finish(
     sandbox: &dyn Sandbox,
     request: &FinishRequest,
-    edited: &BTreeSet<String>,
-    side_effects_confirmed: &mut bool,
+    progress: &mut Progress,
 ) -> Result<(), String> {
     if request.outcome == FinishOutcome::Diagnosis {
         return Ok(());
@@ -370,9 +450,16 @@ async fn check_finish(
                 .into(),
         );
     }
+    if !progress.checked_since_edit && !progress.verification_requested {
+        progress.verification_requested = true;
+        return Err(
+            "Not finished yet. Nothing has run since your last edit, so the fix is unverified. Run the failing check, or the closest one the sandbox can run, then call finish again with the result in verification. If nothing can run here, call finish again and say why in verification."
+                .into(),
+        );
+    }
     let unexpected = changed
         .iter()
-        .filter(|change| !edited.contains(&change.path))
+        .filter(|change| !progress.edited.contains(&change.path))
         .map(|change| {
             format!(
                 "{} ({})",
@@ -385,10 +472,10 @@ async fn check_finish(
             )
         })
         .collect::<Vec<_>>();
-    if unexpected.is_empty() || *side_effects_confirmed {
+    if unexpected.is_empty() || progress.side_effects_confirmed {
         return Ok(());
     }
-    *side_effects_confirmed = true;
+    progress.side_effects_confirmed = true;
     Err(format!(
         "Not finished yet. These files changed without edit_file or write_file, probably as a side effect of commands you ran:\n{}\n\nIf they belong in the fix, call finish again. Otherwise restore them (git checkout -- <path>, or delete new files) and then call finish.",
         unexpected
@@ -614,7 +701,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pull_request_needs_changes_and_side_effects_are_confirmed_once() -> Result<()> {
+    async fn a_pull_request_needs_verified_changes_and_side_effects_are_confirmed_once()
+    -> Result<()> {
         let model = ScriptedModel::new(vec![
             calls(&[("1", FINISH_TOOL, finish("pull_request"))]),
             calls(&[(
@@ -623,10 +711,13 @@ mod tests {
                 json!({ "path": "src/a.rs", "old_text": "old", "new_text": "new" }),
             )]),
             calls(&[("3", FINISH_TOOL, finish("pull_request"))]),
-            calls(&[("4", FINISH_TOOL, finish("pull_request"))]),
+            calls(&[("4", "run_command", json!({ "command": "cargo test" }))]),
+            calls(&[("5", FINISH_TOOL, finish("pull_request"))]),
+            calls(&[("6", FINISH_TOOL, finish("pull_request"))]),
         ]);
         // No changes yet, so the first finish is refused. After the edit the
-        // diff shows the edited file plus a lock file the model never touched.
+        // fix must be checked, and then the diff shows the edited file plus a
+        // lock file the model never touched.
         let sandbox = FakeSandbox::new(concat!(
             ":100644 100644 a b M\0src/a.rs\0",
             ":100644 100644 c d M\0Cargo.lock\0",
@@ -642,7 +733,7 @@ mod tests {
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
         assert_eq!(outcome.finish.outcome, FinishOutcome::PullRequest);
-        assert_eq!(outcome.turns, 4);
+        assert_eq!(outcome.turns, 6);
         let seen = model
             .seen
             .lock()
@@ -656,9 +747,24 @@ mod tests {
             .filter_map(|message| message.content.clone())
             .collect::<Vec<_>>();
         assert!(replies[0].contains("no files have changed"));
-        assert!(replies[2].contains("Cargo.lock (modified)"));
-        assert!(!replies[2].contains("src/a.rs"));
+        assert!(replies[2].contains("Nothing has run since your last edit"));
+        assert!(replies[4].contains("Cargo.lock (modified)"));
+        assert!(!replies[4].contains("src/a.rs"));
         Ok(())
+    }
+
+    #[test]
+    fn events_mask_credentials() {
+        let event = AgentEvent::new(
+            EventKind::Tool,
+            "Run echo ghp_abcdefghijklmnopqrstuvwx",
+            Some("key=sk-ant-api03-abcdefghijklmnop sk-short task-runner".into()),
+        );
+        assert_eq!(event.title, "Run echo ghp_[redacted]");
+        assert_eq!(
+            event.detail.as_deref(),
+            Some("key=sk-[redacted] sk-short task-runner")
+        );
     }
 
     #[tokio::test]

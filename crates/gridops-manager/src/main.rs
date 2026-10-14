@@ -767,7 +767,9 @@ fn router(state: ManagerState) -> Router {
             "/v1/sandboxes",
             get(sandbox::list_sandboxes)
                 .layer(request_timeout(Duration::from_mins(3)))
-                .merge(post(sandbox::create_sandbox).layer(request_timeout(SANDBOX_CREATE_TIMEOUT))),
+                .merge(
+                    post(sandbox::create_sandbox).layer(request_timeout(SANDBOX_CREATE_TIMEOUT)),
+                ),
         )
         .route(
             "/v1/sandboxes/{sandbox_id}/exec",

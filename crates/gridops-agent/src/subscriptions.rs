@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use agent_runtime::{
     AgentProviderKind, AssistantTurn, ChatMessage, EventSink, MessageRole, ModelTiers,
-    ProviderInfo, RuntimeEvent, TextProvider, ToolCall, ToolDefinition,
+    ProviderInfo, RuntimeEvent, TextProvider, ToolCall, ToolDefinition, heal_tool_arguments,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -492,8 +492,7 @@ fn parse_codex_output_item(item: &Value, content: &mut String, tool_calls: &mut 
             let arguments = item
                 .get("arguments")
                 .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str(raw).ok())
-                .unwrap_or_else(|| Value::Object(Map::new()));
+                .map_or_else(|| Value::Object(Map::new()), heal_tool_arguments);
             if !id.is_empty() && !name.is_empty() {
                 tool_calls.push(ToolCall {
                     id: id.to_owned(),

@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 # Pinned to the revision Veyra runs, which adds the auto tool-choice strategy and
 # the structured-answer retry on top of the one ccs pins.
-agent-runtime = { git = "https://github.com/iamngoni/agent-runtime", rev = "dd44d81c1914ebb768fa3990e7c291ba08362384" }
+agent-runtime = { git = "https://github.com/iamngoni/agent-runtime", rev = "a51e8e6845f2ac39b0e897c3a6278961dd200ba9" }
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true

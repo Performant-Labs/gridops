@@ -1527,14 +1527,18 @@ pub async fn workflow_runs(
     .await?;
     let mut runs_on = run_platforms(
         &state,
-        &rows.iter().map(|row| row.get::<i64, _>("id")).collect::<Vec<_>>(),
+        &rows
+            .iter()
+            .map(|row| row.get::<i64, _>("id"))
+            .collect::<Vec<_>>(),
     )
     .await?;
     let items = rows
         .iter()
         .map(|row| {
             let mut item = workflow_run_json(row, user.role == "admin");
-            item["runsOn"] = Value::Array(runs_on.remove(&row.get::<i64, _>("id")).unwrap_or_default());
+            item["runsOn"] =
+                Value::Array(runs_on.remove(&row.get::<i64, _>("id")).unwrap_or_default());
             item
         })
         .collect::<Vec<_>>();
