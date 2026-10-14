@@ -29,6 +29,7 @@ import { toast } from "sonner";
 import { agentRunIconStatus, agentRunLabel, formatElapsed, isTerminalAgentStatus, triggerLabel } from "./agent-state";
 import { type AgentRun, type AgentRunEvent, type AgentRunSummary, cancelAgentRun } from "./agent.functions";
 import { confirmAction } from "~/components/confirm-dialog";
+import { Markdown } from "~/components/markdown";
 import { Callout, InlineError } from "~/components/page";
 import { RunStatusIcon } from "~/components/status-icon";
 import { Button, buttonVariants } from "~/components/ui/button";
@@ -209,6 +210,7 @@ function RunMeta({ run }: { run: AgentRun }) {
 }
 
 function RunOutcome({ run }: { run: AgentRun }) {
+  const [open, setOpen] = useState(true);
   if (run.status === "failed") {
     return <Callout className="mt-2.5" title="The agent couldn’t finish" tone="danger"><span className="whitespace-pre-wrap break-words">{run.error ?? "It stopped without reporting an error."}</span></Callout>;
   }
@@ -230,7 +232,7 @@ function RunOutcome({ run }: { run: AgentRun }) {
           ) : null}
         </div>
         <p className="mt-2 text-2xs text-muted-foreground">A draft pull request from the GridOps GitHub App. Review it before merging.</p>
-        {run.summary ? <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-secondary-foreground">{run.summary}</p> : null}
+        {run.summary ? <Markdown className="mt-2">{run.summary}</Markdown> : null}
       </div>
     );
   }
@@ -238,10 +240,17 @@ function RunOutcome({ run }: { run: AgentRun }) {
   const diagnosis = run.diagnosis ?? run.summary;
   return (
     <div className="mt-2.5 rounded-md border border-border-strong bg-panel-subtle p-3">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-foreground"><Sparkles className="size-3.5 text-primary" />{run.outcome === "diagnosis" ? "Diagnosis" : "Summary"}</div>
-      {run.outcome === "diagnosis" && run.summary && run.diagnosis ? <p className="mt-1.5 whitespace-pre-wrap break-words text-xs font-medium leading-5 text-secondary-foreground">{run.summary}</p> : null}
-      {diagnosis ? <p className="mt-1.5 whitespace-pre-wrap break-words text-xs leading-5 text-secondary-foreground">{diagnosis}</p> : <p className="mt-1.5 text-xs text-muted-foreground">The agent finished without a write-up.</p>}
-      {run.outcome === "diagnosis" ? <p className="mt-2 text-2xs text-muted-foreground">This doesn’t look like a code problem, so no pull request was opened.</p> : null}
+      <button aria-expanded={open} className="-m-1 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-md p-1 text-left text-xs font-medium text-foreground hover:bg-hover" onClick={() => setOpen(!open)} type="button">
+        <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
+        <Sparkles className="size-3.5 text-primary" />{run.outcome === "diagnosis" ? "Diagnosis" : "Summary"}
+      </button>
+      {open ? (
+        <>
+          {run.outcome === "diagnosis" && run.summary && run.diagnosis ? <Markdown className="mt-1.5 font-medium">{run.summary}</Markdown> : null}
+          {diagnosis ? <Markdown className="mt-1.5">{diagnosis}</Markdown> : <p className="mt-1.5 text-xs text-muted-foreground">The agent finished without a write-up.</p>}
+          {run.outcome === "diagnosis" ? <p className="mt-2 text-2xs text-muted-foreground">This doesn’t look like a code problem, so no pull request was opened.</p> : null}
+        </>
+      ) : null}
     </div>
   );
 }
