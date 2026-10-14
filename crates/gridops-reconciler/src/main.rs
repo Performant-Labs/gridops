@@ -414,6 +414,9 @@ async fn reconcile_pool(
             removed += 1;
         }
     }
+    if !provisioning_blocked && evict_idle_fleet_runner(app, pool).await? {
+        removed += 1;
+    }
     let final_runners = runners(app, &pool.id).await?;
     let active_count = final_runners
         .iter()
@@ -556,6 +559,43 @@ async fn rebalance_repository_capacity(app: &Reconciler, pool: &Pool, desired: i
         return Ok(0);
     }
     evict_surplus_runner(app, pool, &current, None).await
+}
+
+/// How long a fleet runner must sit idle before queued fleet work may take its
+/// slot, so a runner that has just come online keeps the job it was made for.
+const FLEET_IDLE_EVICTION_GRACE_MS: i64 = 2 * 60 * 1_000;
+
+/// Deletes one idle fleet runner parked on a repository with no queued jobs,
+/// while fleet work in the pool waits for host capacity. Rebalancing leaves
+/// fleet runners alone, and the fleet scheduler queues rather than reporting a
+/// full host, so without this idle runners hold a machine indefinitely.
+async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> {
+    let now = now_millis();
+    let idle: Option<String> = sqlx::query_scalar(
+        "SELECT r.id FROM runners r
+          WHERE r.pool_id=? AND r.status IN ('online','idle') AND r.busy=0 AND r.updated_at<?
+            AND EXISTS (SELECT 1 FROM workload_intents own WHERE own.workload_id=r.id)
+            AND EXISTS (SELECT 1 FROM workload_intents waiting
+                         WHERE waiting.pool_id=r.pool_id AND waiting.status='queued'
+                           AND waiting.reason_code IN ('physical_resource_exhausted','child_resource_exhausted','pool_capacity_exhausted'))
+            AND NOT EXISTS (SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
+                             WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting'))
+          ORDER BY r.updated_at LIMIT 1",
+    )
+    .bind(&pool.id)
+    .bind(now - FLEET_IDLE_EVICTION_GRACE_MS)
+    .fetch_optional(&app.database)
+    .await?;
+    let Some(idle) = idle else {
+        return Ok(false);
+    };
+    let current = runners(app, &pool.id).await?;
+    let Some(runner) = current.iter().find(|runner| runner.id == idle) else {
+        return Ok(false);
+    };
+    tracing::info!(pool = %pool.id, runner = %runner.name, "evicting an idle fleet runner for queued work");
+    delete_runner(app, pool, runner).await?;
+    Ok(true)
 }
 
 /// Deletes one idle runner that has no work, when a repository or provider is

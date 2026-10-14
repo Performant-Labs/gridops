@@ -38,6 +38,12 @@ const QUEUE_TIMEOUT_MILLIS: i64 = 10 * 60_000;
 const INSPECT_INTERVAL_MILLIS: i64 = 30_000;
 /// The agent has this long to fetch registration material and start.
 const START_WINDOW_MILLIS: i64 = 60_000;
+/// How long the host has to act on a start command. Starts take seconds, and
+/// an agent may check a command against authority it read before a 25 s long
+/// poll (authority lasts 90 s and renews every 15 s), so a deadline much past
+/// 30 s can outlast that authority and be refused, leaving the placement
+/// uncertain and the whole host reconciling.
+const START_COMMAND_DEADLINE_MILLIS: i64 = 30_000;
 
 /// The pool's platforms that are enabled for fleet execution.
 pub(super) async fn profiles(app: &Reconciler, pool_id: &str) -> Result<Vec<Profile>> {
@@ -382,7 +388,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
         placement.id,
         operation,
         &format!("start:{}", placement.id),
-        START_WINDOW_MILLIS - 5_000,
+        START_COMMAND_DEADLINE_MILLIS,
     )
     .await?
     .is_some()

@@ -368,16 +368,16 @@ impl<H: RuntimeHelper> Supervisor<H> {
     ) -> Result<Stop, ClientError> {
         loop {
             let current = authority.borrow_and_update().clone();
-            let Some(expires_at) = current
+            if current
                 .expires_at
-                .filter(|expires| *expires > now().unwrap_or(*expires))
-            else {
+                .is_none_or(|expires| expires <= now().unwrap_or(expires))
+            {
                 // No authority yet: wait for the next heartbeat.
                 if authority.changed().await.is_err() {
                     return Err(internal("session ended"));
                 }
                 continue;
-            };
+            }
             let commands = self
                 .client
                 .poll_commands(
@@ -386,12 +386,21 @@ impl<H: RuntimeHelper> Supervisor<H> {
                     context.authority_session_id,
                 )
                 .await?;
+            // The poll can wait 25 s while heartbeats renew authority, so the
+            // commands are checked against the authority held now, not the one
+            // read before polling. A start deadline may run past the older one.
+            let fresh = authority.borrow().clone();
+            let Some(expires_at) = fresh.expires_at else {
+                // Authority was withdrawn while polling; these commands fail
+                // validation, so leave them to expire.
+                continue;
+            };
             let session = ExpectedAgentSession {
                 host_id: context.host_id,
                 host_epoch: context.host_epoch,
                 control_plane_incarnation: context.control_plane_incarnation,
                 authority_session_id: context.authority_session_id,
-                credential_generation: current.generation,
+                credential_generation: fresh.generation,
                 authority_expires_at: expires_at,
             };
             for command in commands {
