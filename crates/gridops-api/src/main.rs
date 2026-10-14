@@ -173,6 +173,7 @@ async fn main() -> Result<()> {
             "/api/v1/workflow-jobs/{job_id}/agent-runs",
             post(agent::start_agent_run),
         )
+        .route("/api/v1/agent-runs", get(agent::agent_runs))
         .route("/api/v1/agent-runs/{run_id}", get(agent::agent_run))
         .route(
             "/api/v1/agent-runs/{run_id}/cancel",

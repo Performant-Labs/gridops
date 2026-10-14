@@ -6,7 +6,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::SecondsFormat;
@@ -32,7 +32,10 @@ use crate::{
     auth::{AuthUser, assert_installation_admin, audit, require_system_admin},
     error::{ApiError, ApiResult},
     oauth::control_token,
-    resources::SameOrigin,
+    resources::{
+        PaginationQuery, SameOrigin, bounded_pagination, empty_paginated_page, paginated_page,
+        pagination,
+    },
     state::AppState,
 };
 
@@ -864,6 +867,75 @@ pub async fn start_agent_run(
         StatusCode::CREATED,
         Json(run_json(&state, &user, &id).await?),
     ))
+}
+
+/// Every fix-agent run on repositories the viewer can see, newest first.
+pub async fn agent_runs(
+    State(state): State<AppState>,
+    Query(query): Query<PaginationQuery>,
+    user: AuthUser,
+) -> ApiResult<Json<Value>> {
+    let (requested_page, per_page) = pagination(query.page, query.per_page);
+    let total = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM agent_runs agent JOIN repositories repo ON repo.id=agent.repository_id
+          JOIN user_installations access ON access.installation_id=repo.installation_id AND access.user_id=?"#,
+    )
+    .bind(&user.id)
+    .fetch_one(&state.database)
+    .await?;
+    if total == 0 {
+        return Ok(empty_paginated_page(requested_page, per_page));
+    }
+    let (page, offset) = bounded_pagination(requested_page, total, per_page);
+    let rows = sqlx::query(
+        r#"SELECT agent.id,agent.job_id,agent.run_id,agent.status,agent.stage,agent.outcome,agent.title,
+          agent.pull_request_url,agent.pull_request_number,agent.error,agent.trigger,agent.provider,agent.model,
+          agent.turns,agent.tool_calls,agent.created_at,agent.started_at,agent.completed_at,
+          repo.full_name,job.name AS job_name,wr.workflow_name,wr.run_number,requester.login AS requested_by_login
+          FROM agent_runs agent
+          JOIN repositories repo ON repo.id=agent.repository_id
+          JOIN user_installations access ON access.installation_id=repo.installation_id AND access.user_id=?
+          JOIN workflow_jobs job ON job.id=agent.job_id
+          LEFT JOIN workflow_runs wr ON wr.id=agent.run_id
+          LEFT JOIN users requester ON requester.id=agent.requested_by
+          ORDER BY agent.created_at DESC LIMIT ? OFFSET ?"#,
+    )
+    .bind(&user.id)
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(&state.database)
+    .await?;
+    let items = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"),
+                "jobId": row.get::<i64, _>("job_id"),
+                "runId": row.get::<i64, _>("run_id"),
+                "repository": row.get::<String, _>("full_name"),
+                "jobName": row.get::<String, _>("job_name"),
+                "workflowName": row.get::<Option<String>, _>("workflow_name"),
+                "runNumber": row.get::<Option<i64>, _>("run_number"),
+                "status": row.get::<String, _>("status"),
+                "stage": row.get::<Option<String>, _>("stage"),
+                "outcome": row.get::<Option<String>, _>("outcome"),
+                "title": row.get::<Option<String>, _>("title"),
+                "pullRequestUrl": row.get::<Option<String>, _>("pull_request_url"),
+                "pullRequestNumber": row.get::<Option<i64>, _>("pull_request_number"),
+                "error": row.get::<Option<String>, _>("error"),
+                "trigger": row.get::<String, _>("trigger"),
+                "provider": row.get::<Option<String>, _>("provider"),
+                "model": row.get::<Option<String>, _>("model"),
+                "requestedBy": row.get::<Option<String>, _>("requested_by_login"),
+                "turns": row.get::<i64, _>("turns"),
+                "toolCalls": row.get::<i64, _>("tool_calls"),
+                "createdAt": iso(Some(row.get::<i64, _>("created_at"))),
+                "startedAt": iso(row.get::<Option<i64>, _>("started_at")),
+                "completedAt": iso(row.get::<Option<i64>, _>("completed_at")),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(paginated_page(&items, total, page, per_page))
 }
 
 pub async fn agent_run(

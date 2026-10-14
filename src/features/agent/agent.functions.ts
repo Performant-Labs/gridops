@@ -86,6 +86,14 @@ export const saveAgentSettings = (data: AgentSettings) =>
 export const startAgentRun = (jobId: number) =>
   api<AgentRun>(`/api/v1/workflow-jobs/${jobId}/agent-runs`, { method: "POST" });
 
+/** One row of the Agent runs page: the run without its event timeline. */
+export type AgentRunListItem = Omit<AgentRun, "summary" | "diagnosis" | "branch" | "canCancel" | "events"> & {
+  workflowName: string | null; runNumber: number | null; title: string | null; turns: number; toolCalls: number;
+};
+
+export const getAgentRunsPage = ({ page = 1 }: { page?: number } = {}) =>
+  api<{ authenticated?: boolean; items: AgentRunListItem[]; total: number; page: number; perPage: number }>(`/api/v1/agent-runs?page=${page}&perPage=25`);
+
 export const getAgentRun = (agentRunId: string, signal?: AbortSignal) =>
   api<AgentRun>(`/api/v1/agent-runs/${encodeURIComponent(agentRunId)}`, { signal });
 

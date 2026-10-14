@@ -1,5 +1,6 @@
 import {
   Activity,
+  Bot,
   Boxes,
   CircleGauge,
   FileClock,
@@ -38,6 +39,7 @@ export const navigation: NavGroup[] = [
       { label: "Runners", to: "/runners", icon: Activity, shortcut: "r", alert: "failedRunners" },
       { label: "Machines", to: "/fleet", icon: Server, shortcut: "m" },
       { label: "Workflow runs", to: "/workflow-runs", icon: GitPullRequestArrow, shortcut: "w", alert: "queuedJobs" },
+      { label: "Agent runs", to: "/agent-runs", icon: Bot, shortcut: "f" },
       { label: "Repositories", to: "/repositories", icon: PackageSearch, shortcut: "e" },
     ],
   },

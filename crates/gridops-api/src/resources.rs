@@ -139,9 +139,9 @@ pub(crate) struct RepositoryQuery {
 
 #[derive(Deserialize)]
 pub(crate) struct PaginationQuery {
-    page: Option<i64>,
+    pub(crate) page: Option<i64>,
     #[serde(rename = "perPage")]
-    per_page: Option<i64>,
+    pub(crate) per_page: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -4406,7 +4406,7 @@ fn workflow_action_endpoint(action: &str) -> ApiResult<&'static str> {
     }
 }
 
-fn empty_paginated_page(page: i64, per_page: i64) -> Json<Value> {
+pub(crate) fn empty_paginated_page(page: i64, per_page: i64) -> Json<Value> {
     Json(json!({
         "authenticated": false,
         "items": [],
@@ -4416,7 +4416,7 @@ fn empty_paginated_page(page: i64, per_page: i64) -> Json<Value> {
     }))
 }
 
-fn paginated_page(items: &[Value], total: i64, page: i64, per_page: i64) -> Json<Value> {
+pub(crate) fn paginated_page(items: &[Value], total: i64, page: i64, per_page: i64) -> Json<Value> {
     Json(json!({
         "authenticated": true,
         "items": items,
@@ -4426,13 +4426,13 @@ fn paginated_page(items: &[Value], total: i64, page: i64, per_page: i64) -> Json
     }))
 }
 
-fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
+pub(crate) fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
     let page = query_page(page);
     let per_page = per_page.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 100);
     (page, per_page)
 }
 
-fn bounded_pagination(requested_page: i64, total: i64, per_page: i64) -> (i64, i64) {
+pub(crate) fn bounded_pagination(requested_page: i64, total: i64, per_page: i64) -> (i64, i64) {
     let total_pages = total.saturating_add(per_page - 1) / per_page;
     let page = requested_page.min(total_pages.max(1));
     let offset = page.saturating_sub(1).saturating_mul(per_page);
