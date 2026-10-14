@@ -10,6 +10,7 @@ import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, DialogClose, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
 import { type WorkflowRunDetail, getWorkflowRunDetailAction } from "~/features/operations/operations.functions";
+import { MachineLink } from "~/features/runners/runner-row";
 import { JobLogViewer } from "~/features/workflow-runs/job-log-viewer";
 import { RunActionsMenu, isActiveRun } from "~/features/workflow-runs/run-actions";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
@@ -140,6 +141,7 @@ function JobRow({ job, onOpen, selected }: { job: Job; onOpen: () => void; selec
           {job.labels.length > 3 ? <span className="text-2xs text-faint">+{job.labels.length - 3}</span> : null}
         </span>
         <span className="hidden max-w-44 truncate font-mono text-2xs text-faint sm:block">{job.runnerName ?? (waiting ? "no runner yet" : "—")}</span>
+        {job.machine ? <MachineLink className="hidden max-w-36 sm:block" machine={job.machine} /> : null}
         {waiting ? (
           <Tooltip content="Time since the job was queued">
             <span className="tabular relative w-24 shrink-0 text-right text-xs text-warning">queued {formatDuration(job.startedAt, null)}</span>

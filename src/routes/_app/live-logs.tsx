@@ -128,7 +128,7 @@ function LiveLogsPage() {
                       <span className="tabular shrink-0 text-2xs text-faint">{formatAge(target.updatedAt)}</span>
                     </span>
                     <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                      {target.workflowName} #{target.runNumber}<span className="text-faint"> · {target.repository?.split("/").pop()}</span>
+                      {target.workflowName} #{target.runNumber}<span className="text-faint"> · {target.repository?.split("/").pop()}{target.machine?.name ? ` · on ${target.machine.name}` : ""}</span>
                     </span>
                   </span>
                 </button>

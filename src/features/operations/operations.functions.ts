@@ -31,12 +31,15 @@ export type RunnerPool = {
   outdatedRunners: number; createdAt: string; canManage: boolean;
 };
 
+/** The enrolled machine a fleet runner was placed on. */
+export type RunnerMachine = { id: string; name: string | null; runtime: "docker" | "native_process" | "tart_vm" | null; os: "linux" | "macos" | "windows" | null };
+
 export type Runner = {
   id: string; name: string; provider: "docker" | "tart"; platform: "github" | "bitbucket"; status: string; busy: boolean; ephemeral: boolean; os: string;
   architecture: string; containerId: string | null; githubRunnerId: number | null; bitbucketRunnerUuid: string | null;
   failureReason: string | null; registeredAt: string | null; lastHeartbeatAt: string | null;
   createdAt: string; poolId: string; poolName: string; poolPaused: boolean; accountLogin: string;
-  repository: string | null; currentJobName: string | null; currentRunId: number | null; canManage: boolean;
+  repository: string | null; currentJobName: string | null; currentRunId: number | null; machine: RunnerMachine | null; canManage: boolean;
 };
 
 export type WorkflowRun = {
@@ -49,7 +52,7 @@ export type WorkflowRun = {
 export type WorkflowRunDetail = Omit<WorkflowRun, "jobCount" | "activeJobs" | "failedJobs"> & {
   jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; runnerName: string | null;
     runnerGroupName: string | null; labels: string[]; htmlUrl: string; startedAt: string | null; completedAt: string | null;
-    liveRunnerId: string | null; archivedLogId: string | null;
+    liveRunnerId: string | null; archivedLogId: string | null; machine: RunnerMachine | null;
     diagnosis: null | {
       summary: string; requestedLabels: string[];
       candidates: Array<{ id: string; name: string; status: "paused" | "circuit_open" | "incompatible" | "at_capacity" | "ready"; provider: string | null;
@@ -78,6 +81,7 @@ export type LogTarget = {
   containerId: string | null; updatedAt: string; poolName: string; repository: string | null;
   kind: "live" | "archive"; sizeBytes?: number; jobId: number; runId: number; jobName: string;
   jobStatus: string; jobConclusion: string | null; runNumber: number; workflowName: string;
+  machine?: RunnerMachine | null;
 };
 
 export type StructuredJobLog = {

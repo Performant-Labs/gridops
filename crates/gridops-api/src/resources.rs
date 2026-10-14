@@ -1445,8 +1445,13 @@ pub async fn runners(
                 WHERE manage.user_id=? AND manage.installation_id=mapped.installation_id
                   AND manage.permission='admin')
           ) THEN 'admin' ELSE 'read' END AS installation_permission,
-          repo.full_name AS repository,wj.name AS current_job_name,wj.run_id AS current_run_id
+          repo.full_name AS repository,wj.name AS current_job_name,wj.run_id AS current_run_id,
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
         FROM runners r JOIN runner_pools p ON p.id=r.pool_id
+        LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
+          WHERE latest.workload_id=r.id ORDER BY latest.generation DESC LIMIT 1)
+        LEFT JOIN fleet_hosts fh ON fh.id=wp.host_id
+        LEFT JOIN host_backends hb ON hb.id=wp.backend_id
         JOIN installations primary_installation ON primary_installation.id=p.installation_id
         LEFT JOIN repositories repo ON repo.id=r.target_repository_id
         LEFT JOIN installations target_installation ON target_installation.id=repo.installation_id
@@ -1480,6 +1485,7 @@ pub async fn runners(
         "poolId": row.get::<String,_>("pool_id"), "poolName": row.get::<String,_>("pool_name"), "poolPaused": row.get::<bool,_>("pool_paused"),
         "accountLogin": row.get::<String,_>("account_login"), "repository": row.try_get::<Option<String>,_>("repository").ok().flatten(),
         "currentJobName": row.try_get::<Option<String>,_>("current_job_name").ok().flatten(), "currentRunId": row.try_get::<Option<i64>,_>("current_run_id").ok().flatten(),
+        "machine": machine_json(row),
         "canManage": user.role == "admin" || row.get::<String,_>("installation_permission") == "admin",
     })).collect::<Vec<_>>();
     Ok(paginated_page(&items, total, page, per_page))
@@ -1553,8 +1559,16 @@ pub async fn workflow_run(
           (SELECT r.id FROM runners r WHERE r.current_job_id=wj.id AND r.deleted_at IS NULL
             ORDER BY r.updated_at DESC LIMIT 1) AS live_runner_id,
           (SELECT ls.id FROM log_streams ls WHERE ls.job_id=wj.id AND ls.complete=1
-            ORDER BY ls.created_at DESC LIMIT 1) AS archived_log_id
-          FROM workflow_jobs wj WHERE wj.run_id=? ORDER BY wj.created_at"#,
+            ORDER BY ls.created_at DESC LIMIT 1) AS archived_log_id,
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
+          FROM workflow_jobs wj
+          LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
+            JOIN runners r ON r.id=latest.workload_id
+            WHERE r.name=wj.runner_name
+            ORDER BY r.created_at DESC,latest.generation DESC LIMIT 1)
+          LEFT JOIN fleet_hosts fh ON fh.id=wp.host_id
+          LEFT JOIN host_backends hb ON hb.id=wp.backend_id
+          WHERE wj.run_id=? ORDER BY wj.created_at"#,
     )
     .bind(run_id)
     .fetch_all(&state.database)
@@ -1585,6 +1599,7 @@ pub async fn workflow_run(
             "completedAt": iso_optional(row.try_get::<Option<i64>,_>("completed_at").ok().flatten()),
             "liveRunnerId": row.try_get::<Option<String>,_>("live_runner_id").ok().flatten(),
             "archivedLogId": row.try_get::<Option<String>,_>("archived_log_id").ok().flatten(),
+            "machine": machine_json(row),
             "diagnosis": diagnosis,
         }));
     }
@@ -1722,6 +1737,20 @@ pub async fn audit_events(
     Ok(paginated_page(&items, total, page, per_page))
 }
 
+/// The enrolled machine a fleet runner was placed on, or null for runners
+/// `GridOps` started itself.
+fn machine_json(row: &sqlx::sqlite::SqliteRow) -> Value {
+    match row.try_get::<Option<String>, _>("machine_id").ok().flatten() {
+        Some(id) => json!({
+            "id": id,
+            "name": row.try_get::<Option<String>, _>("machine_name").ok().flatten(),
+            "runtime": row.try_get::<Option<String>, _>("machine_runtime").ok().flatten(),
+            "os": row.try_get::<Option<String>, _>("machine_os").ok().flatten(),
+        }),
+        None => Value::Null,
+    }
+}
+
 pub async fn log_targets(
     State(state): State<AppState>,
     Query(query): Query<LogTargetsQuery>,
@@ -1754,8 +1783,9 @@ pub async fn log_targets(
     .await?;
     let (page, offset) = bounded_pagination(requested_page, total, per_page);
     let rows = sqlx::query(
-        r#"SELECT id,runner_id,name,status,busy,container_id,updated_at,pool_name,repository,
-          kind,size_bytes,job_id,run_id,job_name,job_status,job_conclusion,run_number,workflow_name
+        r#"SELECT targets.id,runner_id,name,status,busy,container_id,updated_at,pool_name,repository,
+          kind,size_bytes,job_id,run_id,job_name,job_status,job_conclusion,run_number,workflow_name,
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
         FROM (
           SELECT r.id,CAST(NULL AS TEXT) AS runner_id,r.name,r.status,r.busy,r.container_id,
             r.updated_at,p.name AS pool_name,repo.full_name AS repository,'live' AS kind,
@@ -1783,8 +1813,13 @@ pub async fn log_targets(
           JOIN workflow_runs run ON run.id=job.run_id
           JOIN repositories repo ON repo.id=run.repository_id
           WHERE ls.complete=1 AND ls.job_id IS NOT NULL
-        ) targets ORDER BY
-          CASE WHEN id=? OR runner_id=? THEN 0 ELSE 1 END,
+        ) targets
+        LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
+          WHERE latest.workload_id=COALESCE(targets.runner_id,targets.id) ORDER BY latest.generation DESC LIMIT 1)
+        LEFT JOIN fleet_hosts fh ON fh.id=wp.host_id
+        LEFT JOIN host_backends hb ON hb.id=wp.backend_id
+        ORDER BY
+          CASE WHEN targets.id=? OR runner_id=? THEN 0 ELSE 1 END,
           CASE kind WHEN 'live' THEN 0 ELSE 1 END,busy DESC,updated_at DESC
         LIMIT ? OFFSET ?"#,
     )
@@ -1807,6 +1842,7 @@ pub async fn log_targets(
         "jobName": row.get::<String,_>("job_name"), "jobStatus": row.get::<String,_>("job_status"),
         "jobConclusion": row.try_get::<Option<String>,_>("job_conclusion").ok().flatten(),
         "runNumber": row.get::<i64,_>("run_number"), "workflowName": row.get::<String,_>("workflow_name"),
+        "machine": machine_json(row),
     })).collect::<Vec<_>>();
     Ok(paginated_page(&items, total, page, per_page))
 }

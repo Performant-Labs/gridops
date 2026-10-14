@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { MoreHorizontal, Pause, Play, RefreshCw, RotateCcw, Square, Terminal, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pause, Play, RefreshCw, RotateCcw, Server, Square, Terminal, Trash2 } from "lucide-react";
 
 import { listRowClassName, rowActionClassName } from "~/components/page";
 import { StatusBadge, statusLabel } from "~/components/status-icon";
@@ -7,10 +7,29 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
 import { Tooltip } from "~/components/ui/tooltip";
-import type { Runner } from "~/features/operations/operations.functions";
+import type { Runner, RunnerMachine } from "~/features/operations/operations.functions";
 import { runnerAction } from "~/features/runner-pools/runner-pools.functions";
 import { useAction } from "~/lib/use-action";
 import { cn, formatAge } from "~/lib/utils";
+
+const osLabel = { linux: "Linux", macos: "macOS", windows: "Windows" } as const;
+
+/** "Windows · x64 · native" for a fleet runner, "macOS · arm64" for a Tart VM, and so on. */
+export function runnerPlatformLabel(runner: Runner) {
+  const machine = runner.machine;
+  const os = machine?.os ? osLabel[machine.os] : runner.provider === "tart" ? "macOS" : "Linux";
+  const runtime = machine?.runtime === "native_process" ? " · native" : "";
+  return `${os} · ${runner.architecture.toLowerCase()}${runtime}`;
+}
+
+/** Links to the machine that runs a fleet runner. */
+export function MachineLink({ className, machine }: { className?: string; machine: RunnerMachine }) {
+  return (
+    <Link className={cn("relative truncate rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-selected hover:text-foreground", className)} params={{ hostId: machine.id }} title={`Runs on ${machine.name ?? "an enrolled machine"}`} to="/fleet/machines/$hostId">
+      <Server className="mr-1 inline size-3 align-[-2px]" />{machine.name ?? "Machine"}
+    </Link>
+  );
+}
 
 export function runnerState(runner: Runner) {
   return runner.busy ? "busy" : runner.status;
@@ -27,7 +46,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
         {/* The job and repository columns appear at wider breakpoints; below them they sit under the name. */}
         <span className="block truncate text-2xs text-muted-foreground md:hidden">{runner.currentJobName ?? runner.repository ?? runner.accountLogin}</span>
       </span>
-      <Badge className="hidden sm:inline-flex" dot={runner.provider === "tart" ? "bg-[#bb87fc]" : "bg-info"}>{runner.provider === "tart" ? "macOS" : "Linux"} · {runner.architecture.toLowerCase()}</Badge>
+      <Badge className="hidden sm:inline-flex" dot={runner.provider === "tart" || runner.machine?.os === "macos" ? "bg-[#bb87fc]" : runner.machine?.os === "windows" ? "bg-warning" : "bg-info"}>{runnerPlatformLabel(runner)}</Badge>
       {runner.ephemeral ? null : <Badge className="hidden md:inline-flex" variant="outline">persistent</Badge>}
       {runner.currentJobName ? (
         runner.currentRunId ? (
@@ -38,6 +57,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
       ) : null}
       {runner.failureReason ? <span className="hidden min-w-0 max-w-72 truncate text-xs text-danger lg:block" title={runner.failureReason}>{runner.failureReason}</span> : null}
       <span className="flex-1" />
+      {runner.machine ? <MachineLink className="hidden max-w-40 sm:block" machine={runner.machine} /> : null}
       {showPool ? (
         <Link className="relative hidden max-w-40 truncate rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-selected hover:text-foreground lg:block" params={{ poolId: runner.poolId }} to="/runner-pools/$poolId">{runner.poolName}</Link>
       ) : null}
