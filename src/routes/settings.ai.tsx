@@ -73,7 +73,13 @@ function AiAgentSettings() {
     >
       {!github.ready ? <GitHubPermissionsCallout github={github} /> : null}
       {!canManage ? <Callout title="Read-only access">A GridOps administrator connects AI providers and configures the fix agent.</Callout> : null}
-      {!configured ? <Callout title="Fix with agent is hidden">The button stays off failed jobs until a provider and model are saved below.</Callout> : null}
+      {!configured ? (
+        <Callout title="Fix with agent is hidden">
+          {ready.length
+            ? "A provider is connected but the fix agent isn’t set up. Choose its provider and model under Fix agent, then save."
+            : "The button stays off failed jobs until a provider is connected and saved as the fix agent."}
+        </Callout>
+      ) : null}
 
       <SettingsSection title={`Providers${connections.length ? ` · ${connections.length}` : ""}`}>
         {connections.length ? connections.map((connection) => (
@@ -81,7 +87,7 @@ function AiAgentSettings() {
         )) : <div className="px-4 py-6 text-center text-sm text-muted-foreground">No AI providers are connected yet.</div>}
       </SettingsSection>
 
-      {canManage ? <ConnectProviderSection providers={settings.providers} /> : null}
+      {canManage ? <ConnectProviderSection adopt={configured ? null : agent} providers={settings.providers} /> : null}
 
       {canManage ? <AgentSettingsForm key={formKey} settings={settings} /> : <AgentSettingsSummary settings={settings} />}
     </SettingsLayout>
@@ -155,7 +161,25 @@ function ConnectionRow({ connection, inUse, canManage }: { connection: AiConnect
   );
 }
 
-function ConnectProviderSection({ providers }: { providers: AiProviderOption[] }) {
+type Adopt = AiSettings["agent"] | null;
+
+/** With no fix agent yet, a newly connected provider becomes it, on the provider's first model. */
+async function connected(connection: AiConnection, adopt: Adopt) {
+  if (!adopt || connection.status !== "ready") return toast.success(`${connection.providerName} connected.`);
+  try {
+    const model = (await getAiConnectionModels(connection.id)).models[0];
+    if (!model) return toast.success(`${connection.providerName} connected. Choose a model under Fix agent.`);
+    await saveAgentSettings({
+      connectionId: connection.id, model: model.id, reasoningEffort: effortForModel(model, null),
+      triggerMode: adopt.triggerMode, dailyLimit: adopt.dailyLimit,
+    });
+    toast.success(`${connection.providerName} connected. Fix with agent now uses ${model.name}.`);
+  } catch {
+    toast.success(`${connection.providerName} connected. Save it under Fix agent to turn fixes on.`);
+  }
+}
+
+function ConnectProviderSection({ providers, adopt }: { providers: AiProviderOption[]; adopt: Adopt }) {
   const subscriptions = providers.filter((provider) => provider.authMethod === "subscription_oauth");
   const apiKeys = providers.filter((provider) => provider.authMethod === "api_key");
   return (
@@ -163,14 +187,14 @@ function ConnectProviderSection({ providers }: { providers: AiProviderOption[] }
       description="Sign in with a ChatGPT or Claude subscription, or use an API key. Credentials are encrypted at rest and never returned to the browser."
       title="Connect a provider"
     >
-      {subscriptions.map((provider) => isSubscriptionProvider(provider.id) ? <SubscriptionConnect key={provider.id} provider={provider} providerId={provider.id} /> : null)}
-      {apiKeys.length ? <ApiKeyConnect providers={apiKeys} /> : null}
+      {subscriptions.map((provider) => isSubscriptionProvider(provider.id) ? <SubscriptionConnect adopt={adopt} key={provider.id} provider={provider} providerId={provider.id} /> : null)}
+      {apiKeys.length ? <ApiKeyConnect adopt={adopt} providers={apiKeys} /> : null}
     </SettingsSection>
   );
 }
 
 /** Start → sign in on the provider's page in a new tab → paste the result back → complete. */
-function SubscriptionConnect({ provider, providerId }: { provider: AiProviderOption; providerId: AiSubscriptionProviderId }) {
+function SubscriptionConnect({ provider, providerId, adopt }: { provider: AiProviderOption; providerId: AiSubscriptionProviderId; adopt: Adopt }) {
   const router = useRouter();
   const [attempt, setAttempt] = useState<AiOAuthAttempt | null>(null);
   const [callbackValue, setCallbackValue] = useState("");
@@ -209,7 +233,7 @@ function SubscriptionConnect({ provider, providerId }: { provider: AiProviderOpt
       const connection = await completeAiOAuth({ attemptId: attempt.attemptId, callbackValue: callbackValue.trim() });
       setAttempt(null);
       setCallbackValue("");
-      toast.success(`${connection.providerName} connected.`);
+      await connected(connection, adopt);
       await router.invalidate();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `Could not finish signing in to ${provider.name}.`);
@@ -272,7 +296,7 @@ function SubscriptionConnect({ provider, providerId }: { provider: AiProviderOpt
   );
 }
 
-function ApiKeyConnect({ providers }: { providers: AiProviderOption[] }) {
+function ApiKeyConnect({ providers, adopt }: { providers: AiProviderOption[]; adopt: Adopt }) {
   const router = useRouter();
   const options = providers.flatMap((provider) => isApiKeyProvider(provider.id) ? [{ ...provider, id: provider.id }] : []);
   const [providerId, setProviderId] = useState<AiApiKeyProviderId | null>(options[0]?.id ?? null);
@@ -289,7 +313,7 @@ function ApiKeyConnect({ providers }: { providers: AiProviderOption[] }) {
     try {
       const connection = await connectAiApiKey({ provider: providerId, apiKey: apiKey.trim() });
       setApiKey("");
-      toast.success(`${connection.providerName} connected.`);
+      await connected(connection, adopt);
       await router.invalidate();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The API key could not be saved.");
