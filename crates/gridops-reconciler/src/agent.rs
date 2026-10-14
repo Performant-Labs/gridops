@@ -104,9 +104,19 @@ pub async fn worker(app: Reconciler) {
         }
         match claim_next_run(&app).await {
             Ok(Some(run_id)) => {
-                if let Err(error) = execute_run(&app, &run_id).await {
-                    tracing::error!(agent_run_id = %run_id, error = ?error, "agent run failed");
-                    let _ = finish_failed(&app, &run_id, &format!("{error:#}")).await;
+                // A panic inside one run must fail that run, not stop the worker.
+                let task = tokio::spawn({
+                    let (app, run_id) = (app.clone(), run_id.clone());
+                    async move { execute_run(&app, &run_id).await }
+                });
+                let failure = match task.await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(format!("{error:#}")),
+                    Err(error) => Some(format!("GridOps hit an internal error while running the agent: {error}")),
+                };
+                if let Some(message) = failure {
+                    tracing::error!(agent_run_id = %run_id, error = %message, "agent run failed");
+                    let _ = finish_failed(&app, &run_id, &message).await;
                 }
                 continue;
             }
@@ -589,7 +599,7 @@ async fn job_log(app: &Reconciler, repo_path: &str, job_id: i64, token: &str) ->
 async fn runner_context(app: &Reconciler, plan: &RunPlan) -> Result<Option<RunnerContext>> {
     let row = sqlx::query(
         r#"SELECT runner.name,runner.os,runner.architecture,runner.provider,pool.name AS pool,
-          pool.cpu_limit,pool.memory_limit_mb,pool.labels
+          CAST(pool.cpu_limit AS REAL) AS cpu_limit,pool.memory_limit_mb,pool.labels
           FROM runners runner JOIN runner_pools pool ON pool.id=runner.pool_id
           WHERE runner.name=? OR runner.current_job_id=? OR runner.last_job_id=?
           ORDER BY CASE WHEN runner.name=? THEN 0 ELSE 1 END,runner.updated_at DESC LIMIT 1"#,

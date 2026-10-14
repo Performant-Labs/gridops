@@ -755,10 +755,6 @@ fn router(state: ManagerState) -> Router {
         .route("/v1/runners/{container_id}/logs", get(logs))
         .route("/v1/runners/{container_id}/{action}", post(control_runner))
         .route(
-            "/v1/sandboxes",
-            get(sandbox::list_sandboxes).post(sandbox::create_sandbox),
-        )
-        .route(
             "/v1/sandboxes/{sandbox_id}",
             delete(sandbox::delete_sandbox),
         )
@@ -766,6 +762,13 @@ fn router(state: ManagerState) -> Router {
     // Agent commands and repository uploads outlive the standard timeout, so
     // each carries its own ceiling instead.
     let long_running = Router::new()
+        // Creating a sandbox may first pull its image.
+        .route(
+            "/v1/sandboxes",
+            get(sandbox::list_sandboxes)
+                .layer(request_timeout(Duration::from_mins(3)))
+                .merge(post(sandbox::create_sandbox).layer(request_timeout(SANDBOX_CREATE_TIMEOUT))),
+        )
         .route(
             "/v1/sandboxes/{sandbox_id}/exec",
             post(sandbox::exec_in_sandbox).layer(request_timeout(sandbox::EXEC_ROUTE_TIMEOUT)),
@@ -1377,10 +1380,15 @@ async fn ensure_network(docker: &Docker, name: &str) -> Result<(), ManagerError>
     }
 }
 
+/// A first pull of a runner image can take minutes; Docker's default client timeout is two.
+const IMAGE_PULL_TIMEOUT: Duration = Duration::from_mins(10);
+const SANDBOX_CREATE_TIMEOUT: Duration = Duration::from_mins(12);
+
 async fn ensure_image(docker: &Docker, image: &str, pull_image: bool) -> Result<(), ManagerError> {
+    let puller = docker.clone().with_timeout(IMAGE_PULL_TIMEOUT);
     match docker.inspect_image(image).await {
         Ok(_) if !pull_image => Ok(()),
-        Ok(_) => match docker
+        Ok(_) => match puller
             .create_image(
                 Some(
                     CreateImageOptionsBuilder::default()
@@ -1408,7 +1416,7 @@ async fn ensure_image(docker: &Docker, image: &str, pull_image: bool) -> Result<
         Err(DockerError::DockerResponseServerError {
             status_code: 404, ..
         }) => {
-            docker
+            puller
                 .create_image(
                     Some(
                         CreateImageOptionsBuilder::default()
