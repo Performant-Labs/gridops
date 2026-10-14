@@ -24,10 +24,11 @@ export function runnerPlatformLabel(runner: Runner) {
 }
 
 /** Links to the machine that runs a fleet runner. */
-export function MachineLink({ className, machine }: { className?: string; machine: RunnerMachine }) {
+export function MachineLink({ className, machine, platform = false }: { className?: string; machine: RunnerMachine; platform?: boolean }) {
+  const detail = platform && machine.os ? ` · ${osLabel[machine.os]}${machine.architecture ? ` ${machine.architecture}` : ""}` : "";
   return (
     <Link className={cn("relative truncate rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-selected hover:text-foreground", className)} params={{ hostId: machine.id }} title={`Runs on ${machine.name ?? "an enrolled machine"}`} to="/fleet/machines/$hostId">
-      <Server className="mr-1 inline size-3 align-[-2px]" />{machine.name ?? "Machine"}
+      <Server className="mr-1 inline size-3 align-[-2px]" />{machine.name ?? "Machine"}{detail}
     </Link>
   );
 }

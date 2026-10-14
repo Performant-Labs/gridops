@@ -5,7 +5,8 @@ import { ListPagination } from "~/components/list-pagination";
 import { EmptyState, ListGroup, PageBody, PageHeader } from "~/components/page";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { RunStatusIcon } from "~/components/status-icon";
-import { type WorkflowRun, getWorkflowRunsPage } from "~/features/operations/operations.functions";
+import { Badge } from "~/components/ui/badge";
+import { type RunPlatform, type WorkflowRun, getWorkflowRunsPage } from "~/features/operations/operations.functions";
 import { RunActionsMenu, isActiveRun } from "~/features/workflow-runs/run-actions";
 import { RunRow } from "~/features/workflow-runs/run-row";
 import { validatePageSearch } from "~/lib/pagination";
@@ -67,10 +68,25 @@ function WorkflowRunsPage() {
   );
 }
 
+const OS_LABEL: Record<string, string> = { linux: "Linux", macos: "macOS", windows: "Windows" };
+const OS_DOT: Record<string, string> = { macos: "bg-[#bb87fc]", windows: "bg-warning" };
+
+/** "Mac-mini · Linux arm64", "Host · Linux arm64" or "GitHub-hosted". */
+function PlatformBadge({ platform }: { platform: RunPlatform }) {
+  if (platform.kind === "github") return <Badge variant="outline">GitHub-hosted</Badge>;
+  if (platform.kind === "external") return <Badge variant="outline">Self-hosted</Badge>;
+  const where = platform.kind === "machine" ? platform.machine?.name?.replace(/\.local$/, "") ?? "Machine" : "Host";
+  const os = platform.os ? OS_LABEL[platform.os] ?? platform.os : null;
+  const what = [os, platform.architecture, platform.runtime === "native_process" ? "native" : null].filter(Boolean).join(" ");
+  return <Badge dot={OS_DOT[platform.os ?? ""] ?? "bg-info"} title={`Ran on ${where}`}>{where}{what ? ` · ${what}` : ""}</Badge>;
+}
+
 function JobSummary({ run }: { run: WorkflowRun }) {
   if (!run.jobCount) return null;
   return (
     <span className="tabular hidden shrink-0 items-center gap-2 text-xs text-muted-foreground lg:inline-flex">
+      {run.runsOn?.slice(0, 3).map((platform) => <PlatformBadge key={`${platform.kind}:${platform.machine?.id ?? ""}:${platform.os}:${platform.architecture}`} platform={platform} />)}
+      {(run.runsOn?.length ?? 0) > 3 ? <span className="text-faint">+{(run.runsOn?.length ?? 0) - 3}</span> : null}
       {run.failedJobs ? <span className="text-danger">{run.failedJobs} failed</span> : null}
       {run.activeJobs ? <span className="text-progress">{run.activeJobs} active</span> : null}
       <span className="text-faint">{run.jobCount} {run.jobCount === 1 ? "job" : "jobs"}</span>

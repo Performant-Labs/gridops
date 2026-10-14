@@ -32,7 +32,13 @@ export type RunnerPool = {
 };
 
 /** The enrolled machine a fleet runner was placed on. */
-export type RunnerMachine = { id: string; name: string | null; runtime: "docker" | "native_process" | "tart_vm" | null; os: "linux" | "macos" | "windows" | null };
+export type RunnerMachine = { id: string; name: string | null; runtime: "docker" | "native_process" | "tart_vm" | null; os: "linux" | "macos" | "windows" | null; architecture?: "x64" | "arm64" | null };
+
+/** Where a run's jobs ran: an enrolled machine, the GridOps host, or GitHub's own runners. */
+export type RunPlatform = {
+  kind: "machine" | "host" | "github" | "external"; machine: { id: string; name: string | null } | null;
+  runtime: RunnerMachine["runtime"]; os: string | null; architecture: string | null;
+};
 
 export type Runner = {
   id: string; name: string; provider: "docker" | "tart"; platform: "github" | "bitbucket"; status: string; busy: boolean; ephemeral: boolean; os: string;
@@ -47,9 +53,10 @@ export type WorkflowRun = {
   status: string; conclusion: string | null; headBranch: string | null; headSha: string;
   actorLogin: string | null; htmlUrl: string; startedAt: string | null; completedAt: string | null;
   createdAt: string; repository: string; jobCount: number; activeJobs: number; failedJobs: number; canManage: boolean;
+  runsOn?: RunPlatform[];
 };
 
-export type WorkflowRunDetail = Omit<WorkflowRun, "jobCount" | "activeJobs" | "failedJobs"> & {
+export type WorkflowRunDetail = Omit<WorkflowRun, "jobCount" | "activeJobs" | "failedJobs" | "runsOn"> & {
   jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; runnerName: string | null;
     runnerGroupName: string | null; labels: string[]; htmlUrl: string; startedAt: string | null; completedAt: string | null;
     liveRunnerId: string | null; archivedLogId: string | null; machine: RunnerMachine | null;

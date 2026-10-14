@@ -1446,7 +1446,7 @@ pub async fn runners(
                   AND manage.permission='admin')
           ) THEN 'admin' ELSE 'read' END AS installation_permission,
           repo.full_name AS repository,wj.name AS current_job_name,wj.run_id AS current_run_id,
-          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os,hb.architecture AS machine_arch
         FROM runners r JOIN runner_pools p ON p.id=r.pool_id
         LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
           WHERE latest.workload_id=r.id ORDER BY latest.generation DESC LIMIT 1)
@@ -1525,11 +1525,64 @@ pub async fn workflow_runs(
     .bind(offset)
     .fetch_all(&state.database)
     .await?;
+    let mut runs_on = run_platforms(
+        &state,
+        &rows.iter().map(|row| row.get::<i64, _>("id")).collect::<Vec<_>>(),
+    )
+    .await?;
     let items = rows
         .iter()
-        .map(|row| workflow_run_json(row, user.role == "admin"))
+        .map(|row| {
+            let mut item = workflow_run_json(row, user.role == "admin");
+            item["runsOn"] = Value::Array(runs_on.remove(&row.get::<i64, _>("id")).unwrap_or_default());
+            item
+        })
         .collect::<Vec<_>>();
     Ok(paginated_page(&items, total, page, per_page))
+}
+
+/// Where each run's jobs ran: a fleet machine, the control host or GitHub's own runners.
+async fn run_platforms(state: &AppState, run_ids: &[i64]) -> ApiResult<HashMap<i64, Vec<Value>>> {
+    let mut platforms = HashMap::<i64, Vec<Value>>::new();
+    if run_ids.is_empty() {
+        return Ok(platforms);
+    }
+    let rows = sqlx::query(
+        r#"SELECT DISTINCT wj.run_id,r.id IS NOT NULL AS gridops,
+          COALESCE(wj.runner_group_name,'')='GitHub Actions' AS github_hosted,fh.id AS machine_id,fh.name AS machine_name,
+          hb.runtime_kind AS runtime,COALESCE(hb.execution_os,lower(r.os)) AS os,
+          COALESCE(hb.architecture,lower(r.architecture)) AS architecture
+        FROM workflow_jobs wj
+        LEFT JOIN runners r ON r.id=(SELECT named.id FROM runners named WHERE named.name=wj.runner_name
+          ORDER BY named.created_at DESC LIMIT 1)
+        LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
+          WHERE latest.workload_id=r.id ORDER BY latest.generation DESC LIMIT 1)
+        LEFT JOIN fleet_hosts fh ON fh.id=wp.host_id
+        LEFT JOIN host_backends hb ON hb.id=wp.backend_id
+        WHERE wj.run_id IN (SELECT value FROM json_each(?)) AND COALESCE(wj.runner_name,'')<>''
+        ORDER BY wj.run_id,fh.name,os,architecture"#,
+    )
+    .bind(json!(run_ids).to_string())
+    .fetch_all(&state.database)
+    .await?;
+    for row in rows {
+        let gridops = row.get::<bool, _>("gridops");
+        let machine_id = row.get::<Option<String>, _>("machine_id");
+        let kind = match (gridops, &machine_id) {
+            (false, _) if row.get::<bool, _>("github_hosted") => "github",
+            (false, _) => "external",
+            (true, Some(_)) => "machine",
+            (true, None) => "host",
+        };
+        platforms.entry(row.get("run_id")).or_default().push(json!({
+            "kind": kind,
+            "machine": machine_id.map(|id| json!({"id": id, "name": row.get::<Option<String>, _>("machine_name")})),
+            "runtime": row.get::<Option<String>, _>("runtime"),
+            "os": if gridops { row.get::<Option<String>, _>("os") } else { None },
+            "architecture": if gridops { row.get::<Option<String>, _>("architecture") } else { None },
+        }));
+    }
+    Ok(platforms)
 }
 
 pub async fn workflow_run(
@@ -1560,7 +1613,7 @@ pub async fn workflow_run(
             ORDER BY r.updated_at DESC LIMIT 1) AS live_runner_id,
           (SELECT ls.id FROM log_streams ls WHERE ls.job_id=wj.id AND ls.complete=1
             ORDER BY ls.created_at DESC LIMIT 1) AS archived_log_id,
-          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os,hb.architecture AS machine_arch
           FROM workflow_jobs wj
           LEFT JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
             JOIN runners r ON r.id=latest.workload_id
@@ -1750,6 +1803,7 @@ fn machine_json(row: &sqlx::sqlite::SqliteRow) -> Value {
             "name": row.try_get::<Option<String>, _>("machine_name").ok().flatten(),
             "runtime": row.try_get::<Option<String>, _>("machine_runtime").ok().flatten(),
             "os": row.try_get::<Option<String>, _>("machine_os").ok().flatten(),
+            "architecture": row.try_get::<Option<String>, _>("machine_arch").ok().flatten(),
         }),
         None => Value::Null,
     }
@@ -1791,7 +1845,7 @@ pub async fn log_targets(
           targets.container_id,targets.updated_at,targets.pool_name,targets.repository,targets.kind,
           targets.size_bytes,targets.job_id,targets.run_id,targets.job_name,targets.job_status,
           targets.job_conclusion,targets.run_number,targets.workflow_name,
-          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
+          fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os,hb.architecture AS machine_arch
         FROM (
           SELECT r.id,CAST(NULL AS TEXT) AS runner_id,r.name,r.status,r.busy,r.container_id,
             r.updated_at,p.name AS pool_name,repo.full_name AS repository,'live' AS kind,
