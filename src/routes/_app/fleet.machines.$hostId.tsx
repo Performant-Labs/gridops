@@ -413,6 +413,40 @@ function GrantsSection({ hostId }: { hostId: string }) {
   }
 
   const items = grants.data?.items ?? [];
+
+  /** Sets one column for every repository, a few requests at a time. */
+  async function changeAll(field: keyof GrantPolicy, value: boolean) {
+    const targets = items.filter((grant) => grant[field] !== value);
+    if (targets.length === 0) return;
+    if (value && field === "allowNative" && !(await confirmAction(
+      `Run jobs natively on this machine for all ${targets.length} repositories? Jobs run directly on the host with the agent’s access, not in a container or VM.`,
+      { confirmLabel: "Allow all" },
+    ))) return;
+    if (value && field === "allowDockerSocket" && !(await confirmAction(
+      `Share the Docker socket with jobs from all ${targets.length} repositories? Jobs can then control every container on this machine.`,
+      { confirmLabel: "Allow all" },
+    ))) return;
+    await run(`all:${field}`, async () => {
+      for (let start = 0; start < targets.length; start += 6) {
+        await Promise.all(targets.slice(start, start + 6).map((grant) => setHostGrant(hostId, grant.targetId, {
+          allowSchedule: grant.allowSchedule, allowNative: grant.allowNative, allowDockerSocket: grant.allowDockerSocket, [field]: value,
+        })));
+      }
+    }, `Updated ${targets.length} ${targets.length === 1 ? "repository" : "repositories"}.`);
+  }
+
+  const columnHeader = (field: keyof GrantPolicy, label: string) => (
+    <div className="flex flex-col items-center gap-1.5">
+      <span>{label}</span>
+      <Switch
+        aria-label={`${label} for all repositories`}
+        checked={items.length > 0 && items.every((grant) => grant[field])}
+        disabled={pending !== null || items.length === 0}
+        onCheckedChange={(value) => void changeAll(field, value)}
+      />
+    </div>
+  );
+
   return (
     <section className="space-y-3">
       <SectionHeading>Repositories</SectionHeading>
@@ -425,10 +459,10 @@ function GrantsSection({ hostId }: { hostId: string }) {
           <table className="w-full text-sm">
             <thead className="border-b border-border text-left text-xs text-muted-foreground">
               <tr>
-                <th className="px-4 py-2 font-medium" scope="col">Repository or organization</th>
-                <th className="px-3 py-2 text-center font-medium" scope="col">Run jobs</th>
-                <th className="px-3 py-2 text-center font-medium" scope="col">Run natively on the host</th>
-                <th className="px-4 py-2 text-center font-medium" scope="col">Share Docker socket</th>
+                <th className="px-4 py-2 align-top font-medium" scope="col">Repository or organization</th>
+                <th className="px-3 py-2 text-center font-medium" scope="col">{columnHeader("allowSchedule", "Run jobs")}</th>
+                <th className="px-3 py-2 text-center font-medium" scope="col">{columnHeader("allowNative", "Run natively on the host")}</th>
+                <th className="px-4 py-2 text-center font-medium" scope="col">{columnHeader("allowDockerSocket", "Share Docker socket")}</th>
               </tr>
             </thead>
             <tbody>
@@ -451,7 +485,7 @@ function GrantsSection({ hostId }: { hostId: string }) {
           </table>
         </div>
       )}
-      <p className="text-xs text-muted-foreground">Native profiles on macOS and Linux need “Run natively on the host”: those jobs run directly on the machine, not in a container or VM.</p>
+      <p className="text-xs text-muted-foreground">The switches in the header change every repository at once. Native profiles need “Run natively on the host”: those jobs run directly on the machine, not in a container or VM.</p>
     </section>
   );
 }
