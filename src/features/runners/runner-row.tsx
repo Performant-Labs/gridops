@@ -4,7 +4,8 @@ import { MoreHorizontal, Pause, Play, RefreshCw, RotateCcw, Server, Square, Term
 import { listRowClassName, rowActionClassName } from "~/components/page";
 import { StatusBadge, statusLabel } from "~/components/status-icon";
 import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { Button, buttonVariants } from "~/components/ui/button";
+import { Dialog, DialogTrigger, SheetContent } from "~/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
 import { Tooltip } from "~/components/ui/tooltip";
 import type { Runner, RunnerMachine } from "~/features/operations/operations.functions";
@@ -31,6 +32,49 @@ export function MachineLink({ className, machine }: { className?: string; machin
   );
 }
 
+/** Opens a side panel with what the runner is, where it runs and what it's doing. */
+function RunnerDetails({ runner }: { runner: Runner }) {
+  const state = runnerState(runner);
+  const rows: Array<[string, React.ReactNode]> = [
+    ["Status", statusLabel(state)],
+    ["Platform", runnerPlatformLabel(runner)],
+    ["Runs on", runner.machine ? <MachineLink className="-ml-1.5" machine={runner.machine} /> : "The GridOps host"],
+    ["Pool", <Link className="underline-offset-2 hover:underline" params={{ poolId: runner.poolId }} to="/runner-pools/$poolId">{runner.poolName}</Link>],
+    ["Repository", runner.repository ?? runner.accountLogin],
+    ["Current job", runner.currentJobName
+      ? runner.currentRunId
+        ? <Link className="underline-offset-2 hover:underline" params={{ runId: String(runner.currentRunId) }} to="/workflow-runs/$runId">{runner.currentJobName}</Link>
+        : runner.currentJobName
+      : "None"],
+    ["Mode", runner.ephemeral ? "Ephemeral" : "Persistent"],
+    ["Created", new Date(runner.createdAt).toLocaleString()],
+    ["Registered", runner.registeredAt ? new Date(runner.registeredAt).toLocaleString() : "Not yet"],
+    ["Last heartbeat", runner.lastHeartbeatAt ? `${formatAge(runner.lastHeartbeatAt)} ago` : "None yet"],
+  ];
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button aria-label={`Show details for ${runner.name}`} className="absolute inset-0 outline-none" data-list-row="" type="button" />
+      </DialogTrigger>
+      <SheetContent
+        actions={<Link className={buttonVariants({ size: "sm", variant: "outline" })} search={{ target: runner.id }} to="/live-logs"><Terminal />View logs</Link>}
+        className="max-w-md"
+        description={runner.failureReason ?? undefined}
+        heading={<span className="font-mono">{runner.name}</span>}
+      >
+        <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2.5 overflow-y-auto px-5 py-4 text-sm">
+          {rows.map(([label, value]) => (
+            <div className="contents" key={label}>
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="min-w-0 truncate text-foreground">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </SheetContent>
+    </Dialog>
+  );
+}
+
 export function runnerState(runner: Runner) {
   return runner.busy ? "busy" : runner.status;
 }
@@ -39,7 +83,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
   const state = runnerState(runner);
   return (
     <div className={cn(listRowClassName, "relative pr-2")}>
-      <Link aria-label={`Open logs for ${runner.name}`} className="absolute inset-0 outline-none" data-list-row="" search={{ target: runner.id }} to="/live-logs" />
+      <RunnerDetails runner={runner} />
       <Tooltip content={statusLabel(state)}><span className="relative inline-flex"><StatusBadge iconOnly status={state} /></span></Tooltip>
       <span className="min-w-0 shrink">
         <span className="block truncate font-mono text-xs font-medium text-foreground">{runner.name}</span>
