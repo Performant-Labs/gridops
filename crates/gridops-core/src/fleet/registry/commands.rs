@@ -355,7 +355,9 @@ async fn release(
 
 /// Cancels pending commands that can no longer be delivered: their session
 /// ended or their deadline passed. A delivered command past its deadline is
-/// uncertain, because the agent may have acted on it.
+/// uncertain, because the agent may have acted on it. Only commands that can
+/// change a workload make its placement uncertain; an unanswered `inspect`
+/// leaves the placement as it was, and a later inspect checks again.
 async fn cancel_undeliverable(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: &str,
@@ -385,6 +387,9 @@ async fn cancel_undeliverable(
             continue;
         };
         let kind: String = row.get("kind");
+        if delivered && kind == "inspect" {
+            continue;
+        }
         if delivered {
             sqlx::query("UPDATE workload_placements SET state='uncertain',updated_at=? WHERE id=?")
                 .bind(now)
