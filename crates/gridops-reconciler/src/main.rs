@@ -1823,6 +1823,17 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
         .bind(now)
         .execute(&app.database)
         .await?;
+    // Fleet output whose runner ended without the agent closing its stream
+    // (it restarted, or lost the session) still counts against the budget.
+    sqlx::query(
+        "UPDATE log_streams SET complete=1 WHERE complete=0 AND updated_at < ?
+           AND id IN (SELECT o.log_stream_id FROM fleet_output_streams o
+             JOIN workload_placements p ON p.id=o.placement_id
+             WHERE p.state IN ('stopped','cleaned','failed'))",
+    )
+    .bind(now - 3_600_000)
+    .execute(&app.database)
+    .await?;
     enforce_log_storage_budget(app).await?;
     sqlx::query("DELETE FROM webhook_deliveries WHERE received_at < ?")
         .bind(webhook_cutoff)

@@ -1,7 +1,7 @@
 //! A runner's whole fleet life against the API binary and the real agent:
 //! profile, enrollment, approval, activation, admission, prepare, start with
-//! one-time registration material, inspection and cleanup. Only the container
-//! runtime is a stand-in.
+//! one-time registration material, live console output, inspection and
+//! cleanup. Only the container runtime is a stand-in.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,11 +22,12 @@ use gridops_core::{
 use gridops_host_agent::{
     client::Client,
     dispatch::Trust,
-    helper::{HelperRequest, HelperResponse, RuntimeHelper},
+    helper::{HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper},
     journal::Journal,
     supervisor::{Stop, Supervisor},
 };
-use tokio::sync::oneshot;
+use secrecy::ExposeSecret as _;
+use tokio::{io::AsyncWriteExt as _, sync::oneshot};
 
 use super::*;
 
@@ -35,6 +36,8 @@ use super::*;
 struct FakeDocker {
     bootstraps: Mutex<Vec<String>>,
     operations: Mutex<Vec<&'static str>>,
+    /// The started container's console, written by the test.
+    console: Mutex<Option<tokio::io::DuplexStream>>,
 }
 
 impl RuntimeHelper for FakeDocker {
@@ -111,6 +114,11 @@ impl RuntimeHelper for FakeDocker {
         }
     }
 
+    async fn output(&self, _resource: LocalResourceIdentity) -> Option<RunnerOutput> {
+        let console = self.console.lock().ok()?.take()?;
+        Some(Box::pin(console))
+    }
+
     async fn backends(&self) -> Vec<ObservedBackend> {
         serde_json::from_value(json!([{
             "local_key":"docker","known_id":null,"domain_local_key":"root",
@@ -168,7 +176,7 @@ async fn placement_state(f: &Fixture, placement: PlacementId) -> Result<String> 
 }
 
 #[tokio::test]
-async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host() -> Result<()> {
+async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() -> Result<()> {
     let f = Fixture::new().await?;
     seed_pool(&f).await?;
 
@@ -198,6 +206,11 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
         .json()
         .await?;
     let runtime = Arc::new(FakeDocker::default());
+    let (mut console, output) = tokio::io::duplex(64 * 1024);
+    *runtime
+        .console
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(output);
     let journal =
         Journal::open(&f.directory.join(format!("agent-{}.sqlite", Uuid::new_v4()))).await?;
     let supervisor = Supervisor::new(
@@ -357,6 +370,7 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
         resource_request: prepare.resource_request,
         allocation_ids: prepare.allocation_ids,
     });
+    placement::mark_starting(&f.database, placement_id, &workload.to_string()).await?;
     placement::issue_command(&f.database, placement_id, start, "start:test", 55_000)
         .await?
         .context("start command")?;
@@ -378,6 +392,130 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
             .fetch_one(&f.database)
             .await?;
     assert!(erased.is_none(), "registration material outlived its start");
+
+    // The runner picks up a job; its console output shows in the job log
+    // view while the job runs.
+    let now = gridops_core::now_millis();
+    sqlx::query("UPDATE users SET access_token=? WHERE id='fleet-user'")
+        .bind(vault.seal("fixture-token")?)
+        .execute(&f.database)
+        .await?;
+    sqlx::raw_sql(
+        "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+           VALUES (70,10,'CI',7,'push','in_progress','abc','https://github.com/octo-org/gridops/actions/runs/70',1,1,1,1);
+         INSERT INTO workflow_jobs (id,run_id,name,status,html_url,started_at,created_at,updated_at)
+           VALUES (700,70,'test','in_progress','https://github.com/octo-org/gridops/actions/runs/70/job/700',1,1,1);",
+    )
+    .execute(&f.database)
+    .await?;
+    sqlx::query("UPDATE runners SET current_job_id=700 WHERE id=?")
+        .bind(workload.to_string())
+        .execute(&f.database)
+        .await?;
+    let job_view = || async {
+        let view: Value = f
+            .client
+            .get(format!("{}/api/v1/workflow-jobs/700/logs", f.origin))
+            .header(header::COOKIE, &f.cookie)
+            .send()
+            .await?
+            .json()
+            .await?;
+        anyhow::Ok(view)
+    };
+    let first = "2026-10-14T10:00:00.000000000Z [GRIDOPS JOB LOG 1.log]\n\
+        2026-10-14T10:00:01.000000000Z 2026-10-14T10:00:01.0000000Z ##[group]Run cargo test\n\
+        2026-10-14T10:00:02.000000000Z 2026-10-14T10:00:02.0000000Z    Compiling gridops-core v0.1.0\n";
+    console.write_all(first.as_bytes()).await?;
+    let view = eventually("live runner output", || async {
+        let view = job_view().await?;
+        Ok(view["steps"]
+            .to_string()
+            .contains("Compiling gridops-core")
+            .then_some(view))
+    })
+    .await?;
+    assert_eq!(view["source"], "runner");
+    assert_eq!(view["status"], "in_progress");
+    let stream = || async {
+        anyhow::Ok(
+            sqlx::query_as::<_, (i64, i64, bool, Option<i64>)>(
+                "SELECT o.received_bytes,s.size_bytes,s.complete,s.job_id FROM fleet_output_streams o
+                   JOIN log_streams s ON s.id=o.log_stream_id WHERE o.placement_id=?",
+            )
+            .bind(placement_id.to_string())
+            .fetch_one(&f.database)
+            .await?,
+        )
+    };
+    let shipped = i64::try_from(first.len())?;
+    assert_eq!(stream().await?, (shipped, shipped, false, None));
+
+    // A replayed chunk is appended once, and only the placement's own host,
+    // in its live session, can write the placement's output.
+    let identity = journal.identity().await?.context("identity")?;
+    let credential = identity.credential.expose_secret().to_owned();
+    let session: String = sqlx::query_scalar("SELECT agent_session_id FROM fleet_hosts WHERE id=?")
+        .bind(host.to_string())
+        .fetch_one(&f.database)
+        .await?;
+    let chunk = |session: &str, data: &str| {
+        json!({
+            "authority_session_id": session, "placement_id": placement_id,
+            "offset": 0, "data": base64::engine::general_purpose::STANDARD.encode(data),
+        })
+    };
+    let replay: Value = inventory::agent_post(&f, &host.to_string(), &credential, "output")
+        .json(&chunk(&session, first))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(replay, json!({"received": shipped, "finished": false}));
+    error(
+        inventory::agent_post(&f, &host.to_string(), &credential, "output")
+            .json(&chunk(&Uuid::new_v4().to_string(), "forged\n"))
+            .send()
+            .await?,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await?;
+    let (other, other_credential) = inventory::enrolled(&f).await?;
+    let other_session = Uuid::new_v4().to_string();
+    sqlx::query("UPDATE fleet_hosts SET agent_session_id=?,authority_expires_at=? WHERE id=?")
+        .bind(&other_session)
+        .bind(now + 60_000)
+        .bind(&other)
+        .execute(&f.database)
+        .await?;
+    error(
+        inventory::agent_post(&f, &other, &other_credential, "output")
+            .json(&chunk(&other_session, "forged\n"))
+            .send()
+            .await?,
+        StatusCode::NOT_FOUND,
+        "not_found",
+    )
+    .await?;
+    assert_eq!(stream().await?, (shipped, shipped, false, None));
+
+    // When the runner stops, the rest arrives and the stream is kept as the
+    // job's runner log.
+    let last =
+        "2026-10-14T10:00:03.000000000Z 2026-10-14T10:00:03.0000000Z test result: ok. 12 passed\n";
+    console.write_all(last.as_bytes()).await?;
+    drop(console);
+    let total = shipped + i64::try_from(last.len())?;
+    eventually("finished output", || async {
+        Ok((stream().await? == (total, total, true, Some(700))).then_some(()))
+    })
+    .await?;
+    assert!(
+        job_view().await?["steps"]
+            .to_string()
+            .contains("test result: ok")
+    );
 
     let container = LocalResourceIdentity::Docker {
         object_id: gridops_core::fleet::ids::UpstreamText::new("fake-container")?,

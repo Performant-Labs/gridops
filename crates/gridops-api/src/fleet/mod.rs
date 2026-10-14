@@ -72,6 +72,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(commands::logs),
         )
         .route(
+            "/api/v1/fleet/agent/hosts/{host_id}/output",
+            post(commands::output),
+        )
+        .route(
             "/api/v1/fleet/hosts/{host_id}/logs",
             get(enrollment::agent_logs),
         )

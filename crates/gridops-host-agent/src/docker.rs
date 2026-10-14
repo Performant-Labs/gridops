@@ -9,24 +9,31 @@
 
 use std::{process::Stdio, time::Duration};
 
-use gridops_core::fleet::{
-    domain::{Architecture, RuntimeKind},
-    ids::{DiagnosticId, UpstreamText},
-    protocol::{
-        agent::{AgentOperation, LocalResourceIdentity, PrepareEnvironment, RunnerMode, StopMode},
-        inventory::ObservedBackend,
-        outcomes::{
-            DelayedStartExclusionClaim, DiagnosticCode, DiagnosticReference, FailureCode,
-            LocalAbsenceClaim, SuccessEvidence,
+use gridops_core::{
+    fleet::{
+        domain::{Architecture, RuntimeKind},
+        ids::{DiagnosticId, UpstreamText},
+        protocol::{
+            agent::{
+                AgentOperation, LocalResourceIdentity, PrepareEnvironment, RunnerMode, StopMode,
+            },
+            inventory::ObservedBackend,
+            outcomes::{
+                DelayedStartExclusionClaim, DiagnosticCode, DiagnosticReference, FailureCode,
+                LocalAbsenceClaim, SuccessEvidence,
+            },
+            primitives::WireTimestamp,
         },
-        primitives::WireTimestamp,
     },
+    provisioning::instrumented_runner_script,
 };
 use serde::Deserialize;
 use tokio::{io::AsyncWriteExt as _, process::Command};
 use uuid::Uuid;
 
-use crate::helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper};
+use crate::helper::{
+    Bootstrap, ChildOutput, HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper,
+};
 
 const LABEL: &str = "io.gridops.fleet.environment";
 
@@ -116,7 +123,10 @@ impl DockerRuntime {
         }
         let (script, secret, env) = match (&material, prepared.mode) {
             (Material::GithubJit { jit_config }, RunnerMode::Ephemeral) => (
-                "set -euo pipefail\nIFS= read -r S\n[ -n \"$S\" ]\nexec /home/runner/run.sh --jitconfig \"$S\"",
+                instrumented_runner_script(
+                    "set -euo pipefail\nIFS= read -r S\n[ -n \"$S\" ]\nrunner_args=(--jitconfig \"$S\")\nunset S",
+                    "/home/runner/run.sh \"${runner_args[@]}\"",
+                ),
                 jit_config.clone(),
                 Vec::new(),
             ),
@@ -130,7 +140,10 @@ impl DockerRuntime {
                 },
                 RunnerMode::Persistent,
             ) => (
-                "set -euo pipefail\nIFS= read -r S\nargs=(--unattended --url \"$GRIDOPS_REGISTRATION_URL\" --token \"$S\" --name \"$GRIDOPS_RUNNER_NAME\" --labels \"$GRIDOPS_RUNNER_LABELS\" --work _work --replace --disableupdate)\nif [ -n \"${GRIDOPS_RUNNER_GROUP:-}\" ]; then args+=(--runnergroup \"$GRIDOPS_RUNNER_GROUP\"); fi\n./config.sh \"${args[@]}\"\nunset S\nexec ./run.sh",
+                instrumented_runner_script(
+                    "set -euo pipefail\nIFS= read -r S\nargs=(--unattended --url \"$GRIDOPS_REGISTRATION_URL\" --token \"$S\" --name \"$GRIDOPS_RUNNER_NAME\" --labels \"$GRIDOPS_RUNNER_LABELS\" --work _work --replace --disableupdate)\nif [ -n \"${GRIDOPS_RUNNER_GROUP:-}\" ]; then args+=(--runnergroup \"$GRIDOPS_RUNNER_GROUP\"); fi\n./config.sh \"${args[@]}\"\nunset S",
+                    "./run.sh",
+                ),
                 token.clone(),
                 vec![
                     format!("GRIDOPS_REGISTRATION_URL={url}"),
@@ -184,7 +197,7 @@ impl DockerRuntime {
             String::from(prepared.image.clone()),
             "/bin/bash".into(),
             "-lc".into(),
-            script.into(),
+            script,
         ]);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let Ok(id) = docker(&args).await else {
@@ -282,6 +295,15 @@ impl RuntimeHelper for DockerRuntime {
             }),
             _ => failed(FailureCode::Unsupported, false),
         }
+    }
+
+    /// `docker logs --follow` of a container this agent created, with
+    /// Docker's timestamps, as the manager's live logs have them. Only stdout:
+    /// it's where the job's console pages are mirrored, and one stream keeps
+    /// the output identical every time it's read.
+    async fn output(&self, resource: LocalResourceIdentity) -> Option<RunnerOutput> {
+        let id = self.owned(&resource).await?;
+        ChildOutput::spawn(Command::new("docker").args(["logs", "--follow", "--timestamps", &id]))
     }
 
     async fn backends(&self) -> Vec<ObservedBackend> {

@@ -14,6 +14,7 @@ use gridops_core::fleet::{
         },
         outcomes::AgentCommandResult,
     },
+    registry::output::{RunnerOutputChunk, RunnerOutputReceipt},
 };
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -203,6 +204,16 @@ impl Client {
         self.agent::<_, serde_json::Value>(host, credential, "logs", &body)
             .await
             .map(drop)
+    }
+
+    /// Uploads a chunk of a runner's console output.
+    pub async fn post_output(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        chunk: &RunnerOutputChunk,
+    ) -> Result<RunnerOutputReceipt, ClientError> {
+        self.agent(host, credential, "output", chunk).await
     }
 
     pub async fn post_result(

@@ -33,7 +33,7 @@ use crate::{
     helper::{Bootstrap, NoRuntime, RuntimeHelper},
     journal::{Identity, Journal},
     logs::LogBuffer,
-    probe,
+    output, probe,
 };
 
 const MAX_HEARTBEAT: Duration = Duration::from_secs(15);
@@ -66,8 +66,8 @@ pub struct Supervisor<H = NoRuntime> {
 
 /// What the heartbeat loop learns and the command loop needs.
 #[derive(Clone)]
-struct Authority {
-    credential: Arc<SecretString>,
+pub(crate) struct Authority {
+    pub(crate) credential: Arc<SecretString>,
     generation: Generation,
     expires_at: Option<WireTimestamp>,
 }
@@ -88,7 +88,7 @@ impl Supervisor<NoRuntime> {
     }
 }
 
-impl<H: RuntimeHelper> Supervisor<H> {
+impl<H: RuntimeHelper + 'static> Supervisor<H> {
     /// Runs commands through `runtime`, with the operator's declared trust.
     pub fn with_runtime<R: RuntimeHelper>(self, runtime: R, trust: Trust) -> Supervisor<R> {
         let runtime = Arc::new(runtime);
@@ -325,10 +325,19 @@ impl<H: RuntimeHelper> Supervisor<H> {
             }
         };
         let uploads = self.ship_logs(context.host_id, authority.subscribe());
+        let output = output::ship(output::Shipper {
+            client: self.client.clone(),
+            journal: self.journal.clone(),
+            runtime: Arc::clone(&self.probe),
+            host_id: context.host_id,
+            authority_session: context.authority_session_id,
+            authority: authority.subscribe(),
+        });
         tokio::select! {
             result = heartbeats => result,
             result = self.commands(&context, watcher) => result,
             () = uploads => Ok(Stop::Shutdown),
+            () = output => Ok(Stop::Shutdown),
         }
     }
 

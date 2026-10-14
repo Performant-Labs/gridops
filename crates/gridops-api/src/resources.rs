@@ -2720,6 +2720,9 @@ async fn local_job_log_text(
         .await?;
         return Ok(Some(truncate_log_text(logs)));
     }
+    if let Some(logs) = fleet_job_output(state, user, job_id).await? {
+        return Ok(Some(logs));
+    }
     let row = sqlx::query(
         r#"SELECT stream.path FROM log_streams stream
           JOIN user_installations access ON access.installation_id=stream.installation_id
@@ -2738,6 +2741,53 @@ async fn local_job_log_text(
         .await
         .map_err(|error| ApiError::Internal(error.into()))?;
     let truncated = bytes.len() > MAX_STRUCTURED_LOG_BYTES;
+    let start = bytes.len().saturating_sub(MAX_STRUCTURED_LOG_BYTES);
+    Ok(Some((
+        String::from_utf8_lossy(&bytes[start..]).into_owned(),
+        truncated,
+    )))
+}
+
+/// Output a fleet machine shipped for the runner that has, or last had, the
+/// job. It grows while the job runs.
+async fn fleet_job_output(
+    state: &AppState,
+    user: &AuthUser,
+    job_id: i64,
+) -> ApiResult<Option<(String, bool)>> {
+    let row = sqlx::query(
+        r#"SELECT stream.path,output.received_bytes>stream.size_bytes AS trimmed
+          FROM fleet_output_streams output
+          JOIN log_streams stream ON stream.id=output.log_stream_id
+          JOIN runners runner ON runner.id=stream.runner_id
+          JOIN runner_pools pool ON pool.id=runner.pool_id
+          WHERE (runner.current_job_id=? OR runner.last_job_id=?)
+            AND EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=pool.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=pool.id
+                AND NOT EXISTS (SELECT 1 FROM user_installations access
+                  WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
+            )
+          ORDER BY CASE WHEN runner.current_job_id=? THEN 0 ELSE 1 END,stream.updated_at DESC
+          LIMIT 1"#,
+    )
+    .bind(job_id)
+    .bind(job_id)
+    .bind(&user.id)
+    .bind(job_id)
+    .fetch_optional(&state.database)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let path = safe_log_path(state, row.get::<&str, _>("path"))?;
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        // Nothing arrived yet, or the stream just moved to a trimmed file.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ApiError::Internal(error.into())),
+    };
+    let truncated = row.get::<bool, _>("trimmed") || bytes.len() > MAX_STRUCTURED_LOG_BYTES;
     let start = bytes.len().saturating_sub(MAX_STRUCTURED_LOG_BYTES);
     Ok(Some((
         String::from_utf8_lossy(&bytes[start..]).into_owned(),
