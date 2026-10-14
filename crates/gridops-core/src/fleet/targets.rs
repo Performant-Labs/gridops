@@ -501,6 +501,111 @@ pub fn platform_supports_labels(
     })
 }
 
+/// Whether one of the pool's fleet workloads may still be on a machine: a
+/// placement that hasn't finished, or capacity still charged to a host.
+const LIVE_WORKLOADS: &str = "SELECT EXISTS (
+       SELECT 1 FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id
+       WHERE i.pool_id=?1 AND (p.state NOT IN ('stopped','cleaned','failed')
+         OR EXISTS (SELECT 1 FROM capacity_allocations a
+                    WHERE a.placement_id=p.id AND a.state<>'released')))";
+
+pub async fn pool_has_live_workloads(pool: &SqlitePool, pool_id: &str) -> Result<bool, FleetError> {
+    Ok(sqlx::query_scalar::<_, bool>(LIVE_WORKLOADS)
+        .bind(pool_id)
+        .fetch_one(pool)
+        .await?)
+}
+
+/// Deletes a pool along with its finished fleet history (platforms,
+/// workloads, placements and their host commands), which would otherwise
+/// keep the pool row alive. Returns false, deleting nothing, while a
+/// workload may still be on a machine.
+pub async fn delete_pool(pool: &SqlitePool, pool_id: &str) -> Result<bool, FleetError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if sqlx::query_scalar::<_, bool>(LIVE_WORKLOADS)
+        .bind(pool_id)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Ok(false);
+    }
+    macro_rules! placements {
+        () => {
+            "SELECT p.id FROM workload_placements p
+             JOIN workload_intents i ON i.id=p.intent_id WHERE i.pool_id=?1"
+        };
+    }
+    macro_rules! profiles {
+        () => {
+            "SELECT id FROM pool_execution_profiles WHERE pool_id=?1"
+        };
+    }
+    for statement in [
+        concat!(
+            "DELETE FROM host_command_attempts WHERE command_id IN (SELECT id FROM host_commands WHERE placement_id IN (",
+            placements!(),
+            "))"
+        ),
+        concat!(
+            "DELETE FROM host_command_results WHERE command_id IN (SELECT id FROM host_commands WHERE placement_id IN (",
+            placements!(),
+            "))"
+        ),
+        concat!(
+            "DELETE FROM host_commands WHERE placement_id IN (",
+            placements!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM fleet_events WHERE placement_id IN (",
+            placements!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM fleet_bootstrap_material WHERE placement_id IN (",
+            placements!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM capacity_allocations WHERE placement_id IN (",
+            placements!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM adoption_operations WHERE replacement_placement_id IN (",
+            placements!(),
+            ") OR profile_id IN (",
+            profiles!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM workload_placements WHERE id IN (",
+            placements!(),
+            ")"
+        ),
+        "DELETE FROM workload_intents WHERE pool_id=?1",
+        concat!(
+            "DELETE FROM profile_ci_targets WHERE profile_id IN (",
+            profiles!(),
+            ")"
+        ),
+        concat!(
+            "DELETE FROM profile_host_selectors WHERE profile_id IN (",
+            profiles!(),
+            ")"
+        ),
+        "DELETE FROM pool_execution_profiles WHERE pool_id=?1",
+        "DELETE FROM runner_pools WHERE id=?1",
+    ] {
+        sqlx::query(statement)
+            .bind(pool_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// The targets a pool serves: its repositories, or its organization.
 pub async fn pool_targets(pool: &SqlitePool, pool_id: &str) -> Result<Vec<String>, FleetError> {
     let row = sqlx::query("SELECT scope,installation_id FROM runner_pools WHERE id=?")
