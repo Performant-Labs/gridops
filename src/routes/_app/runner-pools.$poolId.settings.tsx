@@ -307,7 +307,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           </SettingsRow>
         </SettingsSection>
 
-        <FleetExecutionSection poolId={pool.id} />
+        {/* Older Docker pools keep their image in `image`. */}
+        <FleetExecutionSection dockerImage={pool.dockerImage || (pool.provider === "docker" ? pool.image : "")} poolId={pool.id} />
 
         {error ? <Callout title="Could not save" tone="danger">{error}</Callout> : null}
       </SettingsLayout>
