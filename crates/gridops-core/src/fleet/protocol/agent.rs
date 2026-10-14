@@ -341,6 +341,11 @@ pub struct ExpectedAgentSession {
     pub authority_expires_at: WireTimestamp,
 }
 
+/// How far a host's clock may run behind the control plane's. Commands carry
+/// an issue time this far in the past, so a host that lags slightly does not
+/// see a command as issued in the future and refuse it.
+pub const COMMAND_CLOCK_SKEW_MILLIS: i64 = 5_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CommandError {
     #[error("command belongs to a different authority session")]

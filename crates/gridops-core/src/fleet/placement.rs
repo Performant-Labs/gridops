@@ -257,7 +257,7 @@ pub async fn issue_command(
         },
         expected_revision: Revision::new(counter(row.get("profile_revision"))?)
             .map_err(|_| FleetError::Invariant("revision"))?,
-        issued_at: timestamp(now)?,
+        issued_at: timestamp(now - crate::fleet::protocol::agent::COMMAND_CLOCK_SKEW_MILLIS)?,
         deadline_at: timestamp(deadline)?,
         request_hash: String::new(),
         operation,

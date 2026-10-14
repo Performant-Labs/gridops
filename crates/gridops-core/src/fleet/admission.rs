@@ -1229,8 +1229,10 @@ async fn build_prepare_envelope(
             generation,
         },
         expected_revision: profile_revision,
-        issued_at: WireTimestamp::from_millis(issued_at)
-            .map_err(|_| FleetError::Invariant("invalid command issue timestamp"))?,
+        issued_at: WireTimestamp::from_millis(
+            issued_at - crate::fleet::protocol::agent::COMMAND_CLOCK_SKEW_MILLIS,
+        )
+        .map_err(|_| FleetError::Invariant("invalid command issue timestamp"))?,
         deadline_at: WireTimestamp::from_millis(deadline_at)
             .map_err(|_| FleetError::Invariant("invalid command deadline"))?,
         request_hash: String::new(),
