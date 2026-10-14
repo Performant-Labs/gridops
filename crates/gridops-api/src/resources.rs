@@ -1783,8 +1783,10 @@ pub async fn log_targets(
     .await?;
     let (page, offset) = bounded_pagination(requested_page, total, per_page);
     let rows = sqlx::query(
-        r#"SELECT targets.id,runner_id,name,status,busy,container_id,updated_at,pool_name,repository,
-          kind,size_bytes,job_id,run_id,job_name,job_status,job_conclusion,run_number,workflow_name,
+        r#"SELECT targets.id,targets.runner_id,targets.name,targets.status,targets.busy,
+          targets.container_id,targets.updated_at,targets.pool_name,targets.repository,targets.kind,
+          targets.size_bytes,targets.job_id,targets.run_id,targets.job_name,targets.job_status,
+          targets.job_conclusion,targets.run_number,targets.workflow_name,
           fh.id AS machine_id,fh.name AS machine_name,hb.runtime_kind AS machine_runtime,hb.execution_os AS machine_os
         FROM (
           SELECT r.id,CAST(NULL AS TEXT) AS runner_id,r.name,r.status,r.busy,r.container_id,
@@ -1819,8 +1821,8 @@ pub async fn log_targets(
         LEFT JOIN fleet_hosts fh ON fh.id=wp.host_id
         LEFT JOIN host_backends hb ON hb.id=wp.backend_id
         ORDER BY
-          CASE WHEN targets.id=? OR runner_id=? THEN 0 ELSE 1 END,
-          CASE kind WHEN 'live' THEN 0 ELSE 1 END,busy DESC,updated_at DESC
+          CASE WHEN targets.id=? OR targets.runner_id=? THEN 0 ELSE 1 END,
+          CASE targets.kind WHEN 'live' THEN 0 ELSE 1 END,targets.busy DESC,targets.updated_at DESC
         LIMIT ? OFFSET ?"#,
     )
     .bind(&user.id)
