@@ -435,17 +435,6 @@ function GrantsSection({ hostId }: { hostId: string }) {
     }, `Updated ${targets.length} ${targets.length === 1 ? "repository" : "repositories"}.`);
   }
 
-  const columnHeader = (field: keyof GrantPolicy, label: string) => (
-    <div className="flex flex-col items-center gap-1.5">
-      <span>{label}</span>
-      <Switch
-        aria-label={`${label} for all repositories`}
-        checked={items.length > 0 && items.every((grant) => grant[field])}
-        disabled={pending !== null || items.length === 0}
-        onCheckedChange={(value) => void changeAll(field, value)}
-      />
-    </div>
-  );
 
   return (
     <section className="space-y-3">
@@ -460,12 +449,25 @@ function GrantsSection({ hostId }: { hostId: string }) {
             <thead className="border-b border-border text-left text-xs text-muted-foreground">
               <tr>
                 <th className="px-4 py-2 align-top font-medium" scope="col">Repository or organization</th>
-                <th className="px-3 py-2 text-center font-medium" scope="col">{columnHeader("allowSchedule", "Run jobs")}</th>
-                <th className="px-3 py-2 text-center font-medium" scope="col">{columnHeader("allowNative", "Run natively on the host")}</th>
-                <th className="px-4 py-2 text-center font-medium" scope="col">{columnHeader("allowDockerSocket", "Share Docker socket")}</th>
+                <th className="px-3 py-2 text-center font-medium" scope="col">Run jobs</th>
+                <th className="px-3 py-2 text-center font-medium" scope="col">Run natively on the host</th>
+                <th className="px-4 py-2 text-center font-medium" scope="col">Share Docker socket</th>
               </tr>
             </thead>
             <tbody>
+              <tr className="border-b border-border bg-muted/40">
+                <td className="px-4 py-2.5 font-medium text-foreground">All repositories</td>
+                {(["allowSchedule", "allowNative", "allowDockerSocket"] as const).map((field) => (
+                  <td className="px-3 py-2.5 text-center" key={field}>
+                    <Switch
+                      aria-label={`${field === "allowSchedule" ? "Run jobs" : field === "allowNative" ? "Run natively on the host" : "Share Docker socket"} for all repositories`}
+                      checked={items.every((grant) => grant[field])}
+                      disabled={pending !== null}
+                      onCheckedChange={(value) => void changeAll(field, value)}
+                    />
+                  </td>
+                ))}
+              </tr>
               {items.map((grant) => (
                 <tr className="border-b border-border last:border-0" key={grant.targetId}>
                   <td className="px-4 py-2.5 text-foreground">{grant.label}</td>
@@ -485,7 +487,7 @@ function GrantsSection({ hostId }: { hostId: string }) {
           </table>
         </div>
       )}
-      <p className="text-xs text-muted-foreground">The switches in the header change every repository at once. Native profiles need “Run natively on the host”: those jobs run directly on the machine, not in a container or VM.</p>
+      <p className="text-xs text-muted-foreground">The “All repositories” row changes every repository at once. Native profiles need “Run natively on the host”: those jobs run directly on the machine, not in a container or VM.</p>
     </section>
   );
 }

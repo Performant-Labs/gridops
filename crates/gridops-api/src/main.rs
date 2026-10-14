@@ -62,9 +62,18 @@ async fn main() -> Result<()> {
             HeaderValue::from_static("public, max-age=31536000, immutable"),
         ))
         .service(ServeDir::new(web_root.join("assets")));
-    let spa = ServeDir::new(web_root)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(web_root.join("index.html")));
+    // The page names hashed asset files, so it must be revalidated or a
+    // browser keeps running the previous release.
+    let spa = ServiceBuilder::new()
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .service(
+            ServeDir::new(web_root)
+                .append_index_html_on_directories(true)
+                .fallback(ServeFile::new(web_root.join("index.html"))),
+        );
 
     let app = Router::new()
         .merge(fleet::router())
