@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { KeyRound, LoaderCircle, Plus, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { KeyRound, LoaderCircle, Plus, RefreshCw, ScrollText, Server, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import type * as React from "react";
 import { toast } from "sonner";
 
 import { confirmAction } from "~/components/confirm-dialog";
+import { Dialog, DialogTrigger, SheetContent } from "~/components/ui/dialog";
 import { CopyButton } from "~/components/copy-button";
 import {
   Callout, EmptyState, InlineLoading, PageBody, PageHeader, PropertiesPanel, PropertyGroup, PropertyRow, SectionHeading,
@@ -73,6 +74,7 @@ function MachinePage() {
             <Button aria-label="Refresh" disabled={host.isFetching} onClick={() => void host.refetch()} size="sm" variant="ghost">
               <RefreshCw className={cn(host.isFetching && "animate-spin")} />
             </Button>
+            <AgentLogDrawer hostId={item.id} name={item.name} />
             {item.projection === "host" && item.enrollment === "approved" ? <RotateCredentialButton generation={item.credentialGeneration} hostId={item.id} /> : null}
           </>
         }
@@ -135,7 +137,6 @@ function MachineDetail({ host }: { host: HostItem }) {
         {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
-        <AgentLogSection hostId={host.id} />
         <EventsSection items={events.data?.items} query={events} />
       </div>
       <PropertiesPanel>
@@ -358,22 +359,38 @@ const logLevelClass: Record<AgentLog["level"], string> = {
 };
 
 /** The newest lines the machine's agent shipped (kept for a day). */
-function AgentLogSection({ hostId }: { hostId: string }) {
+/** The agent's own log, in a drawer so it doesn't crowd the machine page. */
+function AgentLogDrawer({ hostId, name }: { hostId: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Dialog onOpenChange={setOpen} open={open}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline"><ScrollText /><span className="hidden sm:inline">Agent log</span></Button>
+      </DialogTrigger>
+      <SheetContent className="max-w-3xl" description="Kept for a day." heading={`Agent log · ${name}`}>
+        {open ? <AgentLog hostId={hostId} /> : null}
+      </SheetContent>
+    </Dialog>
+  );
+}
+
+function AgentLog({ hostId }: { hostId: string }) {
   const logs = useQuery({
     queryKey: ["fleet", "logs", hostId],
     queryFn: ({ signal }) => listAgentLogs(hostId, signal),
     refetchInterval: REFRESH,
   });
-  if (logs.isError && isForbidden(logs.error)) return null;
+  if (logs.isError) {
+    return <div className="p-5"><Callout title="Couldn’t load the agent log" tone="danger">{fleetErrorMessage(logs.error, "")}</Callout></div>;
+  }
   const items = logs.data?.items ?? [];
   return (
-    <section className="space-y-3">
-      <SectionHeading>Agent log</SectionHeading>
+    <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
       {items.length === 0 ? (
         <p className="text-sm text-muted-foreground">{logs.isPending ? "Loading…" : "No log lines in the last day."}</p>
       ) : (
         <div
-          className="max-h-96 overflow-y-auto rounded-lg border border-border bg-panel-subtle p-3 font-mono text-2xs leading-5"
+          className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-border bg-panel-subtle p-3 font-mono text-2xs leading-5"
           ref={(element) => { if (element) element.scrollTop = element.scrollHeight; }}
         >
           {items.map((line) => (
@@ -385,8 +402,8 @@ function AgentLogSection({ hostId }: { hostId: string }) {
           ))}
         </div>
       )}
-      <p className="text-xs text-muted-foreground">The latest {items.length} lines. Logs are kept for a day.</p>
-    </section>
+      <p className="text-xs text-muted-foreground">The latest {items.length} lines.</p>
+    </div>
   );
 }
 
