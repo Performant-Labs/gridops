@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS environments (
   local_identity TEXT,
   UNIQUE (placement_id, generation)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS shipped_output (
+  environment_id TEXT PRIMARY KEY
+) STRICT;
 ";
 
 /// The host's enrolled identity and its opaque credential.
@@ -326,6 +329,28 @@ impl Journal {
             .await?
             .map(|row| environment(&row))
             .transpose()
+    }
+
+    /// Started environments whose runner output hasn't been fully shipped.
+    pub async fn unshipped_output(&self) -> Result<Vec<Environment>> {
+        sqlx::query(
+            "SELECT * FROM environments WHERE local_identity IS NOT NULL
+               AND id NOT IN (SELECT environment_id FROM shipped_output)",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(environment)
+        .collect()
+    }
+
+    /// The environment's runner output is shipped, or can't be any more.
+    pub async fn output_shipped(&self, id: PreparedEnvironmentId) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO shipped_output (environment_id) VALUES (?)")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn close(&self) {

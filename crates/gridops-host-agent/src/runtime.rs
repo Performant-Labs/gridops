@@ -12,7 +12,7 @@ use gridops_core::fleet::{
 
 use crate::{
     docker::DockerRuntime,
-    helper::{HelperRequest, HelperResponse, RuntimeHelper},
+    helper::{HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper},
     native::NativeRuntime,
 };
 
@@ -55,6 +55,14 @@ impl RuntimeHelper for HostRuntime {
                 code: FailureCode::Unsupported,
                 retryable: false,
             },
+        }
+    }
+
+    async fn output(&self, resource: LocalResourceIdentity) -> Option<RunnerOutput> {
+        match resource {
+            LocalResourceIdentity::Docker { .. } => self.docker.output(resource).await,
+            LocalResourceIdentity::NativeProcess { .. } => self.native.output(resource).await,
+            LocalResourceIdentity::TartVm { .. } => None,
         }
     }
 

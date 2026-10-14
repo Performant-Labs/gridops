@@ -82,6 +82,67 @@ pub fn failure_cleanup(
     }
 }
 
+/// Wraps a runner launch so the job's console output reaches the container's
+/// stdout. `setup` runs first (registration, reading the secret); `launch`
+/// starts the runner. The runner's own diagnostics stay in a file, and each
+/// step's secret-masked console page under `_diag/pages` is mirrored to stdout
+/// while the job runs, which is what live job logs read.
+#[must_use]
+pub fn instrumented_runner_script(setup: &str, launch: &str) -> String {
+    format!(
+        r#"{setup}
+# The runner listener writes verbose transport diagnostics to stdout/stderr even
+# when its explicit diagnostic-output flag is absent. Keep those diagnostics inside the
+# container; GridOps' user-facing stream is populated exclusively from the
+# secret-masked job console pages below.
+runner_diagnostics=/tmp/gridops-runner-diagnostics.log
+{launch} >"$runner_diagnostics" 2>&1 &
+runner_pid=$!
+trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT
+
+# GitHub's runner writes the actual step console stream to rotating files under
+# _diag/pages. Mirror every page to container stdout so GridOps can stream job
+# output while it is still running, while retaining the runner's secret masking.
+runner_root=${{GRIDOPS_RUNNER_ROOT:-/home/runner}}
+forwarded_state=/tmp/gridops-forwarded-job-state
+rm -rf "$forwarded_state"
+mkdir -p "$forwarded_state"
+
+flush_job_logs() {{
+  for job_log in "$runner_root"/_diag/pages/*.log; do
+    [ -f "$job_log" ] || continue
+    state_file="$forwarded_state/$(basename "$job_log").offset"
+    offset=0
+    if [ -f "$state_file" ]; then read -r offset < "$state_file" || offset=0; fi
+    size=$(wc -c < "$job_log" 2>/dev/null) || continue
+    if [ "$size" -gt "$offset" ]; then
+      if [ "$offset" -eq 0 ]; then
+        printf '\n[GRIDOPS JOB LOG %s]\n' "$(basename "$job_log")"
+      fi
+      head -c "$size" "$job_log" 2>/dev/null | tail -c "+$((offset + 1))" || true
+      printf '%s\n' "$size" > "$state_file"
+    fi
+  done
+}}
+
+(
+  while kill -0 "$runner_pid" 2>/dev/null; do
+    flush_job_logs
+    sleep 0.1
+  done
+  flush_job_logs
+) &
+forwarder_pid=$!
+
+set +e
+wait "$runner_pid"
+runner_status=$?
+set -e
+wait "$forwarder_pid" 2>/dev/null || true
+exit "$runner_status""#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

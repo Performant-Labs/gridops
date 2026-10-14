@@ -7,17 +7,26 @@
 //! another host's resource, and anything that doesn't parse is refused before
 //! the helper sees it.
 
-use std::future::Future;
+use std::{
+    future::Future,
+    pin::Pin,
+    process::Stdio,
+    task::{Context, Poll},
+};
 
 use gridops_core::fleet::{
     ids::PreparedEnvironmentId,
     protocol::{
-        agent::{AgentOperation, PrepareEnvironment},
+        agent::{AgentOperation, LocalResourceIdentity, PrepareEnvironment},
         inventory::ObservedBackend,
         outcomes::{FailureCode, SuccessEvidence},
     },
 };
 use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    process::{Child, ChildStdout, Command},
+};
 
 /// Requests and responses on the socket are bounded like agent JSON.
 pub const MAX_MESSAGE_BYTES: usize = gridops_core::fleet::protocol::primitives::MAX_JSON_BYTES;
@@ -65,11 +74,65 @@ pub trait RuntimeHelper: Send + Sync {
     fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {
         async { Vec::new() }
     }
+
+    /// A started runner's console output from its beginning, ending when the
+    /// runner stops. Reading it again yields the same bytes, so an upload can
+    /// resume where `GridOps` left off. `None` when the runner is gone or this
+    /// runtime can't stream its output.
+    fn output(
+        &self,
+        _resource: LocalResourceIdentity,
+    ) -> impl Future<Output = Option<RunnerOutput>> + Send {
+        async { None }
+    }
+}
+
+/// A runner's console output.
+pub type RunnerOutput = Pin<Box<dyn AsyncRead + Send>>;
+
+/// A child process's stdout. Dropping it stops the process.
+pub struct ChildOutput {
+    _child: Child,
+    stdout: ChildStdout,
+}
+
+impl ChildOutput {
+    pub fn spawn(command: &mut Command) -> Option<RunnerOutput> {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let stdout = child.stdout.take()?;
+        Some(Box::pin(Self {
+            _child: child,
+            stdout,
+        }))
+    }
+}
+
+impl AsyncRead for ChildOutput {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stdout).poll_read(cx, buf)
+    }
 }
 
 impl<H: RuntimeHelper> RuntimeHelper for std::sync::Arc<H> {
     fn call(&self, request: HelperRequest) -> impl Future<Output = HelperResponse> + Send {
         (**self).call(request)
+    }
+
+    fn output(
+        &self,
+        resource: LocalResourceIdentity,
+    ) -> impl Future<Output = Option<RunnerOutput>> + Send {
+        (**self).output(resource)
     }
 
     fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {

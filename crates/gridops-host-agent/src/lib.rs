@@ -14,6 +14,7 @@ pub mod helper;
 pub mod journal;
 pub mod logs;
 pub mod native;
+mod output;
 pub mod probe;
 pub mod runtime;
 pub mod supervisor;
