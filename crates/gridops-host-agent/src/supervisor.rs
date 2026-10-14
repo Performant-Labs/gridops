@@ -69,7 +69,7 @@ pub struct Supervisor<H = NoRuntime> {
 pub(crate) struct Authority {
     pub(crate) credential: Arc<SecretString>,
     generation: Generation,
-    expires_at: Option<WireTimestamp>,
+    pub(crate) expires_at: Option<WireTimestamp>,
 }
 
 impl Supervisor<NoRuntime> {
