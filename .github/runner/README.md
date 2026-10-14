@@ -17,4 +17,4 @@ Push the image to GHCR, then configure the pool with that image and the `gridops
 docker push ghcr.io/iamngoni/gridops-ci-runner:node22-rust196
 ```
 
-The CI workflow requests the `gridops-ci` label so jobs cannot land on a generic runner without the required toolchain.
+The CI workflow requests the `gridops-ci` label so jobs cannot land on a generic runner without the required toolchain. It also requests `arm64`, because the image is only built on the arm64 Docker host; an x64 machine in the same pool would run the stock runner image.
