@@ -68,6 +68,14 @@ pub(crate) fn router() -> Router<AppState> {
             post(inventory::submit),
         )
         .route(
+            "/api/v1/fleet/agent/hosts/{host_id}/logs",
+            post(commands::logs),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/logs",
+            get(enrollment::agent_logs),
+        )
+        .route(
             "/api/v1/fleet/agent/hosts/{host_id}/bootstrap",
             post(commands::bootstrap),
         )

@@ -34,6 +34,8 @@ pub struct DockerRuntime {
     images: Vec<String>,
     network: Option<String>,
     socket: Option<String>,
+    /// The last probe failure, so a change is logged once, not every probe.
+    last_problem: std::sync::Mutex<Option<String>>,
 }
 
 /// Registration material produced by the reconciler.
@@ -55,11 +57,12 @@ enum Material {
 impl DockerRuntime {
     /// `images` is the operator's allowlist; `socket` is the host Docker
     /// socket path to share when a trusted profile asks for it.
-    pub const fn new(images: Vec<String>, network: Option<String>, socket: Option<String>) -> Self {
+    pub fn new(images: Vec<String>, network: Option<String>, socket: Option<String>) -> Self {
         Self {
             images,
             network,
             socket,
+            last_problem: std::sync::Mutex::new(None),
         }
     }
 
@@ -282,14 +285,56 @@ impl RuntimeHelper for DockerRuntime {
     }
 
     async fn backends(&self) -> Vec<ObservedBackend> {
-        match docker_backend(self).await {
-            Ok(backend) => vec![backend],
-            Err(error) => {
-                tracing::debug!(%error, "Docker backend unavailable");
-                Vec::new()
+        let result = docker_backend(self).await;
+        let problem = result.as_ref().err().map(|error| format!("{error:#}"));
+        if let Ok(mut last) = self.last_problem.lock() {
+            if *last != problem {
+                match &problem {
+                    Some(problem) => tracing::warn!("Docker jobs unavailable: {problem}"),
+                    None if last.is_some() => tracing::info!("Docker is available again"),
+                    None => {}
+                }
+                last.clone_from(&problem);
             }
         }
+        match result {
+            Ok(backend) => vec![backend],
+            // Reported as unavailable, so GridOps shows Docker and why it
+            // can't be used rather than nothing at all.
+            Err(_) => unavailable_backend(self).into_iter().collect(),
+        }
     }
+}
+
+fn unavailable_backend(runtime: &DockerRuntime) -> Option<ObservedBackend> {
+    let arch = if crate::probe::architecture() == Architecture::Arm64 {
+        "arm64"
+    } else {
+        "x64"
+    };
+    serde_json::from_value(serde_json::json!({
+        "local_key": "docker",
+        "known_id": null,
+        "domain_local_key": crate::probe::ROOT_DOMAIN,
+        "runtime_kind": "docker",
+        "execution_os": "linux",
+        "architecture": arch,
+        "readiness": "unavailable",
+        "reason": "docker_unreachable",
+        "runtime_identity": null,
+        "capabilities": {
+            "schema_version": 1,
+            "runtime_kind": "docker",
+            "execution_os": "linux",
+            "architecture": arch,
+            "supported_runners": [],
+            "environments": [],
+            "resources": {"cpu": "hard_limit", "memory": "hard_limit", "disk": "estimate"},
+            "interactive": "unsupported",
+            "docker_socket": if runtime.socket.is_some() { "requires_explicit_grant" } else { "unsupported" },
+        }
+    }))
+    .ok()
 }
 
 async fn docker_backend(runtime: &DockerRuntime) -> anyhow::Result<ObservedBackend> {

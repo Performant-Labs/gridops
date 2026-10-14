@@ -58,6 +58,16 @@ export const profileSchema = profileInputSchema.extend({
 export const profileResultSchema = z.strictObject({ item: profileSchema.nullable() });
 export const savedProfileResultSchema = z.strictObject({ item: profileSchema });
 
+export const agentLogSchema = z.strictObject({
+  id: z.number().int(),
+  loggedAt: z.number().int(),
+  level: z.enum(["error", "warn", "info", "debug", "trace"]),
+  target: z.string().max(128),
+  message: z.string().max(8192),
+});
+export const agentLogListSchema = z.strictObject({ items: z.array(agentLogSchema).max(1000) });
+export type AgentLog = z.infer<typeof agentLogSchema>;
+
 export const queuedRunnerSchema = z.strictObject({
   runnerId: z.string().min(1).max(128),
   runnerName: z.string().max(256).nullable(),

@@ -15,8 +15,8 @@ import { Switch } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
-import { listHostGrants, listTargets, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle } from "~/features/fleet/admin-api";
-import type { GrantPolicy, HostGrant, HostLifecycle } from "~/features/fleet/admin-contracts";
+import { listAgentLogs, listHostGrants, listTargets, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle } from "~/features/fleet/admin-api";
+import type { AgentLog, GrantPolicy, HostGrant, HostLifecycle } from "~/features/fleet/admin-contracts";
 import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden,
   lifecycleLabel, newIdempotencyKey, osLabel, platformLabel, runtimeLabel,
@@ -135,6 +135,7 @@ function MachineDetail({ host }: { host: HostItem }) {
         {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
+        <AgentLogSection hostId={host.id} />
         <EventsSection items={events.data?.items} query={events} />
       </div>
       <PropertiesPanel>
@@ -344,6 +345,47 @@ function RecoverSection({ host }: { host: HostItem }) {
           </Button>
         </>
       )}
+    </section>
+  );
+}
+
+const logLevelClass: Record<AgentLog["level"], string> = {
+  error: "text-destructive",
+  warn: "text-amber-600 dark:text-amber-400",
+  info: "text-muted-foreground",
+  debug: "text-faint",
+  trace: "text-faint",
+};
+
+/** The newest lines the machine's agent shipped (kept for a day). */
+function AgentLogSection({ hostId }: { hostId: string }) {
+  const logs = useQuery({
+    queryKey: ["fleet", "logs", hostId],
+    queryFn: ({ signal }) => listAgentLogs(hostId, signal),
+    refetchInterval: REFRESH,
+  });
+  if (logs.isError && isForbidden(logs.error)) return null;
+  const items = logs.data?.items ?? [];
+  return (
+    <section className="space-y-3">
+      <SectionHeading>Agent log</SectionHeading>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{logs.isPending ? "Loading…" : "No log lines in the last day."}</p>
+      ) : (
+        <div
+          className="max-h-96 overflow-y-auto rounded-lg border border-border bg-panel-subtle p-3 font-mono text-2xs leading-5"
+          ref={(element) => { if (element) element.scrollTop = element.scrollHeight; }}
+        >
+          {items.map((line) => (
+            <div className="whitespace-pre-wrap break-words" key={line.id}>
+              <span className="text-faint">{new Date(line.loggedAt).toLocaleTimeString()}</span>{" "}
+              <span className={cn("font-semibold uppercase", logLevelClass[line.level])}>{line.level}</span>{" "}
+              <span className="text-foreground">{line.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">The latest {items.length} lines. Logs are kept for a day.</p>
     </section>
   );
 }

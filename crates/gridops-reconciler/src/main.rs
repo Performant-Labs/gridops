@@ -249,6 +249,11 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
         }
     }
     cleanup_retention(app).await?;
+    // Agent logs are kept for a day, including for machines that went quiet.
+    sqlx::query("DELETE FROM fleet_agent_logs WHERE received_at < ?")
+        .bind(now_millis() - gridops_core::fleet::registry::logs::AGENT_LOG_RETENTION_MILLIS)
+        .execute(&app.database)
+        .await?;
     sqlx::query("DELETE FROM oauth_states WHERE expires_at < ?")
         .bind(now_millis())
         .execute(&app.database)

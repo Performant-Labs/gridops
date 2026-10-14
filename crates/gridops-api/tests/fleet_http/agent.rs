@@ -223,3 +223,66 @@ async fn agent_completes_a_requested_credential_rotation() -> Result<()> {
     assert_eq!(running.await??, Stop::Shutdown);
     Ok(())
 }
+
+#[tokio::test]
+async fn agent_ships_its_log_lines() -> Result<()> {
+    let f = Fixture::new().await?;
+    control_plane(&f).await?;
+    let (supervisor, journal) = agent(&f).await?;
+    let code = f.issue("agent-logs").await?;
+    supervisor
+        .enroll(code["code"].as_str().context("code")?, None)
+        .await?;
+    let host = journal.identity().await?.context("identity")?.host_id;
+    let logs = gridops_host_agent::logs::LogBuffer::default();
+    logs.restore(
+        vec![gridops_host_agent::logs::LogLine {
+            logged_at: gridops_core::now_millis(),
+            level: "warn",
+            target: "gridops_host_agent::docker".into(),
+            message: "Docker jobs unavailable: daemon not running".into(),
+        }],
+        3,
+    );
+    let supervisor = supervisor.with_logs(logs);
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(async move {
+        supervisor
+            .run(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let mut items = Vec::new();
+    for _ in 0..200 {
+        let body: Value = f
+            .client
+            .get(f.url(&format!("/hosts/{host}/logs")))
+            .header(header::COOKIE, &f.cookie)
+            .send()
+            .await?
+            .json()
+            .await?;
+        items = body["items"].as_array().cloned().unwrap_or_default();
+        if items.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let messages: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["message"].as_str())
+        .collect();
+    assert!(
+        messages.contains(&"Docker jobs unavailable: daemon not running"),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.starts_with("3 agent log lines were dropped"))
+    );
+    let _ = stop.send(());
+    assert_eq!(running.await??, Stop::Shutdown);
+    Ok(())
+}

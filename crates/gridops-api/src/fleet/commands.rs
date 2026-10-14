@@ -110,3 +110,17 @@ pub(super) async fn bootstrap(
     )
         .into_response())
 }
+
+/// Log lines from the host's agent.
+pub(super) async fn logs(
+    State(state): State<AppState>,
+    context: RequestContext,
+    agent: FleetAgent,
+    FleetJson(body): FleetJson<gridops_core::fleet::registry::logs::AgentLogBatch>,
+) -> Result<axum::http::StatusCode, FleetApiError> {
+    RegistryService::new(state.database, state.vault)
+        .store_agent_logs(agent.authenticated(), body)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}

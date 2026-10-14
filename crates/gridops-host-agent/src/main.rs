@@ -34,6 +34,7 @@ use gridops_host_agent::{
     dispatch::Trust,
     docker::DockerRuntime,
     journal::Journal,
+    logs::LogBuffer,
     native::NativeRuntime,
     runtime::HostRuntime,
     supervisor::{Stop, Supervisor},
@@ -42,10 +43,13 @@ use serde::{Deserialize, Serialize};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(LOGS.layer())
         .init();
     match run().await {
         Ok(code) => code,
@@ -55,6 +59,9 @@ async fn main() -> ExitCode {
         }
     }
 }
+
+/// The agent's log lines, shipped to `GridOps` while connected.
+static LOGS: std::sync::LazyLock<LogBuffer> = std::sync::LazyLock::new(LogBuffer::default);
 
 /// Settings saved next to the journal at enrollment.
 #[derive(Default, Serialize, Deserialize)]
@@ -162,13 +169,10 @@ async fn serve(journal: Journal) -> Result<ExitCode> {
         .ok()
         .or(load_saved()?.fleet_url)
         .context("this machine isn't enrolled yet; run `gridops-host-agent enroll`")?;
-    let supervisor = Supervisor::new(Client::new(&url)?, journal, name());
+    let supervisor = Supervisor::new(Client::new(&url)?, journal, name()).with_logs(LOGS.clone());
     let trust = Trust {
         docker_socket: env::var("GRIDOPS_AGENT_DOCKER_SOCKET").is_ok(),
     };
-    if let Some(problem) = docker_runtime().problem().await {
-        tracing::warn!("Docker jobs unavailable on this machine: {problem}");
-    }
     tracing::info!("connecting to {url}");
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

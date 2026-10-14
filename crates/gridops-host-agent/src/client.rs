@@ -191,6 +191,20 @@ impl Client {
             .material)
     }
 
+    /// Uploads a batch of the agent's own log lines.
+    pub async fn post_logs(
+        &self,
+        host: HostId,
+        credential: &SecretString,
+        lines: &[crate::logs::LogLine],
+        dropped: u64,
+    ) -> Result<(), ClientError> {
+        let body = serde_json::json!({ "lines": lines, "dropped": dropped });
+        self.agent::<_, serde_json::Value>(host, credential, "logs", &body)
+            .await
+            .map(drop)
+    }
+
     pub async fn post_result(
         &self,
         host: HostId,

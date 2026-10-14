@@ -8,7 +8,7 @@ import { FleetRequestError } from "./registry-api";
 import {
   backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
-  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema } from "./admin-contracts";
+  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema, agentLogListSchema } from "./admin-contracts";
 
 type Options = { signal?: AbortSignal; body?: unknown; method?: "GET" | "POST" | "PUT" };
 
@@ -38,6 +38,8 @@ export const setHostLifecycle = (hostId: string, expectedRevision: number, lifec
   request(`${hostPath(hostId)}/lifecycle`, emptyResponse, {
     method: "POST", body: lifecycleRequestSchema.parse({ expectedRevision, lifecycle }), signal,
   });
+export const listAgentLogs = (hostId: string, signal?: AbortSignal) =>
+  request(`${hostPath(hostId)}/logs`, agentLogListSchema, { signal });
 export const retireHost = (hostId: string, expectedRevision: number, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/retire`, emptyResponse, {
     method: "POST", body: { expectedRevision }, signal,

@@ -161,14 +161,14 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
         <Switch aria-label="Run on machines" checked={enabled} onCheckedChange={setEnabled} />
       </SettingsRow>
       {profile?.enabled ? <WaitingRunners poolId={poolId} /> : null}
-      <SettingsRow description="Where each new runner starts." label="Placement">
+      <SettingsRow description="Where each new runner starts. When both have room, the built-in host goes first because it starts runners fastest." label="Placement">
         <SearchableSelect
           ariaLabel="Fleet placement"
           onValueChange={(next) => next && setPlacement(next)}
           options={[
             { value: "machines", label: "Machines only", description: "Wait for a machine when none is free" },
-            { value: "machines_first", label: "Machines first", description: "Use the built-in runner host when no machine is free" },
-            { value: "host_first", label: "Built-in host first", description: "Use machines when the built-in host is full" },
+            { value: "host_first", label: "Wherever there’s room", description: "The built-in runner host or a machine, whichever is free" },
+            ...(placement === "machines_first" ? [{ value: "machines_first" as const, label: "Machines first", description: "Earlier setting" }] : []),
           ]}
           searchable={false}
           value={placement}

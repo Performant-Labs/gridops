@@ -13,6 +13,7 @@ mod handshake;
 mod inventory;
 #[cfg(test)]
 mod inventory_tests;
+pub mod logs;
 mod queries;
 #[cfg(test)]
 mod query_tests;

@@ -32,11 +32,13 @@ use crate::{
     dispatch::{Dispatcher, Trust},
     helper::{Bootstrap, NoRuntime, RuntimeHelper},
     journal::{Identity, Journal},
+    logs::LogBuffer,
     probe,
 };
 
 const MAX_HEARTBEAT: Duration = Duration::from_secs(15);
 const INVENTORY_REFRESH: Duration = Duration::from_secs(30);
+const LOG_UPLOAD_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -59,6 +61,7 @@ pub struct Supervisor<H = NoRuntime> {
     dispatcher: Dispatcher<Arc<H>>,
     probe: Arc<H>,
     measure: fn() -> probe::Measurement,
+    logs: Option<LogBuffer>,
 }
 
 /// What the heartbeat loop learns and the command loop needs.
@@ -80,6 +83,7 @@ impl Supervisor<NoRuntime> {
             heartbeat: MAX_HEARTBEAT,
             probe: runtime,
             measure: probe::measure,
+            logs: None,
         }
     }
 }
@@ -96,7 +100,15 @@ impl<H: RuntimeHelper> Supervisor<H> {
             heartbeat: self.heartbeat,
             probe: runtime,
             measure: self.measure,
+            logs: self.logs,
         }
+    }
+
+    /// Uploads the agent's log lines collected in `logs` while connected.
+    #[must_use]
+    pub fn with_logs(mut self, logs: LogBuffer) -> Self {
+        self.logs = Some(logs);
+        self
     }
 
     /// Replaces how the host's memory and load are read (tests, or hosts
@@ -312,9 +324,38 @@ impl<H: RuntimeHelper> Supervisor<H> {
                 authority.send_replace(next);
             }
         };
+        let uploads = self.ship_logs(context.host_id, authority.subscribe());
         tokio::select! {
             result = heartbeats => result,
             result = self.commands(&context, watcher) => result,
+            () = uploads => Ok(Stop::Shutdown),
+        }
+    }
+
+    /// Uploads collected log lines every few seconds. Failures put the batch
+    /// back and never end the session; heartbeats decide that.
+    async fn ship_logs(&self, host_id: HostId, authority: watch::Receiver<Authority>) {
+        let Some(logs) = &self.logs else {
+            return std::future::pending().await;
+        };
+        loop {
+            tokio::time::sleep(LOG_UPLOAD_INTERVAL).await;
+            loop {
+                let (lines, dropped) = logs.take();
+                if lines.is_empty() && dropped == 0 {
+                    break;
+                }
+                let credential = authority.borrow().credential.clone();
+                if self
+                    .client
+                    .post_logs(host_id, &credential, &lines, dropped)
+                    .await
+                    .is_err()
+                {
+                    logs.restore(lines, dropped);
+                    break;
+                }
+            }
         }
     }
 

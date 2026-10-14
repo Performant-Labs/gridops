@@ -129,7 +129,8 @@ pub enum Placement {
     Machines,
     /// On a fleet machine when one can take the runner, else the built-in host.
     MachinesFirst,
-    /// On the built-in host, with fleet machines taking the overflow.
+    /// Wherever there's room: the built-in host when it can start the runner
+    /// (fastest), else a ready fleet machine, else wait and try again.
     HostFirst,
 }
 

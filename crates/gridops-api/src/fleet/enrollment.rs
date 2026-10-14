@@ -468,6 +468,25 @@ pub(super) async fn retire(
     Ok(StatusCode::OK.into_response())
 }
 
+#[derive(Serialize)]
+pub(super) struct AgentLogList {
+    items: Vec<gridops_core::fleet::registry::logs::StoredAgentLog>,
+}
+
+/// The newest lines the host's agent shipped, oldest first.
+pub(super) async fn agent_logs(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetUser,
+    FleetPath(host_id): FleetPath<HostId>,
+) -> Result<Json<AgentLogList>, FleetApiError> {
+    let items = RegistryService::new(state.database, state.vault)
+        .agent_logs(user.principal(), host_id, 300)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(AgentLogList { items }))
+}
+
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,
