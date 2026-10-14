@@ -568,21 +568,25 @@ async fn rebalance_repository_capacity(app: &Reconciler, pool: &Pool, desired: i
 /// slot, so a runner that has just come online keeps the job it was made for.
 const FLEET_IDLE_EVICTION_GRACE_MS: i64 = 2 * 60 * 1_000;
 
-/// Deletes one idle fleet runner parked on a repository with no queued jobs,
+/// Deletes one idle fleet runner parked on a repository with no queued jobs
+/// for its OS,
 /// while fleet work in the pool waits for host capacity. Rebalancing leaves
 /// fleet runners alone, and the fleet scheduler queues rather than reporting a
 /// full host, so without this idle runners hold a machine indefinitely.
 async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> {
     let now = now_millis();
     let idle: Option<String> = sqlx::query_scalar(
-        "SELECT r.id FROM runners r
+        r#"SELECT r.id FROM runners r
           WHERE r.pool_id=? AND r.status IN ('online','idle') AND r.busy=0 AND r.updated_at<?
             AND EXISTS (SELECT 1 FROM workload_intents own WHERE own.workload_id=r.id)
             AND EXISTS (SELECT 1 FROM workload_intents waiting
                          WHERE waiting.pool_id=r.pool_id AND waiting.status='queued')
             AND NOT EXISTS (SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
-                             WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting'))
-          ORDER BY r.updated_at LIMIT 1",
+                             WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting')
+                               AND (instr(lower(job.labels),'"'||lower(r.os)||'"')>0
+                                    OR (instr(lower(job.labels),'"linux"')=0 AND instr(lower(job.labels),'"windows"')=0
+                                        AND instr(lower(job.labels),'"macos"')=0)))
+          ORDER BY r.updated_at LIMIT 1"#,
     )
     .bind(&pool.id)
     .bind(now - FLEET_IDLE_EVICTION_GRACE_MS)

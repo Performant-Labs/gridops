@@ -64,7 +64,11 @@ pub(super) async fn choose_profile<'a>(
 ) -> Result<Option<(&'a Profile, bool)>> {
     let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
     let mut queued = vec![0_i64; profiles.len()];
-    for (_, requested) in gridops_core::queued_job_assignments(&app.database, &pool.id).await? {
+    // Repositories with queued jobs each platform can run.
+    let mut waiting = vec![std::collections::HashSet::<i64>::new(); profiles.len()];
+    for (repository, requested) in
+        gridops_core::queued_job_assignments(&app.database, &pool.id).await?
+    {
         if let Some(index) = profiles.iter().position(|profile| {
             targets::platform_supports_labels(
                 profile.input.execution_os,
@@ -74,30 +78,37 @@ pub(super) async fn choose_profile<'a>(
             )
         }) {
             queued[index] += 1;
+            waiting[index].insert(repository);
         }
     }
-    // An idle runner parked on a repository without queued jobs cannot take
-    // another repository's job, so it doesn't count toward covering the queue.
     let rows = sqlx::query(
-        "SELECT i.profile_id,COUNT(*) AS active,COUNT(CASE WHEN r.busy=1 THEN 1 END) AS busy
+        "SELECT i.profile_id,r.target_repository_id,r.busy
            FROM runners r JOIN workload_intents i ON i.workload_id=r.id
           WHERE r.pool_id=? AND r.deleted_at IS NULL
-            AND r.status IN ('starting','online','idle','busy','paused','stopped')
-            AND (r.busy=1 OR r.target_repository_id IS NULL OR EXISTS (
-                  SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
-                   WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting')))
-          GROUP BY i.profile_id",
+            AND r.status IN ('starting','online','idle','busy','paused','stopped')",
     )
     .bind(&pool.id)
     .fetch_all(&app.database)
     .await?;
+    // An idle runner registered to a repository with no queued job its
+    // platform can run cannot take another repository's job, so it doesn't
+    // count toward covering the queue.
     let deficit = |index: usize| {
-        let row = rows
+        let (mut active, mut busy) = (0_i64, 0_i64);
+        for row in rows
             .iter()
-            .find(|row| row.get::<String, _>("profile_id") == profiles[index].id);
-        let (active, busy) = row.map_or((0, 0), |row| {
-            (row.get::<i64, _>("active"), row.get::<i64, _>("busy"))
-        });
+            .filter(|row| row.get::<String, _>("profile_id") == profiles[index].id)
+        {
+            let is_busy = row.get::<bool, _>("busy");
+            let useful = is_busy
+                || row
+                    .get::<Option<i64>, _>("target_repository_id")
+                    .is_none_or(|repository| waiting[index].contains(&repository));
+            if useful {
+                active += 1;
+                busy += i64::from(is_busy);
+            }
+        }
         busy.saturating_add(queued[index].saturating_mul(pool.queue_scale_factor))
             .saturating_sub(active)
     };
