@@ -8,6 +8,7 @@ import {
   GitPullRequestArrow,
   LoaderCircle,
   MessageSquareText,
+  RotateCcw,
   Sparkles,
   Square,
   Wrench,
@@ -36,15 +37,19 @@ export function AgentRunPanel({
   error,
   onRetry,
   onUpdate,
+  onRunAgain,
 }: {
   run: AgentRun | null;
   summary: AgentRunSummary | null;
   error: string | null;
   onRetry: () => void;
   onUpdate: (run: AgentRun) => void;
+  /** Starts a fresh run for the same job; offered once a run failed or was cancelled. */
+  onRunAgain?: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(true);
   const [cancelling, setCancelling] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const status = run?.status ?? summary?.status ?? "queued";
   const terminal = isTerminalAgentStatus(status);
   const pullRequestUrl = run?.pullRequestUrl ?? summary?.pullRequestUrl ?? null;
@@ -88,6 +93,19 @@ export function AgentRunPanel({
           <a className={buttonVariants({ size: "xs", variant: "ghost" })} href={pullRequestUrl} rel="noreferrer" target="_blank">
             <GitPullRequestArrow />{pullRequestNumber ? `#${pullRequestNumber}` : "Pull request"}<ExternalLink />
           </a>
+        ) : null}
+        {onRunAgain && (status === "failed" || status === "cancelled") ? (
+          <Button
+            disabled={restarting}
+            onClick={() => {
+              setRestarting(true);
+              void onRunAgain().finally(() => setRestarting(false));
+            }}
+            size="xs"
+            variant="ghost"
+          >
+            {restarting ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}Run again
+          </Button>
         ) : null}
         {run?.canCancel ? (
           <Button disabled={cancelling} onClick={() => void cancel()} size="xs" variant="ghost">

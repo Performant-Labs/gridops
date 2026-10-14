@@ -242,6 +242,7 @@ export function JobLogViewer({
           error={agentRun.error}
           key={agentRunId}
           onRetry={() => void agentRun.reload()}
+          onRunAgain={fixState.visible && !fixState.disabled ? startFix : undefined}
           onUpdate={agentRun.accept}
           run={agentRun.run}
           summary={agentSummary}

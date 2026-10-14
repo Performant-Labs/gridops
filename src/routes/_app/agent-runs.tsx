@@ -1,4 +1,6 @@
-import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
+import { useState } from "react";
+import { toast } from "sonner";
 import { Bot, ExternalLink, GitPullRequestArrow } from "lucide-react";
 
 import { ListPagination } from "~/components/list-pagination";
@@ -11,7 +13,7 @@ import { Dialog, DialogTrigger, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
 import { AgentRunPanel } from "~/features/agent/agent-run-panel";
 import { agentRunLabel, isTerminalAgentStatus } from "~/features/agent/agent-state";
-import { type AgentRunListItem, type AgentRunStatus, getAgentRunsPage } from "~/features/agent/agent.functions";
+import { type AgentRunListItem, type AgentRunStatus, getAgentRunsPage, startAgentRun } from "~/features/agent/agent.functions";
 import { useAgentRun } from "~/features/agent/use-agent-run";
 import { validatePageSearch } from "~/lib/pagination";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
@@ -108,17 +110,34 @@ function AgentRunRow({ run }: { run: AgentRunListItem }) {
   );
 }
 
-/** The run's live status and timeline, re-read while it's still working. */
+/** The run's live status and timeline, re-read while it's still working. Run again follows the new run. */
 function AgentRunDetails({ run }: { run: AgentRunListItem }) {
-  const agentRun = useAgentRun(run.id);
+  const router = useRouter();
+  const [runId, setRunId] = useState(run.id);
+  const agentRun = useAgentRun(runId);
+
+  async function runAgain() {
+    try {
+      const next = await startAgentRun(run.jobId);
+      agentRun.accept(next);
+      setRunId(next.id);
+      toast.success("The agent is looking into this failure again.");
+      void router.invalidate();
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not start the agent.");
+    }
+  }
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <AgentRunPanel
         error={agentRun.error}
+        key={runId}
         onRetry={() => void agentRun.reload()}
+        onRunAgain={runAgain}
         onUpdate={agentRun.accept}
         run={agentRun.run}
-        summary={{ id: run.id, status: run.status, outcome: run.outcome, pullRequestUrl: run.pullRequestUrl, pullRequestNumber: run.pullRequestNumber, createdAt: run.createdAt, completedAt: run.completedAt }}
+        summary={runId === run.id ? { id: run.id, status: run.status, outcome: run.outcome, pullRequestUrl: run.pullRequestUrl, pullRequestNumber: run.pullRequestNumber, createdAt: run.createdAt, completedAt: run.completedAt } : null}
       />
     </div>
   );
