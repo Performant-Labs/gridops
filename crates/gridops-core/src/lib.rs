@@ -14,7 +14,7 @@ pub use autoscaling::{
     ProviderCapacity, RepositoryCapacity, assigned_queued_jobs, compatible_runner_provider,
     effective_runner_labels, is_runner_system_label, next_runner_provider, next_runner_repository,
     provider_capacities, provider_capacity_deficit, provider_supports_labels,
-    repository_capacities, repository_capacity_deficit, runner_arch_label,
+    queued_job_assignments, repository_capacities, repository_capacity_deficit, runner_arch_label,
     runner_supports_system_label, runner_system_labels, scale_up_target,
 };
 pub use bitbucket::{

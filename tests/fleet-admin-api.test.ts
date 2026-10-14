@@ -9,8 +9,8 @@ const hostId = "00000001-0000-4000-8000-000000000001";
 const backendId = "00000002-0000-4000-8000-000000000001";
 const targetId = "00000008-0000-4000-8000-000000000001";
 const profileInput: ProfileInput = {
-  enabled: true, runtimeKind: "docker", executionOs: "linux", architecture: "arm64", mode: "ephemeral",
-  image: "ghcr.io/actions/actions-runner:latest", labels: ["self-hosted"], cpuMillis: 2000, memoryMib: 2048, diskBytes: 0,
+  enabled: true, placement: "machines", mode: "ephemeral", cpuMillis: 2000, memoryMib: 2048, diskBytes: 0,
+  platforms: [{ runtimeKind: "docker", executionOs: "linux", architecture: "arm64", image: "ghcr.io/actions/actions-runner:latest", requiresDockerSocket: false }],
 };
 
 const calls = (fetcher: ReturnType<typeof vi.fn>) => fetcher.mock.calls as Array<[string, RequestInit]>;
@@ -48,7 +48,7 @@ describe("fleet admin browser transport", () => {
   });
 
   it("reads targets, grants and pool profiles and saves a profile with PUT", async () => {
-    const profile = { ...profileInput, id: targetId, revision: 2, requiresDockerSocket: false, targetIds: [targetId] };
+    const profile = { ...profileInput, platforms: profileInput.platforms.map((platform) => ({ ...platform, id: targetId, revision: 2 })), targetIds: [targetId] };
     const fetcher = vi.fn()
       .mockResolvedValueOnce(Response.json({ items: [{ id: targetId, kind: "github_repository", label: "acme/api" }] }))
       .mockResolvedValueOnce(Response.json({ items: [{ targetId, label: "acme/api", allowSchedule: true, allowNative: false, allowDockerSocket: false }] }))

@@ -39,11 +39,77 @@ const INSPECT_INTERVAL_MILLIS: i64 = 30_000;
 /// The agent has this long to fetch registration material and start.
 const START_WINDOW_MILLIS: i64 = 60_000;
 
-/// The pool's profile when it's enabled for fleet execution.
-pub(super) async fn profile(app: &Reconciler, pool_id: &str) -> Result<Option<Profile>> {
-    Ok(targets::pool_profile(&app.database, pool_id)
+/// The pool's platforms that are enabled for fleet execution.
+pub(super) async fn profiles(app: &Reconciler, pool_id: &str) -> Result<Vec<Profile>> {
+    Ok(targets::pool_profiles(&app.database, pool_id)
         .await?
-        .filter(|profile| profile.input.enabled))
+        .into_iter()
+        .filter(|profile| profile.input.enabled)
+        .collect())
+}
+
+/// The platform the pool's next runner should use: the one furthest behind
+/// the queued jobs that only it (or it first) can run, else the first.
+pub(super) async fn choose_profile<'a>(
+    app: &Reconciler,
+    pool: &Pool,
+    profiles: &'a [Profile],
+) -> Result<Option<&'a Profile>> {
+    let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
+    let mut queued = vec![0_i64; profiles.len()];
+    for (_, requested) in gridops_core::queued_job_assignments(&app.database, &pool.id).await? {
+        if let Some(index) = profiles.iter().position(|profile| {
+            targets::platform_supports_labels(
+                profile.input.execution_os,
+                profile.input.architecture,
+                &requested,
+                &configured,
+            )
+        }) {
+            queued[index] += 1;
+        }
+    }
+    let rows = sqlx::query(
+        "SELECT i.profile_id,COUNT(*) AS active,COUNT(CASE WHEN r.busy=1 THEN 1 END) AS busy
+           FROM runners r JOIN workload_intents i ON i.workload_id=r.id
+          WHERE r.pool_id=? AND r.deleted_at IS NULL
+            AND r.status IN ('starting','online','idle','busy','paused','stopped')
+          GROUP BY i.profile_id",
+    )
+    .bind(&pool.id)
+    .fetch_all(&app.database)
+    .await?;
+    let deficit = |index: usize| {
+        let row = rows
+            .iter()
+            .find(|row| row.get::<String, _>("profile_id") == profiles[index].id);
+        let (active, busy) = row.map_or((0, 0), |row| {
+            (row.get::<i64, _>("active"), row.get::<i64, _>("busy"))
+        });
+        busy.saturating_add(queued[index].saturating_mul(pool.queue_scale_factor))
+            .saturating_sub(active)
+    };
+    Ok((0..profiles.len())
+        .filter(|index| deficit(*index) > 0)
+        .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
+        .or((!profiles.is_empty()).then_some(0))
+        .map(|index| &profiles[index]))
+}
+
+/// Whether the built-in host can start a runner for this platform.
+pub(super) fn host_serves(pool: &Pool, profile: &Profile) -> bool {
+    use gridops_core::fleet::{Architecture, ExecutionOs};
+    let providers = serde_json::from_str::<Vec<String>>(&pool.providers).unwrap_or_default();
+    let has = |name: &str| providers.iter().any(|provider| provider == name);
+    let host_arch = match profile.input.architecture {
+        Architecture::X64 => "x64",
+        Architecture::Arm64 => "arm64",
+    };
+    match profile.input.execution_os {
+        ExecutionOs::Linux => has("docker") && gridops_core::runner_arch_label() == host_arch,
+        ExecutionOs::Macos => has("tart") && profile.input.architecture == Architecture::Arm64,
+        ExecutionOs::Windows => false,
+    }
 }
 
 /// Whether a fleet machine can take this pool's next runner now.

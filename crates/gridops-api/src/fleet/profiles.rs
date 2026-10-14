@@ -1,12 +1,12 @@
-//! Fleet targets and pool execution profiles. A pool runs on fleet hosts once
-//! it has an enabled profile. Only system administrators can read or change
+//! Fleet targets and pool fleet settings. A pool runs on fleet hosts once it
+//! has enabled platforms (one execution profile each). Only system administrators can read or change
 //! these, because they decide which machines run which repositories' jobs.
 
 use axum::{Json, extract::State};
 use gridops_core::fleet::{
     FleetError, Principal,
     protocol::browser::ErrorCode,
-    targets::{self, Profile, ProfileInput, TargetSummary},
+    targets::{self, FleetSettings, FleetSettingsInput, TargetSummary},
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ pub(super) struct Targets {
 
 #[derive(Serialize)]
 pub(super) struct ProfileResponse {
-    item: Option<Profile>,
+    item: Option<FleetSettings>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +50,7 @@ pub(super) async fn profile(
     FleetPath(path): FleetPath<PoolPath>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
-    let item = targets::pool_profile(&state.database, &path.pool_id)
+    let item = targets::pool_fleet(&state.database, &path.pool_id)
         .await
         .map_err(|error| fleet_error(context, &error))?;
     Ok(Json(ProfileResponse { item }))
@@ -79,10 +79,10 @@ pub(super) async fn save_profile(
     context: RequestContext,
     user: FleetWriteUser,
     FleetPath(path): FleetPath<PoolPath>,
-    FleetJson(body): FleetJson<ProfileInput>,
+    FleetJson(body): FleetJson<FleetSettingsInput>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
-    let item = targets::save_pool_profile(&state.database, &path.pool_id, &body)
+    let item = targets::save_pool_fleet(&state.database, &path.pool_id, &body)
         .await
         .map_err(|error| fleet_error(context, &error))?;
     Ok(Json(ProfileResponse { item: Some(item) }))

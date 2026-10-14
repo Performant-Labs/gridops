@@ -174,158 +174,331 @@ pub struct Profile {
     pub target_ids: Vec<String>,
 }
 
-/// The pool's profile, if it has one.
-pub async fn pool_profile(pool: &SqlitePool, pool_id: &str) -> Result<Option<Profile>, FleetError> {
-    let Some(row) = sqlx::query(
+/// One platform a pool runs on: how and where each runner is isolated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformInput {
+    /// The platform's profile, when it already exists.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub runtime_kind: super::RuntimeKind,
+    pub execution_os: super::ExecutionOs,
+    pub architecture: super::Architecture,
+    pub image: String,
+    #[serde(default)]
+    pub requires_docker_socket: bool,
+}
+
+/// A pool's fleet settings: what all its platforms share, and the platforms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FleetSettingsInput {
+    pub enabled: bool,
+    #[serde(default)]
+    pub placement: Placement,
+    pub mode: super::protocol::agent::RunnerMode,
+    pub cpu_millis: u32,
+    pub memory_mib: u32,
+    pub disk_bytes: u64,
+    pub platforms: Vec<PlatformInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Platform {
+    pub id: String,
+    pub revision: i64,
+    pub runtime_kind: super::RuntimeKind,
+    pub execution_os: super::ExecutionOs,
+    pub architecture: super::Architecture,
+    pub image: String,
+    pub requires_docker_socket: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetSettings {
+    pub enabled: bool,
+    pub placement: Placement,
+    pub mode: super::protocol::agent::RunnerMode,
+    pub cpu_millis: u32,
+    pub memory_mib: u32,
+    pub disk_bytes: u64,
+    pub platforms: Vec<Platform>,
+    pub target_ids: Vec<String>,
+}
+
+/// The pool's current (not archived) profiles, oldest first.
+pub async fn pool_profiles(pool: &SqlitePool, pool_id: &str) -> Result<Vec<Profile>, FleetError> {
+    let rows = sqlx::query(
         "SELECT id,revision,enabled,runtime_kind,execution_os,architecture,mode,image,labels_json,
                 cpu_millis,memory_mib,disk_bytes,requires_docker_socket,placement
-           FROM pool_execution_profiles WHERE pool_id=? ORDER BY created_at LIMIT 1",
+           FROM pool_execution_profiles WHERE pool_id=? AND archived_at IS NULL
+          ORDER BY created_at,rowid",
     )
     .bind(pool_id)
-    .fetch_optional(pool)
-    .await?
-    else {
-        return Ok(None);
-    };
-    let id: String = row.get("id");
-    let target_ids = sqlx::query_scalar(
-        "SELECT target_id FROM profile_ci_targets WHERE profile_id=? AND enabled=1 AND revoked_at IS NULL",
-    )
-    .bind(&id)
     .fetch_all(pool)
     .await?;
-    let input = serde_json::from_value(serde_json::json!({
-        "enabled": row.get::<bool, _>("enabled"),
-        "runtimeKind": row.get::<String, _>("runtime_kind"),
-        "executionOs": row.get::<String, _>("execution_os"),
-        "architecture": row.get::<String, _>("architecture"),
-        "mode": row.get::<String, _>("mode"),
-        "image": row.get::<String, _>("image"),
-        "labels": serde_json::from_str::<Vec<String>>(row.get("labels_json")).unwrap_or_default(),
-        "cpuMillis": row.get::<i64, _>("cpu_millis"),
-        "memoryMib": row.get::<i64, _>("memory_mib"),
-        "diskBytes": row.get::<i64, _>("disk_bytes"),
-        "requiresDockerSocket": row.get::<bool, _>("requires_docker_socket"),
-        "placement": row.get::<String, _>("placement"),
-    }))
-    .map_err(|_| FleetError::Invariant("stored profile"))?;
-    Ok(Some(Profile {
-        id,
-        revision: row.get("revision"),
-        input,
+    let mut profiles = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.get("id");
+        let target_ids = sqlx::query_scalar(
+            "SELECT target_id FROM profile_ci_targets WHERE profile_id=? AND enabled=1 AND revoked_at IS NULL",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await?;
+        let input = serde_json::from_value(serde_json::json!({
+            "enabled": row.get::<bool, _>("enabled"),
+            "runtimeKind": row.get::<String, _>("runtime_kind"),
+            "executionOs": row.get::<String, _>("execution_os"),
+            "architecture": row.get::<String, _>("architecture"),
+            "mode": row.get::<String, _>("mode"),
+            "image": row.get::<String, _>("image"),
+            "labels": serde_json::from_str::<Vec<String>>(row.get("labels_json")).unwrap_or_default(),
+            "cpuMillis": row.get::<i64, _>("cpu_millis"),
+            "memoryMib": row.get::<i64, _>("memory_mib"),
+            "diskBytes": row.get::<i64, _>("disk_bytes"),
+            "requiresDockerSocket": row.get::<bool, _>("requires_docker_socket"),
+            "placement": row.get::<String, _>("placement"),
+        }))
+        .map_err(|_| FleetError::Invariant("stored profile"))?;
+        profiles.push(Profile {
+            id,
+            revision: row.get("revision"),
+            input,
+            target_ids,
+        });
+    }
+    Ok(profiles)
+}
+
+/// The pool's fleet settings, if it has any platform.
+pub async fn pool_fleet(
+    pool: &SqlitePool,
+    pool_id: &str,
+) -> Result<Option<FleetSettings>, FleetError> {
+    let profiles = pool_profiles(pool, pool_id).await?;
+    let Some(first) = profiles.first() else {
+        return Ok(None);
+    };
+    let shared = first.input.clone();
+    let mut target_ids = first.target_ids.clone();
+    target_ids.sort();
+    Ok(Some(FleetSettings {
+        enabled: profiles.iter().any(|profile| profile.input.enabled),
+        placement: shared.placement,
+        mode: shared.mode,
+        cpu_millis: shared.cpu_millis,
+        memory_mib: shared.memory_mib,
+        disk_bytes: shared.disk_bytes,
+        platforms: profiles
+            .into_iter()
+            .map(|profile| Platform {
+                id: profile.id,
+                revision: profile.revision,
+                runtime_kind: profile.input.runtime_kind,
+                execution_os: profile.input.execution_os,
+                architecture: profile.input.architecture,
+                image: profile.input.image,
+                requires_docker_socket: profile.input.requires_docker_socket,
+            })
+            .collect(),
         target_ids,
     }))
 }
 
-/// Creates or updates the pool's profile and points it at the pool's targets.
-/// Each change bumps the revision, so placements keep the configuration they
-/// were admitted with.
-pub async fn save_pool_profile(
+/// Saves the pool's fleet settings: updates the platforms that are kept,
+/// adds new ones and archives the ones left out. A platform's revision only
+/// moves when it actually changes, so runners already waiting for it stay
+/// valid.
+pub async fn save_pool_fleet(
     pool: &SqlitePool,
     pool_id: &str,
-    input: &ProfileInput,
-) -> Result<Profile, FleetError> {
-    if input.cpu_millis == 0 || input.memory_mib == 0 || input.image.trim().is_empty() {
+    input: &FleetSettingsInput,
+) -> Result<FleetSettings, FleetError> {
+    use super::{ExecutionOs, RuntimeKind};
+    if input.cpu_millis == 0 || input.memory_mib == 0 {
+        return Err(FleetError::InvalidRequest("platforms need CPU and memory"));
+    }
+    if input.platforms.len() > 12 {
+        return Err(FleetError::InvalidRequest("too many platforms"));
+    }
+    if input.enabled && input.platforms.is_empty() {
         return Err(FleetError::InvalidRequest(
-            "profile needs CPU, memory and an image",
+            "add a platform to run on machines",
         ));
     }
-    if input.labels.len() > 100 {
-        return Err(FleetError::InvalidRequest("too many labels"));
+    let mut seen = Vec::new();
+    for platform in &input.platforms {
+        let fits = match platform.runtime_kind {
+            RuntimeKind::Docker => platform.execution_os == ExecutionOs::Linux,
+            RuntimeKind::TartVm => platform.execution_os == ExecutionOs::Macos,
+            RuntimeKind::NativeProcess => true,
+        };
+        if !fits {
+            return Err(FleetError::InvalidRequest("runtime doesn't run that OS"));
+        }
+        if platform.image.trim().is_empty() {
+            return Err(FleetError::InvalidRequest("platform needs an image"));
+        }
+        super::protocol::primitives::ImageReference::try_from(platform.image.trim().to_owned())
+            .map_err(|_| FleetError::InvalidRequest("image reference"))?;
+        let key = (
+            name(platform.runtime_kind),
+            serde_value(&platform.execution_os)?,
+            serde_value(&platform.architecture)?,
+        );
+        if seen.contains(&key) {
+            return Err(FleetError::InvalidRequest("a platform is listed twice"));
+        }
+        seen.push(key);
     }
-    super::protocol::primitives::ImageReference::try_from(input.image.clone())
-        .map_err(|_| FleetError::InvalidRequest("image reference"))?;
     sync_github_targets(pool).await?;
     let targets = pool_targets(pool, pool_id).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = crate::now_millis();
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM pool_execution_profiles WHERE pool_id=? ORDER BY created_at LIMIT 1",
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM pool_execution_profiles WHERE pool_id=? AND archived_at IS NULL",
     )
     .bind(pool_id)
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    let values = (
-        name(input.runtime_kind),
-        serde_value(&input.execution_os)?,
-        serde_value(&input.architecture)?,
-        serde_value(&input.mode)?,
-        serde_json::to_string(&input.labels).map_err(|_| FleetError::Invariant("labels"))?,
-    );
-    let id = if let Some(id) = existing {
-        {
+    let mode = serde_value(&input.mode)?;
+    let disk = i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?;
+    let mut kept = Vec::new();
+    for platform in &input.platforms {
+        let os = serde_value(&platform.execution_os)?;
+        let architecture = serde_value(&platform.architecture)?;
+        let docker_socket =
+            platform.requires_docker_socket && platform.runtime_kind == RuntimeKind::Docker;
+        let id = if let Some(id) = platform.id.as_ref().filter(|id| existing.contains(id)) {
             sqlx::query(
-                "UPDATE pool_execution_profiles SET revision=revision+1,enabled=?,runtime_kind=?,
-                   execution_os=?,architecture=?,mode=?,requires_docker_socket=?,all_authorized_hosts=1,
-                   image=?,labels_json=?,cpu_millis=?,memory_mib=?,disk_bytes=?,placement=?,updated_at=? WHERE id=?",
+                "UPDATE pool_execution_profiles SET
+                   revision=revision+1,enabled=?,runtime_kind=?,execution_os=?,architecture=?,mode=?,
+                   requires_docker_socket=?,all_authorized_hosts=1,image=?,labels_json='[]',
+                   cpu_millis=?,memory_mib=?,disk_bytes=?,placement=?,updated_at=?
+                 WHERE id=? AND NOT (enabled IS ? AND runtime_kind IS ? AND execution_os IS ?
+                   AND architecture IS ? AND mode IS ? AND requires_docker_socket IS ? AND image IS ?
+                   AND cpu_millis IS ? AND memory_mib IS ? AND disk_bytes IS ? AND placement IS ?)",
             )
             .bind(input.enabled)
-            .bind(values.0)
-            .bind(&values.1)
-            .bind(&values.2)
-            .bind(&values.3)
-            .bind(input.requires_docker_socket)
-            .bind(input.image.trim())
-            .bind(&values.4)
+            .bind(name(platform.runtime_kind))
+            .bind(&os)
+            .bind(&architecture)
+            .bind(&mode)
+            .bind(docker_socket)
+            .bind(platform.image.trim())
             .bind(i64::from(input.cpu_millis))
             .bind(i64::from(input.memory_mib))
-            .bind(i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?)
+            .bind(disk)
             .bind(input.placement.name())
             .bind(now)
-            .bind(&id)
+            .bind(id)
+            .bind(input.enabled)
+            .bind(name(platform.runtime_kind))
+            .bind(&os)
+            .bind(&architecture)
+            .bind(&mode)
+            .bind(docker_socket)
+            .bind(platform.image.trim())
+            .bind(i64::from(input.cpu_millis))
+            .bind(i64::from(input.memory_mib))
+            .bind(disk)
+            .bind(input.placement.name())
             .execute(&mut *tx)
             .await?;
-            id
-        }
-    } else {
-        {
+            id.clone()
+        } else {
             let id = Uuid::new_v4().to_string();
             sqlx::query(
                 "INSERT INTO pool_execution_profiles
                  (id,pool_id,name,revision,enabled,runtime_kind,execution_os,architecture,mode,
                   requires_docker_socket,all_authorized_hosts,image,labels_json,cpu_millis,memory_mib,
                   disk_bytes,placement,created_at,updated_at)
-                 VALUES (?,?,'default',1,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
+                 VALUES (?,?,?,1,?,?,?,?,?,?,1,?,'[]',?,?,?,?,?,?)",
             )
             .bind(&id)
             .bind(pool_id)
+            .bind(format!("{os}-{architecture}-{}", name(platform.runtime_kind)))
             .bind(input.enabled)
-            .bind(values.0)
-            .bind(&values.1)
-            .bind(&values.2)
-            .bind(&values.3)
-            .bind(input.requires_docker_socket)
-            .bind(input.image.trim())
-            .bind(&values.4)
+            .bind(name(platform.runtime_kind))
+            .bind(&os)
+            .bind(&architecture)
+            .bind(&mode)
+            .bind(docker_socket)
+            .bind(platform.image.trim())
             .bind(i64::from(input.cpu_millis))
             .bind(i64::from(input.memory_mib))
-            .bind(i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?)
+            .bind(disk)
             .bind(input.placement.name())
             .bind(now)
             .bind(now)
             .execute(&mut *tx)
             .await?;
             id
+        };
+        sqlx::query("UPDATE profile_ci_targets SET enabled=0 WHERE profile_id=?")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        for target in &targets {
+            sqlx::query(
+                "INSERT INTO profile_ci_targets (profile_id,target_id,enabled) VALUES (?,?,1)
+                 ON CONFLICT(profile_id,target_id) DO UPDATE SET enabled=1,revoked_at=NULL",
+            )
+            .bind(&id)
+            .bind(target)
+            .execute(&mut *tx)
+            .await?;
         }
-    };
-    sqlx::query("UPDATE profile_ci_targets SET enabled=0 WHERE profile_id=?")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    for target in &targets {
+        kept.push(id);
+    }
+    for id in existing.iter().filter(|id| !kept.contains(id)) {
         sqlx::query(
-            "INSERT INTO profile_ci_targets (profile_id,target_id,enabled) VALUES (?,?,1)
-             ON CONFLICT(profile_id,target_id) DO UPDATE SET enabled=1,revoked_at=NULL",
+            "UPDATE pool_execution_profiles SET enabled=0,archived_at=?,revision=revision+1,updated_at=?
+             WHERE id=?",
         )
-        .bind(&id)
-        .bind(target)
+        .bind(now)
+        .bind(now)
+        .bind(id)
         .execute(&mut *tx)
         .await?;
     }
     tx.commit().await?;
-    pool_profile(pool, pool_id)
+    pool_fleet(pool, pool_id)
         .await?
-        .ok_or(FleetError::Invariant("saved profile"))
+        .ok_or(FleetError::Invariant("saved fleet settings"))
+}
+
+/// Whether a runner on this platform satisfies every label a job asked for:
+/// `self-hosted`, the platform's OS and architecture, and the pool's own
+/// labels.
+#[must_use]
+pub fn platform_supports_labels(
+    execution_os: super::ExecutionOs,
+    architecture: super::Architecture,
+    requested: &[String],
+    configured: &[String],
+) -> bool {
+    let os = match execution_os {
+        super::ExecutionOs::Linux => "linux",
+        super::ExecutionOs::Macos => "macos",
+        super::ExecutionOs::Windows => "windows",
+    };
+    let arch = match architecture {
+        super::Architecture::X64 => "x64",
+        super::Architecture::Arm64 => "arm64",
+    };
+    requested.iter().all(|label| {
+        label.eq_ignore_ascii_case("self-hosted")
+            || label.eq_ignore_ascii_case(os)
+            || label.eq_ignore_ascii_case(arch)
+            || (!crate::is_runner_system_label(label)
+                && configured
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(label)))
+    })
 }
 
 /// The targets a pool serves: its repositories, or its organization.
@@ -435,7 +608,7 @@ pub async fn pool_queue(pool: &SqlitePool, pool_id: &str) -> Result<Vec<QueuedRu
 /// Whether a fleet machine can plausibly take this pool's next runner now:
 /// some active, online machine with a matching enabled backend, the right
 /// grants and no pressure, and none of the pool's runners already waiting
-/// for a machine (waiting means the machines are full).
+/// for a machine on this platform (waiting means the machines are full).
 pub async fn machine_ready(
     pool: &SqlitePool,
     pool_id: &str,
@@ -443,7 +616,7 @@ pub async fn machine_ready(
 ) -> Result<bool, FleetError> {
     let now = crate::now_millis();
     Ok(sqlx::query_scalar(
-        "SELECT NOT EXISTS (SELECT 1 FROM workload_intents WHERE pool_id=? AND status='queued')
+        "SELECT NOT EXISTS (SELECT 1 FROM workload_intents WHERE pool_id=? AND profile_id=? AND status='queued')
             AND EXISTS (
               SELECT 1 FROM pool_execution_profiles p
                 JOIN host_backends b ON b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
@@ -458,6 +631,7 @@ pub async fn machine_ready(
                  AND (p.runtime_kind!='native_process' OR g.allow_native=1))",
     )
     .bind(pool_id)
+    .bind(profile_id)
     .bind(profile_id)
     .bind(now - 45_000)
     .bind(now)

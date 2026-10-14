@@ -35,24 +35,25 @@ export const hostGrantListSchema = z.strictObject({ items: z.array(hostGrantSche
 // Pool IDs are GridOps' own identifiers, not fleet UUIDs.
 export const fleetPoolIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 
-export const profileInputSchema = z.strictObject({
-  enabled: z.boolean(),
+export const platformInputSchema = z.strictObject({
+  id: fleetIdSchema.optional(),
   runtimeKind: z.enum(["docker", "native_process", "tart_vm"]),
   executionOs: z.enum(["linux", "macos", "windows"]),
   architecture: z.enum(["x64", "arm64"]),
-  mode: z.enum(["ephemeral", "persistent"]),
   image: z.string().trim().min(1).max(512),
-  labels: z.array(z.string().trim().min(1).max(128)).max(100),
+  requiresDockerSocket: z.boolean(),
+});
+export const profileInputSchema = z.strictObject({
+  enabled: z.boolean(),
+  placement: z.enum(["machines", "machines_first", "host_first"]),
+  mode: z.enum(["ephemeral", "persistent"]),
   cpuMillis: safeInteger.min(1).max(0xffff_ffff),
   memoryMib: safeInteger.min(1).max(0xffff_ffff),
   diskBytes: safeInteger,
-  requiresDockerSocket: z.boolean().optional(),
-  placement: z.enum(["machines", "machines_first", "host_first"]).optional(),
+  platforms: z.array(platformInputSchema).max(12),
 });
 export const profileSchema = profileInputSchema.extend({
-  id: fleetIdSchema,
-  revision: fleetCounterSchema,
-  requiresDockerSocket: z.boolean(),
+  platforms: z.array(platformInputSchema.extend({ id: fleetIdSchema, revision: fleetCounterSchema })).max(12),
   targetIds: z.array(fleetIdSchema).max(10_000),
 });
 export const profileResultSchema = z.strictObject({ item: profileSchema.nullable() });
@@ -82,4 +83,5 @@ export type GrantPolicy = z.infer<typeof grantPolicySchema>;
 export type HostGrant = z.infer<typeof hostGrantSchema>;
 export type FleetTarget = z.infer<typeof fleetTargetSchema>;
 export type ProfileInput = z.input<typeof profileInputSchema>;
+export type PlatformInput = z.input<typeof platformInputSchema>;
 export type Profile = z.infer<typeof profileSchema>;

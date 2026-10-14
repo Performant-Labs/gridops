@@ -1181,27 +1181,32 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
 }
 
 /// Starts one runner for the pool, on the built-in host or a fleet machine as
-/// the pool's fleet profile says.
+/// the pool's fleet platforms and placement say.
 async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
     use gridops_core::fleet::targets::Placement;
-    let Some(profile) = fleet::profile(app, &pool.id).await? else {
+    let profiles = fleet::profiles(app, &pool.id).await?;
+    let Some(profile) = fleet::choose_profile(app, pool, &profiles).await? else {
         return provision_on_host(app, pool).await;
     };
+    let host = fleet::host_serves(pool, profile);
     match profile.input.placement {
-        Placement::Machines => fleet::provision(app, pool, &profile).await,
+        Placement::Machines => fleet::provision(app, pool, profile).await,
         Placement::MachinesFirst => {
-            if fleet::machine_ready(app, pool, &profile).await? {
-                fleet::provision(app, pool, &profile).await
+            if !host || fleet::machine_ready(app, pool, profile).await? {
+                fleet::provision(app, pool, profile).await
             } else {
                 provision_on_host(app, pool).await
             }
         }
         Placement::HostFirst => {
+            if !host {
+                return fleet::provision(app, pool, profile).await;
+            }
             let attempt = provision_on_host(app, pool).await?;
             if matches!(attempt, ProvisionAttempt::Deferred { .. })
-                && fleet::machine_ready(app, pool, &profile).await?
+                && fleet::machine_ready(app, pool, profile).await?
             {
-                return fleet::provision(app, pool, &profile).await;
+                return fleet::provision(app, pool, profile).await;
             }
             Ok(attempt)
         }

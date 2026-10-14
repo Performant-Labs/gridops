@@ -1740,7 +1740,11 @@ pub async fn audit_events(
 /// The enrolled machine a fleet runner was placed on, or null for runners
 /// `GridOps` started itself.
 fn machine_json(row: &sqlx::sqlite::SqliteRow) -> Value {
-    match row.try_get::<Option<String>, _>("machine_id").ok().flatten() {
+    match row
+        .try_get::<Option<String>, _>("machine_id")
+        .ok()
+        .flatten()
+    {
         Some(id) => json!({
             "id": id,
             "name": row.try_get::<Option<String>, _>("machine_name").ok().flatten(),
@@ -4214,6 +4218,9 @@ async fn diagnose_queued_job(
 ) -> ApiResult<Value> {
     let rows = sqlx::query(
         r#"SELECT p.id,p.name,p.labels,p.providers,p.paused,p.provision_circuit_open,p.max_count,
+          (SELECT json_group_array(json_array(fp.execution_os,fp.architecture,fp.placement))
+            FROM pool_execution_profiles fp
+            WHERE fp.pool_id=p.id AND fp.enabled=1 AND fp.archived_at IS NULL) AS platforms,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.status IN ('starting','online','idle','busy','paused','stopped') THEN 1 END) AS active_runners,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN 1 END) AS busy_runners
           FROM runner_pools p
@@ -4251,9 +4258,35 @@ async fn diagnose_queued_job(
             {
                 configured_labels.push(pool_name.clone());
             }
-            let providers = json_array(row.get::<&str, _>("providers"));
+            let platforms = serde_json::from_str::<Vec<(String, String, String)>>(
+                row.get::<&str, _>("platforms"),
+            )
+            .unwrap_or_default();
+            let machines_only = platforms
+                .iter()
+                .any(|(_, _, placement)| placement == "machines");
+            let providers = if machines_only {
+                Vec::new()
+            } else {
+                json_array(row.get::<&str, _>("providers"))
+            };
             let matching_provider =
-                compatible_runner_provider(&providers, requested_labels, &configured_labels);
+                compatible_runner_provider(&providers, requested_labels, &configured_labels)
+                    .or_else(|| {
+                        platforms.iter().find_map(|(os, arch, _)| {
+                            let platform = (
+                                serde_json::from_value(json!(os)).ok()?,
+                                serde_json::from_value(json!(arch)).ok()?,
+                            );
+                            gridops_core::fleet::targets::platform_supports_labels(
+                                platform.0,
+                                platform.1,
+                                requested_labels,
+                                &configured_labels,
+                            )
+                            .then(|| format!("machines ({os} {arch})"))
+                        })
+                    });
             let active = row.get::<i64, _>("active_runners");
             let maximum = row.get::<i64, _>("max_count");
             let paused = row.get::<bool, _>("paused");

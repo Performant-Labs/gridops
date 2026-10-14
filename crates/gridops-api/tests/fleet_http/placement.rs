@@ -178,9 +178,7 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
         .header(header::COOKIE, &f.cookie)
         .header(header::ORIGIN, &f.origin)
         .json(&json!({
-            "enabled": true, "runtimeKind": "docker", "executionOs": "linux",
-            "architecture": "arm64", "mode": "ephemeral", "image": "runner:fixture",
-            "labels": ["self-hosted"], "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,            "platforms": [{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
         }))
         .send()
         .await?;
@@ -295,7 +293,9 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
     .bind(workload.to_string())
     .execute(&f.database)
     .await?;
-    let profile_id = profile["item"]["id"].as_str().context("profile id")?;
+    let profile_id = profile["item"]["platforms"][0]["id"]
+        .as_str()
+        .context("profile id")?;
     // A pool set to "machines first" would place its next runner here.
     assert!(
         gridops_core::fleet::targets::machine_ready(&f.database, "fleet-pool", profile_id).await?
@@ -440,6 +440,69 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
 }
 
 #[tokio::test]
+async fn pool_runs_on_several_platforms_and_keeps_unchanged_ones() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let save = |platforms: Value| {
+        f.client
+            .put(f.url("/pools/fleet-pool/profile"))
+            .header(header::COOKIE, &f.cookie)
+            .header(header::ORIGIN, &f.origin)
+            .json(&json!({
+                "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024,
+                "diskBytes": 0, "platforms": platforms,
+            }))
+            .send()
+    };
+    let linux = json!({"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"});
+    let windows = json!({"runtimeKind": "native_process", "executionOs": "windows", "architecture": "x64", "image": "native:actions-runner"});
+    let saved: Value = save(json!([linux, windows])).await?.json().await?;
+    let platforms = saved["item"]["platforms"].as_array().context("platforms")?;
+    assert_eq!(platforms.len(), 2);
+    let (linux_id, windows_id) = (platforms[0]["id"].clone(), platforms[1]["id"].clone());
+
+    // The same platform twice is refused.
+    assert_eq!(
+        save(json!([linux, linux])).await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Dropping Windows archives it; Linux keeps its ID and revision.
+    let mut kept = linux.clone();
+    kept["id"] = linux_id.clone();
+    let saved: Value = save(json!([kept])).await?.json().await?;
+    assert_eq!(saved["item"]["platforms"].as_array().map(Vec::len), Some(1));
+    assert_eq!(saved["item"]["platforms"][0]["id"], linux_id);
+    assert_eq!(saved["item"]["platforms"][0]["revision"], 1);
+    let archived: (bool, Option<i64>) =
+        sqlx::query_as("SELECT enabled,archived_at FROM pool_execution_profiles WHERE id=?")
+            .bind(windows_id.as_str().context("windows id")?)
+            .fetch_one(&f.database)
+            .await?;
+    assert!(!archived.0 && archived.1.is_some());
+
+    // Matching labels: a Windows x64 job needs the Windows platform.
+    let requested = [
+        "self-hosted".to_owned(),
+        "Windows".to_owned(),
+        "X64".to_owned(),
+    ];
+    assert!(gridops_core::fleet::targets::platform_supports_labels(
+        gridops_core::fleet::ExecutionOs::Windows,
+        gridops_core::fleet::Architecture::X64,
+        &requested,
+        &[],
+    ));
+    assert!(!gridops_core::fleet::targets::platform_supports_labels(
+        gridops_core::fleet::ExecutionOs::Linux,
+        gridops_core::fleet::Architecture::Arm64,
+        &requested,
+        &[],
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn waiting_runners_explain_what_is_missing() -> Result<()> {
     let f = Fixture::new().await?;
     seed_pool(&f).await?;
@@ -449,9 +512,7 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
         .header(header::COOKIE, &f.cookie)
         .header(header::ORIGIN, &f.origin)
         .json(&json!({
-            "enabled": true, "runtimeKind": "docker", "executionOs": "linux",
-            "architecture": "arm64", "mode": "ephemeral", "image": "runner:fixture",
-            "labels": [], "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,            "platforms": [{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
         }))
         .send()
         .await?
@@ -464,7 +525,10 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
             SubmitIntent {
                 idempotency_key: "runner:waiting".into(),
                 pool_id: "fleet-pool".into(),
-                profile_id: profile["item"]["id"].as_str().context("profile")?.parse()?,
+                profile_id: profile["item"]["platforms"][0]["id"]
+                    .as_str()
+                    .context("profile")?
+                    .parse()?,
                 target_id: profile["item"]["targetIds"][0]
                     .as_str()
                     .context("target")?
@@ -498,7 +562,9 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
         !gridops_core::fleet::targets::machine_ready(
             &f.database,
             "fleet-pool",
-            profile["item"]["id"].as_str().context("profile")?
+            profile["item"]["platforms"][0]["id"]
+                .as_str()
+                .context("profile")?
         )
         .await?
     );
@@ -524,9 +590,7 @@ async fn pools_take_turns_when_work_waits() -> Result<()> {
             .header(header::COOKIE, &f.cookie)
             .header(header::ORIGIN, &f.origin)
             .json(&json!({
-                "enabled": true, "runtimeKind": "docker", "executionOs": "linux",
-                "architecture": "arm64", "mode": "ephemeral", "image": "runner:fixture",
-                "labels": [], "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+                "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,                "platforms": [{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
             }))
             .send()
             .await?
@@ -546,7 +610,10 @@ async fn pools_take_turns_when_work_waits() -> Result<()> {
                 SubmitIntent {
                     idempotency_key: format!("runner:turn-{index}"),
                     pool_id: (*pool).into(),
-                    profile_id: profile["item"]["id"].as_str().context("profile")?.parse()?,
+                    profile_id: profile["item"]["platforms"][0]["id"]
+                        .as_str()
+                        .context("profile")?
+                        .parse()?,
                     target_id: profile["item"]["targetIds"][0]
                         .as_str()
                         .context("target")?

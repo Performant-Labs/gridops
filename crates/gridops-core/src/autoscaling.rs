@@ -124,7 +124,20 @@ pub async fn assigned_queued_jobs(
               candidate.repository_id=repo.id OR
               (candidate.scope='organization' AND candidate.installation_id=repo.installation_id)
             ) AND EXISTS (
-              SELECT 1 FROM json_each(candidate.providers) provider
+              SELECT 1 FROM (
+                -- The built-in host's runners, unless the pool runs on machines only.
+                SELECT CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'macos' ELSE 'linux' END AS os,
+                  CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'arm64' ELSE lower(?) END AS arch
+                FROM json_each(candidate.providers) provider
+                WHERE lower(CAST(provider.value AS TEXT)) IN ('docker','tart')
+                  AND NOT EXISTS (SELECT 1 FROM pool_execution_profiles machines_only
+                    WHERE machines_only.pool_id=candidate.id AND machines_only.enabled=1
+                      AND machines_only.archived_at IS NULL AND machines_only.placement='machines')
+                UNION ALL
+                -- Each fleet platform the pool runs on.
+                SELECT profile.execution_os,profile.architecture FROM pool_execution_profiles profile
+                WHERE profile.pool_id=candidate.id AND profile.enabled=1 AND profile.archived_at IS NULL
+              ) platform
               WHERE NOT EXISTS (
                 SELECT 1 FROM json_each(wj.labels) requested
                 WHERE NOT (
@@ -133,8 +146,7 @@ pub async fn assigned_queued_jobs(
                     SELECT 1 FROM json_each(candidate.labels) assigned
                     WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
                   )) OR
-                  (lower(CAST(provider.value AS TEXT))='docker' AND lower(CAST(requested.value AS TEXT)) IN ('linux',lower(?))) OR
-                  (lower(CAST(provider.value AS TEXT))='tart' AND lower(CAST(requested.value AS TEXT)) IN ('macos','arm64'))
+                  lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch)
                 )
               )
             )
@@ -272,7 +284,8 @@ pub fn provider_capacity_deficit(capacity: &ProviderCapacity, factor: i64) -> i6
         .saturating_sub(capacity.active)
 }
 
-async fn queued_job_assignments(
+/// Labels of the queued jobs assigned to this pool, with their repository.
+pub async fn queued_job_assignments(
     database: &SqlitePool,
     pool_id: &str,
 ) -> Result<Vec<(i64, Vec<String>)>, sqlx::Error> {
@@ -288,7 +301,20 @@ async fn queued_job_assignments(
               candidate.repository_id=repo.id OR
               (candidate.scope='organization' AND candidate.installation_id=repo.installation_id)
             ) AND EXISTS (
-              SELECT 1 FROM json_each(candidate.providers) provider
+              SELECT 1 FROM (
+                -- The built-in host's runners, unless the pool runs on machines only.
+                SELECT CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'macos' ELSE 'linux' END AS os,
+                  CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'arm64' ELSE lower(?) END AS arch
+                FROM json_each(candidate.providers) provider
+                WHERE lower(CAST(provider.value AS TEXT)) IN ('docker','tart')
+                  AND NOT EXISTS (SELECT 1 FROM pool_execution_profiles machines_only
+                    WHERE machines_only.pool_id=candidate.id AND machines_only.enabled=1
+                      AND machines_only.archived_at IS NULL AND machines_only.placement='machines')
+                UNION ALL
+                -- Each fleet platform the pool runs on.
+                SELECT profile.execution_os,profile.architecture FROM pool_execution_profiles profile
+                WHERE profile.pool_id=candidate.id AND profile.enabled=1 AND profile.archived_at IS NULL
+              ) platform
               WHERE NOT EXISTS (
                 SELECT 1 FROM json_each(wj.labels) requested
                 WHERE NOT (
@@ -297,8 +323,7 @@ async fn queued_job_assignments(
                     SELECT 1 FROM json_each(candidate.labels) assigned
                     WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
                   )) OR
-                  (lower(CAST(provider.value AS TEXT))='docker' AND lower(CAST(requested.value AS TEXT)) IN ('linux',lower(?))) OR
-                  (lower(CAST(provider.value AS TEXT))='tart' AND lower(CAST(requested.value AS TEXT)) IN ('macos','arm64'))
+                  lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch)
                 )
               )
             )
