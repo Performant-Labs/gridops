@@ -144,6 +144,8 @@ struct CreatedRunner {
 
 enum ProvisionAttempt {
     Provisioned,
+    /// No queued job needs another runner, so none was started.
+    NoDemand,
     /// The host had no safe capacity. `full_provider` names the provider whose
     /// runner budget is exhausted, so idle runners of that provider could make
     /// room.
@@ -396,6 +398,7 @@ async fn reconcile_pool(
             }
             match attempt {
                 ProvisionAttempt::Provisioned => provisioned += 1,
+                ProvisionAttempt::NoDemand => break,
                 ProvisionAttempt::Deferred { reason, .. } => {
                     defer_pool_capacity(app, pool, reason.as_deref()).await?;
                     capacity_deferred = true;
@@ -576,8 +579,7 @@ async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> 
           WHERE r.pool_id=? AND r.status IN ('online','idle') AND r.busy=0 AND r.updated_at<?
             AND EXISTS (SELECT 1 FROM workload_intents own WHERE own.workload_id=r.id)
             AND EXISTS (SELECT 1 FROM workload_intents waiting
-                         WHERE waiting.pool_id=r.pool_id AND waiting.status='queued'
-                           AND waiting.reason_code IN ('physical_resource_exhausted','child_resource_exhausted','pool_capacity_exhausted'))
+                         WHERE waiting.pool_id=r.pool_id AND waiting.status='queued')
             AND NOT EXISTS (SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
                              WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting'))
           ORDER BY r.updated_at LIMIT 1",
@@ -1225,9 +1227,25 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
 async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
     use gridops_core::fleet::targets::Placement;
     let profiles = fleet::profiles(app, &pool.id).await?;
-    let Some(profile) = fleet::choose_profile(app, pool, &profiles).await? else {
+    let Some((profile, behind)) = fleet::choose_profile(app, pool, &profiles).await? else {
         return provision_on_host(app, pool).await;
     };
+    // A fleet runner without queued work only sits on a repository holding
+    // machine capacity, and the desired count can stay high while a job no
+    // platform can run stays queued. Above the pool's minimum, start fleet
+    // runners only for platforms that are behind.
+    if !behind && profile.input.placement == Placement::Machines {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runners WHERE pool_id=? AND deleted_at IS NULL
+               AND status IN ('starting','online','idle','busy','paused','stopped')",
+        )
+        .bind(&pool.id)
+        .fetch_one(&app.database)
+        .await?;
+        if active >= pool.min_count {
+            return Ok(ProvisionAttempt::NoDemand);
+        }
+    }
     let host = fleet::host_serves(pool, profile);
     match profile.input.placement {
         Placement::Machines => fleet::provision(app, pool, profile).await,

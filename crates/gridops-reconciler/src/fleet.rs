@@ -55,12 +55,13 @@ pub(super) async fn profiles(app: &Reconciler, pool_id: &str) -> Result<Vec<Prof
 }
 
 /// The platform the pool's next runner should use: the one furthest behind
-/// the queued jobs that only it (or it first) can run, else the first.
+/// the queued jobs that only it (or it first) can run, else the first. The
+/// flag says whether that platform is actually behind queued work.
 pub(super) async fn choose_profile<'a>(
     app: &Reconciler,
     pool: &Pool,
     profiles: &'a [Profile],
-) -> Result<Option<&'a Profile>> {
+) -> Result<Option<(&'a Profile, bool)>> {
     let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
     let mut queued = vec![0_i64; profiles.len()];
     for (_, requested) in gridops_core::queued_job_assignments(&app.database, &pool.id).await? {
@@ -75,11 +76,16 @@ pub(super) async fn choose_profile<'a>(
             queued[index] += 1;
         }
     }
+    // An idle runner parked on a repository without queued jobs cannot take
+    // another repository's job, so it doesn't count toward covering the queue.
     let rows = sqlx::query(
         "SELECT i.profile_id,COUNT(*) AS active,COUNT(CASE WHEN r.busy=1 THEN 1 END) AS busy
            FROM runners r JOIN workload_intents i ON i.workload_id=r.id
           WHERE r.pool_id=? AND r.deleted_at IS NULL
             AND r.status IN ('starting','online','idle','busy','paused','stopped')
+            AND (r.busy=1 OR r.target_repository_id IS NULL OR EXISTS (
+                  SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
+                   WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting')))
           GROUP BY i.profile_id",
     )
     .bind(&pool.id)
@@ -98,8 +104,40 @@ pub(super) async fn choose_profile<'a>(
     Ok((0..profiles.len())
         .filter(|index| deficit(*index) > 0)
         .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
-        .or((!profiles.is_empty()).then_some(0))
-        .map(|index| &profiles[index]))
+        .map(|index| (&profiles[index], true))
+        .or_else(|| profiles.first().map(|profile| (profile, false))))
+}
+
+/// The repository whose queued jobs this platform can run, furthest behind,
+/// so a Windows runner isn't registered to a repository waiting on Linux.
+async fn repository_for_platform(
+    app: &Reconciler,
+    pool: &Pool,
+    profile: &Profile,
+) -> Result<Option<gridops_core::RepositoryCapacity>> {
+    let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
+    let mut wanted = std::collections::HashMap::<i64, i64>::new();
+    for (repository, requested) in
+        gridops_core::queued_job_assignments(&app.database, &pool.id).await?
+    {
+        if targets::platform_supports_labels(
+            profile.input.execution_os,
+            profile.input.architecture,
+            &requested,
+            &configured,
+        ) {
+            *wanted.entry(repository).or_default() += 1;
+        }
+    }
+    Ok(gridops_core::repository_capacities(&app.database, &pool.id)
+        .await?
+        .into_iter()
+        .filter_map(|capacity| {
+            let queued = *wanted.get(&capacity.repository_id)?;
+            Some((queued - capacity.active, capacity))
+        })
+        .max_by_key(|(behind, capacity)| (*behind, std::cmp::Reverse(capacity.repository_id)))
+        .map(|(_, capacity)| capacity))
 }
 
 /// Whether the built-in host can start a runner for this platform.
@@ -134,9 +172,12 @@ pub(super) async fn provision(
     profile: &Profile,
 ) -> Result<ProvisionAttempt> {
     let (target_id, repository_id) = if pool.scope == "repository" {
-        let repository = next_runner_repository(&app.database, &pool.id, pool.queue_scale_factor)
-            .await?
-            .context("runner pool has no available repositories")?;
+        let repository = match repository_for_platform(app, pool, profile).await? {
+            Some(repository) => repository,
+            None => next_runner_repository(&app.database, &pool.id, pool.queue_scale_factor)
+                .await?
+                .context("runner pool has no available repositories")?,
+        };
         let target = targets::ensure_target(
             &app.database,
             &CiTarget::GithubRepository {
