@@ -2248,6 +2248,18 @@ pub async fn delete_runner_pool(
 ) -> ApiResult<Json<Value>> {
     pool_access(&state, &user, &pool_id).await?;
     assert_pool_admin(&state, &user, &pool_id).await?;
+    let still_running = || {
+        ApiError::Conflict(
+            "This pool still has runners on fleet machines. Scale it to zero, wait for them to stop, then delete it."
+                .into(),
+        )
+    };
+    if gridops_core::fleet::targets::pool_has_live_workloads(&state.database, &pool_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.into()))?
+    {
+        return Err(still_running());
+    }
     sqlx::query("UPDATE runner_pools SET paused=1,state='deleting',updated_at=? WHERE id=?")
         .bind(now_millis())
         .bind(&pool_id)
@@ -2256,6 +2268,12 @@ pub async fn delete_runner_pool(
     let runners = runners_for_pool(&state, &pool_id).await?;
     for runner in &runners {
         delete_runner_resources(&state, &user, runner).await?;
+    }
+    if !gridops_core::fleet::targets::delete_pool(&state.database, &pool_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.into()))?
+    {
+        return Err(still_running());
     }
     audit(
         &state,
@@ -2266,10 +2284,6 @@ pub async fn delete_runner_pool(
         json!({ "runners": runners.len() }),
     )
     .await?;
-    sqlx::query("DELETE FROM runner_pools WHERE id=?")
-        .bind(&pool_id)
-        .execute(&state.database)
-        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -413,3 +413,49 @@ async fn inventory_is_invalidated_on_upgrade_and_every_authority_change() -> Res
     );
     db.close().await
 }
+
+#[tokio::test]
+async fn deleting_a_pool_takes_its_finished_fleet_history_with_it() -> Result<()> {
+    use gridops_core::fleet::targets::delete_pool;
+    let db = Database::ready().await?;
+    // The fixture's placement is still reserved, with capacity charged to the host.
+    assert!(!delete_pool(&db.pool, "legacy-pool").await?);
+    let pools: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runner_pools WHERE id='legacy-pool'")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(pools, 1);
+    sqlx::query("UPDATE workload_placements SET state='cleaned',local_absence_proven_at=2,delayed_starts_excluded_at=2 WHERE id=?")
+        .bind(PLACEMENT)
+        .execute(&db.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE capacity_allocations SET state='released',released_at=2 WHERE placement_id=?",
+    )
+    .bind(PLACEMENT)
+    .execute(&db.pool)
+    .await?;
+    assert!(delete_pool(&db.pool, "legacy-pool").await?);
+    for table in [
+        "runner_pools",
+        "pool_execution_profiles",
+        "profile_ci_targets",
+        "workload_intents",
+        "workload_placements",
+        "capacity_allocations",
+        "host_commands",
+    ] {
+        // Names come from the list above, never request input.
+        let rows: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&db.pool)
+                .await?;
+        assert_eq!(rows, 0, "{table} kept rows");
+    }
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&db.pool)
+            .await?
+            .is_empty()
+    );
+    db.close().await
+}
