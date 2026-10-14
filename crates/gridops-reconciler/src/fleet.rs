@@ -46,6 +46,15 @@ pub(super) async fn profile(app: &Reconciler, pool_id: &str) -> Result<Option<Pr
         .filter(|profile| profile.input.enabled))
 }
 
+/// Whether a fleet machine can take this pool's next runner now.
+pub(super) async fn machine_ready(
+    app: &Reconciler,
+    pool: &Pool,
+    profile: &Profile,
+) -> Result<bool> {
+    Ok(targets::machine_ready(&app.database, &pool.id, &profile.id).await?)
+}
+
 /// Creates one fleet runner for the pool and tries to place it.
 pub(super) async fn provision(
     app: &Reconciler,

@@ -120,6 +120,29 @@ pub async fn list_targets(pool: &SqlitePool) -> Result<Vec<TargetSummary>, Fleet
         .collect())
 }
 
+/// Where a pool with a profile runs its runners.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Only on fleet machines.
+    #[default]
+    Machines,
+    /// On a fleet machine when one can take the runner, else the built-in host.
+    MachinesFirst,
+    /// On the built-in host, with fleet machines taking the overflow.
+    HostFirst,
+}
+
+impl Placement {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Machines => "machines",
+            Self::MachinesFirst => "machines_first",
+            Self::HostFirst => "host_first",
+        }
+    }
+}
+
 /// The editable part of a pool's execution profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -136,6 +159,8 @@ pub struct ProfileInput {
     pub disk_bytes: u64,
     #[serde(default)]
     pub requires_docker_socket: bool,
+    #[serde(default)]
+    pub placement: Placement,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,7 +177,7 @@ pub struct Profile {
 pub async fn pool_profile(pool: &SqlitePool, pool_id: &str) -> Result<Option<Profile>, FleetError> {
     let Some(row) = sqlx::query(
         "SELECT id,revision,enabled,runtime_kind,execution_os,architecture,mode,image,labels_json,
-                cpu_millis,memory_mib,disk_bytes,requires_docker_socket
+                cpu_millis,memory_mib,disk_bytes,requires_docker_socket,placement
            FROM pool_execution_profiles WHERE pool_id=? ORDER BY created_at LIMIT 1",
     )
     .bind(pool_id)
@@ -180,6 +205,7 @@ pub async fn pool_profile(pool: &SqlitePool, pool_id: &str) -> Result<Option<Pro
         "memoryMib": row.get::<i64, _>("memory_mib"),
         "diskBytes": row.get::<i64, _>("disk_bytes"),
         "requiresDockerSocket": row.get::<bool, _>("requires_docker_socket"),
+        "placement": row.get::<String, _>("placement"),
     }))
     .map_err(|_| FleetError::Invariant("stored profile"))?;
     Ok(Some(Profile {
@@ -230,7 +256,7 @@ pub async fn save_pool_profile(
             sqlx::query(
                 "UPDATE pool_execution_profiles SET revision=revision+1,enabled=?,runtime_kind=?,
                    execution_os=?,architecture=?,mode=?,requires_docker_socket=?,all_authorized_hosts=1,
-                   image=?,labels_json=?,cpu_millis=?,memory_mib=?,disk_bytes=?,updated_at=? WHERE id=?",
+                   image=?,labels_json=?,cpu_millis=?,memory_mib=?,disk_bytes=?,placement=?,updated_at=? WHERE id=?",
             )
             .bind(input.enabled)
             .bind(values.0)
@@ -243,6 +269,7 @@ pub async fn save_pool_profile(
             .bind(i64::from(input.cpu_millis))
             .bind(i64::from(input.memory_mib))
             .bind(i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?)
+            .bind(input.placement.name())
             .bind(now)
             .bind(&id)
             .execute(&mut *tx)
@@ -256,8 +283,8 @@ pub async fn save_pool_profile(
                 "INSERT INTO pool_execution_profiles
                  (id,pool_id,name,revision,enabled,runtime_kind,execution_os,architecture,mode,
                   requires_docker_socket,all_authorized_hosts,image,labels_json,cpu_millis,memory_mib,
-                  disk_bytes,created_at,updated_at)
-                 VALUES (?,?,'default',1,?,?,?,?,?,?,1,?,?,?,?,?,?,?)",
+                  disk_bytes,placement,created_at,updated_at)
+                 VALUES (?,?,'default',1,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
             )
             .bind(&id)
             .bind(pool_id)
@@ -272,6 +299,7 @@ pub async fn save_pool_profile(
             .bind(i64::from(input.cpu_millis))
             .bind(i64::from(input.memory_mib))
             .bind(i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?)
+            .bind(input.placement.name())
             .bind(now)
             .bind(now)
             .execute(&mut *tx)
@@ -401,4 +429,37 @@ pub async fn pool_queue(pool: &SqlitePool, pool_id: &str) -> Result<Vec<QueuedRu
             queued_at: row.get("created_at"),
         })
         .collect())
+}
+
+/// Whether a fleet machine can plausibly take this pool's next runner now:
+/// some active, online machine with a matching enabled backend, the right
+/// grants and no pressure, and none of the pool's runners already waiting
+/// for a machine (waiting means the machines are full).
+pub async fn machine_ready(
+    pool: &SqlitePool,
+    pool_id: &str,
+    profile_id: &str,
+) -> Result<bool, FleetError> {
+    let now = crate::now_millis();
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM workload_intents WHERE pool_id=? AND status='queued')
+            AND EXISTS (
+              SELECT 1 FROM pool_execution_profiles p
+                JOIN host_backends b ON b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
+                                    AND b.architecture=p.architecture AND b.enabled=1 AND b.readiness='ready'
+                JOIN fleet_hosts h ON h.id=b.host_id
+                JOIN profile_ci_targets pt ON pt.profile_id=p.id AND pt.enabled=1 AND pt.revoked_at IS NULL
+                JOIN host_target_grants g ON g.host_id=h.id AND g.target_id=pt.target_id
+                                         AND g.allow_schedule=1 AND g.revoked_at IS NULL
+               WHERE p.id=? AND h.enrollment_state='approved' AND h.lifecycle_state='active'
+                 AND h.integrity_state='verified' AND h.pressure_state='normal'
+                 AND h.last_heartbeat_at>? AND h.authority_expires_at>?
+                 AND (p.runtime_kind!='native_process' OR g.allow_native=1))",
+    )
+    .bind(pool_id)
+    .bind(profile_id)
+    .bind(now - 45_000)
+    .bind(now)
+    .fetch_one(pool)
+    .await?)
 }

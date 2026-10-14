@@ -70,7 +70,7 @@ struct Pool {
     provision_circuit_open: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Clone, Debug, FromRow)]
 struct Runner {
     id: String,
     installation_id: i64,
@@ -89,6 +89,9 @@ struct Runner {
     last_job_id: Option<i64>,
     configuration_version: i64,
     updated_at: i64,
+    /// Placed by the fleet scheduler on an enrolled machine, not by the
+    /// manager. Repository and provider rebalancing leaves it alone.
+    fleet: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -568,8 +571,15 @@ async fn evict_surplus_runner(
     let labels = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
     let provider_capacities =
         provider_capacities(&app.database, &pool.id, &providers, &labels).await?;
+    // Fleet runners are placed by the fleet scheduler; the provider and
+    // repository counts here don't describe them.
+    let current = current
+        .iter()
+        .filter(|runner| !runner.fleet)
+        .cloned()
+        .collect::<Vec<_>>();
     let Some(runner) = surplus_runner(
-        current,
+        &current,
         &capacities,
         &provider_capacities,
         &providers,
@@ -1165,10 +1175,35 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
     Ok(output)
 }
 
+/// Starts one runner for the pool, on the built-in host or a fleet machine as
+/// the pool's fleet profile says.
 async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
-    if let Some(profile) = fleet::profile(app, &pool.id).await? {
-        return fleet::provision(app, pool, &profile).await;
+    use gridops_core::fleet::targets::Placement;
+    let Some(profile) = fleet::profile(app, &pool.id).await? else {
+        return provision_on_host(app, pool).await;
+    };
+    match profile.input.placement {
+        Placement::Machines => fleet::provision(app, pool, &profile).await,
+        Placement::MachinesFirst => {
+            if fleet::machine_ready(app, pool, &profile).await? {
+                fleet::provision(app, pool, &profile).await
+            } else {
+                provision_on_host(app, pool).await
+            }
+        }
+        Placement::HostFirst => {
+            let attempt = provision_on_host(app, pool).await?;
+            if matches!(attempt, ProvisionAttempt::Deferred { .. })
+                && fleet::machine_ready(app, pool, &profile).await?
+            {
+                return fleet::provision(app, pool, &profile).await;
+            }
+            Ok(attempt)
+        }
     }
+}
+
+async fn provision_on_host(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
     let runner_id = uuid::Uuid::new_v4().to_string();
     let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
     let runner_name = format!("{}-{suffix}", pool.name);
@@ -1677,7 +1712,8 @@ async fn runners(app: &Reconciler, pool_id: &str) -> Result<Vec<Runner>> {
            runner.name,runner.container_id,runner.github_runner_id,runner.ci_platform,
            runner.bitbucket_connection_id,runner.bitbucket_runner_uuid,
            runner.target_repository_id,repo.owner AS repository_owner,repo.name AS repository_name,
-           runner.provider,runner.status,runner.busy,runner.last_job_id,runner.configuration_version,runner.updated_at
+           runner.provider,runner.status,runner.busy,runner.last_job_id,runner.configuration_version,runner.updated_at,
+           EXISTS(SELECT 1 FROM workload_intents intent WHERE intent.workload_id=runner.id) AS fleet
            FROM runners runner JOIN runner_pools pool ON pool.id=runner.pool_id
            LEFT JOIN repositories repo ON repo.id=runner.target_repository_id
            WHERE runner.pool_id=? AND runner.deleted_at IS NULL ORDER BY runner.created_at DESC"#,
@@ -2270,6 +2306,7 @@ mod tests {
             last_job_id: None,
             configuration_version,
             updated_at: 1_000,
+            fleet: false,
         }
     }
 

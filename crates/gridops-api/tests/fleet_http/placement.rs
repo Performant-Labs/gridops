@@ -295,8 +295,12 @@ async fn admitted_runner_is_prepared_started_inspected_and_cleaned_on_its_host()
     .bind(workload.to_string())
     .execute(&f.database)
     .await?;
-    let service = FleetService::new(f.database.clone());
     let profile_id = profile["item"]["id"].as_str().context("profile id")?;
+    // A pool set to "machines first" would place its next runner here.
+    assert!(
+        gridops_core::fleet::targets::machine_ready(&f.database, "fleet-pool", profile_id).await?
+    );
+    let service = FleetService::new(f.database.clone());
     service
         .submit_intent(
             &Principal::Reconciler,
@@ -489,6 +493,15 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
         .json()
         .await?;
     assert_eq!(queue["items"][0]["reason"], "no_active_machine");
+    // With no machine able to take it, "machines first" uses the built-in host.
+    assert!(
+        !gridops_core::fleet::targets::machine_ready(
+            &f.database,
+            "fleet-pool",
+            profile["item"]["id"].as_str().context("profile")?
+        )
+        .await?
+    );
     Ok(())
 }
 

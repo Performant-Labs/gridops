@@ -47,6 +47,7 @@ export const profileInputSchema = z.strictObject({
   memoryMib: safeInteger.min(1).max(0xffff_ffff),
   diskBytes: safeInteger,
   requiresDockerSocket: z.boolean().optional(),
+  placement: z.enum(["machines", "machines_first", "host_first"]).optional(),
 });
 export const profileSchema = profileInputSchema.extend({
   id: fleetIdSchema,

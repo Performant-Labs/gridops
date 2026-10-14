@@ -34,12 +34,12 @@ const GIB = 1024 ** 3;
 
 const defaults: ProfileInput = {
   enabled: false, runtimeKind: "docker", executionOs: "linux", architecture: "arm64", mode: "ephemeral",
-  image: defaultImage.docker, labels: [], cpuMillis: 2000, memoryMib: 2048, diskBytes: 0, requiresDockerSocket: false,
+  image: defaultImage.docker, labels: [], cpuMillis: 2000, memoryMib: 2048, diskBytes: 0, requiresDockerSocket: false, placement: "machines",
 };
 
 export function FleetExecutionSection({ poolId }: { poolId: string }) {
   const profile = useQuery({ queryKey: ["fleet", "profile", poolId], queryFn: ({ signal }) => getPoolProfile(poolId, signal) });
-  const description = <>When on, this pool’s runners run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link> instead of the built-in runner host.</>;
+  const description = <>When on, this pool’s runners can run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link>. Placement decides whether the built-in runner host is still used.</>;
 
   if (profile.isPending) return <SettingsSection description={description} title="Fleet execution"><InlineLoading label="Loading…" /></SettingsSection>;
   if (profile.isError) {
@@ -111,6 +111,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
   const [memoryMib, setMemoryMib] = useState(initial.memoryMib);
   const [diskGib, setDiskGib] = useState(initial.diskBytes / GIB);
   const [dockerSocket, setDockerSocket] = useState(initial.requiresDockerSocket ?? false);
+  const [placement, setPlacement] = useState(initial.placement ?? "machines");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -134,6 +135,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
         labels: labels.split(",").map((label) => label.trim()).filter(Boolean),
         cpuMillis: Math.round(cores * 1000), memoryMib, diskBytes: Math.round(diskGib * GIB),
         requiresDockerSocket: runtimeKind === "docker" ? dockerSocket : false,
+        placement,
       });
       queryClient.setQueryData(["fleet", "profile", poolId], saved);
       toast.success(saved.item.enabled ? "Fleet execution saved." : "Fleet execution saved and turned off.");
@@ -159,6 +161,19 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
         <Switch aria-label="Run on machines" checked={enabled} onCheckedChange={setEnabled} />
       </SettingsRow>
       {profile?.enabled ? <WaitingRunners poolId={poolId} /> : null}
+      <SettingsRow description="Where each new runner starts." label="Placement">
+        <SearchableSelect
+          ariaLabel="Fleet placement"
+          onValueChange={(next) => next && setPlacement(next)}
+          options={[
+            { value: "machines", label: "Machines only", description: "Wait for a machine when none is free" },
+            { value: "machines_first", label: "Machines first", description: "Use the built-in runner host when no machine is free" },
+            { value: "host_first", label: "Built-in host first", description: "Use machines when the built-in host is full" },
+          ]}
+          searchable={false}
+          value={placement}
+        />
+      </SettingsRow>
       <SettingsRow description={runtimeKind === "native_process" ? "Jobs run directly on the machine. The machine must allow native runs for this repository." : "How each runner is isolated on the machine."} label="Runtime">
         <SearchableSelect
           ariaLabel="Fleet runtime"
