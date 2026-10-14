@@ -174,7 +174,10 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
       const saved = await savePoolProfile(poolId, {
         enabled, placement, mode: native ? "ephemeral" : mode,
         cpuMillis: Math.round(cores * 1000), memoryMib, diskBytes: Math.round(diskGib * GIB),
-        platforms: platforms.map(({ key: _key, ...platform }) => ({ ...platform, image: platform.image.trim() })),
+        platforms: platforms.map((platform) => ({
+          id: platform.id, runtimeKind: platform.runtimeKind, executionOs: platform.executionOs,
+          architecture: platform.architecture, image: platform.image.trim(), requiresDockerSocket: platform.requiresDockerSocket,
+        })),
       });
       queryClient.setQueryData(["fleet", "profile", poolId], saved);
       toast.success(saved.item.enabled ? "Fleet execution saved." : "Fleet execution saved and turned off.");
