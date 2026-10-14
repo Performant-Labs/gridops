@@ -454,11 +454,13 @@ async fn pool_runs_on_several_platforms_and_keeps_unchanged_ones() -> Result<()>
             }))
             .send()
     };
-    let linux = json!({"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"});
+    // Without an image, a Docker platform runs the pool's own Docker image.
+    let linux = json!({"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64"});
     let windows = json!({"runtimeKind": "native_process", "executionOs": "windows", "architecture": "x64", "image": "native:actions-runner"});
     let saved: Value = save(json!([linux, windows])).await?.json().await?;
     let platforms = saved["item"]["platforms"].as_array().context("platforms")?;
     assert_eq!(platforms.len(), 2);
+    assert_eq!(platforms[0]["image"], "runner:fixture");
     let (linux_id, windows_id) = (platforms[0]["id"].clone(), platforms[1]["id"].clone());
 
     // The same platform twice is refused.

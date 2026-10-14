@@ -19,7 +19,7 @@ type Runtime = PlatformInput["runtimeKind"];
 type Os = PlatformInput["executionOs"];
 
 const FORM_ID = "fleet-profile-form";
-const defaultImage: Record<Runtime, string> = {
+const stockImage: Record<Runtime, string> = {
   docker: "ghcr.io/actions/actions-runner:latest",
   native_process: "native:actions-runner",
   tart_vm: "",
@@ -34,27 +34,33 @@ const GIB = 1024 ** 3;
 
 const runtimeLabels: Record<Runtime, string> = { docker: "Docker", native_process: "native", tart_vm: "Tart VM" };
 
-const newPlatform: PlatformInput = {
-  runtimeKind: "docker", executionOs: "linux", architecture: "arm64", image: defaultImage.docker, requiresDockerSocket: false,
-};
+/** Each runtime's starting image. Docker starts from the pool's own image, so jobs keep the tools it has. */
+const defaultImages = (poolDockerImage: string): Record<Runtime, string> =>
+  ({ ...stockImage, docker: poolDockerImage.trim() || stockImage.docker });
+
+const newPlatform = (images: Record<Runtime, string>): PlatformInput => ({
+  runtimeKind: "docker", executionOs: "linux", architecture: "arm64", image: images.docker, requiresDockerSocket: false,
+});
 /** A sensible next platform: Linux on the other architecture, else Windows x64. */
-function nextPlatform(current: PlatformInput[]): PlatformInput {
+function nextPlatform(current: PlatformInput[], images: Record<Runtime, string>): PlatformInput {
   const taken = (platform: PlatformInput) => current.some((item) =>
     item.runtimeKind === platform.runtimeKind && item.executionOs === platform.executionOs && item.architecture === platform.architecture);
+  const linux = newPlatform(images);
   const candidates: PlatformInput[] = [
-    newPlatform,
-    { ...newPlatform, architecture: "x64" },
-    { runtimeKind: "native_process", executionOs: "windows", architecture: "x64", image: defaultImage.native_process, requiresDockerSocket: false },
-    { runtimeKind: "native_process", executionOs: "macos", architecture: "arm64", image: defaultImage.native_process, requiresDockerSocket: false },
+    linux,
+    { ...linux, architecture: "x64" },
+    { runtimeKind: "native_process", executionOs: "windows", architecture: "x64", image: images.native_process, requiresDockerSocket: false },
+    { runtimeKind: "native_process", executionOs: "macos", architecture: "arm64", image: images.native_process, requiresDockerSocket: false },
   ];
-  return candidates.find((platform) => !taken(platform)) ?? newPlatform;
+  return candidates.find((platform) => !taken(platform)) ?? linux;
 }
 
 const defaults: ProfileInput = {
   enabled: false, placement: "machines", mode: "ephemeral", cpuMillis: 2000, memoryMib: 2048, diskBytes: 0, platforms: [],
 };
 
-export function FleetExecutionSection({ poolId }: { poolId: string }) {
+/** `dockerImage` is the pool's own Docker image: new Docker platforms start from it. */
+export function FleetExecutionSection({ poolId, dockerImage }: { poolId: string; dockerImage: string }) {
   const profile = useQuery({ queryKey: ["fleet", "profile", poolId], queryFn: ({ signal }) => getPoolProfile(poolId, signal) });
   const description = <>When on, this pool’s runners can run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link>. Placement decides whether the built-in runner host is still used.</>;
 
@@ -75,7 +81,7 @@ export function FleetExecutionSection({ poolId }: { poolId: string }) {
     );
   }
   const item = profile.data.item;
-  return <ProfileEditor description={description} key={item ? item.platforms.map((platform) => `${platform.id}:${platform.revision}`).join(",") : "new"} poolId={poolId} profile={item} />;
+  return <ProfileEditor description={description} key={item ? item.platforms.map((platform) => `${platform.id}:${platform.revision}`).join(",") : "new"} poolDockerImage={dockerImage} poolId={poolId} profile={item} />;
 }
 
 const waitingReason: Record<string, string> = {
@@ -121,8 +127,12 @@ const draftKey = () => `platform-${++nextKey}`;
 const platformName = (platform: PlatformInput) =>
   `${osLabels[platform.executionOs]} ${platform.architecture} · ${runtimeLabels[platform.runtimeKind]}`;
 
-function ProfileEditor({ poolId, profile, description }: { poolId: string; profile: Profile | null; description: ReactNode }) {
+function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
+  poolId: string; poolDockerImage: string; profile: Profile | null; description: ReactNode;
+}) {
   const queryClient = useQueryClient();
+  const images = defaultImages(poolDockerImage);
+  const poolImage = poolDockerImage.trim();
   const initial = profile ?? defaults;
   const [enabled, setEnabled] = useState(initial.enabled);
   const [mode, setMode] = useState(initial.mode);
@@ -131,7 +141,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
   const [diskGib, setDiskGib] = useState(initial.diskBytes / GIB);
   const [placement, setPlacement] = useState(initial.placement);
   const [platforms, setPlatforms] = useState<PlatformDraft[]>(() =>
-    (profile?.platforms ?? [newPlatform]).map((platform) => ({ ...platform, key: draftKey() })));
+    (profile?.platforms ?? [newPlatform(images)]).map((platform) => ({ ...platform, key: draftKey() })));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const native = platforms.some((platform) => platform.runtimeKind === "native_process");
@@ -146,7 +156,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
       runtimeKind: next,
       executionOs: osOptions[next].includes(platform.executionOs) ? platform.executionOs : osOptions[next][0] ?? "linux",
       // Swap the image only when it still holds the previous runtime's default.
-      image: platform.image.trim() === "" || platform.image === defaultImage[platform.runtimeKind] ? defaultImage[next] : platform.image,
+      image: ["", images[platform.runtimeKind], stockImage[platform.runtimeKind]].includes(platform.image.trim()) ? images[next] : platform.image,
       requiresDockerSocket: next === "docker" ? platform.requiresDockerSocket : false,
     };
   }
@@ -211,7 +221,7 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
           </div>
           <Button
             disabled={platforms.length >= 12}
-            onClick={() => setPlatforms((current) => [...current, { ...nextPlatform(current), key: draftKey() }])}
+            onClick={() => setPlatforms((current) => [...current, { ...nextPlatform(current, images), key: draftKey() }])}
             size="sm"
             type="button"
             variant="outline"
@@ -280,6 +290,14 @@ function ProfileEditor({ poolId, profile, description }: { poolId: string; profi
                 </label>
               ) : null}
             </div>
+            {platform.runtimeKind === "docker" && poolImage && platform.image.trim() !== poolImage ? (
+              <p className="text-xs text-warning">
+                Not the pool’s Docker image (<code className="font-mono">{poolImage}</code>), so jobs here may miss tools it has.{" "}
+                <button className="underline underline-offset-2" onClick={() => update(platform.key, (current) => ({ ...current, image: poolImage }))} type="button">
+                  Use the pool’s image
+                </button>
+              </p>
+            ) : null}
           </div>
         ))}
       </div>

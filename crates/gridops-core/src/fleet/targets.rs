@@ -184,6 +184,8 @@ pub struct PlatformInput {
     pub runtime_kind: super::RuntimeKind,
     pub execution_os: super::ExecutionOs,
     pub architecture: super::Architecture,
+    /// Left empty, a Docker platform gets the pool's own Docker image.
+    #[serde(default)]
     pub image: String,
     #[serde(default)]
     pub requires_docker_socket: bool,
@@ -308,6 +310,32 @@ pub async fn pool_fleet(
     }))
 }
 
+/// The image a Docker platform runs when the pool has no Docker image of its own.
+const STOCK_DOCKER_IMAGE: &str = "ghcr.io/actions/actions-runner:latest";
+
+/// The Docker image the pool's built-in runners use, so a Docker platform
+/// saved without an image gets the same tools.
+async fn pool_docker_image(pool: &SqlitePool, pool_id: &str) -> Result<String, FleetError> {
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT provider,image,docker_image FROM runner_pools WHERE id=?")
+            .bind(pool_id)
+            .fetch_optional(pool)
+            .await?;
+    let image = row
+        .map(|(provider, image, docker_image)| {
+            if docker_image.is_empty() && provider == "docker" {
+                image
+            } else {
+                docker_image
+            }
+        })
+        .unwrap_or_default();
+    Ok(match image.trim() {
+        "" => STOCK_DOCKER_IMAGE.to_owned(),
+        image => image.to_owned(),
+    })
+}
+
 /// Saves the pool's fleet settings: updates the platforms that are kept,
 /// adds new ones and archives the ones left out. A platform's revision only
 /// moves when it actually changes, so runners already waiting for it stay
@@ -329,8 +357,18 @@ pub async fn save_pool_fleet(
             "add a platform to run on machines",
         ));
     }
+    let unset = |platform: &PlatformInput| {
+        platform.runtime_kind == RuntimeKind::Docker && platform.image.trim().is_empty()
+    };
+    let mut platforms = input.platforms.clone();
+    if platforms.iter().any(unset) {
+        let image = pool_docker_image(pool, pool_id).await?;
+        for platform in platforms.iter_mut().filter(|platform| unset(platform)) {
+            platform.image.clone_from(&image);
+        }
+    }
     let mut seen = Vec::new();
-    for platform in &input.platforms {
+    for platform in &platforms {
         let fits = match platform.runtime_kind {
             RuntimeKind::Docker => platform.execution_os == ExecutionOs::Linux,
             RuntimeKind::TartVm => platform.execution_os == ExecutionOs::Macos,
@@ -367,7 +405,7 @@ pub async fn save_pool_fleet(
     let mode = serde_value(&input.mode)?;
     let disk = i64::try_from(input.disk_bytes).map_err(|_| FleetError::InvalidRequest("disk"))?;
     let mut kept = Vec::new();
-    for platform in &input.platforms {
+    for platform in &platforms {
         let os = serde_value(&platform.execution_os)?;
         let architecture = serde_value(&platform.architecture)?;
         let docker_socket =
