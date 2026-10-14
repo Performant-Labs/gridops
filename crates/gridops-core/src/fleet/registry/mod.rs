@@ -1054,8 +1054,9 @@ impl RegistryService {
             .collect())
     }
 
-    /// Changes what a host may run for one granted target. Native execution
-    /// and Docker socket access are separate, explicit trust decisions.
+    /// Sets what a host may run for one target, approving the target first if
+    /// the host doesn't have it yet. Native execution and Docker socket access
+    /// are separate, explicit trust decisions.
     pub async fn set_host_grant(
         &self,
         principal: &Principal,
@@ -1069,23 +1070,33 @@ impl RegistryService {
         let mut tx = self.begin().await?;
         let now = self.clock.now_millis();
         ensure_system_admin(&mut tx, user_id).await?;
-        let changed = sqlx::query(
-            "UPDATE host_target_grants SET allow_schedule=?,allow_native=?,allow_docker_socket=?,
-                    revision=revision+1,granted_by=?
-              WHERE host_id=? AND target_id=? AND revoked_at IS NULL",
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=? AND lifecycle_state!='retired')
+                AND EXISTS (SELECT 1 FROM fleet_ci_targets WHERE id=?)",
         )
+        .bind(host_id.to_string())
+        .bind(target_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            return Err(RegistryError::NotFound);
+        }
+        sqlx::query(
+            "INSERT INTO host_target_grants
+               (host_id,target_id,allow_schedule,allow_native,allow_docker_socket,granted_by)
+             VALUES (?,?,?,?,?,?)
+             ON CONFLICT(host_id,target_id) DO UPDATE SET allow_schedule=excluded.allow_schedule,
+               allow_native=excluded.allow_native,allow_docker_socket=excluded.allow_docker_socket,
+               revision=revision+1,revoked_at=NULL,granted_by=excluded.granted_by",
+        )
+        .bind(host_id.to_string())
+        .bind(target_id)
         .bind(allow_schedule)
         .bind(allow_native)
         .bind(allow_docker_socket)
         .bind(user_id)
-        .bind(host_id.to_string())
-        .bind(target_id)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if changed != 1 {
-            return Err(RegistryError::NotFound);
-        }
+        .await?;
         audit_and_event(
             &mut tx,
             Some(user_id),

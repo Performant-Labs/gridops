@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { KeyRound, LoaderCircle, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { KeyRound, LoaderCircle, Plus, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import type * as React from "react";
 import { toast } from "sonner";
@@ -396,6 +396,8 @@ function GrantsSection({ hostId }: { hostId: string }) {
     queryFn: ({ signal }) => listHostGrants(hostId, signal),
     refetchInterval: REFRESH,
   });
+  const targets = useQuery({ queryKey: ["fleet", "targets"], queryFn: ({ signal }) => listTargets(signal) });
+  const [adding, setAdding] = useState<string[]>([]);
   const { pending, run } = useFleetAction();
   if (grants.isError && isForbidden(grants.error)) return null;
 
@@ -413,6 +415,21 @@ function GrantsSection({ hostId }: { hostId: string }) {
   }
 
   const items = grants.data?.items ?? [];
+  const granted = new Set(items.map((grant) => grant.targetId));
+  const addable = (targets.data?.items ?? []).filter((target) => !granted.has(target.id));
+
+  /** Lets the machine run jobs for more repositories, a few requests at a time. */
+  async function addTargets() {
+    const ids = adding;
+    if (ids.length === 0) return;
+    await run("add", async () => {
+      for (let start = 0; start < ids.length; start += 6) {
+        await Promise.all(ids.slice(start, start + 6).map((targetId) =>
+          setHostGrant(hostId, targetId, { allowSchedule: true, allowNative: false, allowDockerSocket: false })));
+      }
+      setAdding([]);
+    }, `Added ${ids.length} ${ids.length === 1 ? "repository" : "repositories"}.`);
+  }
 
   /** Sets one column for every repository, a few requests at a time. */
   async function changeAll(field: keyof GrantPolicy, value: boolean) {
@@ -439,6 +456,30 @@ function GrantsSection({ hostId }: { hostId: string }) {
   return (
     <section className="space-y-3">
       <SectionHeading>Repositories</SectionHeading>
+      {addable.length > 0 ? (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+          <div className="min-w-0 flex-1">
+            <SearchableMultiSelect
+              ariaLabel="Add repositories and organizations"
+              emptyMessage="No repositories or organizations found"
+              loading={targets.isPending}
+              onValueChange={setAdding}
+              options={addable.map((target) => ({
+                value: target.id, label: target.label,
+                description: target.kind === "github_organization" ? "Organization" : "Repository",
+              }))}
+              placeholder={`Add repositories (${addable.length} not approved yet)…`}
+              searchPlaceholder="Search…"
+              selectAll
+              selectedNoun="repositories"
+              values={adding}
+            />
+          </div>
+          <Button disabled={pending !== null || adding.length === 0} onClick={() => void addTargets()} variant="outline">
+            {pending === "add" ? <LoaderCircle className="animate-spin" /> : <Plus />}Add
+          </Button>
+        </div>
+      ) : null}
       {grants.isPending ? <InlineLoading label="Loading repositories…" /> : grants.isError ? (
         <Callout action={<Button onClick={() => void grants.refetch()} size="sm" variant="outline">Retry</Button>} title="Couldn’t load repositories" tone="danger">{fleetErrorMessage(grants.error, "")}</Callout>
       ) : items.length === 0 ? (
