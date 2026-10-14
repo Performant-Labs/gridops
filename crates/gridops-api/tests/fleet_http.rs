@@ -65,6 +65,9 @@ impl Fixture {
                 .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
                 .env("GRIDOPS_API_BIND", format!("127.0.0.1:{port}"))
                 .env("GRIDOPS_DATABASE_PATH", &path)
+                .env("GRIDOPS_LOG_DIRECTORY", directory.join("logs"))
+                // GitHub is unreachable, so job views use what GridOps holds.
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
                 .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
                 .env(
                     "GRIDOPS_ENCRYPTION_KEY",
