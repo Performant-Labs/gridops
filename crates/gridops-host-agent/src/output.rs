@@ -14,7 +14,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gridops_core::fleet::{
     ids::{AuthoritySessionId, HostId, PlacementId},
-    protocol::browser::ErrorCode,
+    protocol::{browser::ErrorCode, primitives::WireTimestamp},
     registry::output::{RunnerOutputChunk, RunnerOutputReceipt},
 };
 use tokio::{io::AsyncReadExt as _, sync::watch, task::JoinSet, time::Instant};
@@ -80,6 +80,7 @@ async fn follow<H: RuntimeHelper>(
     {
         let mut upload = Upload {
             session: &session,
+            authority: session.authority.clone(),
             placement: environment.placement_id,
             received: 0,
         };
@@ -93,6 +94,7 @@ async fn follow<H: RuntimeHelper>(
 
 struct Upload<'a, H> {
     session: &'a Shipper<H>,
+    authority: watch::Receiver<Authority>,
     placement: PlacementId,
     /// How much of the output `GridOps` has.
     received: u64,
@@ -131,8 +133,8 @@ impl<H> Upload<'_, H> {
         }
     }
 
-    /// Sends one chunk, retrying while `GridOps` is unreachable or the
-    /// session is between authority renewals. `None` when it refused.
+    /// Sends one chunk once the session holds work authority, retrying while
+    /// `GridOps` is unreachable. `None` when it refused.
     async fn send(
         &mut self,
         offset: u64,
@@ -147,11 +149,26 @@ impl<H> Upload<'_, H> {
             finished,
         };
         loop {
-            let credential = Arc::clone(&self.session.authority.borrow().credential);
+            let current = self.authority.borrow_and_update().clone();
+            let now = WireTimestamp::from_millis(gridops_core::now_millis()).ok();
+            if current
+                .expires_at
+                .zip(now)
+                .is_none_or(|(expires, now)| expires <= now)
+            {
+                // GridOps takes output only from a session with work
+                // authority; wait for the heartbeat that grants it. Without
+                // a sender the session is over and this task is being
+                // stopped, so nothing may be recorded as shipped.
+                if self.authority.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+                continue;
+            }
             match self
                 .session
                 .client
-                .post_output(self.session.host_id, &credential, &chunk)
+                .post_output(self.session.host_id, &current.credential, &chunk)
                 .await
             {
                 Ok(receipt) => {
