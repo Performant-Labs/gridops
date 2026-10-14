@@ -251,7 +251,7 @@ export function JobLogViewer({
         />
       ) : null}
 
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-40 flex-1">
         <div className="absolute inset-0 overflow-auto bg-[var(--log-background)]" onScroll={handleLogScroll} ref={logViewport}>
           {loading && !jobLog ? <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading job output…</div> : null}
           {jobLog && waitingForRunner ? <div className="flex items-center gap-2 px-4 py-2.5 text-xs text-[#8a8f98]"><RunStatusIcon status="queued" />Waiting for a runner to pick this job up…</div> : null}

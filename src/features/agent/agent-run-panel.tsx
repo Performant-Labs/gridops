@@ -82,8 +82,8 @@ export function AgentRunPanel({
   }
 
   return (
-    <section aria-label="Fix with agent" className="shrink-0 border-b border-border">
-      <div className="flex min-h-9 items-center gap-2 px-4 py-1">
+    <section aria-label="Fix with agent" className="flex min-h-0 flex-col border-b border-border">
+      <div className="flex min-h-9 shrink-0 items-center gap-2 px-4 py-1">
         <button
           aria-expanded={open}
           className="-ml-1 flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 pl-1 pr-1.5 text-left text-xs hover:bg-hover"
@@ -157,7 +157,7 @@ function AgentRunBody({ run, error, onRetry }: { run: AgentRun | null; error: st
 
   return (
     <div
-      className="max-h-[min(22rem,38dvh)] overflow-y-auto overscroll-contain px-4 pb-3"
+      className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-3"
       onScroll={() => {
         if (viewport.current) stickToEnd.current = isNearLogEnd(viewport.current);
       }}
