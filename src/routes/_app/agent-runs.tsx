@@ -129,7 +129,7 @@ function AgentRunDetails({ run }: { run: AgentRunListItem }) {
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className="flex min-h-0 flex-1 flex-col">
       <AgentRunPanel
         error={agentRun.error}
         key={runId}

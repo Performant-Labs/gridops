@@ -176,7 +176,9 @@ export function JobLogViewer({
 
   const status = jobLog?.conclusion ?? jobLog?.status ?? fallback?.status ?? "queued";
   const runId = jobLog?.runId ?? fallback?.runId;
-  const waitingForRunner = jobLog?.source === "pending" || (!jobLog?.steps.length && status === "queued");
+  const waitingForRunner = status === "queued" && (jobLog?.source === "pending" || !jobLog?.steps.length);
+  // Runners on fleet machines don't stream to GridOps; GitHub publishes their log once the job ends.
+  const awaitingLog = jobLog?.source === "pending" && !waitingForRunner;
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -186,10 +188,10 @@ export function JobLogViewer({
           <div className="truncate text-sm font-medium">{jobLog?.name ?? fallback?.name ?? "Job log"}</div>
           <div className="truncate text-xs text-muted-foreground">
             {jobLog?.repository ?? fallback?.repository} · {jobLog?.workflowName ?? fallback?.workflowName} #{jobLog?.runNumber ?? fallback?.runNumber}
-            {jobLog && !waitingForRunner ? <> · {formatDuration(jobLog.startedAt, jobLog.completedAt)} · {jobLog.source === "github" ? "GitHub log" : "live runner"}</> : null}
+            {jobLog && !waitingForRunner ? <> · {formatDuration(jobLog.startedAt, jobLog.completedAt)} · {jobLog.source === "github" ? "GitHub log" : awaitingLog ? "log when finished" : "live runner"}</> : null}
           </div>
         </div>
-        {active && !waitingForRunner ? (
+        {active && !waitingForRunner && !awaitingLog ? (
           <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
             <span className={cn("size-1.5 rounded-full", following ? "bg-success live-pulse" : "bg-warning")} />{following ? "Following" : "Paused"}
           </span>
@@ -249,18 +251,10 @@ export function JobLogViewer({
         />
       ) : null}
 
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-40 flex-1">
         <div className="absolute inset-0 overflow-auto bg-[var(--log-background)]" onScroll={handleLogScroll} ref={logViewport}>
           {loading && !jobLog ? <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading job output…</div> : null}
-          {jobLog && waitingForRunner ? (
-            <div className="grid h-full place-items-center p-6 text-center">
-              <div>
-                <RunStatusIcon className="mx-auto" size={20} status="queued" />
-                <p className="mt-3 text-sm font-medium text-[#d0d6e0]">Waiting for a runner</p>
-                <p className="mt-1 max-w-xs text-xs text-[#8a8f98]">Output appears here as soon as a runner picks this job up.</p>
-              </div>
-            </div>
-          ) : null}
+          {jobLog && waitingForRunner ? <div className="flex items-center gap-2 px-4 py-2.5 text-xs text-[#8a8f98]"><RunStatusIcon status="queued" />Waiting for a runner to pick this job up…</div> : null}
           {jobLog && !waitingForRunner && visibleSteps.length === 0 ? <div className="p-6 text-sm text-muted-foreground">{query ? `No step output matches “${query}”.` : "This job has no step output."}</div> : null}
           {visibleSteps.map((step) => {
             const expanded = expandedSteps.has(step.number) || Boolean(query);
@@ -275,13 +269,13 @@ export function JobLogViewer({
                 {expanded ? (
                   step.lines.length ? (
                     <pre className="overflow-x-auto pb-2 font-mono text-xs leading-5 text-[#c9ced6]"><code>{step.lines.map((line, index) => <LogLine index={index + 1} key={`${line.timestamp}:${index}`} level={line.level} text={line.text} />)}</code></pre>
-                  ) : <div className="px-11 pb-3 text-xs text-[#62666d]">{active && step.status === "in_progress" ? "Waiting for output from this step…" : "No console output for this step."}</div>
+                  ) : <div className="px-11 pb-3 text-xs text-[#62666d]">{active && step.status === "in_progress" ? (awaitingLog ? "Output appears when the job finishes." : "Waiting for output from this step…") : "No console output for this step."}</div>
                 ) : null}
               </div>
             );
           })}
         </div>
-        {active && !following && !waitingForRunner ? <Button className="absolute bottom-4 right-4 shadow-popover" onClick={jumpToLatest} size="sm" variant="secondary"><ArrowDown />Jump to latest</Button> : null}
+        {active && !following && !waitingForRunner && !awaitingLog ? <Button className="absolute bottom-4 right-4 shadow-popover" onClick={jumpToLatest} size="sm" variant="secondary"><ArrowDown />Jump to latest</Button> : null}
       </div>
     </section>
   );
