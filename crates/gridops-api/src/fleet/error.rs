@@ -87,6 +87,7 @@ impl IntoResponse for FleetApiError {
             429 => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
+        tracing::warn!(request_id = %self.context.id, status = status.as_u16(), code = ?self.code, "fleet request refused");
         let message = match self.code {
             ErrorCode::InvalidRequest => "Invalid fleet request",
             ErrorCode::Unauthenticated => "Authentication required",
