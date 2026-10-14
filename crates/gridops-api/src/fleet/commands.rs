@@ -124,3 +124,18 @@ pub(super) async fn logs(
         .map_err(|error| context.registry_error(&error))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+/// Console output of a runner on this host, for the job log view.
+pub(super) async fn output(
+    State(state): State<AppState>,
+    context: RequestContext,
+    agent: FleetAgent,
+    FleetJson(body): FleetJson<gridops_core::fleet::registry::output::RunnerOutputChunk>,
+) -> Result<Json<gridops_core::fleet::registry::output::RunnerOutputReceipt>, FleetApiError> {
+    let directory = state.config.log_directory().clone();
+    RegistryService::new(state.database, state.vault)
+        .append_runner_output(agent.authenticated(), &body, &directory)
+        .await
+        .map(Json)
+        .map_err(|error| context.registry_error(&error))
+}

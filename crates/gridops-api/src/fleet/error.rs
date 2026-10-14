@@ -35,7 +35,7 @@ impl RequestContext {
 
     pub(super) fn registry_error(self, error: &RegistryError) -> FleetApiError {
         self.error(match error {
-            RegistryError::Database(_) | RegistryError::Json(_) => {
+            RegistryError::Database(_) | RegistryError::Json(_) | RegistryError::Storage(_) => {
                 tracing::error!(request_id = %self.id, "fleet registry dependency failed");
                 ErrorCode::DependencyUnavailable
             }

@@ -14,6 +14,7 @@ mod inventory;
 #[cfg(test)]
 mod inventory_tests;
 pub mod logs;
+pub mod output;
 mod queries;
 #[cfg(test)]
 mod query_tests;
@@ -200,6 +201,8 @@ pub enum RegistryError {
     TargetScopeForbidden,
     #[error("JSON encoding failed")]
     Json(#[from] serde_json::Error),
+    #[error("log storage failed")]
+    Storage(#[from] std::io::Error),
     #[error(transparent)]
     Credential(#[from] CredentialError),
     #[error(transparent)]
