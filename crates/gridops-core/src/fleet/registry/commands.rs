@@ -340,7 +340,7 @@ async fn apply_to_placement(
 }
 
 /// Registration material is single-use: once a start resolves it is erased.
-async fn erase_bootstrap(
+pub(super) async fn erase_bootstrap(
     tx: &mut Transaction<'_, Sqlite>,
     placement_id: &str,
     now: i64,
@@ -358,7 +358,7 @@ async fn erase_bootstrap(
 
 /// Records that nothing of this placement can exist on the host and frees
 /// its capacity.
-async fn release(
+pub(super) async fn release(
     tx: &mut Transaction<'_, Sqlite>,
     placement_id: &str,
     now: i64,

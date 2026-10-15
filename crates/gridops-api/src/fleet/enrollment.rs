@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use gridops_core::fleet::{
-    Architecture, CiTargetId, ExecutionOs, Generation, HostId, NonNilUuid, Revision,
+    Architecture, CiTargetId, ExecutionOs, Generation, HostId, NonNilUuid, PlacementId, Revision,
     protocol::{
         browser::{BoundedItems, ErrorCode},
         primitives::{BrowserCounter, IdempotencyKey, Sha256Digest, WireTimestamp},
@@ -16,6 +16,7 @@ use gridops_core::fleet::{
     registry::{
         ApproveHost, EnrollmentIssue, EnrollmentMetadata, EnrollmentScope, HostRegistration,
         IssueEnrollment, OneTimeSecret, RecoverHost, RecoveryIssue, RegistryService,
+        unconfirmed::UnconfirmedPlacement,
     },
 };
 use secrecy::{ExposeSecret as _, SecretString};
@@ -360,6 +361,50 @@ pub(super) async fn lifecycle(
         .await
         .map_err(|error| context.registry_error(&error))?;
     Ok(StatusCode::OK.into_response())
+}
+
+#[derive(Serialize)]
+pub(super) struct UnconfirmedList {
+    items: Vec<UnconfirmedPlacement>,
+}
+
+pub(super) async fn unconfirmed(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetUser,
+    FleetPath(host_id): FleetPath<HostId>,
+) -> Result<Json<UnconfirmedList>, FleetApiError> {
+    let items = RegistryService::new(state.database, state.vault)
+        .unconfirmed_placements(user.principal(), host_id)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(UnconfirmedList { items }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RepairBody {
+    placement_ids: BoundedItems<PlacementId, 64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RepairResponse {
+    repaired: Vec<PlacementId>,
+}
+
+pub(super) async fn repair_unconfirmed(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser,
+    FleetPath(host_id): FleetPath<HostId>,
+    FleetJson(body): FleetJson<RepairBody>,
+) -> Result<Json<RepairResponse>, FleetApiError> {
+    let repaired = RegistryService::new(state.database, state.vault)
+        .repair_unconfirmed(user.principal(), host_id, body.placement_ids.as_slice())
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(RepairResponse { repaired }))
 }
 
 #[derive(Deserialize)]

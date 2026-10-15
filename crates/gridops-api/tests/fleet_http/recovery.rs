@@ -287,3 +287,94 @@ async fn queued_work_goes_to_a_platform_with_an_authorized_machine() -> Result<(
     assert!(behind);
     Ok(())
 }
+
+/// When the agent can't settle a placement itself, an administrator can: the
+/// machine shows as blocked, and repairing releases the unconfirmed start on
+/// their word, with an audit entry, so the machine takes work again.
+#[tokio::test]
+async fn an_administrator_repairs_a_placement_the_agent_cannot_confirm() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let proxy = Proxy::start(&f.origin).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &proxy.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+
+    // The start's result never gets through, and its deadline passes.
+    proxy.faults.refuse_results.store(true, Ordering::SeqCst);
+    issue_start(&f, placement_id, workload, 2_000).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let identity = machine.journal.identity().await?.context("identity")?;
+    inventory::agent_post(
+        &f,
+        &host,
+        identity.credential.expose_secret(),
+        "commands/poll",
+    )
+    .json(&json!({"authority_session_id":Uuid::new_v4(),"wait_ms":0,"limit":1}))
+    .send()
+    .await?
+    .error_for_status()?;
+    assert_eq!(placement_state(&f, placement_id).await?, "uncertain");
+
+    let get = |path: String| f.client.get(f.url(&path)).header(header::COOKIE, &f.cookie);
+    let listed: Value = get(format!("/hosts/{host}/unconfirmed"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let item = &listed["items"][0];
+    assert_eq!(item["placementId"], placement_id.to_string());
+    assert_eq!(item["repair"], "release");
+    assert_eq!(item["command"]["kind"], "start_runner");
+    assert_eq!(item["command"]["interrupted"], false);
+    let queue: Value = get("/pools/fleet-pool/queue".to_owned())
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(queue["blockedHosts"][0]["hostId"], host);
+    assert_eq!(queue["blockedHosts"][0]["unconfirmed"], 1);
+
+    let repair = || {
+        f.admin_post(&format!("/hosts/{host}/unconfirmed/repair"))
+            .json(&json!({"placementIds": [placement_id]}))
+    };
+    sqlx::query("UPDATE users SET role='member' WHERE id='fleet-user'")
+        .execute(&f.database)
+        .await?;
+    error(repair().send().await?, StatusCode::FORBIDDEN, "forbidden").await?;
+    sqlx::query("UPDATE users SET role='admin' WHERE id='fleet-user'")
+        .execute(&f.database)
+        .await?;
+    let repaired: Value = repair().send().await?.error_for_status()?.json().await?;
+    assert_eq!(repaired["repaired"], json!([placement_id]));
+    assert_eq!(placement_state(&f, placement_id).await?, "failed");
+    assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
+    let audit: String = sqlx::query_scalar(
+        "SELECT metadata FROM audit_events WHERE action='fleet.placement.repaired' AND target_id=?",
+    )
+    .bind(placement_id.to_string())
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&audit)?,
+        json!({"repair": "release", "cancelled": ["start_runner"]})
+    );
+    // Repeating it changes nothing.
+    let again: Value = repair().send().await?.error_for_status()?.json().await?;
+    assert_eq!(again["repaired"], json!([]));
+
+    // The agent's late answer can't undo the repair, and the machine works.
+    proxy.faults.refuse_results.store(false, Ordering::SeqCst);
+    within("work authority", || has_authority(&f, &host)).await?;
+    assert_eq!(placement_state(&f, placement_id).await?, "failed");
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
+    Ok(())
+}

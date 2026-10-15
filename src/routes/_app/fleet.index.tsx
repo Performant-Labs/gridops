@@ -98,6 +98,11 @@ function MachineRow({ host }: { host: HostReadV1 }) {
             {full.enrollment === "approved" ? null : <EnrollmentBadge value={full.enrollment} />}
             <FreshnessBadge value={full.heartbeatFreshness} />
             {full.duplicateHardware ? <Badge variant="destructive">Duplicate hardware</Badge> : null}
+            {full.counts.uncertainPlacementCount > 0 ? (
+              <Badge title="Unconfirmed jobs keep this machine from taking new ones. Open it to repair them." variant="destructive">
+                Blocked · {full.counts.uncertainPlacementCount} unconfirmed
+              </Badge>
+            ) : null}
           </div>
         ) : dash}
       </td>

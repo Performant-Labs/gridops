@@ -57,8 +57,10 @@ pub(super) async fn profile(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct QueueResponse {
     items: Vec<targets::QueuedRunner>,
+    blocked_hosts: Vec<targets::BlockedHost>,
 }
 
 pub(super) async fn queue(
@@ -71,7 +73,13 @@ pub(super) async fn queue(
     let items = targets::pool_queue(&state.database, &path.pool_id)
         .await
         .map_err(|error| fleet_error(context, &error))?;
-    Ok(Json(QueueResponse { items }))
+    let blocked_hosts = targets::pool_blocked_hosts(&state.database, &path.pool_id)
+        .await
+        .map_err(|error| fleet_error(context, &error))?;
+    Ok(Json(QueueResponse {
+        items,
+        blocked_hosts,
+    }))
 }
 
 pub(super) async fn save_profile(

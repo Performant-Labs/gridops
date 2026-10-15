@@ -748,6 +748,51 @@ pub async fn pool_queue(pool: &SqlitePool, pool_id: &str) -> Result<Vec<QueuedRu
         .collect())
 }
 
+/// A machine that could run this pool's work but takes none while some of
+/// its placements are unconfirmed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedHost {
+    pub host_id: String,
+    pub name: String,
+    pub unconfirmed: i64,
+    /// When its oldest unconfirmed placement became unconfirmed.
+    pub since: i64,
+}
+
+/// The pool's machines held back by unconfirmed placements.
+pub async fn pool_blocked_hosts(
+    pool: &SqlitePool,
+    pool_id: &str,
+) -> Result<Vec<BlockedHost>, FleetError> {
+    let rows = sqlx::query(
+        "SELECT h.id,h.name,COUNT(*) AS unconfirmed,MIN(w.updated_at) AS since
+           FROM fleet_hosts h JOIN workload_placements w ON w.host_id=h.id AND w.state='uncertain'
+          WHERE h.lifecycle_state IN ('active','draining') AND EXISTS (
+            SELECT 1 FROM pool_execution_profiles p
+              JOIN host_backends b ON b.host_id=h.id AND b.runtime_kind=p.runtime_kind
+                                  AND b.execution_os=p.execution_os AND b.architecture=p.architecture
+                                  AND b.enabled=1
+              JOIN profile_ci_targets pt ON pt.profile_id=p.id AND pt.enabled=1 AND pt.revoked_at IS NULL
+              JOIN host_target_grants g ON g.host_id=h.id AND g.target_id=pt.target_id
+                                       AND g.allow_schedule=1 AND g.revoked_at IS NULL
+             WHERE p.pool_id=? AND p.enabled=1 AND p.archived_at IS NULL)
+          GROUP BY h.id ORDER BY since",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| BlockedHost {
+            host_id: row.get("id"),
+            name: row.get("name"),
+            unconfirmed: row.get("unconfirmed"),
+            since: row.get("since"),
+        })
+        .collect())
+}
+
 /// Some active, online machine with a matching enabled backend, the right
 /// grants, no pressure and live work authority. Binds the profile, the
 /// heartbeat cutoff and now.

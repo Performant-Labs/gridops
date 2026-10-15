@@ -47,6 +47,14 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/v1/fleet/hosts/{host_id}/domains/{domain_id}",
             get(query::domain),
         )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/unconfirmed",
+            get(enrollment::unconfirmed),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/unconfirmed/repair",
+            post(enrollment::repair_unconfirmed),
+        )
         .route("/api/v1/fleet/hosts/{host_id}/samples", get(query::samples))
         .route("/api/v1/fleet/hosts/{host_id}/events", get(query::events))
         .route("/api/v1/fleet/enrollments", post(enrollment::issue))

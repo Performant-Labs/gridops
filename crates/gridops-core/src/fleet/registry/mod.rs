@@ -21,6 +21,7 @@ mod query_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+pub mod unconfirmed;
 
 pub use commands::ResultDisposition;
 

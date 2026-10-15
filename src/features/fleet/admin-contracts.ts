@@ -75,8 +75,34 @@ export const queuedRunnerSchema = z.strictObject({
   reason: z.string().max(64).nullable(),
   queuedAt: z.number().int().nonnegative(),
 });
-export const poolQueueSchema = z.strictObject({ items: z.array(queuedRunnerSchema).max(50) });
+/** A machine that could run the pool's work but is held back by unconfirmed placements. */
+export const blockedHostSchema = z.strictObject({
+  hostId: fleetIdSchema,
+  name: z.string().max(256),
+  unconfirmed: z.number().int().positive(),
+  since: safeInteger,
+});
+export const poolQueueSchema = z.strictObject({
+  items: z.array(queuedRunnerSchema).max(50),
+  blockedHosts: z.array(blockedHostSchema).max(1_000),
+});
 export type QueuedRunner = z.infer<typeof queuedRunnerSchema>;
+export type BlockedHost = z.infer<typeof blockedHostSchema>;
+
+/** A placement whose last command nobody answered, which keeps its machine from taking work. */
+export const unconfirmedPlacementSchema = z.strictObject({
+  placementId: fleetIdSchema,
+  runnerId: z.string().max(128).nullable(),
+  runnerName: z.string().max(256).nullable(),
+  poolId: z.string().min(1).max(128),
+  poolName: z.string().max(256).nullable(),
+  since: safeInteger,
+  command: z.strictObject({ kind: z.string().min(1).max(64), issuedAt: safeInteger, interrupted: z.boolean() }).nullable(),
+  repair: z.enum(["reinspect", "release"]),
+});
+export const unconfirmedListSchema = z.strictObject({ items: z.array(unconfirmedPlacementSchema).max(1_000) });
+export const repairResultSchema = z.strictObject({ repaired: z.array(fleetIdSchema).max(64) });
+export type UnconfirmedPlacement = z.infer<typeof unconfirmedPlacementSchema>;
 
 export type HostLifecycle = z.infer<typeof hostLifecycleSchema>;
 export type GrantPolicy = z.infer<typeof grantPolicySchema>;
