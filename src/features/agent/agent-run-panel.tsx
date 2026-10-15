@@ -248,7 +248,7 @@ function RunOutcome({ run }: { run: AgentRun }) {
         <>
           {run.outcome === "diagnosis" && run.summary && run.diagnosis ? <Markdown className="mt-1.5 font-medium">{run.summary}</Markdown> : null}
           {diagnosis ? <Markdown className="mt-1.5">{diagnosis}</Markdown> : <p className="mt-1.5 text-xs text-muted-foreground">The agent finished without a write-up.</p>}
-          {run.outcome === "diagnosis" ? <p className="mt-2 text-2xs text-muted-foreground">This doesn’t look like a code problem, so no pull request was opened.</p> : null}
+          {run.outcome === "diagnosis" ? <p className="mt-2 text-2xs text-muted-foreground">No pull request was opened.</p> : null}
         </>
       ) : null}
     </div>

@@ -19,7 +19,10 @@ use base64::engine::general_purpose::STANDARD;
 use futures_util::StreamExt as _;
 use gridops_agent::{
     catalog::ProviderId,
-    changes::{ChangeKind, FileChange, collect_changes, diff_stat, prepare_checkout_script},
+    changes::{
+        ChangeKind, FileChange, WORKFLOWS_DIR, collect_changes, diff_stat, prepare_checkout_script,
+        workflow_diff,
+    },
     connection::{AgentModel, ModelSettings},
     prompt::{FailedStep, FailureContext, LOG_TAIL_LINES, RunnerContext},
     sandbox::{ExecOutput, ExecRequest, Sandbox},
@@ -457,6 +460,23 @@ async fn drive(
             let stat = diff_stat(sandbox).await.unwrap_or_default();
             record(app, run_id, EventKind::Status, "Changes", Some(stat)).await?;
             let changes = collect_changes(sandbox).await?;
+            let workflows: Vec<&str> = changes
+                .iter()
+                .map(|change| change.path.as_str())
+                .filter(|path| path.starts_with(WORKFLOWS_DIR))
+                .collect();
+            // GitHub refuses the commit outright (403 on the tree) without
+            // the Workflows permission, so hand the patch over instead.
+            if !workflows.is_empty()
+                && plan.installation_permissions["workflows"].as_str() != Some("write")
+            {
+                let diff = workflow_diff(sandbox).await.unwrap_or_default();
+                let mut finish = outcome.finish.clone();
+                finish.outcome = FinishOutcome::Diagnosis;
+                finish.body = workflow_permission_body(&finish.body, &workflows, &diff);
+                finish_succeeded(app, run_id, &finish, None).await?;
+                return Ok(());
+            }
             let pull_request =
                 open_pull_request(app, plan, &context, &outcome.finish, &changes, &token)
                     .await
@@ -473,6 +493,26 @@ async fn drive(
         }
     }
     Ok(())
+}
+
+/// The agent's write-up, plus why there's no pull request and the workflow
+/// change for a person to apply.
+fn workflow_permission_body(body: &str, paths: &[&str], diff: &str) -> String {
+    let files = paths
+        .iter()
+        .map(|path| format!("`{path}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut text = format!(
+        "{}\n\n## No pull request opened\n\nThis fix changes {files}. GitHub only lets the GridOps app change workflow files with its **Workflows** permission (read and write), which this installation doesn't have. Apply the change yourself, or grant the permission to the GitHub App, accept it on the installation, and run the agent again.",
+        body.trim()
+    );
+    if !diff.trim().is_empty() {
+        text.push_str("\n\n```diff\n");
+        text.push_str(diff.trim_end());
+        text.push_str("\n```");
+    }
+    text
 }
 
 /// A token for this repository only, able to read logs and code and open a

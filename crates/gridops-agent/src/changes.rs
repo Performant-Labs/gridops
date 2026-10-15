@@ -171,6 +171,21 @@ pub async fn diff_stat(sandbox: &dyn Sandbox) -> Result<String> {
         .require_success("Summarising changes")
 }
 
+/// Where GitHub keeps workflow files. A GitHub App needs the separate
+/// Workflows permission to change anything under it.
+pub const WORKFLOWS_DIR: &str = ".github/workflows/";
+
+/// The agent's changes to workflow files, as a patch a person can apply.
+pub async fn workflow_diff(sandbox: &dyn Sandbox) -> Result<String> {
+    sandbox
+        .exec(ExecRequest::script(
+            "git add -A && git diff --cached -- .github/workflows",
+            60,
+        ))
+        .await?
+        .require_success("Collecting workflow changes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
