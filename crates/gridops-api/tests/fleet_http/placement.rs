@@ -529,7 +529,10 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
         )
     };
     let shipped = i64::try_from(first.len())?;
-    assert_eq!(stream().await?, (shipped, shipped, false, None));
+    eventually("shipped output", || async {
+        Ok((stream().await? == (shipped, shipped, false, None)).then_some(()))
+    })
+    .await?;
 
     // A replayed chunk is appended once, and only the placement's own host,
     // in its live session, can write the placement's output.
