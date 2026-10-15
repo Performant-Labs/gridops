@@ -33,9 +33,9 @@ use super::*;
 
 /// Plays a Docker host whose runner exits as soon as it's inspected.
 #[derive(Default)]
-struct FakeDocker {
+pub(super) struct FakeDocker {
     bootstraps: Mutex<Vec<String>>,
-    operations: Mutex<Vec<&'static str>>,
+    pub(super) operations: Mutex<Vec<&'static str>>,
     /// The started container's console, written by the test.
     console: Mutex<Option<tokio::io::DuplexStream>>,
 }
@@ -136,7 +136,7 @@ impl RuntimeHelper for FakeDocker {
     }
 }
 
-async fn seed_pool(f: &Fixture) -> Result<()> {
+pub(super) async fn seed_pool(f: &Fixture) -> Result<()> {
     sqlx::raw_sql(
         "INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
            VALUES (1,1,'octo-org','Organization','Organization','selected',1,1);
@@ -152,7 +152,7 @@ async fn seed_pool(f: &Fixture) -> Result<()> {
     Ok(())
 }
 
-async fn eventually<T, F, Fut>(what: &str, mut probe: F) -> Result<T>
+pub(super) async fn eventually<T, F, Fut>(what: &str, mut probe: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Option<T>>>,
@@ -166,7 +166,7 @@ where
     bail!("timed out waiting for {what}")
 }
 
-async fn placement_state(f: &Fixture, placement: PlacementId) -> Result<String> {
+pub(super) async fn placement_state(f: &Fixture, placement: PlacementId) -> Result<String> {
     Ok(
         sqlx::query_scalar("SELECT state FROM workload_placements WHERE id=?")
             .bind(placement.to_string())
@@ -175,18 +175,48 @@ async fn placement_state(f: &Fixture, placement: PlacementId) -> Result<String> 
     )
 }
 
-#[tokio::test]
-async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() -> Result<()> {
-    let f = Fixture::new().await?;
-    seed_pool(&f).await?;
+/// A machine that enrolled through `origin` (the API, or a proxy in front of
+/// it), was approved, had its Docker backend enabled and was activated, and
+/// now holds work authority.
+pub(super) struct Machine {
+    pub(super) host: gridops_core::fleet::ids::HostId,
+    pub(super) journal: Journal,
+    pub(super) target: String,
+    pub(super) profile_id: String,
+    pub(super) stop: oneshot::Sender<()>,
+    pub(super) running: tokio::task::JoinHandle<Result<Stop>>,
+}
 
+pub(super) async fn active_machine(
+    f: &Fixture,
+    origin: &str,
+    runtime: Arc<FakeDocker>,
+) -> Result<Machine> {
+    active_machine_on(
+        f,
+        origin,
+        runtime,
+        json!([{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}]),
+    )
+    .await
+}
+
+/// Like [`active_machine`], with the pool running on `platforms`. The
+/// machine itself offers Linux arm64 Docker.
+pub(super) async fn active_machine_on(
+    f: &Fixture,
+    origin: &str,
+    runtime: Arc<FakeDocker>,
+    platforms: Value,
+) -> Result<Machine> {
     let response = f
         .client
         .put(f.url("/pools/fleet-pool/profile"))
         .header(header::COOKIE, &f.cookie)
         .header(header::ORIGIN, &f.origin)
         .json(&json!({
-            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,            "platforms": [{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
+            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+            "platforms": platforms,
         }))
         .send()
         .await?;
@@ -205,27 +235,17 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
         .await?
         .json()
         .await?;
-    let runtime = Arc::new(FakeDocker::default());
-    let (mut console, output) = tokio::io::duplex(64 * 1024);
-    *runtime
-        .console
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(output);
     let journal =
         Journal::open(&f.directory.join(format!("agent-{}.sqlite", Uuid::new_v4()))).await?;
-    let supervisor = Supervisor::new(
-        Client::new(&f.origin)?,
-        journal.clone(),
-        "fleet-host".into(),
-    )
-    .with_heartbeat(Duration::from_millis(200))
-    .with_measurements(|| gridops_host_agent::probe::Measurement {
-        memory_total_mib: Some(16_384),
-        memory_used_mib: Some(4_096),
-        cpu_used_millis: Some(500),
-        uptime_seconds: Some(60),
-    })
-    .with_runtime(Arc::clone(&runtime), Trust::default());
+    let supervisor = Supervisor::new(Client::new(origin)?, journal.clone(), "fleet-host".into())
+        .with_heartbeat(Duration::from_millis(200))
+        .with_measurements(|| gridops_host_agent::probe::Measurement {
+            memory_total_mib: Some(16_384),
+            memory_used_mib: Some(4_096),
+            cpu_used_millis: Some(500),
+            uptime_seconds: Some(60),
+        })
+        .with_runtime(Arc::clone(&runtime), Trust::default());
     supervisor
         .enroll(issued["code"].as_str().context("code")?, None)
         .await?;
@@ -293,9 +313,34 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
     })
     .await?;
 
+    // The platform the machine serves.
+    let profile_id = profile["item"]["platforms"]
+        .as_array()
+        .context("platforms")?
+        .iter()
+        .find(|platform| platform["architecture"] == "arm64")
+        .and_then(|platform| platform["id"].as_str())
+        .context("profile id")?
+        .to_owned();
+    Ok(Machine {
+        host,
+        journal,
+        target,
+        profile_id,
+        stop,
+        running,
+    })
+}
+
+/// Admits one runner of the pool onto `machine` and waits until its
+/// environment is prepared.
+pub(super) async fn prepared_placement(
+    f: &Fixture,
+    machine: &Machine,
+    workload: Uuid,
+) -> Result<PlacementId> {
     // As the reconciler does: the runner row exists before placement, and
     // must not count against a pool that allows exactly one runner.
-    let workload = Uuid::new_v4();
     sqlx::query("UPDATE runner_pools SET max_count=1 WHERE id='fleet-pool'")
         .execute(&f.database)
         .await?;
@@ -306,9 +351,7 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
     .bind(workload.to_string())
     .execute(&f.database)
     .await?;
-    let profile_id = profile["item"]["platforms"][0]["id"]
-        .as_str()
-        .context("profile id")?;
+    let profile_id = machine.profile_id.as_str();
     // A pool set to "machines first" would place its next runner here.
     assert!(
         gridops_core::fleet::targets::machine_ready(&f.database, "fleet-pool", profile_id).await?
@@ -321,7 +364,7 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
                 idempotency_key: "runner:placement-test".into(),
                 pool_id: "fleet-pool".into(),
                 profile_id: profile_id.parse()?,
-                target_id: target.parse()?,
+                target_id: machine.target.parse()?,
                 workload_id: WorkloadId::try_new(workload)?,
                 generation: Generation::new(1)?,
                 kind: WorkloadKind::CiRunner,
@@ -343,9 +386,20 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
             .parse()?;
 
     eventually("prepared environment", || async {
-        Ok((placement_state(&f, placement_id).await? == "registering").then_some(()))
+        Ok((placement_state(f, placement_id).await? == "registering").then_some(()))
     })
     .await?;
+    Ok(placement_id)
+}
+
+/// Issues the placement's start, with one-time registration material, that
+/// the host must act on within `ttl_ms`.
+pub(super) async fn issue_start(
+    f: &Fixture,
+    placement_id: PlacementId,
+    workload: Uuid,
+    ttl_ms: i64,
+) -> Result<()> {
     let prepared = placement::prepared_environment(&f.database, placement_id)
         .await?
         .context("prepared environment")?;
@@ -371,9 +425,35 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
         allocation_ids: prepare.allocation_ids,
     });
     placement::mark_starting(&f.database, placement_id, &workload.to_string()).await?;
-    placement::issue_command(&f.database, placement_id, start, "start:test", 55_000)
+    placement::issue_command(&f.database, placement_id, start, "start:test", ttl_ms)
         .await?
         .context("start command")?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let (mut console, output) = tokio::io::duplex(64 * 1024);
+    *runtime
+        .console
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(output);
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    issue_start(&f, placement_id, workload, 55_000).await?;
+    let Machine {
+        host,
+        journal,
+        stop,
+        running,
+        ..
+    } = machine;
+    let vault = Vault::new([0; 32], SESSION_SECRET.as_bytes().to_vec());
     eventually("running runner", || async {
         Ok((placement_state(&f, placement_id).await? == "running").then_some(()))
     })
