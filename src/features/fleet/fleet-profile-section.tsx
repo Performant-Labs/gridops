@@ -11,6 +11,7 @@ import { SettingsRow, SettingsSection, Switch, UnitField } from "~/components/se
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { SearchableSelect } from "~/components/ui/searchable-select";
+import { formatRelativeTime } from "~/lib/utils";
 import { getPoolProfile, getPoolQueue, savePoolProfile } from "./admin-api";
 import type { PlatformInput, Profile, ProfileInput } from "./admin-contracts";
 import { fleetErrorMessage, isForbidden } from "./fleet-ui";
@@ -108,14 +109,29 @@ function WaitingRunners({ poolId }: { poolId: string }) {
     refetchInterval: 10_000,
   });
   const items = queue.data?.items ?? [];
-  if (items.length === 0) return null;
+  const blocked = queue.data?.blockedHosts ?? [];
+  if (items.length === 0 && blocked.length === 0) return null;
   const reason = items.find((item) => item.reason)?.reason;
   return (
-    <div className="px-4 py-3">
-      <Callout title={`${items.length} ${items.length === 1 ? "runner is" : "runners are"} waiting for a machine`} tone="warning">
-        {(reason && waitingReason[reason]) ?? "No machine can take it yet."}{" "}
-        <Link className="underline underline-offset-2" to="/fleet">Check machines</Link>
-      </Callout>
+    <div className="space-y-2 px-4 py-3">
+      {blocked.length > 0 ? (
+        <Callout title={blocked.length === 1 ? `${blocked[0]!.name} isn’t taking jobs` : `${blocked.length} machines aren’t taking jobs`} tone="danger">
+          Jobs on {blocked.length === 1 ? "it" : "them"} couldn’t be confirmed, so no new ones start there until they’re settled. Repair them on the machine’s page:{" "}
+          {blocked.map((host, index) => (
+            <span key={host.hostId}>
+              {index > 0 ? ", " : null}
+              <Link className="underline underline-offset-2" params={{ hostId: host.hostId }} to="/fleet/machines/$hostId">{host.name}</Link>
+              {" "}({host.unconfirmed} unconfirmed, {formatRelativeTime(new Date(host.since).toISOString())})
+            </span>
+          ))}.
+        </Callout>
+      ) : null}
+      {items.length > 0 ? (
+        <Callout title={`${items.length} ${items.length === 1 ? "runner is" : "runners are"} waiting for a machine`} tone="warning">
+          {(reason && waitingReason[reason]) ?? "No machine can take it yet."}{" "}
+          <Link className="underline underline-offset-2" to="/fleet">Check machines</Link>
+        </Callout>
+      ) : null}
     </div>
   );
 }

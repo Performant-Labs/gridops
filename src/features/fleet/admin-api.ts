@@ -8,7 +8,7 @@ import { FleetRequestError } from "./registry-api";
 import {
   backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
-  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema, agentLogListSchema } from "./admin-contracts";
+  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema } from "./admin-contracts";
 
 type Options = { signal?: AbortSignal; body?: unknown; method?: "GET" | "POST" | "PUT" };
 
@@ -53,6 +53,13 @@ export const listHostGrants = (hostId: string, signal?: AbortSignal) =>
 export const setHostGrant = (hostId: string, targetId: string, policy: GrantPolicy, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/grants/${fleetIdSchema.parse(targetId)}`, emptyResponse, {
     method: "POST", body: grantPolicySchema.parse(policy), signal,
+  });
+export const listUnconfirmed = (hostId: string, signal?: AbortSignal) =>
+  request(`${hostPath(hostId)}/unconfirmed`, unconfirmedListSchema, { signal });
+/** Settles unconfirmed placements the way the agent would; at most 64 per call. */
+export const repairUnconfirmed = (hostId: string, placementIds: string[], signal?: AbortSignal) =>
+  request(`${hostPath(hostId)}/unconfirmed/repair`, repairResultSchema, {
+    method: "POST", body: { placementIds: placementIds.map((id) => fleetIdSchema.parse(id)) }, signal,
   });
 export const listTargets = (signal?: AbortSignal) =>
   request("/api/v1/fleet/targets", fleetTargetListSchema, { signal });

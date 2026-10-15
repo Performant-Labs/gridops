@@ -16,8 +16,10 @@ import { Switch } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
-import { listAgentLogs, listHostGrants, listTargets, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle } from "~/features/fleet/admin-api";
-import type { AgentLog, GrantPolicy, HostGrant, HostLifecycle } from "~/features/fleet/admin-contracts";
+import {
+  listAgentLogs, listHostGrants, listTargets, listUnconfirmed, repairUnconfirmed, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle,
+} from "~/features/fleet/admin-api";
+import type { AgentLog, GrantPolicy, HostGrant, HostLifecycle, UnconfirmedPlacement } from "~/features/fleet/admin-contracts";
 import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden,
   lifecycleLabel, newIdempotencyKey, osLabel, platformLabel, runtimeLabel,
@@ -135,6 +137,7 @@ function MachineDetail({ host }: { host: HostItem }) {
         {host.enrollment === "pending" ? <ApprovalSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" ? <LifecycleSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
+        {host.counts.uncertainPlacementCount > 0 ? <UnconfirmedSection hostId={host.id} /> : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
         <EventsSection items={events.data?.items} query={events} />
@@ -176,6 +179,15 @@ function HostAlerts({ host }: { host: HostItem }) {
     alerts.push(
       <Callout key="duplicate" title="Another machine reports the same hardware" tone="danger">
         This can mean the agent’s identity was copied to another machine. Check both machines before approving or running jobs.
+      </Callout>,
+    );
+  }
+  const unconfirmed = host.counts.uncertainPlacementCount;
+  if (unconfirmed > 0) {
+    alerts.push(
+      <Callout key="unconfirmed" title="Not taking new jobs" tone="danger">
+        {unconfirmed === 1 ? "A job" : `${unconfirmed} jobs`} on this machine couldn’t be confirmed, so no new jobs start here until {unconfirmed === 1 ? "it’s" : "they’re"} settled.
+        The agent settles these itself when it reconnects; if it can’t, repair them below.
       </Callout>,
     );
   }
@@ -404,6 +416,82 @@ function AgentLog({ hostId }: { hostId: string }) {
       )}
       <p className="text-xs text-muted-foreground">The latest {items.length} lines.</p>
     </div>
+  );
+}
+
+const commandLabel: Record<string, string> = {
+  prepare_environment: "Preparing the runner",
+  start_runner: "Starting the runner",
+  drain: "Draining the runner",
+  stop: "Stopping the runner",
+  cleanup: "Removing the runner",
+};
+
+const repairEffect: Record<UnconfirmedPlacement["repair"], string> = {
+  reinspect: "The agent confirmed this runner started. Repair marks it running again, so GridOps checks it and removes it when it’s done.",
+  release: "The agent never confirmed this runner started. Repair frees its capacity and marks it failed; if it’s still running on the machine, stop it there.",
+};
+
+const since = (millis: number) => formatRelativeTime(new Date(millis).toISOString());
+
+/** Placements whose last command went unanswered, each with the repair that settles it. */
+function UnconfirmedSection({ hostId }: { hostId: string }) {
+  const placements = useQuery({
+    queryKey: ["fleet", "unconfirmed", hostId],
+    queryFn: ({ signal }) => listUnconfirmed(hostId, signal),
+    refetchInterval: REFRESH,
+  });
+  const { pending, run } = useFleetAction();
+  if (placements.isError && isForbidden(placements.error)) return null;
+  const items = placements.data?.items ?? [];
+
+  async function repair(selected: UnconfirmedPlacement[]) {
+    const releases = selected.filter((item) => item.repair === "release").length;
+    const message = selected.length === 1
+      ? `Repair this job? ${repairEffect[selected[0]!.repair]}`
+      : `Repair ${selected.length} jobs? ${releases > 0 ? `${releases} never confirmed starting: their capacity is freed and they’re marked failed, so stop any of their runners still on the machine. ` : ""}`
+        + `${selected.length - releases > 0 ? `${selected.length - releases} confirmed running: GridOps checks them and removes them when done.` : ""}`;
+    if (!(await confirmAction(message, { confirmLabel: "Repair", destructive: releases > 0 }))) return;
+    await run(selected.length === 1 ? selected[0]!.placementId : "all", async () => {
+      for (let start = 0; start < selected.length; start += 64) {
+        await repairUnconfirmed(hostId, selected.slice(start, start + 64).map((item) => item.placementId));
+      }
+    }, "Repaired. The machine takes new jobs again once its next heartbeat lands.");
+  }
+
+  return (
+    <section className="space-y-3">
+      <SectionHeading actions={items.length > 1 ? (
+        <Button disabled={pending !== null} onClick={() => repair(items)} size="sm" variant="outline">
+          {pending === "all" ? <LoaderCircle className="animate-spin" /> : null}Repair all
+        </Button>
+      ) : null}>Unconfirmed jobs</SectionHeading>
+      {placements.isPending ? <InlineLoading label="Loading unconfirmed jobs" /> : null}
+      {placements.isError ? <Callout tone="danger">{fleetErrorMessage(placements.error, "Couldn’t load unconfirmed jobs.")}</Callout> : null}
+      {placements.isSuccess && items.length === 0 ? <p className="text-sm text-muted-foreground">Settled. The machine takes new jobs again once its next heartbeat lands.</p> : null}
+      {items.length > 0 ? (
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {items.map((item) => (
+            <li className="flex flex-col gap-2 p-3 sm:flex-row sm:items-start sm:justify-between" key={item.placementId}>
+              <div className="min-w-0 space-y-1 text-sm">
+                <p className="truncate font-medium">{item.runnerName ?? item.runnerId ?? "Runner"}{item.poolName ? <span className="font-normal text-muted-foreground"> · {item.poolName}</span> : null}</p>
+                <p className="text-muted-foreground" title={formatDateTime(new Date(item.since).toISOString())}>
+                  Became unconfirmed {since(item.since)}.
+                  {item.command ? ` ${commandLabel[item.command.kind] ?? item.command.kind.replaceAll("_", " ")} ${item.command.interrupted ? "was cut off on the machine" : "got no answer"}.` : ""}
+                </p>
+                <p className="text-xs text-muted-foreground">{repairEffect[item.repair]}</p>
+              </div>
+              <Button className="shrink-0" disabled={pending !== null} onClick={() => repair([item])} size="sm" variant="outline">
+                {pending === item.placementId ? <LoaderCircle className="animate-spin" /> : null}Repair
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        To see the runners on a Docker machine, run <code className="font-mono">docker ps -a --filter label=io.gridops.fleet.environment</code> there.
+      </p>
+    </section>
   );
 }
 
