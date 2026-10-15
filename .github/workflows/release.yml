@@ -65,6 +65,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      # Machines pull the CI image only when they don't have it, so one may
+      # still hold a build from before musl was added.
+      - name: Check the musl toolchain
+        run: |
+          command -v musl-gcc >/dev/null && rustup target list --installed | grep -qx ${{ matrix.target }} || {
+            echo "::error::This machine's gridops-ci image has no musl toolchain. Run 'docker pull' for the image on the machine and retry."
+            exit 1
+          }
+
       - name: Build
         run: cargo build --release --locked -p gridops-host-agent --target ${{ matrix.target }}
 
