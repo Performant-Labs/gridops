@@ -88,8 +88,11 @@ impl DockerRuntime {
         if !self.images.contains(&image) {
             return failed(FailureCode::Permission, false);
         }
-        if docker(&["image", "inspect", &image]).await.is_err()
-            && docker(&["pull", &image]).await.is_err()
+        // Pull every time, so a tag that moved (`latest`, a rebuilt CI image)
+        // is picked up. The copy already here serves if the registry can't be
+        // reached.
+        if docker(&["pull", &image]).await.is_err()
+            && docker(&["image", "inspect", &image]).await.is_err()
         {
             return failed(FailureCode::Dependency, true);
         }
