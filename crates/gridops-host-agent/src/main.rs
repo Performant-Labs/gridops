@@ -2,9 +2,11 @@
 //!
 //! - `gridops-host-agent` (no arguments, in a terminal) enrolls the machine if
 //!   it isn't enrolled yet, asking for anything missing, then runs.
-//! - `gridops-host-agent enroll [--replace]` enrolls with a one-time code from
-//!   `GRIDOPS_ENROLLMENT_CODE` or a prompt, so it never appears in a process
-//!   list. `--replace` takes a recovery code for an already enrolled machine.
+//! - `gridops-host-agent enroll [--replace] [--no-start]` enrolls with a
+//!   one-time code from `GRIDOPS_ENROLLMENT_CODE` or a prompt, so it never
+//!   appears in a process list. `--replace` takes a recovery code for an
+//!   already enrolled machine; `--no-start` skips offering to run it (the
+//!   installer starts a service instead).
 //! - `gridops-host-agent run` keeps the fleet session open.
 //! - `gridops-host-agent helper <socket>` runs the privileged runtime helper.
 //! - `gridops-host-agent probe` prints what this host would report.
@@ -98,12 +100,17 @@ async fn run() -> Result<ExitCode> {
         "enroll" => {
             let journal = journal().await?;
             enroll(&journal, flags.iter().any(|flag| flag == "--replace")).await?;
-            if interactive() && confirm("Start the agent now?")? {
+            let start = !flags.iter().any(|flag| flag == "--no-start");
+            if start && interactive() && confirm("Start the agent now?")? {
                 return serve(journal).await;
             }
             Ok(ExitCode::SUCCESS)
         }
         "run" => serve(journal().await?).await,
+        "version" | "--version" | "-V" => {
+            println!("gridops-host-agent {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
         "" if interactive() => {
             let journal = journal().await?;
             if journal.identity().await?.is_none() {
@@ -113,7 +120,7 @@ async fn run() -> Result<ExitCode> {
         }
         "" | "help" | "--help" | "-h" => {
             println!(
-                "Usage: gridops-host-agent [enroll [--replace] | run | probe | helper <socket>]\n\n\
+                "Usage: gridops-host-agent [enroll [--replace] [--no-start] | run | probe | version | helper <socket>]\n\n\
                  Run it with no arguments in a terminal to enroll this machine and start it."
             );
             Ok(ExitCode::SUCCESS)

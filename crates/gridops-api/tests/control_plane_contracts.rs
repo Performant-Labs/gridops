@@ -189,6 +189,39 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
 }
 
 #[tokio::test]
+async fn installers_are_public_and_point_at_this_deployment() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+
+    for path in ["install.sh", "install.ps1"] {
+        let response = fixture
+            .client
+            .get(format!("{}/{path}", fixture.base_url))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let script = response.text().await?;
+        assert!(
+            !script.contains("__GRIDOPS_"),
+            "{path} has a placeholder left"
+        );
+        let quoted = |value: &str| [format!("\"{value}\""), format!("'{value}'")];
+        assert!(
+            quoted(&fixture.base_url)
+                .iter()
+                .any(|v| script.contains(v.as_str())),
+            "{path} doesn't carry the address"
+        );
+        assert!(
+            quoted(env!("CARGO_PKG_VERSION"))
+                .iter()
+                .any(|v| script.contains(v.as_str())),
+            "{path} doesn't carry the version"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn webhook_signature_idempotency_and_rejection_are_persistent() -> Result<()> {
     let fixture = ApiFixture::start().await?;
     let body = r#"{"zen":"fixture"}"#;

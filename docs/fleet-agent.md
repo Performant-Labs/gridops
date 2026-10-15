@@ -24,14 +24,37 @@ A machine only gets work while it heartbeats: if it goes quiet for 90 seconds
 it stops receiving new runners, and work that was never delivered is
 cancelled and placed elsewhere.
 
-## Build the agent
+## Install the agent
+
+**Machines → Add machine** issues the enrollment code and shows the installer
+for this GridOps. On Linux or macOS:
+
+```sh
+curl -fsSL https://gridops.example.com/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://gridops.example.com/install.ps1 | iex
+```
+
+The installer downloads the agent for the machine's OS and architecture from
+the GitHub release matching your GridOps version, and checks its SHA-256. It
+then asks for the enrollment code and runs the agent as a user service: a
+LaunchAgent on macOS, a systemd user unit on Linux, or a scheduled task at
+logon on Windows. Set `GRIDOPS_AGENT_IMAGES` before running it to allow
+Docker runner images. Other settings are listed at the top of each script.
+Running the installer again upgrades the agent and keeps its settings.
+
+Release binaries (`gridops-host-agent-<linux|macos|windows>-<x64|arm64>`) can
+also be downloaded directly from the
+[releases page](https://github.com/iamngoni/gridops/releases). To build from
+source instead:
 
 ```sh
 cargo build --release -p gridops-host-agent
 ```
-
-The binary is `target/release/gridops-host-agent`. Copy it to the machine
-(for example `/usr/local/bin`).
 
 Check what the machine will report:
 

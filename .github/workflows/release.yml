@@ -1,0 +1,266 @@
+# Builds a GridOps release on the project's own runners. A `vX.Y.Z` tag that
+# matches the workspace version publishes it: control plane images on GHCR, and
+# host agent binaries, installers and compose file on the GitHub release.
+# Running it by hand builds everything without publishing.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.96.0
+
+jobs:
+  version:
+    name: Version
+    runs-on: [self-hosted, linux, gridops-ci]
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Read the version
+        id: version
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          [ -n "$version" ] || { echo "Cargo.toml has no workspace version"; exit 1; }
+          publish=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"; exit 1; }
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Version $version, publish: $publish"
+
+  agent-linux:
+    name: Agent (Linux ${{ matrix.arch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+    # The CI image has the musl toolchain, so the binary runs on any distro.
+    runs-on: [self-hosted, linux, "${{ matrix.arch }}", gridops-ci]
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Build
+        run: cargo build --release --locked -p gridops-host-agent --target ${{ matrix.target }}
+
+      - name: Check and stage
+        run: |
+          bin="target/${{ matrix.target }}/release/gridops-host-agent"
+          "$bin" --version
+          if ldd "$bin" >/dev/null 2>&1; then echo "$bin is dynamically linked"; exit 1; fi
+          mkdir -p dist
+          cp "$bin" "dist/gridops-host-agent-linux-${{ matrix.arch }}"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  agent-macos:
+    name: Agent (macOS)
+    needs: version
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      # A toolchain of the job's own, so nothing on the host changes.
+      - name: Install Rust
+        run: |
+          export RUSTUP_HOME="$RUNNER_TEMP/rustup" CARGO_HOME="$RUNNER_TEMP/cargo"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal \
+            --default-toolchain "$RUST_VERSION" --target x86_64-apple-darwin
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p gridops-host-agent -p gridops-tart-agent --target aarch64-apple-darwin
+          cargo build --release --locked -p gridops-host-agent --target x86_64-apple-darwin
+
+      - name: Check and stage
+        run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/gridops-host-agent dist/gridops-host-agent-macos-arm64
+          cp target/x86_64-apple-darwin/release/gridops-host-agent dist/gridops-host-agent-macos-x64
+          cp target/aarch64-apple-darwin/release/gridops-tart-agent dist/gridops-tart-agent-macos-arm64
+          dist/gridops-host-agent-macos-arm64 --version
+          lipo -archs dist/gridops-host-agent-macos-x64 | grep -qx x86_64
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-macos
+          path: dist/*
+          if-no-files-found: error
+
+  agent-windows:
+    name: Agent (Windows x64)
+    needs: version
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      # A toolchain of the job's own. Linking needs the MSVC build tools on
+      # the machine (Visual Studio Build Tools, "Desktop development with C++").
+      - name: Install Rust
+        run: |
+          $env:RUSTUP_HOME = Join-Path $env:RUNNER_TEMP 'rustup'
+          $env:CARGO_HOME = Join-Path $env:RUNNER_TEMP 'cargo'
+          $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe' -OutFile $init
+          & $init -y --no-modify-path --profile minimal --default-toolchain $env:RUST_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$env:RUSTUP_HOME"
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$env:CARGO_HOME"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:CARGO_HOME 'bin')
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p gridops-host-agent --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check and stage
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\gridops-host-agent.exe dist\gridops-host-agent-windows-x64.exe
+          & dist\gridops-host-agent-windows-x64.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-windows
+          path: dist/*
+          if-no-files-found: error
+
+  images:
+    name: Control plane images
+    needs: version
+    # Docker on the Mac builds both platforms (amd64 through Rosetta).
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Build, and push on a release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin"
+          # A throwaway Docker config, so the registry login never lands in
+          # the host's keychain or ~/.docker.
+          export DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker-config"
+          mkdir -p "$DOCKER_CONFIG/cli-plugins"
+          for dir in "$HOME/.docker/cli-plugins" /Applications/OrbStack.app/Contents/MacOS/xbin \
+            /Applications/Docker.app/Contents/Resources/cli-plugins /usr/local/lib/docker/cli-plugins; do
+            if [ -x "$dir/docker-buildx" ]; then ln -sf "$dir/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"; break; fi
+          done
+          docker buildx version
+          push=""
+          if [ "$PUBLISH" = true ]; then
+            auth="$(printf '%s:%s' "$GITHUB_ACTOR" "$REGISTRY_TOKEN" | base64 | tr -d '\n')"
+            printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" > "$DOCKER_CONFIG/config.json"
+            push="--push"
+          fi
+          minor="${VERSION%.*}"
+          for target in api manager reconciler; do
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/gridops-$target"
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --target "$target" \
+              --tag "$image:$VERSION" --tag "$image:$minor" --tag "$image:latest" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --annotation "index:org.opencontainers.image.description=GridOps $target" \
+              $push .
+          done
+          rm -rf "$DOCKER_CONFIG"
+
+  release:
+    name: Publish release
+    needs: [version, agent-linux, agent-macos, agent-windows, images]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: [self-hosted, linux, gridops-ci]
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download binaries
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble
+        run: |
+          sed "s/__GRIDOPS_VERSION__/$VERSION/" scripts/install.sh > dist/install.sh
+          sed "s/__GRIDOPS_VERSION__/$VERSION/" scripts/install.ps1 > dist/install.ps1
+          node scripts/release-compose.mjs "$VERSION" > dist/compose.release.yaml
+          cp .env.example dist/env.example
+          cd dist
+          sha256sum gridops-* install.sh install.ps1 compose.release.yaml env.example > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: GridOps ${{ env.VERSION }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/gridops-*
+            dist/install.sh
+            dist/install.ps1
+            dist/compose.release.yaml
+            dist/env.example
+            dist/SHA256SUMS
