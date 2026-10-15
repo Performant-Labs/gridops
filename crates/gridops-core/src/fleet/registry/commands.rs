@@ -16,7 +16,7 @@ use sqlx::{Row as _, Sqlite, Transaction};
 
 use super::{AuthenticatedHost, RegistryError, RegistryService, audit_and_event};
 use crate::fleet::{
-    ids::{AuthoritySessionId, BootstrapReference},
+    ids::{AuthoritySessionId, BootstrapReference, HostId},
     protocol::{
         agent::AgentCommandEnvelope,
         outcomes::{AgentCommandResult, CommandOutcome, SuccessEvidence},
@@ -195,10 +195,21 @@ impl RegistryService {
             });
         }
         let state: String = row.get("state");
-        let terminal = matches!(
-            state.as_str(),
-            "succeeded" | "failed" | "uncertain" | "cancelled"
-        );
+        // A command that went uncertain because its deadline passed without
+        // a result still waits for one: the agent may have run it and lost
+        // the reply. Its late result settles the command.
+        let late = state == "uncertain"
+            && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM host_command_results WHERE command_id=? AND disposition='applied')",
+            )
+            .bind(result.command_id.to_string())
+            .fetch_one(&mut *tx)
+            .await?;
+        let terminal = !late
+            && matches!(
+                state.as_str(),
+                "succeeded" | "failed" | "uncertain" | "cancelled"
+            );
         let disposition = if terminal {
             ResultDisposition::Stale
         } else {
@@ -243,7 +254,15 @@ impl RegistryService {
                 .await?;
             }
             if let Some(placement_id) = row.get::<Option<String>, _>("placement_id") {
-                apply_to_placement(&mut tx, &placement_id, row.get("kind"), result, now).await?;
+                if !late {
+                    apply_to_placement(&mut tx, &placement_id, row.get("kind"), result, now)
+                        .await?;
+                } else if placement_is_uncertain(&mut tx, &placement_id).await? {
+                    // Only a placement still waiting on this answer moves.
+                    apply_to_placement(&mut tx, &placement_id, row.get("kind"), result, now)
+                        .await?;
+                    keep_uncertain_while_unsettled(&mut tx, &placement_id, now).await?;
+                }
             }
             audit_and_event(
                 &mut tx,
@@ -365,6 +384,118 @@ async fn release(
     .bind(placement_id)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn placement_is_uncertain(
+    tx: &mut Transaction<'_, Sqlite>,
+    placement_id: &str,
+) -> Result<bool, RegistryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM workload_placements WHERE id=? AND state='uncertain')",
+    )
+    .bind(placement_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// A placement stays uncertain while any other command that could have
+/// changed its workload is still unanswered.
+async fn keep_uncertain_while_unsettled(
+    tx: &mut Transaction<'_, Sqlite>,
+    placement_id: &str,
+    now: i64,
+) -> Result<(), RegistryError> {
+    sqlx::query(
+        "UPDATE workload_placements SET state='uncertain',updated_at=?
+          WHERE id=? AND state!='uncertain' AND EXISTS (
+            SELECT 1 FROM host_commands c WHERE c.placement_id=workload_placements.id
+              AND c.state='uncertain' AND c.kind!='inspect')",
+    )
+    .bind(now)
+    .bind(placement_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Settles commands that a reconnecting agent never received.
+///
+/// The agent journals a command before acting on it, and before this
+/// handshake it delivered the result of everything it journaled. A command
+/// delivered to one of its earlier sessions that still has no result was
+/// therefore lost on the way (a poll reply that never arrived), and it never
+/// will run: the agent refuses envelopes bound to another session. Such a
+/// prepare or start created nothing, so its capacity is released and the
+/// placement fails; any other command leaves the workload as it was, so an
+/// uncertain placement goes back to `running` for the reconciler to inspect.
+pub(super) async fn settle_unreceived(
+    tx: &mut Transaction<'_, Sqlite>,
+    host_id: HostId,
+    epoch: i64,
+    session_id: &str,
+    now: i64,
+) -> Result<(), RegistryError> {
+    let rows = sqlx::query(
+        "SELECT c.id,c.kind,c.placement_id FROM host_commands c
+          WHERE c.host_id=? AND c.host_epoch=? AND c.state IN ('delivered','uncertain')
+            AND json_extract(c.payload_json,'$.authority_session_id') IS NOT ?
+            AND NOT EXISTS (SELECT 1 FROM host_command_results r WHERE r.command_id=c.id)",
+    )
+    .bind(host_id.to_string())
+    .bind(epoch)
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut touched = Vec::new();
+    for row in rows {
+        let id: String = row.get("id");
+        let kind: String = row.get("kind");
+        sqlx::query("UPDATE host_commands SET state='cancelled' WHERE id=?")
+            .bind(&id)
+            .execute(&mut **tx)
+            .await?;
+        audit_and_event(
+            tx,
+            None,
+            Some(host_id),
+            "fleet.command.unreceived",
+            "command",
+            &id,
+            json!({"kind": kind}),
+            now,
+        )
+        .await?;
+        let Some(placement_id) = row.get::<Option<String>, _>("placement_id") else {
+            continue;
+        };
+        if kind == "prepare_environment" || kind == "start_runner" {
+            erase_bootstrap(tx, &placement_id, now).await?;
+            release(tx, &placement_id, now).await?;
+            sqlx::query(
+                "UPDATE workload_placements SET state='failed',updated_at=?
+                  WHERE id=? AND state IN ('preparing','registering','starting','uncertain')",
+            )
+            .bind(now)
+            .bind(&placement_id)
+            .execute(&mut **tx)
+            .await?;
+        } else if kind != "inspect" {
+            // An unanswered inspect never made its placement uncertain.
+            touched.push(placement_id);
+        }
+    }
+    for placement_id in touched {
+        sqlx::query(
+            "UPDATE workload_placements SET state='running',updated_at=?
+              WHERE id=? AND state='uncertain'",
+        )
+        .bind(now)
+        .bind(&placement_id)
+        .execute(&mut **tx)
+        .await?;
+        keep_uncertain_while_unsettled(tx, &placement_id, now).await?;
+    }
     Ok(())
 }
 
