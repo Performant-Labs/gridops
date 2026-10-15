@@ -103,6 +103,26 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         Ok(result)
     }
 
+    /// The result of a command this agent received but never finished: it
+    /// stopped part way, so the command's local effect is unknown. Journaled
+    /// like any other result, so it is reported once and stays the answer.
+    pub async fn interrupted(
+        &self,
+        envelope: &AgentCommandEnvelope,
+        now: WireTimestamp,
+    ) -> Result<AgentCommandResult, DispatchError> {
+        let result = result(
+            envelope,
+            CommandOutcome::Uncertain {
+                code: UncertainCode::LocalStateUnknown,
+                diagnostic: None,
+            },
+            now,
+        )?;
+        self.journal.complete(&result).await?;
+        Ok(result)
+    }
+
     async fn execute(
         &self,
         envelope: &AgentCommandEnvelope,

@@ -9,7 +9,9 @@ use std::{path::Path, str::FromStr, time::Duration};
 use anyhow::{Context as _, Result};
 use gridops_core::fleet::{
     domain::{ExecutionOs, RuntimeKind},
-    ids::{Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId},
+    ids::{
+        CommandId, Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId,
+    },
     protocol::{
         agent::{
             AgentCommandEnvelope, LocalResourceIdentity, PrepareEnvironment, PreparedWorkload,
@@ -59,6 +61,9 @@ CREATE TABLE IF NOT EXISTS environments (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS shipped_output (
   environment_id TEXT PRIMARY KEY
+) STRICT;
+CREATE TABLE IF NOT EXISTS delivered_results (
+  command_id TEXT PRIMARY KEY
 ) STRICT;
 ";
 
@@ -263,6 +268,42 @@ impl Journal {
                 .await?
                 .rows_affected();
         anyhow::ensure!(updated == 1, "command result was already recorded");
+        Ok(())
+    }
+
+    /// Commands received since `since` (Unix milliseconds) whose result the
+    /// server hasn't taken yet, oldest first. A command that was interrupted
+    /// before it finished has no result.
+    pub async fn undelivered(
+        &self,
+        since: i64,
+    ) -> Result<Vec<(AgentCommandEnvelope, Option<AgentCommandResult>)>> {
+        sqlx::query(
+            "SELECT envelope,result FROM commands c WHERE received_at>=?
+               AND NOT EXISTS (SELECT 1 FROM delivered_results d WHERE d.command_id=c.command_id)
+             ORDER BY received_at,command_id",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                from_json(&row.get::<String, _>("envelope"))?,
+                row.get::<Option<String>, _>("result")
+                    .map(|result| from_json(&result))
+                    .transpose()?,
+            ))
+        })
+        .collect()
+    }
+
+    /// The server has this command's result.
+    pub async fn delivered(&self, command_id: CommandId) -> Result<()> {
+        sqlx::query("INSERT INTO delivered_results (command_id) VALUES (?) ON CONFLICT DO NOTHING")
+            .bind(command_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
