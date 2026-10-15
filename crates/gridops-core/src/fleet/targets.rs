@@ -748,31 +748,39 @@ pub async fn pool_queue(pool: &SqlitePool, pool_id: &str) -> Result<Vec<QueuedRu
         .collect())
 }
 
+/// Some active, online machine with a matching enabled backend, the right
+/// grants, no pressure and live work authority. Binds the profile, the
+/// heartbeat cutoff and now.
+macro_rules! authorized_machine {
+    () => {
+        "EXISTS (
+          SELECT 1 FROM pool_execution_profiles p
+            JOIN host_backends b ON b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
+                                AND b.architecture=p.architecture AND b.enabled=1 AND b.readiness='ready'
+            JOIN fleet_hosts h ON h.id=b.host_id
+            JOIN profile_ci_targets pt ON pt.profile_id=p.id AND pt.enabled=1 AND pt.revoked_at IS NULL
+            JOIN host_target_grants g ON g.host_id=h.id AND g.target_id=pt.target_id
+                                     AND g.allow_schedule=1 AND g.revoked_at IS NULL
+           WHERE p.id=? AND h.enrollment_state='approved' AND h.lifecycle_state='active'
+             AND h.integrity_state='verified' AND h.pressure_state='normal'
+             AND h.last_heartbeat_at>? AND h.authority_expires_at>?
+             AND (p.runtime_kind!='native_process' OR g.allow_native=1))"
+    };
+}
+
 /// Whether a fleet machine can plausibly take this pool's next runner now:
-/// some active, online machine with a matching enabled backend, the right
-/// grants and no pressure, and none of the pool's runners already waiting
-/// for a machine on this platform (waiting means the machines are full).
+/// an authorized machine for the platform, and none of the pool's runners
+/// already waiting for a machine on it (waiting means the machines are full).
 pub async fn machine_ready(
     pool: &SqlitePool,
     pool_id: &str,
     profile_id: &str,
 ) -> Result<bool, FleetError> {
     let now = crate::now_millis();
-    Ok(sqlx::query_scalar(
-        "SELECT NOT EXISTS (SELECT 1 FROM workload_intents WHERE pool_id=? AND profile_id=? AND status='queued')
-            AND EXISTS (
-              SELECT 1 FROM pool_execution_profiles p
-                JOIN host_backends b ON b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
-                                    AND b.architecture=p.architecture AND b.enabled=1 AND b.readiness='ready'
-                JOIN fleet_hosts h ON h.id=b.host_id
-                JOIN profile_ci_targets pt ON pt.profile_id=p.id AND pt.enabled=1 AND pt.revoked_at IS NULL
-                JOIN host_target_grants g ON g.host_id=h.id AND g.target_id=pt.target_id
-                                         AND g.allow_schedule=1 AND g.revoked_at IS NULL
-               WHERE p.id=? AND h.enrollment_state='approved' AND h.lifecycle_state='active'
-                 AND h.integrity_state='verified' AND h.pressure_state='normal'
-                 AND h.last_heartbeat_at>? AND h.authority_expires_at>?
-                 AND (p.runtime_kind!='native_process' OR g.allow_native=1))",
-    )
+    Ok(sqlx::query_scalar(concat!(
+        "SELECT NOT EXISTS (SELECT 1 FROM workload_intents WHERE pool_id=? AND profile_id=? AND status='queued') AND ",
+        authorized_machine!()
+    ))
     .bind(pool_id)
     .bind(profile_id)
     .bind(profile_id)
@@ -780,4 +788,102 @@ pub async fn machine_ready(
     .bind(now)
     .fetch_one(pool)
     .await?)
+}
+
+/// Whether any machine could run this platform's runners at all: one is
+/// online with work authority, whether or not it has room right now.
+pub async fn machine_available(pool: &SqlitePool, profile_id: &str) -> Result<bool, FleetError> {
+    let now = crate::now_millis();
+    Ok(
+        sqlx::query_scalar(concat!("SELECT ", authorized_machine!()))
+            .bind(profile_id)
+            .bind(now - 45_000)
+            .bind(now)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// The platform a pool's next runner should use: the one furthest behind
+/// the queued jobs it would run, else the first with a machine available,
+/// else the first. The flag says whether that platform is behind.
+///
+/// A queued job counts for the first platform that can run it and has a
+/// machine available; only when none has one does it count for the first
+/// that can run it. Otherwise a job any Linux machine could run would keep
+/// waiting on the first Linux platform while that machine had lost its
+/// authority (an uncertain placement, say) and another sat idle.
+pub async fn choose_platform<'a>(
+    pool: &SqlitePool,
+    pool_id: &str,
+    configured_labels: &[String],
+    queue_scale_factor: i64,
+    profiles: &'a [Profile],
+) -> Result<Option<(&'a Profile, bool)>, FleetError> {
+    let mut available = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        available.push(machine_available(pool, &profile.id).await?);
+    }
+    let mut queued = vec![0_i64; profiles.len()];
+    // Repositories with queued jobs each platform would run.
+    let mut waiting = vec![std::collections::HashSet::<i64>::new(); profiles.len()];
+    for (repository, requested) in crate::queued_job_assignments(pool, pool_id).await? {
+        let runs = |index: &usize| {
+            platform_supports_labels(
+                profiles[*index].input.execution_os,
+                profiles[*index].input.architecture,
+                &requested,
+                configured_labels,
+            )
+        };
+        if let Some(index) = (0..profiles.len())
+            .filter(runs)
+            .find(|index| available[*index])
+            .or_else(|| (0..profiles.len()).find(runs))
+        {
+            queued[index] += 1;
+            waiting[index].insert(repository);
+        }
+    }
+    let rows = sqlx::query(
+        "SELECT i.profile_id,r.target_repository_id,r.busy
+           FROM runners r JOIN workload_intents i ON i.workload_id=r.id
+          WHERE r.pool_id=? AND r.deleted_at IS NULL
+            AND r.status IN ('starting','online','idle','busy','paused','stopped')",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?;
+    // An idle runner registered to a repository with no queued job its
+    // platform can run cannot take another repository's job, so it doesn't
+    // count toward covering the queue.
+    let deficit = |index: usize| {
+        let (mut active, mut busy) = (0_i64, 0_i64);
+        for row in rows
+            .iter()
+            .filter(|row| row.get::<String, _>("profile_id") == profiles[index].id)
+        {
+            let is_busy = row.get::<bool, _>("busy");
+            let useful = is_busy
+                || row
+                    .get::<Option<i64>, _>("target_repository_id")
+                    .is_none_or(|repository| waiting[index].contains(&repository));
+            if useful {
+                active += 1;
+                busy += i64::from(is_busy);
+            }
+        }
+        busy.saturating_add(queued[index].saturating_mul(queue_scale_factor))
+            .saturating_sub(active)
+    };
+    Ok((0..profiles.len())
+        .filter(|index| deficit(*index) > 0)
+        .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
+        .map(|index| (&profiles[index], true))
+        .or_else(|| {
+            (0..profiles.len())
+                .find(|index| available[*index])
+                .or((!profiles.is_empty()).then_some(0))
+                .map(|index| (&profiles[index], false))
+        }))
 }

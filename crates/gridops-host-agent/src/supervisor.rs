@@ -38,6 +38,8 @@ use crate::{
 
 const MAX_HEARTBEAT: Duration = Duration::from_secs(15);
 const INVENTORY_REFRESH: Duration = Duration::from_secs(30);
+/// How far back a reconnecting agent looks for results the server never got.
+const RESULT_REDELIVERY_WINDOW: Duration = Duration::from_hours(24);
 const LOG_UPLOAD_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -58,7 +60,10 @@ pub struct Supervisor<H = NoRuntime> {
     journal: Journal,
     name: String,
     heartbeat: Duration,
-    dispatcher: Dispatcher<Arc<H>>,
+    dispatcher: Arc<Dispatcher<Arc<H>>>,
+    /// Held while a command runs, so a new session waits for it to finish
+    /// before reporting what the journal holds.
+    in_flight: Arc<tokio::sync::Mutex<()>>,
     probe: Arc<H>,
     measure: fn() -> probe::Measurement,
     logs: Option<LogBuffer>,
@@ -76,7 +81,12 @@ impl Supervisor<NoRuntime> {
     pub fn new(client: Client, journal: Journal, name: String) -> Self {
         let runtime = Arc::new(NoRuntime);
         Self {
-            dispatcher: Dispatcher::new(journal.clone(), Arc::clone(&runtime), Trust::default()),
+            dispatcher: Arc::new(Dispatcher::new(
+                journal.clone(),
+                Arc::clone(&runtime),
+                Trust::default(),
+            )),
+            in_flight: Arc::default(),
             client,
             journal,
             name,
@@ -93,7 +103,12 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
     pub fn with_runtime<R: RuntimeHelper>(self, runtime: R, trust: Trust) -> Supervisor<R> {
         let runtime = Arc::new(runtime);
         Supervisor {
-            dispatcher: Dispatcher::new(self.journal.clone(), Arc::clone(&runtime), trust),
+            dispatcher: Arc::new(Dispatcher::new(
+                self.journal.clone(),
+                Arc::clone(&runtime),
+                trust,
+            )),
+            in_flight: self.in_flight,
             client: self.client,
             journal: self.journal,
             name: self.name,
@@ -196,6 +211,7 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
             .map_err(internal)?
             .ok_or_else(|| internal("identity is missing"))?;
         let credential = identity.credential;
+        self.deliver_results(identity.host_id, &credential).await?;
         let session_id = new_id::<AuthoritySessionId>()?;
         let boot_id = text(&probe::boot_id())?;
         let handshake = self
@@ -212,7 +228,8 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
                     // The credential is bound to the host's epoch; the server
                     // reports it, which also covers recovery.
                     None,
-                ),
+                )
+                .with_results_flushed(),
             )
             .await?;
         if handshake.negotiated_protocol == ProtocolNegotiation::Incompatible {
@@ -426,16 +443,30 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
                         .ok(),
                     None => None,
                 };
-                match self
-                    .dispatcher
-                    .dispatch_with(&body, &session, now()?, bootstrap)
-                    .await
-                {
+                // The command runs to the end even if this session drops
+                // meanwhile, so its result reaches the journal and the next
+                // session delivers it.
+                let in_flight = Arc::clone(&self.in_flight).lock_owned().await;
+                let dispatcher = Arc::clone(&self.dispatcher);
+                let (session, now) = (session.clone(), now()?);
+                let dispatched = tokio::spawn(async move {
+                    let _in_flight = in_flight;
+                    dispatcher
+                        .dispatch_with(&body, &session, now, bootstrap)
+                        .await
+                })
+                .await
+                .map_err(internal)?;
+                match dispatched {
                     Ok(result) => {
                         let latest = authority.borrow().credential.clone();
                         self.client
                             .post_result(context.host_id, &latest, &result)
                             .await?;
+                        self.journal
+                            .delivered(result.command_id)
+                            .await
+                            .map_err(internal)?;
                     }
                     Err(error) => tracing::warn!(%error, "refused a fleet command"),
                 }
@@ -452,6 +483,46 @@ struct SessionContext {
 }
 
 impl<H: RuntimeHelper> Supervisor<H> {
+    /// Delivers every journaled result the server hasn't taken: a reply lost
+    /// with the last session would otherwise leave its command uncertain and
+    /// the host without work. Afterwards the handshake can tell the server
+    /// that commands with no result never arrived here. A command that was
+    /// interrupted part way is reported as uncertain.
+    async fn deliver_results(
+        &self,
+        host_id: HostId,
+        credential: &SecretString,
+    ) -> Result<(), ClientError> {
+        let _in_flight = self.in_flight.lock().await;
+        let since = gridops_core::now_millis() - RESULT_REDELIVERY_WINDOW.as_millis() as i64;
+        for (envelope, result) in self.journal.undelivered(since).await.map_err(internal)? {
+            let result = match result {
+                Some(result) => result,
+                None => self
+                    .dispatcher
+                    .interrupted(&envelope, now()?)
+                    .await
+                    .map_err(internal)?,
+            };
+            match self.client.post_result(host_id, credential, &result).await {
+                // A refusal is final: the command belongs to an earlier
+                // epoch or no longer exists, and retrying changes nothing.
+                Ok(()) => {}
+                Err(ClientError::Refused(code))
+                    if !matches!(
+                        code,
+                        gridops_core::fleet::protocol::browser::ErrorCode::RateLimited
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+            self.journal
+                .delivered(envelope.command_id)
+                .await
+                .map_err(internal)?;
+        }
+        Ok(())
+    }
+
     async fn rotate(
         &self,
         host_id: HostId,

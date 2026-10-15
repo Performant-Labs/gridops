@@ -85,6 +85,12 @@ pub struct HandshakeRequest {
     pub(crate) supported_protocol: ProtocolRange,
     pub(crate) agent_version: UpstreamText,
     pub(crate) expected_host_epoch: Option<HostEpoch>,
+    /// The agent has delivered the result of every command it journaled
+    /// before this session. Commands delivered to its earlier sessions that
+    /// still have no result never reached it, and the server can settle
+    /// them. Older agents leave it out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) results_flushed: bool,
 }
 
 impl HandshakeRequest {
@@ -103,7 +109,16 @@ impl HandshakeRequest {
             supported_protocol,
             agent_version,
             expected_host_epoch,
+            results_flushed: false,
         }
+    }
+
+    /// Declares that every journaled result was delivered before this
+    /// handshake.
+    #[must_use]
+    pub const fn with_results_flushed(mut self) -> Self {
+        self.results_flushed = true;
+        self
     }
 }
 

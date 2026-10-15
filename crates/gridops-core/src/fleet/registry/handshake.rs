@@ -255,6 +255,10 @@ impl RegistryService {
         .bind(host_id.to_string())
         .execute(&mut *tx)
         .await?;
+        if request.results_flushed {
+            super::commands::settle_unreceived(&mut tx, host_id, epoch_i64, &session_id, now)
+                .await?;
+        }
         audit_and_event(
             &mut tx,
             None,

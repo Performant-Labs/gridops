@@ -32,6 +32,8 @@ mod inventory;
 mod placement;
 #[path = "fleet_http/query.rs"]
 mod query;
+#[path = "fleet_http/recovery.rs"]
+mod recovery;
 
 struct Fixture {
     _process: ApiProcess,
