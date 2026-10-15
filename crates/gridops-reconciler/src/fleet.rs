@@ -54,69 +54,23 @@ pub(super) async fn profiles(app: &Reconciler, pool_id: &str) -> Result<Vec<Prof
         .collect())
 }
 
-/// The platform the pool's next runner should use: the one furthest behind
-/// the queued jobs that only it (or it first) can run, else the first. The
-/// flag says whether that platform is actually behind queued work.
+/// The platform the pool's next runner should use; see
+/// [`targets::choose_platform`]. The flag says whether that platform is
+/// actually behind queued work.
 pub(super) async fn choose_profile<'a>(
     app: &Reconciler,
     pool: &Pool,
     profiles: &'a [Profile],
 ) -> Result<Option<(&'a Profile, bool)>> {
     let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
-    let mut queued = vec![0_i64; profiles.len()];
-    // Repositories with queued jobs each platform can run.
-    let mut waiting = vec![std::collections::HashSet::<i64>::new(); profiles.len()];
-    for (repository, requested) in
-        gridops_core::queued_job_assignments(&app.database, &pool.id).await?
-    {
-        if let Some(index) = profiles.iter().position(|profile| {
-            targets::platform_supports_labels(
-                profile.input.execution_os,
-                profile.input.architecture,
-                &requested,
-                &configured,
-            )
-        }) {
-            queued[index] += 1;
-            waiting[index].insert(repository);
-        }
-    }
-    let rows = sqlx::query(
-        "SELECT i.profile_id,r.target_repository_id,r.busy
-           FROM runners r JOIN workload_intents i ON i.workload_id=r.id
-          WHERE r.pool_id=? AND r.deleted_at IS NULL
-            AND r.status IN ('starting','online','idle','busy','paused','stopped')",
+    Ok(targets::choose_platform(
+        &app.database,
+        &pool.id,
+        &configured,
+        pool.queue_scale_factor,
+        profiles,
     )
-    .bind(&pool.id)
-    .fetch_all(&app.database)
-    .await?;
-    // An idle runner registered to a repository with no queued job its
-    // platform can run cannot take another repository's job, so it doesn't
-    // count toward covering the queue.
-    let deficit = |index: usize| {
-        let (mut active, mut busy) = (0_i64, 0_i64);
-        for row in rows
-            .iter()
-            .filter(|row| row.get::<String, _>("profile_id") == profiles[index].id)
-        {
-            let is_busy = row.get::<bool, _>("busy");
-            let useful = is_busy
-                || row
-                    .get::<Option<i64>, _>("target_repository_id")
-                    .is_none_or(|repository| waiting[index].contains(&repository));
-            if useful {
-                active += 1;
-                busy += i64::from(is_busy);
-            }
-        }
-        busy.saturating_add(queued[index].saturating_mul(pool.queue_scale_factor))
-            .saturating_sub(active)
-    };
-    Ok((0..profiles.len())
-        .filter(|index| deficit(*index) > 0)
-        .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
-        .map(|index| (&profiles[index], true))
-        .or_else(|| profiles.first().map(|profile| (profile, false))))
+    .await?)
 }
 
 /// The repository whose queued jobs this platform can run, furthest behind,
