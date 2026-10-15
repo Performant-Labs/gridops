@@ -494,8 +494,8 @@ impl ManagerLimits {
             (1..=1_000).contains(&max_runners),
             "GRIDOPS_MAX_MANAGED_RUNNERS must be between 1 and 1000"
         );
-        let min_free_disk_mb = optional_env("GRIDOPS_MIN_FREE_DISK_MB")?.unwrap_or(25_600);
-        let min_free_disk_percent = optional_env("GRIDOPS_MIN_FREE_DISK_PERCENT")?.unwrap_or(15);
+        let min_free_disk_mb = optional_env("GRIDOPS_MIN_FREE_DISK_MB")?.unwrap_or(10_240);
+        let min_free_disk_percent = optional_env("GRIDOPS_MIN_FREE_DISK_PERCENT")?.unwrap_or(10);
         anyhow::ensure!(
             min_free_disk_percent <= 95,
             "GRIDOPS_MIN_FREE_DISK_PERCENT must be between 0 and 95"
@@ -1660,12 +1660,25 @@ fn disk_capacity(limits: &ManagerLimits) -> Result<DiskCapacity, ManagerError> {
     let (total_mb, available_mb) = parse_df_capacity(&stdout).ok_or_else(|| {
         ManagerError::Internal(anyhow::anyhow!("runner-host disk capacity was invalid"))
     })?;
-    let percent_floor = total_mb.saturating_mul(limits.min_free_disk_percent) / 100;
     Ok(DiskCapacity {
         total_mb,
         available_mb,
-        minimum_free_mb: limits.min_free_disk_mb.max(percent_floor),
+        minimum_free_mb: free_disk_floor_mb(
+            limits.min_free_disk_mb,
+            limits.min_free_disk_percent,
+            total_mb,
+        ),
     })
+}
+
+/// The absolute floor, lowered to `percent` of the disk on disks too small for
+/// it so small hosts still admit runners. A `percent` of 0 keeps the absolute
+/// floor everywhere.
+fn free_disk_floor_mb(minimum_mb: u64, percent: u64, total_mb: u64) -> u64 {
+    if percent == 0 {
+        return minimum_mb;
+    }
+    minimum_mb.min(total_mb.saturating_mul(percent) / 100)
 }
 
 fn parse_df_capacity(output: &str) -> Option<(u64, u64)> {
@@ -1892,6 +1905,13 @@ fn valid_log_tail(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_disk_floor_scales_down_on_small_disks() {
+        assert_eq!(free_disk_floor_mb(10_240, 10, 500_000), 10_240);
+        assert_eq!(free_disk_floor_mb(10_240, 10, 40_000), 4_000);
+        assert_eq!(free_disk_floor_mb(10_240, 0, 40_000), 10_240);
+    }
 
     fn provision_request(mode: &str) -> ProvisionRunner {
         ProvisionRunner {
