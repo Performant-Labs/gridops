@@ -18,9 +18,10 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
+COPY scripts/install.sh scripts/install.ps1 ./scripts/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    find crates migrations -type f -exec touch {} + \
+    find crates migrations scripts -type f -exec touch {} + \
     && cargo build --workspace --release --locked \
     && mkdir -p /app/bin \
     && cp /app/target/release/gridops-api /app/bin/gridops-api \

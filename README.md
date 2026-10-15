@@ -60,7 +60,25 @@ After signing in, Settings can launch GitHub's App-manifest flow with the exact 
 
 For localhost development the generated manifest leaves webhook delivery disabled because GitHub cannot reach a loopback URL. Set `GRIDOPS_BASE_URL` to a public HTTPS origin before enabling deliveries. For a private HTTPS origin reachable only through Tailscale or another VPN, set `GRIDOPS_GITHUB_WEBHOOK_ACTIVE=false`; installation-token polling continues to synchronize workflow runs and jobs without inbound GitHub delivery. OAuth, App credentials, and runner control continue to work in both modes.
 
-## Run with Docker
+## Install
+
+Run the control plane from the published images. Download the release's
+compose file and settings template:
+
+```sh
+curl -fsSLO https://github.com/iamngoni/gridops/releases/latest/download/compose.release.yaml
+curl -fsSL -o .env https://github.com/iamngoni/gridops/releases/latest/download/env.example
+# Fill the required values in .env, then:
+docker compose -f compose.release.yaml up -d
+```
+
+To add a machine, open **Machines → Add machine** and run the one-line
+installer it shows. The installer fetches the host agent built for the
+machine's OS and architecture, and it matches your GridOps version. See
+[docs/fleet-agent.md](docs/fleet-agent.md), and
+[docs/releasing.md](docs/releasing.md) for how releases are made.
+
+## Run from source
 
 ```sh
 cp .env.example .env

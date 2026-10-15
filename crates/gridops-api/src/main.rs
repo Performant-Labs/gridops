@@ -3,6 +3,7 @@ mod auth;
 mod error;
 mod fleet;
 mod github_app;
+mod install;
 mod oauth;
 mod resources;
 mod state;
@@ -79,6 +80,8 @@ async fn main() -> Result<()> {
         .merge(fleet::router())
         .merge(fleet::operation_router())
         .route("/api/health", get(resources::health))
+        .route("/install.sh", get(install::shell))
+        .route("/install.ps1", get(install::powershell))
         .route("/api/v1/auth/session", get(auth::session))
         .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/auth/github", get(oauth::begin))

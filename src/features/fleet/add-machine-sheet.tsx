@@ -113,13 +113,15 @@ function EnrollmentInstructions({ issued, onDone }: { issued: Issued; onDone: ()
       </Callout>
       <div className="space-y-1.5">
         <div className="text-sm font-medium text-foreground">On the machine, run</div>
-        <CopyField label="Command" value="gridops-host-agent" />
-        <p className="text-xs leading-5 text-muted-foreground">It asks for these two values, enrolls the machine, and starts it. On Windows the program is <code className="font-mono">gridops-host-agent.exe</code>.</p>
+        <CopyField label="Linux or macOS" value={`curl -fsSL ${address}/install.sh | sh`} />
+        <CopyField label="Windows (PowerShell)" value={`irm ${address}/install.ps1 | iex`} />
+        <p className="text-xs leading-5 text-muted-foreground">
+          It installs the agent that matches this GridOps, asks for the code below, and keeps the agent running as a user service.
+        </p>
       </div>
-      <CopyField label="GridOps address" value={address} />
       <CopyField label="Enrollment code" value={issued.code} />
       <p className="text-xs leading-5 text-muted-foreground">
-        To run Docker jobs, list the images the machine may pull in <code className="font-mono">GRIDOPS_AGENT_IMAGES</code> (comma-separated). The default is <code className="font-mono">ghcr.io/actions/actions-runner:latest</code>.
+        To run Docker jobs, list the images the machine may pull in <code className="font-mono">GRIDOPS_AGENT_IMAGES</code> (comma-separated) before running the installer. The default is <code className="font-mono">ghcr.io/actions/actions-runner:latest</code>.
       </p>
       <p className="text-sm text-muted-foreground">Once the agent enrolls, the machine appears in the list as pending. Open it to approve it.</p>
       <div className="flex justify-end">
