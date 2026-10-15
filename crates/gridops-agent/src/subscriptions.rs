@@ -68,9 +68,9 @@ const CLAUDE_SESSION_SCOPE: &str = "user:sessions:claude_code";
 const CLAUDE_API_BASE: &str = "https://api.anthropic.com";
 const CLAUDE_ANTHROPIC_VERSION: &str = "2023-06-01";
 const CLAUDE_BETAS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.299 (external, sdk-cli)";
+const CLAUDE_USER_AGENT: &str = "claude-cli/2.1.300 (external, sdk-cli)";
 const CLAUDE_BILLING_HEADER: &str =
-    "x-anthropic-billing-header: cc_version=2.1.299.cfa; cc_entrypoint=sdk-cli;";
+    "x-anthropic-billing-header: cc_version=2.1.300.cfa; cc_entrypoint=sdk-cli;";
 const CLAUDE_SYSTEM_PREFIX: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
