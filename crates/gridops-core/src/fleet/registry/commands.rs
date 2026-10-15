@@ -42,10 +42,25 @@ impl RegistryService {
         session_id: AuthoritySessionId,
         limit: u32,
     ) -> Result<Vec<AgentCommandEnvelope>, RegistryError> {
-        let mut tx = self.begin().await?;
         let now = self.clock.now_millis();
-        super::ensure_authenticated_generation(&mut tx, authenticated, now).await?;
         let host_id = authenticated.host_id.to_string();
+        // Agents poll every half second. A host with no open commands has
+        // nothing to cancel or deliver, so that poll only reads and never
+        // queues behind SQLite's write lock.
+        let mut read = self.pool.begin().await?;
+        super::ensure_authenticated_generation(&mut read, authenticated, now).await?;
+        let open: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM host_commands WHERE host_id=? AND state IN ('pending','delivered'))",
+        )
+        .bind(&host_id)
+        .fetch_one(&mut *read)
+        .await?;
+        read.commit().await?;
+        if !open {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.begin().await?;
+        super::ensure_authenticated_generation(&mut tx, authenticated, now).await?;
         cancel_undeliverable(&mut tx, &host_id, now).await?;
         let authorized: bool = sqlx::query_scalar(
             "SELECT agent_session_id=? AND authority_expires_at>? FROM fleet_hosts WHERE id=?",

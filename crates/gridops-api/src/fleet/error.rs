@@ -36,7 +36,11 @@ impl RequestContext {
     pub(super) fn registry_error(self, error: &RegistryError) -> FleetApiError {
         self.error(match error {
             RegistryError::Database(_) | RegistryError::Json(_) | RegistryError::Storage(_) => {
-                tracing::error!(request_id = %self.id, "fleet registry dependency failed");
+                // Messages can carry stored values, so only the class and the
+                // SQLite code are logged: enough to tell a busy database from
+                // a constraint or a decoding fault.
+                let (kind, code) = dependency_class(error);
+                tracing::error!(request_id = %self.id, kind, code = %code, "fleet registry dependency failed");
                 ErrorCode::DependencyUnavailable
             }
             RegistryError::Forbidden | RegistryError::TargetScopeForbidden => ErrorCode::Forbidden,
@@ -56,6 +60,26 @@ impl RequestContext {
             | RegistryError::Credential(_)
             | RegistryError::Input(_) => ErrorCode::InvalidRequest,
         })
+    }
+}
+
+fn dependency_class(error: &RegistryError) -> (&'static str, String) {
+    match error {
+        RegistryError::Database(sqlx::Error::Database(database)) => (
+            "database",
+            database
+                .code()
+                .map(|code| code.into_owned())
+                .unwrap_or_default(),
+        ),
+        RegistryError::Database(sqlx::Error::PoolTimedOut) => ("pool_timed_out", String::new()),
+        RegistryError::Database(sqlx::Error::Io(error)) => {
+            ("database_io", format!("{:?}", error.kind()))
+        }
+        RegistryError::Database(_) => ("database_other", String::new()),
+        RegistryError::Json(_) => ("json", String::new()),
+        RegistryError::Storage(error) => ("storage", format!("{:?}", error.kind())),
+        _ => ("other", String::new()),
     }
 }
 

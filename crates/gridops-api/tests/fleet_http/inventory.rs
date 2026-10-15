@@ -789,3 +789,24 @@ async fn observation_failure_rolls_back_children_and_returns_redacted_retryable_
     assert!(!logs.contains("inventory-private-database-sentinel"));
     Ok(())
 }
+
+/// Agents poll every half second. With nothing queued for the host the poll
+/// only reads, so a writer that holds `SQLite`'s write lock past the busy
+/// timeout (a slow retention pass, say) no longer fails it, and the agent
+/// keeps its session.
+#[tokio::test]
+async fn idle_command_poll_answers_while_another_writer_holds_the_database() -> Result<()> {
+    let f = Fixture::new().await?;
+    let (host, secret) = enrolled(&f).await?;
+    let writer = f.database.begin_with("BEGIN IMMEDIATE").await?;
+    let started = std::time::Instant::now();
+    let response = agent_post(&f, &host, &secret, "commands/poll")
+        .json(&json!({"authority_session_id":Uuid::new_v4(),"wait_ms":0,"limit":1}))
+        .send()
+        .await?;
+    let body = receipt(response).await?;
+    assert_eq!(body["commands"], json!([]));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    writer.rollback().await?;
+    Ok(())
+}
