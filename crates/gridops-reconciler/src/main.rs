@@ -346,8 +346,9 @@ async fn reconcile_pool(
             runner.ci_platform != "bitbucket" && !runner.busy && runner_needs_update(pool, runner)
         })
     {
-        delete_runner(app, pool, stale).await?;
-        rotated = 1;
+        if delete_runner(app, pool, stale).await? {
+            rotated = 1;
+        }
     }
 
     let current = runners(app, &pool.id).await?;
@@ -413,8 +414,9 @@ async fn reconcile_pool(
             .filter(|runner| runner.ci_platform != "bitbucket" && !runner.busy)
             .take(excess)
         {
-            delete_runner(app, pool, runner).await?;
-            removed += 1;
+            if delete_runner(app, pool, runner).await? {
+                removed += 1;
+            }
         }
     }
     if !provisioning_blocked && evict_idle_fleet_runner(app, pool).await? {
@@ -600,8 +602,7 @@ async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> 
         return Ok(false);
     };
     tracing::info!(pool = %pool.id, runner = %runner.name, "evicting an idle fleet runner for queued work");
-    delete_runner(app, pool, runner).await?;
-    Ok(true)
+    delete_runner(app, pool, runner).await
 }
 
 /// Deletes one idle runner that has no work, when a repository or provider is
@@ -639,8 +640,7 @@ async fn evict_surplus_runner(
     ) else {
         return Ok(0);
     };
-    delete_runner(app, pool, runner).await?;
-    Ok(1)
+    Ok(i64::from(delete_runner(app, pool, runner).await?))
 }
 
 fn surplus_runner<'a>(
@@ -1560,7 +1560,12 @@ async fn provision_on_host(app: &Reconciler, pool: &Pool) -> Result<ProvisionAtt
     Ok(ProvisionAttempt::Provisioned)
 }
 
-async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result<()> {
+/// Deregisters and retires a runner. Returns `false`, leaving it in place
+/// marked busy, when GitHub says it is running a job and its runtime isn't
+/// known to be gone: its busy flag was missed, as happens when the
+/// `in_progress` webhook arrives while the API is restarting, and removing it
+/// would kill the job.
+async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result<bool> {
     if runner.container_id.is_some()
         && let Err(error) = archive_runner_logs(app, pool, runner).await
     {
@@ -1591,23 +1596,38 @@ async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result
                             .await?
                             .map(|runner| runner.id),
                     };
-                    if let Some(github_runner_id) = github_runner_id {
-                        let path = match (&runner.repository_owner, &runner.repository_name) {
-                            (Some(owner), Some(repository)) => format!(
-                                "/repos/{owner}/{repository}/actions/runners/{github_runner_id}"
-                            ),
-                            _ => format!(
-                                "/orgs/{}/actions/runners/{github_runner_id}",
-                                pool.account_login
-                            ),
-                        };
-                        app.github.delete(&path, &token).await?;
-                    }
-                    Result::<()>::Ok(())
+                    let Some(github_runner_id) = github_runner_id else {
+                        return Result::<bool>::Ok(true);
+                    };
+                    let path = match (&runner.repository_owner, &runner.repository_name) {
+                        (Some(owner), Some(repository)) => format!(
+                            "/repos/{owner}/{repository}/actions/runners/{github_runner_id}"
+                        ),
+                        _ => format!(
+                            "/orgs/{}/actions/runners/{github_runner_id}",
+                            pool.account_login
+                        ),
+                    };
+                    app.github.remove_runner(&path, &token).await
                 }
                 .await;
-                if let Err(error) = github_cleanup {
-                    tracing::warn!(runner_id = %runner.id, error = ?error, "could not remove GitHub runner registration");
+                match github_cleanup {
+                    Ok(false) if runner.status != "failed" => {
+                        tracing::info!(runner_id = %runner.id, "GitHub says the runner is running a job; keeping it");
+                        let now = now_millis();
+                        sqlx::query(
+                            "UPDATE runners SET busy=1,status='busy',updated_at=? WHERE id=? AND deleted_at IS NULL",
+                        )
+                        .bind(now)
+                        .bind(&runner.id)
+                        .execute(&app.database)
+                        .await?;
+                        return Ok(false);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(runner_id = %runner.id, error = ?error, "could not remove GitHub runner registration");
+                    }
                 }
             }
             Ok(None) => {
@@ -1636,7 +1656,7 @@ async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result
         json!({ "poolId": pool.id }),
     )
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 /// The Bitbucket registration to remove when deleting `runner`, if it ever
