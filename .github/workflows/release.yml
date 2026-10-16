@@ -81,7 +81,9 @@ jobs:
         run: |
           bin="target/${{ matrix.target }}/release/gridops-host-agent"
           "$bin" --version
-          if ldd "$bin" >/dev/null 2>&1; then echo "$bin is dynamically linked"; exit 1; fi
+          # A dynamically linked binary names its loader. (ldd can't tell: on
+          # x86_64 it exits 0 for a static-pie binary.)
+          if readelf -l "$bin" | grep -q 'program interpreter'; then echo "$bin is dynamically linked"; exit 1; fi
           mkdir -p dist
           cp "$bin" "dist/gridops-host-agent-linux-${{ matrix.arch }}"
 
