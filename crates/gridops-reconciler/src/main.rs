@@ -1847,6 +1847,11 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
         .bind(capacity_cutoff)
         .execute(&app.database)
         .await?;
+    // Machine samples back the overview's workload chart, which shows up to 30 days.
+    sqlx::query("DELETE FROM host_samples WHERE received_at < ?")
+        .bind(capacity_cutoff)
+        .execute(&app.database)
+        .await?;
     Ok(())
 }
 

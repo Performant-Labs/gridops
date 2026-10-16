@@ -89,6 +89,27 @@ export const poolQueueSchema = z.strictObject({
 export type QueuedRunner = z.infer<typeof queuedRunnerSchema>;
 export type BlockedHost = z.infer<typeof blockedHostSchema>;
 
+/** Each machine's runners, CPU load and memory over time, for the overview chart. */
+const machineLoadSchema = z.strictObject({
+  runners: z.number().nonnegative(),
+  cpuPercent: z.number().nonnegative().nullable(),
+  memoryPercent: z.number().nonnegative().nullable(),
+});
+export const fleetWorkloadSchema = z.strictObject({
+  machines: z.array(z.strictObject({
+    id: z.string().min(1).max(128),
+    name: z.string().max(256),
+    cpuMillis: z.number().int().nullable(),
+    memoryMib: z.number().int().nullable(),
+  })).max(1_000),
+  points: z.array(z.strictObject({
+    recordedAt: z.number().int(),
+    machines: z.array(machineLoadSchema).max(1_000),
+  })).max(1_000),
+});
+export type FleetWorkload = z.infer<typeof fleetWorkloadSchema>;
+export type WorkloadWindow = "24h" | "7d" | "30d";
+
 /** A placement whose last command nobody answered, which keeps its machine from taking work. */
 export const unconfirmedPlacementSchema = z.strictObject({
   placementId: fleetIdSchema,
