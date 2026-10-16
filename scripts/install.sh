@@ -93,7 +93,9 @@ esac
 
 enrolled() { [ -s "$STATE_DIR/agent.json" ] && grep -q fleet_url "$STATE_DIR/agent.json"; }
 
+enrolled_now=""
 if [ "${GRIDOPS_NO_ENROLL:-}" != 1 ] && ! enrolled; then
+  enrolled_now=1
   [ -n "$URL" ] && export GRIDOPS_FLEET_URL="$URL"
   if [ -n "${GRIDOPS_ENROLLMENT_CODE:-}" ]; then
     "$bin" enroll --no-start
@@ -115,6 +117,10 @@ if ! enrolled; then
 fi
 
 mkdir -p "$STATE_DIR"
+# Native jobs inherit the agent's environment, so the service keeps the PATH
+# of the shell running this installer, plus where Docker Desktop and OrbStack
+# put the docker CLI. It runs unthrottled, like an agent started by hand.
+service_path="$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.orbstack/bin"
 if [ "$os" = macos ]; then
   plist="$HOME/Library/LaunchAgents/$LABEL.plist"
   if [ ! -f "$plist" ] && pgrep -f "gridops-host-agent run" >/dev/null 2>&1; then
@@ -124,8 +130,7 @@ if [ "$os" = macos ]; then
   [ -n "$IMAGES" ] || IMAGES="$(plutil -extract EnvironmentVariables.GRIDOPS_AGENT_IMAGES raw "$plist" 2>/dev/null || true)"
   IMAGES="${IMAGES:-$DEFAULT_IMAGES}"
   mkdir -p "$(dirname "$plist")"
-  # launchd starts with a minimal PATH; Docker Desktop and OrbStack put the CLI here.
-  path="/usr/local/bin:/opt/homebrew/bin:$HOME/.orbstack/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  path="$(printf '%s' "$service_path" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
   cat >"$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -142,7 +147,7 @@ if [ "$os" = macos ]; then
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$STATE_DIR/agent.log</string>
   <key>StandardErrorPath</key><string>$STATE_DIR/agent.log</string>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -172,6 +177,7 @@ Wants=network-online.target
 ExecStart=$bin run
 Environment=GRIDOPS_AGENT_STATE_DIR=$STATE_DIR
 Environment=GRIDOPS_AGENT_IMAGES=$IMAGES
+Environment="PATH=$(printf '%s' "$service_path" | sed 's/%/%%/g')"
 Environment=RUST_LOG=gridops_host_agent=info
 Restart=always
 RestartSec=10
@@ -189,4 +195,4 @@ EOF
 else
   say "No user service manager found. Start the agent with: $bin run"
 fi
-say "Approve the machine in GridOps under Machines."
+[ -z "$enrolled_now" ] || say "Approve the machine in GridOps under Machines."

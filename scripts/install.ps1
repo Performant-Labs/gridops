@@ -72,7 +72,9 @@ $ProgressPreference = 'SilentlyContinue'
 
     $savedConfig = Join-Path $stateDir 'agent.json'
     $enrolled = { (Test-Path $savedConfig) -and ((Get-Content -Raw $savedConfig) -match 'fleet_url') }
+    $enrolledNow = $false
     if ($env:GRIDOPS_NO_ENROLL -ne '1' -and -not (& $enrolled)) {
+        $enrolledNow = $true
         if ($url) { $env:GRIDOPS_FLEET_URL = $url }
         & $exe enroll --no-start
         if ($LASTEXITCODE -ne 0) { throw 'gridops: enrollment failed' }
@@ -89,8 +91,11 @@ $ProgressPreference = 'SilentlyContinue'
     }
     $action = New-ScheduledTaskAction -Execute $exe -Argument 'run'
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+    # Tasks default to below-normal priority; native jobs build under the
+    # agent, so it runs at normal priority like an agent started by hand.
+    $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 4
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskName $taskName
-    Write-Host "The agent runs as the scheduled task '$taskName'. Approve the machine in GridOps under Machines."
+    Write-Host "The agent runs as the scheduled task '$taskName'."
+    if ($enrolledNow) { Write-Host 'Approve the machine in GridOps under Machines.' }
 }
