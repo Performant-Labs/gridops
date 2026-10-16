@@ -875,9 +875,10 @@ pub async fn machine_available(pool: &SqlitePool, profile_id: &str) -> Result<bo
     )
 }
 
-/// The platform a pool's next runner should use: the one furthest behind
-/// the queued jobs it would run, else the first with a machine available,
-/// else the first. The flag says whether that platform is behind.
+/// The platform a pool's next runner should use: the one with the
+/// longest-waiting prioritised job still short of a runner, else the one
+/// furthest behind the queued jobs it would run, else the first with a machine
+/// available, else the first. The flag says whether that platform is behind.
 ///
 /// A queued job counts for the first platform that can run it and has a
 /// machine available; only when none has one does it count for the first
@@ -898,12 +899,15 @@ pub async fn choose_platform<'a>(
     let mut queued = vec![0_i64; profiles.len()];
     // Repositories with queued jobs each platform would run.
     let mut waiting = vec![std::collections::HashSet::<i64>::new(); profiles.len()];
-    for (repository, requested) in crate::queued_job_assignments(pool, pool_id).await? {
+    // Per platform and repository: prioritised jobs, and when the oldest was
+    // queued.
+    let mut prioritised = vec![std::collections::HashMap::<i64, (i64, i64)>::new(); profiles.len()];
+    for job in crate::queued_job_assignments(pool, pool_id).await? {
         let runs = |index: &usize| {
             platform_supports_labels(
                 profiles[*index].input.execution_os,
                 profiles[*index].input.architecture,
-                &requested,
+                &job.labels,
                 configured_labels,
             )
         };
@@ -913,7 +917,14 @@ pub async fn choose_platform<'a>(
             .or_else(|| (0..profiles.len()).find(runs))
         {
             queued[index] += 1;
-            waiting[index].insert(repository);
+            waiting[index].insert(job.repository_id);
+            if job.prioritised {
+                let (count, since) = prioritised[index]
+                    .entry(job.repository_id)
+                    .or_insert((0, job.queued_at));
+                *count += 1;
+                *since = (*since).min(job.queued_at);
+            }
         }
     }
     let rows = sqlx::query(
@@ -947,9 +958,35 @@ pub async fn choose_platform<'a>(
         busy.saturating_add(queued[index].saturating_mul(queue_scale_factor))
             .saturating_sub(active)
     };
+    // When the oldest prioritised job this platform would run was queued,
+    // among repositories with more of them than idle runners to take them.
+    let unmet_priority = |index: usize| {
+        prioritised[index]
+            .iter()
+            .filter(|(repository, (count, _))| {
+                let idle = rows
+                    .iter()
+                    .filter(|row| {
+                        row.get::<String, _>("profile_id") == profiles[index].id
+                            && !row.get::<bool, _>("busy")
+                            && row.get::<Option<i64>, _>("target_repository_id")
+                                == Some(**repository)
+                    })
+                    .count();
+                count.saturating_mul(queue_scale_factor) > i64::try_from(idle).unwrap_or(i64::MAX)
+            })
+            .map(|(_, (_, since))| *since)
+            .min()
+    };
     Ok((0..profiles.len())
-        .filter(|index| deficit(*index) > 0)
-        .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
+        .filter_map(|index| unmet_priority(index).map(|since| (since, index)))
+        .min()
+        .map(|(_, index)| index)
+        .or_else(|| {
+            (0..profiles.len())
+                .filter(|index| deficit(*index) > 0)
+                .max_by_key(|index| (deficit(*index), std::cmp::Reverse(*index)))
+        })
         .map(|index| (&profiles[index], true))
         .or_else(|| {
             (0..profiles.len())

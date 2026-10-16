@@ -215,6 +215,13 @@ pub struct UpdateRunnerPool {
     pub cpu_limit: f64,
     pub memory_limit_mb: i64,
     pub runner_group_id: i64,
+    /// Pool repositories whose queued jobs get the next runner first. Left
+    /// out, the pool keeps the ones it has.
+    #[serde(default)]
+    pub priority_repository_ids: Option<Vec<i64>>,
+    /// How long any job may wait before it counts as prioritised too.
+    #[serde(default)]
+    pub priority_wait_minutes: Option<i64>,
 }
 
 impl UpdateRunnerPool {
@@ -247,6 +254,12 @@ impl UpdateRunnerPool {
                 }
         }) {
             return Err("Choose between 1 and 1,000 unique repositories for the pool.".into());
+        }
+        if self
+            .priority_wait_minutes
+            .is_some_and(|minutes| !(1..=1440).contains(&minutes))
+        {
+            return Err("The priority wait must be between 1 and 1,440 minutes.".into());
         }
         if let Some(bitbucket_connection_ids) = &self.bitbucket_connection_ids {
             validate_bitbucket_connections(
@@ -537,6 +550,8 @@ mod tests {
             cpu_limit: original.cpu_limit,
             memory_limit_mb: original.memory_limit_mb,
             runner_group_id: original.runner_group_id,
+            priority_repository_ids: None,
+            priority_wait_minutes: None,
         };
         assert!(update.validate().is_ok());
 

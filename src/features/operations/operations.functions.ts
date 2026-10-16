@@ -54,6 +54,8 @@ export type WorkflowRun = {
   actorLogin: string | null; htmlUrl: string; startedAt: string | null; completedAt: string | null;
   createdAt: string; repository: string; jobCount: number; activeJobs: number; failedJobs: number; canManage: boolean;
   runsOn?: RunPlatform[];
+  /** Its repository is prioritised in a runner pool. */
+  prioritised?: boolean;
 };
 
 export type WorkflowRunDetail = Omit<WorkflowRun, "jobCount" | "activeJobs" | "failedJobs" | "runsOn"> & {

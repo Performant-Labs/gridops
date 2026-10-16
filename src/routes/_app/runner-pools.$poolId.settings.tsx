@@ -48,6 +48,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   const [tartImage, setTartImage] = useState(pool.tartImage);
   const [macosRuntime, setMacosRuntime] = useState<"vm" | "native">(pool.macosRuntime ?? "vm");
   const [repositoryIds, setRepositoryIds] = useState(pool.repositoryIds);
+  const [priorityRepositoryIds, setPriorityRepositoryIds] = useState(pool.priorityRepositoryIds);
   const [maxCount, setMaxCount] = useState(pool.maxCount);
   const [desiredCount, setDesiredCount] = useState(pool.desiredCount);
   const [cpuLimit, setCpuLimit] = useState(pool.cpuLimit);
@@ -115,6 +116,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
         data: {
           poolId: pool.id,
           repositoryIds: pool.scope === "repository" ? repositoryIds : undefined,
+          priorityRepositoryIds: pool.scope === "repository" ? priorityRepositoryIds.filter((id) => repositoryIds.includes(id)) : undefined,
+          priorityWaitMinutes: pool.scope === "repository" ? Number(form.get("priorityWaitMinutes")) : undefined,
           name: poolName,
           mode,
           provider: primaryProvider,
@@ -295,6 +298,31 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           </div>
         </SettingsSection>
 
+        {pool.scope === "repository" ? (
+          <SettingsSection description="Which repositories get the next runner when the pool is busy." title="Priority">
+            <SettingsRow description="Their queued jobs get the next runner ahead of the pool’s other repositories, on machines and on this host." label="Prioritised repositories" stacked>
+              <SearchableMultiSelect
+                ariaLabel="Prioritised repositories"
+                emptyMessage="No pool repositories match this search"
+                onValueChange={setPriorityRepositoryIds}
+                options={selectedRepositories.map((repository) => ({
+                  value: repository.id,
+                  label: repository.fullName,
+                  description: repository.accountLogin,
+                  keywords: [repository.accountLogin],
+                }))}
+                placeholder="None — every repository takes its turn"
+                searchPlaceholder="Search the pool’s repositories…"
+                selectedNoun="repositories"
+                values={priorityRepositoryIds.filter((id) => repositoryIds.includes(id))}
+              />
+            </SettingsRow>
+            <SettingsRow description="A job from any repository that waits this long goes ahead too, so prioritised work can’t hold every runner." htmlFor="priority-wait" label="Fair-share wait">
+              <UnitField unit="minutes"><Input className="pr-16" defaultValue={pool.priorityWaitMinutes} id="priority-wait" max="1440" min="1" name="priorityWaitMinutes" required type="number" /></UnitField>
+            </SettingsRow>
+          </SettingsSection>
+        ) : null}
+
         <SettingsSection description="Grow from the queue, shrink when idle." title="Autoscaling">
           <SettingsRow description="Queued workflow jobs raise the target up to the maximum." inline label="Autoscale from queued jobs">
             <Switch aria-label="Autoscale from queued jobs" defaultChecked={pool.autoscalingEnabled} name="autoscalingEnabled" />
@@ -356,6 +384,15 @@ function ReadOnlyPool({ pool }: { pool: RunnerPoolDetail }) {
         <SettingsValue label="Per runner" value={`${pool.cpuLimit} cores · ${pool.memoryLimitMb} MB`} />
         <SettingsValue label="Autoscaling" value={pool.autoscalingEnabled ? `On · ${pool.queueScaleFactor} per queued job · idle after ${pool.idleTimeoutMinutes}m` : "Off"} />
       </SettingsSection>
+      {pool.scope === "repository" ? (
+        <SettingsSection title="Priority">
+          <SettingsValue
+            label="Prioritised"
+            value={pool.repositories.filter((repository) => repository.prioritised).map((repository) => repository.fullName).join(", ") || "None"}
+          />
+          <SettingsValue label="Fair-share wait" value={`${pool.priorityWaitMinutes} minutes`} />
+        </SettingsSection>
+      ) : null}
     </SettingsLayout>
   );
 }

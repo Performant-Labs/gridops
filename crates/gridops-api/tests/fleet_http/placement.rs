@@ -918,3 +918,142 @@ async fn pools_take_turns_when_work_waits() -> Result<()> {
     assert_eq!(considered, ["fleet-pool", "other-pool"]);
     Ok(())
 }
+
+#[tokio::test]
+async fn prioritised_repositories_get_the_next_runner_first() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let now = gridops_core::now_millis();
+    // Repository 10 queued two jobs before repository 11 queued one.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+           VALUES (11,1,'octo-org','release','octo-org/release',0,'main','https://github.com/octo-org/release',1,1,1);
+         INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('fleet-pool',11,2);
+         UPDATE runner_pools SET autoscaling_enabled=1,paused=0 WHERE id='fleet-pool';
+         INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+           VALUES (40,10,'CI',1,'push','queued','sha','https://example.test/40',1,1,1,1),
+                  (41,11,'Release',1,'push','queued','sha','https://example.test/41',1,1,1,1);
+         INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+           VALUES (50,40,'build','queued','[\"self-hosted\"]','https://example.test/50',{older},{older}),
+                  (51,40,'test','queued','[\"self-hosted\"]','https://example.test/51',{older},{older}),
+                  (52,41,'ship','queued','[\"self-hosted\"]','https://example.test/52',{newer},{newer});",
+        older = now - 60_000,
+        newer = now - 30_000,
+    )))
+    .execute(&f.database)
+    .await?;
+    let next_repository = || async {
+        Ok::<_, anyhow::Error>(
+            gridops_core::next_runner_repository(&f.database, "fleet-pool", 1)
+                .await?
+                .context("next repository")?
+                .repository_id,
+        )
+    };
+    // Unprioritised, the repository furthest behind gets the runner.
+    assert_eq!(next_repository().await?, 10);
+
+    let response = f
+        .client
+        .put(format!("{}/api/v1/runner-pools/fleet-pool", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(&json!({
+            "name": "fleet", "mode": "ephemeral", "provider": "docker", "providers": ["docker"],
+            "labels": [], "image": "runner:fixture", "dockerImage": "runner:fixture",
+            "desiredCount": 0, "minCount": 0, "maxCount": 4, "autoscalingEnabled": true,
+            "queueScaleFactor": 1, "idleTimeoutMinutes": 5, "cpuLimit": 1, "memoryLimitMb": 1024,
+            "runnerGroupId": 1, "priorityRepositoryIds": [11], "priorityWaitMinutes": 10,
+        }))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await?
+    );
+    let pool: Value = f
+        .client
+        .get(format!("{}/api/v1/runner-pools/fleet-pool", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(pool["priorityRepositoryIds"], json!([11]));
+    // The built-in host's next runner goes to the prioritised repository.
+    assert_eq!(next_repository().await?, 11);
+
+    // On machines, the prioritised repository's runner is admitted first,
+    // though the other repository's were queued before it.
+    let profile: Value = f
+        .client
+        .put(f.url("/pools/fleet-pool/profile"))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(&json!({
+            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+            "platforms": [{"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let profile_id = profile["item"]["platforms"][0]["id"]
+        .as_str()
+        .context("profile")?;
+    let service = FleetService::new(f.database.clone());
+    for (index, repository_id) in [10_u64, 10, 11].into_iter().enumerate() {
+        let target = gridops_core::fleet::targets::ensure_target(
+            &f.database,
+            &gridops_core::fleet::CiTarget::GithubRepository {
+                installation_id: gridops_core::fleet::ExternalId::new(1)?,
+                repository_id: gridops_core::fleet::ExternalId::new(repository_id)?,
+            },
+        )
+        .await?;
+        gridops_core::fleet::targets::link_pool_target(&f.database, "fleet-pool", &target).await?;
+        service
+            .submit_intent(
+                &Principal::Reconciler,
+                SubmitIntent {
+                    idempotency_key: format!("runner:priority-{index}"),
+                    pool_id: "fleet-pool".into(),
+                    profile_id: profile_id.parse()?,
+                    target_id: target.parse()?,
+                    workload_id: WorkloadId::try_new(Uuid::new_v4())?,
+                    generation: Generation::new(1)?,
+                    kind: WorkloadKind::CiRunner,
+                    agent_run_id: None,
+                    expected_profile_revision: Some(1),
+                },
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let considered = || async {
+        service.admit_queued(&Principal::Reconciler, 1).await?;
+        let repositories: Vec<i64> = sqlx::query_scalar(
+            "SELECT t.repository_id FROM workload_intents i JOIN fleet_ci_targets t ON t.id=i.target_id
+              WHERE i.reason_code IS NOT NULL ORDER BY i.created_at",
+        )
+        .fetch_all(&f.database)
+        .await?;
+        sqlx::query("UPDATE workload_intents SET reason_code=NULL")
+            .execute(&f.database)
+            .await?;
+        Ok::<_, anyhow::Error>(repositories)
+    };
+    assert_eq!(considered().await?, [11]);
+
+    // A job that has waited past the pool's priority window goes ahead of the
+    // prioritised repository's newer one, so priority can't starve the pool.
+    sqlx::query("UPDATE workflow_jobs SET created_at=? WHERE id=50")
+        .bind(now - 11 * 60_000)
+        .execute(&f.database)
+        .await?;
+    assert_eq!(next_repository().await?, 10);
+    assert_eq!(considered().await?, [10]);
+    Ok(())
+}
