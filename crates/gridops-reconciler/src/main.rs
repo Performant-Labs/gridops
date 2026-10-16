@@ -2505,6 +2505,8 @@ mod tests {
             queued,
             active,
             busy: 0,
+            prioritised: 0,
+            prioritised_since: None,
         };
         let parked = |id: &str, repository_id: i64| Runner {
             id: id.into(),

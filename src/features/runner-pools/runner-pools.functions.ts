@@ -50,7 +50,9 @@ export type RunnerPoolDetail = {
   repositoryId: number | null;
   repository: string | null;
   repositoryIds: number[];
-  repositories: RepositoryOption[];
+  repositories: Array<RepositoryOption & { prioritised?: boolean }>;
+  priorityRepositoryIds: number[];
+  priorityWaitMinutes: number;
   bitbucketConnections: Array<{ id: string; name: string; workspace: string; workspaceUuid: string }>;
   bitbucketConnectionIds: string[];
   accountLogin: string;

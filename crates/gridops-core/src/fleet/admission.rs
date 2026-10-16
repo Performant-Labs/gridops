@@ -124,17 +124,36 @@ pub(crate) async fn run_slice(
         return Err(FleetError::Forbidden);
     }
     let rows = sqlx::query(
-        // Pools take turns: every pool's oldest waiting intent comes before
-        // any pool's second, so one busy pool can't starve the others.
+        // Pools take turns: every pool's first waiting intent comes before
+        // any pool's second, so one busy pool can't starve the others. Within
+        // a pool, intents for a prioritised repository, or for one with a job
+        // queued longer than the pool's priority window, go first.
         "SELECT i.id,i.workload_id,i.generation,i.kind,i.pool_id,i.profile_id,i.target_id,
                 i.agent_run_id,i.expected_profile_revision,
-                ROW_NUMBER() OVER (PARTITION BY i.pool_id ORDER BY i.created_at,i.id) AS turn
+                ROW_NUMBER() OVER (
+                  PARTITION BY i.pool_id
+                  ORDER BY CASE WHEN EXISTS (
+                      SELECT 1 FROM fleet_ci_targets t
+                        JOIN runner_pool_priority_repositories flagged
+                          ON flagged.pool_id=i.pool_id AND flagged.repository_id=t.repository_id
+                       WHERE t.id=i.target_id
+                    ) OR EXISTS (
+                      SELECT 1 FROM fleet_ci_targets t
+                        JOIN workflow_runs wr ON wr.repository_id=t.repository_id
+                         AND wr.status IN ('requested','queued','pending','waiting','in_progress')
+                        JOIN workflow_jobs wj ON wj.run_id=wr.id AND wj.status='queued'
+                       WHERE t.id=i.target_id
+                         AND wj.created_at <= ? - 60000*COALESCE(
+                           (SELECT wait_minutes FROM runner_pool_priorities WHERE pool_id=i.pool_id),10)
+                    ) THEN 0 ELSE 1 END,i.created_at,i.id
+                ) AS turn
           FROM workload_intents i
           WHERE i.status = 'queued'
             AND NOT EXISTS (SELECT 1 FROM workload_placements p WHERE p.intent_id=i.id)
           ORDER BY turn,i.created_at,i.id
           LIMIT ?",
     )
+    .bind(crate::now_millis())
     .bind(
         i64::try_from(limit.get())
             .map_err(|_| FleetError::InvalidRequest("scan limit overflow"))?,

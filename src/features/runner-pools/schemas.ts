@@ -81,7 +81,13 @@ function validateProvider(
 }
 
 export const updateRunnerPoolSchema = z
-  .object({ repositoryIds: repositoryIds.optional(), bitbucketConnectionIds: bitbucketConnectionIds.optional(), ...configurationShape })
+  .object({
+    repositoryIds: repositoryIds.optional(),
+    priorityRepositoryIds: repositoryIds.optional(),
+    priorityWaitMinutes: z.number().int().min(1).max(1_440).optional(),
+    bitbucketConnectionIds: bitbucketConnectionIds.optional(),
+    ...configurationShape,
+  })
   .superRefine((value, context) => {
     if (value.repositoryIds?.length === 0) {
       context.addIssue({

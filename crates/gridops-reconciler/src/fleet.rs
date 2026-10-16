@@ -75,33 +75,51 @@ pub(super) async fn choose_profile<'a>(
 
 /// The repository whose queued jobs this platform can run, furthest behind,
 /// so a Windows runner isn't registered to a repository waiting on Linux.
+/// Repositories with prioritised jobs still waiting for a runner come first,
+/// the longest-waiting first.
 async fn repository_for_platform(
     app: &Reconciler,
     pool: &Pool,
     profile: &Profile,
 ) -> Result<Option<gridops_core::RepositoryCapacity>> {
     let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
-    let mut wanted = std::collections::HashMap::<i64, i64>::new();
-    for (repository, requested) in
-        gridops_core::queued_job_assignments(&app.database, &pool.id).await?
-    {
+    // Per repository: the jobs this platform runs, how many of them are
+    // prioritised, and when the oldest of those was queued.
+    let mut wanted = std::collections::HashMap::<i64, (i64, i64, Option<i64>)>::new();
+    for job in gridops_core::queued_job_assignments(&app.database, &pool.id).await? {
         if targets::platform_supports_labels(
             profile.input.execution_os,
             profile.input.architecture,
-            &requested,
+            &job.labels,
             &configured,
         ) {
-            *wanted.entry(repository).or_default() += 1;
+            let (queued, prioritised, since) = wanted.entry(job.repository_id).or_default();
+            *queued += 1;
+            if job.prioritised {
+                *prioritised += 1;
+                *since = Some(since.map_or(job.queued_at, |since| since.min(job.queued_at)));
+            }
         }
     }
     Ok(gridops_core::repository_capacities(&app.database, &pool.id)
         .await?
         .into_iter()
-        .filter_map(|capacity| {
-            let queued = *wanted.get(&capacity.repository_id)?;
-            Some((queued - capacity.active, capacity))
+        .filter_map(|mut capacity| {
+            let (queued, prioritised, since) = *wanted.get(&capacity.repository_id)?;
+            capacity.prioritised = prioritised;
+            capacity.prioritised_since = since;
+            let unmet = capacity.unmet_priority(pool.queue_scale_factor);
+            Some((
+                (
+                    unmet.is_some(),
+                    std::cmp::Reverse(unmet.unwrap_or_default()),
+                    queued - capacity.active,
+                    std::cmp::Reverse(capacity.repository_id),
+                ),
+                capacity,
+            ))
         })
-        .max_by_key(|(behind, capacity)| (*behind, std::cmp::Reverse(capacity.repository_id)))
+        .max_by_key(|(key, _)| *key)
         .map(|(_, capacity)| capacity))
 }
 
@@ -361,6 +379,8 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
                 queued: 0,
                 active: 0,
                 busy: 0,
+                prioritised: 0,
+                prioritised_since: None,
             },
         );
         json!({

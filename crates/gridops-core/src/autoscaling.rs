@@ -10,6 +10,43 @@ pub struct RepositoryCapacity {
     pub queued: i64,
     pub active: i64,
     pub busy: i64,
+    /// Queued jobs that count as prioritised; see [`QueuedJob::prioritised`].
+    pub prioritised: i64,
+    /// When the oldest of those jobs was queued.
+    pub prioritised_since: Option<i64>,
+}
+
+impl RepositoryCapacity {
+    /// When this repository's oldest prioritised job was queued, if it has
+    /// more prioritised jobs than runners waiting to take them.
+    pub fn unmet_priority(&self, factor: i64) -> Option<i64> {
+        (self.prioritised.saturating_mul(factor) > self.active.saturating_sub(self.busy))
+            .then_some(self.prioritised_since)
+            .flatten()
+    }
+}
+
+/// A queued job the pool would run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedJob {
+    pub repository_id: i64,
+    pub labels: Vec<String>,
+    pub queued_at: i64,
+    /// Its repository is prioritised in the pool, or it has waited longer than
+    /// the pool's priority window, so a busy prioritised repository can't
+    /// starve the others.
+    pub prioritised: bool,
+}
+
+/// Whether a queued job counts as prioritised in the pool. Binds the pool id,
+/// the current time and the pool id again.
+macro_rules! prioritised_job {
+    () => {
+        "(EXISTS (SELECT 1 FROM runner_pool_priority_repositories flagged
+    WHERE flagged.pool_id=? AND flagged.repository_id=wr.repository_id)
+  OR wj.created_at <= ? - 60000*COALESCE(
+    (SELECT wait_minutes FROM runner_pool_priorities WHERE pool_id=?),10))"
+    };
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,8 +213,9 @@ pub async fn provider_capacities(
             busy: 0,
         })
         .collect::<Vec<_>>();
-    for (_, requested) in queued_job_assignments(database, pool_id).await? {
-        if let Some(provider) = compatible_runner_provider(providers, &requested, configured_labels)
+    for job in queued_job_assignments(database, pool_id).await? {
+        if let Some(provider) =
+            compatible_runner_provider(providers, &job.labels, configured_labels)
             && let Some(capacity) = capacities
                 .iter_mut()
                 .find(|capacity| capacity.provider == provider)
@@ -226,10 +264,10 @@ pub async fn next_runner_provider(
             busy: 0,
         })
         .collect::<Vec<_>>();
-    for (queued_repository_id, requested) in &assignments {
-        if repository_id.is_none_or(|repository_id| repository_id == *queued_repository_id)
+    for job in &assignments {
+        if repository_id.is_none_or(|repository_id| repository_id == job.repository_id)
             && let Some(provider) =
-                compatible_runner_provider(providers, requested, configured_labels)
+                compatible_runner_provider(providers, &job.labels, configured_labels)
             && let Some(capacity) = capacities
                 .iter_mut()
                 .find(|capacity| capacity.provider == provider)
@@ -288,9 +326,12 @@ pub fn provider_capacity_deficit(capacity: &ProviderCapacity, factor: i64) -> i6
 pub async fn queued_job_assignments(
     database: &SqlitePool,
     pool_id: &str,
-) -> Result<Vec<(i64, Vec<String>)>, sqlx::Error> {
-    let rows = sqlx::query(
-        r#"SELECT repo.id AS repository_id,wj.labels FROM workflow_jobs wj
+) -> Result<Vec<QueuedJob>, sqlx::Error> {
+    let sql = concat!(
+        r#"SELECT repo.id AS repository_id,wj.labels,wj.created_at,
+          "#,
+        prioritised_job!(),
+        r#" AS prioritised FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
           WHERE wj.status='queued' AND ?=(
@@ -330,19 +371,23 @@ pub async fn queued_job_assignments(
             ORDER BY CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
               candidate.created_at,candidate.id
             LIMIT 1
-          ) ORDER BY wj.created_at,wj.id"#,
-    )
-    .bind(pool_id)
-    .bind(runner_arch_label())
-    .fetch_all(database)
-    .await?;
+          ) ORDER BY wj.created_at,wj.id"#
+    );
+    let rows = sqlx::query(sql)
+        .bind(pool_id)
+        .bind(crate::now_millis())
+        .bind(pool_id)
+        .bind(pool_id)
+        .bind(runner_arch_label())
+        .fetch_all(database)
+        .await?;
     Ok(rows
         .into_iter()
-        .map(|row| {
-            (
-                row.get("repository_id"),
-                serde_json::from_str(row.get::<&str, _>("labels")).unwrap_or_default(),
-            )
+        .map(|row| QueuedJob {
+            repository_id: row.get("repository_id"),
+            labels: serde_json::from_str(row.get::<&str, _>("labels")).unwrap_or_default(),
+            queued_at: row.get("created_at"),
+            prioritised: row.get("prioritised"),
         })
         .collect())
 }
@@ -351,11 +396,29 @@ pub async fn repository_capacities(
     database: &SqlitePool,
     pool_id: &str,
 ) -> Result<Vec<RepositoryCapacity>, sqlx::Error> {
-    let rows = sqlx::query(
+    let sql = concat!(
         r#"SELECT repo.id,repo.installation_id,repo.owner,repo.name,
-          (SELECT COUNT(*) FROM workflow_jobs wj
+          COUNT(job.repository_id) AS queued,
+          COALESCE(SUM(job.prioritised),0) AS prioritised,
+          MIN(CASE WHEN job.prioritised THEN job.created_at END) AS prioritised_since,
+          (SELECT COUNT(*) FROM runners runner
+            WHERE runner.pool_id=? AND runner.target_repository_id=repo.id
+              AND runner.deleted_at IS NULL
+              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS active,
+          (SELECT COUNT(*) FROM runners runner
+            WHERE runner.pool_id=? AND runner.target_repository_id=repo.id
+              AND runner.deleted_at IS NULL AND runner.busy=1
+              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS busy
+          FROM runner_pool_repositories membership
+          JOIN repositories repo ON repo.id=membership.repository_id
+          LEFT JOIN (
+            SELECT wr.repository_id,wj.created_at,"#,
+        prioritised_job!(),
+        r#" AS prioritised
+            FROM workflow_jobs wj
             JOIN workflow_runs wr ON wr.id=wj.run_id
-            WHERE wr.repository_id=repo.id AND wj.status='queued' AND ?=(
+            JOIN repositories repo ON repo.id=wr.repository_id
+            WHERE wj.status='queued' AND ?=(
               SELECT candidate.id FROM runner_pools candidate
               WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
                 EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
@@ -380,27 +443,23 @@ pub async fn repository_capacities(
               ORDER BY CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
                 candidate.created_at,candidate.id
               LIMIT 1
-            )) AS queued,
-          (SELECT COUNT(*) FROM runners runner
-            WHERE runner.pool_id=? AND runner.target_repository_id=repo.id
-              AND runner.deleted_at IS NULL
-              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS active,
-          (SELECT COUNT(*) FROM runners runner
-            WHERE runner.pool_id=? AND runner.target_repository_id=repo.id
-              AND runner.deleted_at IS NULL AND runner.busy=1
-              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS busy
-          FROM runner_pool_repositories membership
-          JOIN repositories repo ON repo.id=membership.repository_id
+            )
+          ) job ON job.repository_id=repo.id
           WHERE membership.pool_id=? AND repo.archived=0
-          ORDER BY membership.created_at,repo.id"#,
-    )
-    .bind(pool_id)
-    .bind(runner_arch_label())
-    .bind(pool_id)
-    .bind(pool_id)
-    .bind(pool_id)
-    .fetch_all(database)
-    .await?;
+          GROUP BY repo.id
+          ORDER BY membership.created_at,repo.id"#
+    );
+    let rows = sqlx::query(sql)
+        .bind(pool_id)
+        .bind(pool_id)
+        .bind(pool_id)
+        .bind(crate::now_millis())
+        .bind(pool_id)
+        .bind(pool_id)
+        .bind(runner_arch_label())
+        .bind(pool_id)
+        .fetch_all(database)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|row| RepositoryCapacity {
@@ -411,6 +470,8 @@ pub async fn repository_capacities(
             queued: row.get("queued"),
             active: row.get("active"),
             busy: row.get("busy"),
+            prioritised: row.get("prioritised"),
+            prioritised_since: row.get("prioritised_since"),
         })
         .collect())
 }
@@ -428,9 +489,20 @@ pub async fn next_runner_repository(
     factor: i64,
 ) -> Result<Option<RepositoryCapacity>, sqlx::Error> {
     let mut capacities = repository_capacities(database, pool_id).await?;
+    // Repositories with prioritised jobs still waiting for a runner go first,
+    // the longest-waiting first.
+    let urgency = |capacity: &RepositoryCapacity| {
+        capacity
+            .unmet_priority(factor)
+            .map_or((1, 0), |since| (0, since))
+    };
     capacities.sort_by(|left, right| {
-        repository_capacity_deficit(right, factor)
-            .cmp(&repository_capacity_deficit(left, factor))
+        urgency(left)
+            .cmp(&urgency(right))
+            .then_with(|| {
+                repository_capacity_deficit(right, factor)
+                    .cmp(&repository_capacity_deficit(left, factor))
+            })
             .then_with(|| right.queued.cmp(&left.queued))
             .then_with(|| left.active.cmp(&right.active))
             .then_with(|| left.repository_id.cmp(&right.repository_id))

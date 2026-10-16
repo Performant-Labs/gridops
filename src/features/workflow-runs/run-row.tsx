@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { GitBranch } from "lucide-react";
+import { ChevronsUp, GitBranch } from "lucide-react";
 import type * as React from "react";
 
 import { listRowClassName } from "~/components/page";
@@ -20,6 +20,7 @@ export type RunRowData = {
   startedAt: string | null;
   completedAt: string | null;
   createdAt?: string | null;
+  prioritised?: boolean;
 };
 
 /** One workflow run in Linear's issue-row shape: status, identifier, title, then metadata on the right. */
@@ -41,6 +42,13 @@ export function RunRow({ run, meta, trailing, className }: { run: RunRowData; me
         </span>
       </span>
       {meta}
+      {run.prioritised && run.status !== "completed" ? (
+        <Tooltip content="Its repository is prioritised: queued jobs get the next runner first">
+          <span className="relative z-[1] hidden shrink-0 items-center gap-1 rounded-full border border-border-strong px-2 py-0.5 text-2xs font-medium text-foreground sm:inline-flex">
+            <ChevronsUp className="size-3" />Priority
+          </span>
+        </Tooltip>
+      ) : null}
       {run.branch ? (
         <span className="hidden max-w-44 shrink-0 items-center gap-1 truncate rounded-full border border-border-strong px-2 py-0.5 font-mono text-2xs text-muted-foreground md:inline-flex" title={run.branch}>
           <GitBranch className="size-3 shrink-0" /><span className="truncate">{run.branch}</span>

@@ -1033,6 +1033,8 @@ pub async fn runner_pool(
         .map(|(owner, repository)| format!("{owner}/{repository}"));
     let mut repositories = sqlx::query(
         r#"SELECT repo.id,repo.installation_id,repo.full_name,repo.private,
+          EXISTS (SELECT 1 FROM runner_pool_priority_repositories flagged
+            WHERE flagged.pool_id=membership.pool_id AND flagged.repository_id=repo.id) AS prioritised,
           installation.account_login,installation.account_type
           FROM runner_pool_repositories membership
            JOIN repositories repo ON repo.id=membership.repository_id
@@ -1051,9 +1053,21 @@ pub async fn runner_pool(
             "accountType": row.get::<String, _>("account_type"),
             "fullName": row.get::<String, _>("full_name"),
             "private": row.get::<bool, _>("private"),
+            "prioritised": row.get::<bool, _>("prioritised"),
         })
     })
     .collect::<Vec<_>>();
+    let priority_repository_ids = repositories
+        .iter()
+        .filter(|repository| repository["prioritised"] == true)
+        .map(|repository| repository["id"].clone())
+        .collect::<Vec<_>>();
+    let priority_wait_minutes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT wait_minutes FROM runner_pool_priorities WHERE pool_id=?),10)",
+    )
+    .bind(&pool_id)
+    .fetch_one(&state.database)
+    .await?;
     if repositories.is_empty()
         && let Some(repository_id) = pool.repository_id
         && let Some(repository) = &repository
@@ -1123,6 +1137,8 @@ pub async fn runner_pool(
         "autoscalingEnabled": pool.autoscaling_enabled,
         "queueScaleFactor": pool.queue_scale_factor,
         "idleTimeoutMinutes": pool.idle_timeout_minutes,
+        "priorityRepositoryIds": priority_repository_ids,
+        "priorityWaitMinutes": priority_wait_minutes,
         "maxCpuLimit": max_cpu_limit,
         "maxMemoryLimitMb": max_memory_limit_mb,
         "configurationVersion": pool.configuration_version,
@@ -1208,6 +1224,17 @@ pub async fn update_runner_pool(
     .bind(&pool_id)
     .fetch_all(&state.database)
     .await?;
+    let priority_repository_ids = match &input.priority_repository_ids {
+        Some(ids) => ids.iter().copied().collect::<HashSet<_>>(),
+        None => sqlx::query_scalar::<_, i64>(
+            "SELECT repository_id FROM runner_pool_priority_repositories WHERE pool_id=?",
+        )
+        .bind(&pool_id)
+        .fetch_all(&state.database)
+        .await?
+        .into_iter()
+        .collect(),
+    };
     let existing_bitbucket_connection_ids = sqlx::query_scalar::<_, String>(
         "SELECT connection_id FROM runner_pool_bitbucket_connections WHERE pool_id=? ORDER BY created_at,connection_id",
     )
@@ -1234,6 +1261,15 @@ pub async fn update_runner_pool(
     if pool.scope == "repository" && repository_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "A repository pool requires at least one repository.".into(),
+        ));
+    }
+    if input.priority_repository_ids.is_some()
+        && !priority_repository_ids
+            .iter()
+            .all(|id| repository_ids.contains(id))
+    {
+        return Err(ApiError::BadRequest(
+            "Only repositories in the pool can be prioritised.".into(),
         ));
     }
     if i64::try_from(repository_ids.len()).unwrap_or(i64::MAX) > input.max_count {
@@ -1367,6 +1403,28 @@ pub async fn update_runner_pool(
             .bind(now.saturating_add(i64::try_from(position).unwrap_or(i64::MAX)))
             .execute(&mut *transaction)
             .await?;
+            // Rewriting the membership cleared its priorities.
+            if priority_repository_ids.contains(repository_id) {
+                sqlx::query(
+                    "INSERT INTO runner_pool_priority_repositories (pool_id,repository_id,created_at) VALUES (?,?,?)",
+                )
+                .bind(&pool_id)
+                .bind(repository_id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        if let Some(minutes) = input.priority_wait_minutes {
+            sqlx::query(
+                "INSERT INTO runner_pool_priorities (pool_id,wait_minutes,updated_at) VALUES (?,?,?)
+                 ON CONFLICT(pool_id) DO UPDATE SET wait_minutes=excluded.wait_minutes,updated_at=excluded.updated_at",
+            )
+            .bind(&pool_id)
+            .bind(minutes)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
         }
     }
     sqlx::query("DELETE FROM runner_pool_bitbucket_connections WHERE pool_id=?")
@@ -1396,6 +1454,11 @@ pub async fn update_runner_pool(
             "desiredCount": input.desired_count,
             "runtimeConfigurationChanged": runtime_changed,
             "repositoryIds": repository_ids,
+            "priorityRepositoryIds": repository_ids
+                .iter()
+                .filter(|id| priority_repository_ids.contains(id))
+                .collect::<Vec<_>>(),
+            "priorityWaitMinutes": input.priority_wait_minutes,
             "bitbucketConnectionIds": bitbucket_connections,
             "configurationVersion": pool.configuration_version + version_increment,
         }),
@@ -1514,7 +1577,9 @@ pub async fn workflow_runs(
           wr.conclusion,wr.head_branch,wr.head_sha,wr.actor_login,wr.html_url,wr.started_at,
           wr.completed_at,wr.github_created_at,repo.full_name,ui.permission AS installation_permission,
           COUNT(wj.id) AS job_count,COUNT(CASE WHEN wj.status='in_progress' THEN 1 END) AS active_jobs,
-          COUNT(CASE WHEN wj.conclusion='failure' THEN 1 END) AS failed_jobs
+          COUNT(CASE WHEN wj.conclusion='failure' THEN 1 END) AS failed_jobs,
+          EXISTS (SELECT 1 FROM runner_pool_priority_repositories flagged
+            WHERE flagged.repository_id=repo.id) AS prioritised
         FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
         JOIN user_installations ui ON ui.installation_id=repo.installation_id AND ui.user_id=?
         LEFT JOIN workflow_jobs wj ON wj.run_id=wr.id GROUP BY wr.id
@@ -3395,6 +3460,8 @@ async fn provision(
                 queued: 0,
                 active: 0,
                 busy: 0,
+                prioritised: 0,
+                prioritised_since: None,
             })
         } else {
             None
@@ -4328,6 +4395,7 @@ fn workflow_run_json(row: &sqlx::sqlite::SqliteRow, system_admin: bool) -> Value
         "repository": row.get::<String,_>("full_name"), "jobCount": row.get::<i64,_>("job_count"),
         "activeJobs": row.get::<i64,_>("active_jobs"), "failedJobs": row.get::<i64,_>("failed_jobs"),
         "canManage": system_admin || row.get::<String,_>("installation_permission") == "admin",
+        "prioritised": row.try_get::<bool,_>("prioritised").unwrap_or(false),
     })
 }
 
