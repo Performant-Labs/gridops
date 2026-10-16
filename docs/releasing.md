@@ -26,10 +26,9 @@ The workflow refuses a tag that doesn't match the workspace version. To check
 that everything builds without publishing, run the workflow by hand from the
 Actions tab.
 
-The first time an image is published, GHCR creates its package as private.
-Make each of `gridops-api`, `gridops-manager` and `gridops-reconciler` public
-under the package's settings (Danger Zone → Change visibility), or deployments
-can't pull it anonymously.
+The images carry the repository as their source, so GHCR links each package
+to the repository and gives it the repository's visibility. For a public
+repository, anyone can pull them without logging in.
 
 ## Runner requirements
 
