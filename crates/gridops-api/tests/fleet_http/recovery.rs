@@ -385,6 +385,73 @@ async fn queued_work_goes_to_a_platform_with_an_authorized_machine() -> Result<(
     Ok(())
 }
 
+/// A platform chosen for one repository's jobs doesn't take another's. With
+/// long-waiting jobs pinned to x64 and a new job any Linux machine runs, x64
+/// goes first, but its runners go only to the x64 repository: the other job
+/// is arm64's, and an x64 runner for it would wait on the x64 machine while
+/// the arm64 one sat idle (homelab, 2026-10-16).
+#[tokio::test]
+async fn a_platform_takes_only_the_jobs_counted_for_it() -> Result<()> {
+    use gridops_core::fleet::targets::{choose_platform, platform_jobs, pool_profiles};
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    sqlx::raw_sql(
+        "INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+           VALUES (11,1,'octo-org','sift','octo-org/sift',0,'main','https://github.com/octo-org/sift',1,1,1);
+         INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('fleet-pool',11,1);",
+    )
+    .execute(&f.database)
+    .await?;
+    let machine = active_machine_on(
+        &f,
+        &f.origin,
+        Arc::new(FakeDocker::default()),
+        json!([
+            {"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"},
+            {"runtimeKind": "docker", "executionOs": "linux", "architecture": "x64", "image": "runner:fixture"},
+        ]),
+    )
+    .await?;
+    sqlx::raw_sql(
+        "UPDATE runner_pools SET autoscaling_enabled=1,paused=0 WHERE id='fleet-pool';
+         INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+           VALUES (80,10,'CI',8,'push','queued','abc','https://github.com/octo-org/gridops/actions/runs/80',1,1,1,1),
+                  (81,11,'CI',9,'push','queued','def','https://github.com/octo-org/sift/actions/runs/81',1,1,1,1);
+         INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+           VALUES (800,80,'build','queued','[\"self-hosted\",\"linux\"]','https://github.com/octo-org/gridops/actions/runs/80/job/800',
+                   CAST(strftime('%s','now') AS INTEGER)*1000,1),
+                  (810,81,'check','queued','[\"self-hosted\",\"Linux\",\"X64\"]','https://github.com/octo-org/sift/actions/runs/81/job/810',1,1),
+                  (811,81,'coverage','queued','[\"self-hosted\",\"Linux\",\"X64\"]','https://github.com/octo-org/sift/actions/runs/81/job/811',1,1);",
+    )
+    .execute(&f.database)
+    .await?;
+    let profiles = pool_profiles(&f.database, "fleet-pool").await?;
+    let configured = ["self-hosted".to_owned()];
+    let (chosen, behind) = choose_platform(&f.database, "fleet-pool", &configured, 1, &profiles)
+        .await?
+        .context("platform")?;
+    assert_eq!(
+        (chosen.input.architecture, behind),
+        (gridops_core::fleet::Architecture::X64, true)
+    );
+    assert_ne!(chosen.id, machine.profile_id);
+    let repositories = |profile: String| {
+        let (database, profiles, configured) = (&f.database, &profiles, &configured);
+        async move {
+            Ok::<_, anyhow::Error>(
+                platform_jobs(database, "fleet-pool", configured, profiles, &profile)
+                    .await?
+                    .into_iter()
+                    .map(|job| job.repository_id)
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    assert_eq!(repositories(chosen.id.clone()).await?, [11, 11]);
+    assert_eq!(repositories(machine.profile_id.clone()).await?, [10]);
+    Ok(())
+}
+
 /// When the agent can't settle a placement itself, an administrator can: the
 /// machine shows as blocked, and repairing releases the unconfirmed start on
 /// their word, with an audit entry, so the machine takes work again.
