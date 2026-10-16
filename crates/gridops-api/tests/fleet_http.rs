@@ -36,7 +36,7 @@ mod query;
 mod recovery;
 
 struct Fixture {
-    _process: ApiProcess,
+    process: ApiProcess,
     directory: PathBuf,
     database: SqlitePool,
     client: Client,
@@ -53,36 +53,64 @@ impl Drop for ApiProcess {
     }
 }
 
+fn start_api(directory: &std::path::Path, origin: &str) -> Result<ApiProcess> {
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("api.log"))?;
+    Ok(ApiProcess(
+        Command::new(env!("CARGO_BIN_EXE_gridops-api"))
+            .env("GRIDOPS_BASE_URL", origin)
+            .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
+            .env("GRIDOPS_API_BIND", origin.trim_start_matches("http://"))
+            .env("GRIDOPS_DATABASE_PATH", directory.join("db.sqlite"))
+            .env("GRIDOPS_LOG_DIRECTORY", directory.join("logs"))
+            // GitHub is unreachable, so job views use what GridOps holds.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
+            .env(
+                "GRIDOPS_ENCRYPTION_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            )
+            .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
+            .env("GITHUB_CLIENT_ID", "fleet-http-client")
+            .env("GITHUB_CLIENT_SECRET", "fleet-http-synthetic-secret")
+            .env("GRIDOPS_GITHUB_WEBHOOK_ACTIVE", "false")
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log))
+            .spawn()?,
+    ))
+}
+
+async fn wait_until_healthy(
+    client: &Client,
+    origin: &str,
+    directory: &std::path::Path,
+) -> Result<()> {
+    for _ in 0..100 {
+        if client
+            .get(format!("{origin}/api/health"))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    bail!(
+        "fleet API did not start; see {}",
+        directory.join("api.log").display()
+    )
+}
+
 impl Fixture {
     async fn new() -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let directory = std::env::temp_dir().join(format!("gridops-fleet-http-{}", Uuid::new_v4()));
         fs::create_dir(&directory)?;
-        let path = directory.join("db.sqlite");
-        let log = fs::File::create(directory.join("api.log"))?;
         let origin = format!("http://127.0.0.1:{port}");
-        let process = ApiProcess(
-            Command::new(env!("CARGO_BIN_EXE_gridops-api"))
-                .env("GRIDOPS_BASE_URL", &origin)
-                .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
-                .env("GRIDOPS_API_BIND", format!("127.0.0.1:{port}"))
-                .env("GRIDOPS_DATABASE_PATH", &path)
-                .env("GRIDOPS_LOG_DIRECTORY", directory.join("logs"))
-                // GitHub is unreachable, so job views use what GridOps holds.
-                .env("HTTPS_PROXY", "http://127.0.0.1:9")
-                .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
-                .env(
-                    "GRIDOPS_ENCRYPTION_KEY",
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                )
-                .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
-                .env("GITHUB_CLIENT_ID", "fleet-http-client")
-                .env("GITHUB_CLIENT_SECRET", "fleet-http-synthetic-secret")
-                .env("GRIDOPS_GITHUB_WEBHOOK_ACTIVE", "false")
-                .stdout(Stdio::from(log.try_clone()?))
-                .stderr(Stdio::from(log))
-                .spawn()?,
-        );
+        let process = start_api(&directory, &origin)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(SESSION_SECRET.as_bytes())?;
         mac.update(SESSION_TOKEN.as_bytes());
         let cookie = format!(
@@ -90,26 +118,10 @@ impl Fixture {
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
         let client = Client::new();
-        for attempt in 0..100 {
-            if client
-                .get(format!("{origin}/api/health"))
-                .send()
-                .await
-                .is_ok_and(|response| response.status().is_success())
-            {
-                break;
-            }
-            if attempt == 99 {
-                bail!(
-                    "fleet API did not start; see {}",
-                    directory.join("api.log").display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_until_healthy(&client, &origin, &directory).await?;
         let fixture = Self {
-            _process: process,
-            database: connect_database_path(&path).await?,
+            process,
+            database: connect_database_path(&directory.join("db.sqlite")).await?,
             directory,
             client,
             origin,
@@ -117,6 +129,16 @@ impl Fixture {
         };
         fixture.seed().await?;
         Ok(fixture)
+    }
+
+    /// Stops the API and starts it again on the same database and address,
+    /// as a deploy does. Agents see it unreachable in between.
+    async fn restart(&mut self, downtime: Duration) -> Result<()> {
+        self.process.0.kill()?;
+        self.process.0.wait()?;
+        tokio::time::sleep(downtime).await;
+        self.process = start_api(&self.directory, &self.origin)?;
+        wait_until_healthy(&self.client, &self.origin, &self.directory).await
     }
 
     async fn seed(&self) -> Result<()> {
