@@ -780,6 +780,63 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
         .json()
         .await?;
     assert_eq!(queue["items"][0]["reason"], "no_active_machine");
+
+    // A repository that joins the pool after its platforms were saved is
+    // refused until the reconciler links it; one outside the pool never is.
+    sqlx::raw_sql(
+        "INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+           VALUES (11,1,'octo-org','new','octo-org/new',0,'main','https://github.com/octo-org/new',1,1,1),
+                  (12,1,'octo-org','other','octo-org/other',0,'main','https://github.com/octo-org/other',1,1,1);
+         INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('fleet-pool',11,1);",
+    )
+    .execute(&f.database)
+    .await?;
+    let target = |repository: u64| {
+        let database = f.database.clone();
+        async move {
+            anyhow::Ok(
+                gridops_core::fleet::targets::ensure_target(
+                    &database,
+                    &gridops_core::fleet::CiTarget::GithubRepository {
+                        installation_id: 1.try_into()?,
+                        repository_id: repository.try_into()?,
+                    },
+                )
+                .await?,
+            )
+        }
+    };
+    let submit = |target_id: String| {
+        let service = service.clone();
+        let profile_id = profile["item"]["platforms"][0]["id"].clone();
+        async move {
+            service
+                .submit_intent(
+                    &Principal::Reconciler,
+                    SubmitIntent {
+                        idempotency_key: format!("runner:{target_id}"),
+                        pool_id: "fleet-pool".into(),
+                        profile_id: profile_id.as_str().context("profile")?.parse()?,
+                        target_id: target_id.parse()?,
+                        workload_id: WorkloadId::try_new(Uuid::new_v4())?,
+                        generation: Generation::new(1)?,
+                        kind: WorkloadKind::CiRunner,
+                        agent_run_id: None,
+                        expected_profile_revision: Some(1),
+                    },
+                )
+                .await
+                .map_err(anyhow::Error::from)
+        }
+    };
+    let (joined, outside) = (target(11).await?, target(12).await?);
+    assert!(submit(joined.clone()).await.is_err());
+    for target_id in [&joined, &outside] {
+        gridops_core::fleet::targets::link_pool_target(&f.database, "fleet-pool", target_id)
+            .await?;
+    }
+    submit(joined).await?;
+    assert!(submit(outside).await.is_err());
     // With no machine able to take it, "machines first" uses the built-in host.
     assert!(
         !gridops_core::fleet::targets::machine_ready(

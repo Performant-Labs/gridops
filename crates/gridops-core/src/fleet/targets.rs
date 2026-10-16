@@ -645,6 +645,32 @@ pub async fn delete_pool(pool: &SqlitePool, pool_id: &str) -> Result<bool, Fleet
 }
 
 /// The targets a pool serves: its repositories, or its organization.
+/// Links a repository that joined the pool after its fleet settings were
+/// saved to the pool's platforms, as saving them would. Without the link every
+/// runner for it is refused. Machines still have to be approved for it.
+pub async fn link_pool_target(
+    pool: &SqlitePool,
+    pool_id: &str,
+    target_id: &str,
+) -> Result<(), FleetError> {
+    sqlx::query(
+        "INSERT INTO profile_ci_targets (profile_id,target_id,enabled)
+         SELECT p.id,t.id,1 FROM pool_execution_profiles p
+           JOIN runner_pools rp ON rp.id=p.pool_id
+           JOIN fleet_ci_targets t ON t.id=?2 AND t.kind='github_repository'
+          WHERE p.pool_id=?1 AND p.archived_at IS NULL
+            AND (rp.repository_id=t.repository_id OR EXISTS (
+              SELECT 1 FROM runner_pool_repositories pr
+               WHERE pr.pool_id=rp.id AND pr.repository_id=t.repository_id))
+         ON CONFLICT(profile_id,target_id) DO UPDATE SET enabled=1,revoked_at=NULL",
+    )
+    .bind(pool_id)
+    .bind(target_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn pool_targets(pool: &SqlitePool, pool_id: &str) -> Result<Vec<String>, FleetError> {
     let row = sqlx::query("SELECT scope,installation_id FROM runner_pools WHERE id=?")
         .bind(pool_id)

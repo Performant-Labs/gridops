@@ -151,6 +151,7 @@ pub(super) async fn provision(
             },
         )
         .await?;
+        targets::link_pool_target(&app.database, &pool.id, &target).await?;
         (target, Some(repository.repository_id))
     } else {
         let target = targets::pool_targets(&app.database, &pool.id)
