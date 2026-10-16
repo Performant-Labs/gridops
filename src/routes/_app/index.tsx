@@ -1,5 +1,5 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowRight, ArrowUpRight, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 
@@ -9,6 +9,9 @@ import { Callout, EmptyState, PageBody, PageHeader, SectionHeading, listRowClass
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusDot } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
+import { AgentRunRow } from "~/features/agent/agent-run-row";
+import { isTerminalAgentStatus } from "~/features/agent/agent-state";
+import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview } from "~/features/dashboard/dashboard.functions";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
 import type { CapacityHistory, CapacityWindow, DashboardOverview } from "~/features/dashboard/types";
@@ -19,7 +22,14 @@ import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { cn, formatAge, formatDateTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/")({
-  loader: () => getDashboardOverview(),
+  loader: async () => {
+    // Agent runs need a signed-in viewer; without one the overview shows none.
+    const [overview, agentRuns] = await Promise.all([
+      getDashboardOverview(),
+      getAgentRunsPage().then((page) => page.items, () => null),
+    ]);
+    return { ...overview, agentRuns: overview.authenticated ? agentRuns : null };
+  },
   pendingComponent: () => <ResourcePageLoading icon={CircleGauge} title="Overview" />,
   component: OverviewPage,
 });
@@ -62,6 +72,7 @@ function OverviewPage() {
               {data.authenticated ? <FleetWorkloadSection /> : null}
               <PoolsSection pools={data.pools} />
               <RunsSection runs={data.runs} />
+              {data.agentRuns ? <AgentRunsSection runs={data.agentRuns} /> : null}
             </div>
             <div className="min-w-0 space-y-8">
               {data.authenticated ? <AttentionSection data={data} /> : null}
@@ -279,6 +290,33 @@ function RunsSection({ runs }: { runs: DashboardOverview["runs"] }) {
         ) : runs.map((run) => (
           <RunRow key={run.id} run={{ id: run.id, workflow: run.workflow, repository: run.repository, branch: run.branch, status: run.status, conclusion: run.conclusion, startedAt: run.startedAt, completedAt: run.completedAt }} />
         ))}
+      </div>
+    </section>
+  );
+}
+
+const OVERVIEW_AGENT_RUNS = 5;
+
+/** Fix-agent runs still working, then the latest finished ones. */
+function AgentRunsSection({ runs }: { runs: AgentRunListItem[] }) {
+  const active = runs.filter((run) => !isTerminalAgentStatus(run.status));
+  const shown = [...active, ...runs.filter((run) => isTerminalAgentStatus(run.status))].slice(0, Math.max(OVERVIEW_AGENT_RUNS, active.length));
+  return (
+    <section className="space-y-3">
+      <SectionHeading
+        actions={
+          <span className="flex items-center gap-2">
+            {active.length ? <span className="text-xs text-progress">{active.length} active</span> : null}
+            <ViewAll to="/agent-runs" />
+          </span>
+        }
+      >
+        Agent runs
+      </SectionHeading>
+      <div className="overflow-hidden rounded-lg border border-border [&>*:last-child]:border-b-0">
+        {shown.length === 0 ? (
+          <EmptyState className="min-h-0 py-10" description="Runs appear here when someone uses Fix with agent on a failed job, or when fixes start automatically." icon={Bot} title="No agent runs yet" />
+        ) : shown.map((run) => <AgentRunRow key={run.id} run={run} />)}
       </div>
     </section>
   );
