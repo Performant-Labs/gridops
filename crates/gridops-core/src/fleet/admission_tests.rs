@@ -3205,3 +3205,85 @@ async fn successful_retry_clears_previous_queued_reason_from_both_rows() -> Resu
     );
     database.close().await
 }
+
+/// A job either Linux platform could run goes to the one with the most room
+/// on its machines, not simply the first, and a full machine doesn't count.
+#[tokio::test]
+async fn jobs_any_platform_can_run_go_where_machines_have_room() -> Result<()> {
+    use crate::fleet::{Architecture, targets};
+    let database = Database::ready().await?;
+    configure_default(&database).await?;
+    configure_host(&database, WINDOWS_HOST, TARGET).await?;
+    // The pool's second platform, Linux x64, runs on the Windows machine's
+    // Linux VM; the first, Linux arm64, on the Mac's Docker VM, where the
+    // fixture's placed runner holds 1000 of its 2000 millicores.
+    sqlx::raw_sql(
+        "INSERT INTO pool_execution_profiles (id,pool_id,name,enabled,runtime_kind,execution_os,architecture,mode,image,cpu_millis,memory_mib,disk_bytes,all_authorized_hosts,created_at,updated_at)
+           VALUES ('40000000-0000-4000-8000-000000000002','legacy-pool','Docker x64',1,'docker','linux','x64','ephemeral','runner:fixture',1000,1024,1073741824,1,2,2);
+         INSERT INTO profile_ci_targets (profile_id,target_id)
+           VALUES ('40000000-0000-4000-8000-000000000002','30000000-0000-4000-8000-000000000001');
+         UPDATE runner_pools SET autoscaling_enabled=1,paused=0 WHERE id='legacy-pool';
+         UPDATE workload_intents SET status='admitted';
+         INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+           VALUES (80,10,'CI',8,'push','queued','abc','https://github.com/octo-org/gridops/actions/runs/80',1,1,1,1);
+         INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+           VALUES (800,80,'build','queued','[\"self-hosted\",\"linux\"]','https://github.com/octo-org/gridops/actions/runs/80/job/800',1,1);",
+    )
+    .execute(&database.pool)
+    .await?;
+    let profiles = targets::pool_profiles(&database.pool, "legacy-pool").await?;
+    let configured = ["self-hosted".to_owned()];
+    let set_cpu = |domain: &'static str, cpu: i64| {
+        let pool = database.pool.clone();
+        async move {
+            sqlx::query("UPDATE host_resource_domains SET cpu_millis=? WHERE id=?")
+                .bind(cpu)
+                .bind(domain)
+                .execute(&pool)
+                .await
+        }
+    };
+    let choose = || async {
+        anyhow::Ok(
+            targets::choose_platform(&database.pool, "legacy-pool", &configured, 1, &profiles)
+                .await?
+                .map(|(profile, behind)| (profile.input.architecture, behind)),
+        )
+    };
+    let (mac_vm, windows_vm) = (
+        "12000000-0000-4000-8000-000000000001",
+        "22000000-0000-4000-8000-000000000001",
+    );
+
+    // Room for one runner on the Mac and two on Windows: the job goes to x64,
+    // though arm64 is the pool's first platform.
+    assert_eq!(choose().await?, Some((Architecture::X64, true)));
+    // Once its runner starts on Windows, the job stays counted there though
+    // both machines now have equal room, so no second runner starts for it.
+    sqlx::raw_sql(
+        "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,status,created_at,updated_at)
+           VALUES ('runner-x64','legacy-pool',10,'runner-x64','docker','starting',3,3);
+         INSERT INTO fleet_operations (id,kind,principal_kind,principal_scope,idempotency_key,request_hash,status,created_at,updated_at)
+           VALUES ('intent-x64','submit_workload','autoscaler','legacy-pool','op-x64','hash','succeeded',3,3);
+         INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,expected_profile_revision,status,created_at,updated_at)
+           VALUES ('intent-x64','runner-x64',1,'ci_runner','legacy-pool','40000000-0000-4000-8000-000000000002','30000000-0000-4000-8000-000000000001',NULL,1,'admitted',3,3);",
+    )
+    .execute(&database.pool)
+    .await?;
+    set_cpu(windows_vm, 1000).await?;
+    assert_eq!(choose().await?.map(|(_, behind)| behind), Some(false));
+    sqlx::raw_sql(
+        "DELETE FROM workload_intents WHERE id='intent-x64';
+         DELETE FROM fleet_operations WHERE id='intent-x64';
+         DELETE FROM runners WHERE id='runner-x64';",
+    )
+    .execute(&database.pool)
+    .await?;
+    // A full Windows machine doesn't count; the Mac still has room.
+    set_cpu(windows_vm, 500).await?;
+    assert_eq!(choose().await?, Some((Architecture::Arm64, true)));
+    // With no room anywhere, the first platform with a machine waits for it.
+    set_cpu(mac_vm, 1000).await?;
+    assert_eq!(choose().await?, Some((Architecture::Arm64, true)));
+    database.close().await
+}

@@ -819,13 +819,12 @@ pub async fn pool_blocked_hosts(
         .collect())
 }
 
-/// Some active, online machine with a matching enabled backend, the right
-/// grants, no pressure and live work authority. Binds the profile, the
-/// heartbeat cutoff and now.
-macro_rules! authorized_machine {
+/// Each backend, with its host and resource domain, that an active, online
+/// machine offers for a platform, with the right grants, no pressure and live
+/// work authority. Binds the profile, the heartbeat cutoff and now.
+macro_rules! authorized_backends {
     () => {
-        "EXISTS (
-          SELECT 1 FROM pool_execution_profiles p
+        "SELECT b.host_id,b.domain_id FROM pool_execution_profiles p
             JOIN host_backends b ON b.runtime_kind=p.runtime_kind AND b.execution_os=p.execution_os
                                 AND b.architecture=p.architecture AND b.enabled=1 AND b.readiness='ready'
             JOIN fleet_hosts h ON h.id=b.host_id
@@ -835,8 +834,155 @@ macro_rules! authorized_machine {
            WHERE p.id=? AND h.enrollment_state='approved' AND h.lifecycle_state='active'
              AND h.integrity_state='verified' AND h.pressure_state='normal'
              AND h.last_heartbeat_at>? AND h.authority_expires_at>?
-             AND (p.runtime_kind!='native_process' OR g.allow_native=1))"
+             AND (p.runtime_kind!='native_process' OR g.allow_native=1)"
     };
+}
+
+/// Some machine offers an [`authorized_backends`] backend for the platform.
+macro_rules! authorized_machine {
+    () => {
+        concat!("EXISTS (", authorized_backends!(), ")")
+    };
+}
+
+/// Room left on fleet machines, counted in runners per platform. Platforms on
+/// one machine draw on the same resource domains, as admission does.
+struct Room {
+    /// Per (host, resource domain): CPU, memory and disk not yet allocated.
+    free: std::collections::HashMap<(String, String), [i64; 3]>,
+    parents: std::collections::HashMap<(String, String), Option<String>>,
+    /// Per platform: the (host, domain) of each backend that could take it.
+    backends: Vec<Vec<(String, String)>>,
+    /// Per platform: what one runner reserves.
+    request: Vec<[i64; 3]>,
+}
+
+impl Room {
+    async fn load(pool: &SqlitePool, profiles: &[Profile]) -> Result<Self, FleetError> {
+        let now = crate::now_millis();
+        let mut backends = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let rows: Vec<(String, String)> = sqlx::query_as(concat!(
+                "SELECT DISTINCT * FROM (",
+                authorized_backends!(),
+                ")"
+            ))
+            .bind(&profile.id)
+            .bind(now - 45_000)
+            .bind(now)
+            .fetch_all(pool)
+            .await?;
+            backends.push(rows);
+        }
+        let mut free = std::collections::HashMap::new();
+        let mut parents = std::collections::HashMap::new();
+        for row in sqlx::query(
+            "SELECT d.host_id,d.id,d.parent_domain_id,d.cpu_millis,d.memory_mib,d.disk_bytes,
+                    COALESCE(SUM(a.cpu_millis),0) AS used_cpu,COALESCE(SUM(a.memory_mib),0) AS used_memory,
+                    COALESCE(SUM(a.disk_bytes),0) AS used_disk
+               FROM host_resource_domains d
+               LEFT JOIN capacity_allocations a ON a.host_id=d.host_id AND a.domain_id=d.id
+                                              AND a.state!='released'
+              GROUP BY d.host_id,d.id",
+        )
+        .fetch_all(pool)
+        .await?
+        {
+            let key = (row.get::<String, _>("host_id"), row.get::<String, _>("id"));
+            free.insert(
+                key.clone(),
+                [
+                    row.get::<i64, _>("cpu_millis") - row.get::<i64, _>("used_cpu"),
+                    row.get::<i64, _>("memory_mib") - row.get::<i64, _>("used_memory"),
+                    row.get::<i64, _>("disk_bytes") - row.get::<i64, _>("used_disk"),
+                ],
+            );
+            parents.insert(key, row.get("parent_domain_id"));
+        }
+        let request = profiles
+            .iter()
+            .map(|profile| {
+                [
+                    i64::from(profile.input.cpu_millis),
+                    i64::from(profile.input.memory_mib),
+                    i64::try_from(profile.input.disk_bytes).unwrap_or(i64::MAX),
+                ]
+            })
+            .collect();
+        Ok(Self {
+            free,
+            parents,
+            backends,
+            request,
+        })
+    }
+
+    /// The domain and its ancestors, which a runner on it draws from.
+    fn path(&self, (host, domain): &(String, String)) -> Vec<(String, String)> {
+        let mut path = Vec::new();
+        let mut next = Some(domain.clone());
+        while let Some(domain) = next {
+            let key = (host.clone(), domain);
+            if path.contains(&key) {
+                break;
+            }
+            next = self.parents.get(&key).cloned().flatten();
+            path.push(key);
+        }
+        path
+    }
+
+    /// Runners of platform `index` that still fit on this backend.
+    fn fits(&self, index: usize, backend: &(String, String)) -> i64 {
+        let request = self.request[index];
+        self.path(backend)
+            .iter()
+            .map(|domain| {
+                let free = self.free.get(domain).copied().unwrap_or_default();
+                (0..3)
+                    .map(|axis| {
+                        if request[axis] > 0 {
+                            free[axis].max(0) / request[axis]
+                        } else if free[axis] >= 0 {
+                            i64::MAX
+                        } else {
+                            0
+                        }
+                    })
+                    .min()
+                    .unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Runners of platform `index` that still fit across its machines.
+    fn slots(&self, index: usize) -> i64 {
+        self.backends[index]
+            .iter()
+            .map(|backend| self.fits(index, backend))
+            .fold(0, i64::saturating_add)
+    }
+
+    /// Takes one runner's room on the platform's roomiest machine, if any has room.
+    fn take(&mut self, index: usize) {
+        let Some(backend) = self.backends[index]
+            .iter()
+            .filter(|backend| self.fits(index, backend) > 0)
+            .max_by_key(|backend| self.fits(index, backend))
+            .cloned()
+        else {
+            return;
+        };
+        let request = self.request[index];
+        for domain in self.path(&backend) {
+            if let Some(free) = self.free.get_mut(&domain) {
+                for axis in 0..3 {
+                    free[axis] -= request[axis];
+                }
+            }
+        }
+    }
 }
 
 /// Whether a fleet machine can plausibly take this pool's next runner now:
@@ -888,14 +1034,38 @@ pub async fn platform_jobs(
 ) -> Result<Vec<crate::QueuedJob>, FleetError> {
     let platform = profiles.iter().position(|profile| profile.id == profile_id);
     let available = machines_available(pool, profiles).await?;
-    Ok(
-        attribute_queued_jobs(pool, pool_id, configured_labels, profiles, &available)
-            .await?
-            .into_iter()
-            .filter(|(_, index)| Some(*index) == platform)
-            .map(|(job, _)| job)
-            .collect(),
+    let runners = pool_runners(pool, pool_id).await?;
+    let (jobs, _) = attribute_queued_jobs(
+        pool,
+        pool_id,
+        configured_labels,
+        profiles,
+        &available,
+        &runners,
     )
+    .await?;
+    Ok(jobs
+        .into_iter()
+        .filter(|(_, index)| Some(*index) == platform)
+        .map(|(job, _)| job)
+        .collect())
+}
+
+/// The pool's fleet runners that are up or on their way: each one's platform,
+/// the repository it is registered to, and whether it is on a job.
+async fn pool_runners(
+    pool: &SqlitePool,
+    pool_id: &str,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, FleetError> {
+    Ok(sqlx::query(
+        "SELECT i.profile_id,r.target_repository_id,r.busy
+           FROM runners r JOIN workload_intents i ON i.workload_id=r.id
+          WHERE r.pool_id=? AND r.deleted_at IS NULL
+            AND r.status IN ('starting','online','idle','busy','paused','stopped')",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn machines_available(
@@ -910,46 +1080,109 @@ async fn machines_available(
 }
 
 /// The pool's queued jobs, each with the platform (its index in `profiles`)
-/// it counts for. Jobs no platform can run are left out.
+/// it counts for, and the room left on the platforms' machines once they
+/// have theirs. Jobs no platform can run are left out.
 ///
-/// A queued job counts for the first platform that can run it and has a
-/// machine available; only when none has one does it count for the first
-/// that can run it. Otherwise a job any Linux machine could run would keep
-/// waiting on the first Linux platform while that machine had lost its
-/// authority (an uncertain placement, say) and another sat idle.
+/// A job counts for the platform of one of `runners` not yet on a job that
+/// can take it. Otherwise it needs room: runners waiting for a machine take
+/// theirs first, then jobs only one platform can run. A job several platforms
+/// can run counts for the one with the most room left on its machines, so
+/// work spreads across the fleet instead of queueing on the first platform
+/// while another machine sits idle. With no room anywhere it counts for the
+/// first platform with a machine available, else the first that can run it.
 async fn attribute_queued_jobs(
     pool: &SqlitePool,
     pool_id: &str,
     configured_labels: &[String],
     profiles: &[Profile],
     available: &[bool],
-) -> Result<Vec<(crate::QueuedJob, usize)>, FleetError> {
-    Ok(crate::queued_job_assignments(pool, pool_id)
+    runners: &[sqlx::sqlite::SqliteRow],
+) -> Result<(Vec<(crate::QueuedJob, usize)>, Room), FleetError> {
+    let mut room = Room::load(pool, profiles).await?;
+    let waiting_runners: Vec<String> = sqlx::query_scalar(
+        "SELECT profile_id FROM workload_intents WHERE pool_id=? AND status='queued'",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?;
+    for profile_id in waiting_runners {
+        if let Some(index) = profiles.iter().position(|profile| profile.id == profile_id) {
+            room.take(index);
+        }
+    }
+    // Per platform: the repository, if any, of each runner not yet on a job.
+    // Such a runner takes a queued job it can run wherever it is.
+    let mut spare = profiles
+        .iter()
+        .map(|profile| {
+            runners
+                .iter()
+                .filter(|row| {
+                    row.get::<String, _>("profile_id") == profile.id && !row.get::<bool, _>("busy")
+                })
+                .map(|row| row.get::<Option<i64>, _>("target_repository_id"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut jobs = crate::queued_job_assignments(pool, pool_id)
         .await?
         .into_iter()
-        .filter_map(|job| {
-            let runs = |index: &usize| {
-                platform_supports_labels(
-                    profiles[*index].input.execution_os,
-                    profiles[*index].input.architecture,
-                    &job.labels,
-                    configured_labels,
-                )
-            };
-            (0..profiles.len())
-                .filter(runs)
-                .find(|index| available[*index])
-                .or_else(|| (0..profiles.len()).find(runs))
-                .map(|index| (job, index))
+        .map(|job| {
+            let platforms = (0..profiles.len())
+                .filter(|index| {
+                    platform_supports_labels(
+                        profiles[*index].input.execution_os,
+                        profiles[*index].input.architecture,
+                        &job.labels,
+                        configured_labels,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (platforms, job)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    jobs.sort_by_key(|(platforms, _)| platforms.len() > 1);
+    let mut attributed = Vec::with_capacity(jobs.len());
+    for (platforms, job) in jobs {
+        // A job a spare runner covers stays with it; counting it elsewhere
+        // because that runner now takes up room would start a second runner.
+        let covered = platforms.iter().copied().find(|index| {
+            spare[*index]
+                .iter()
+                .position(|repository| {
+                    repository.is_none_or(|repository| repository == job.repository_id)
+                })
+                .map(|at| spare[*index].swap_remove(at))
+                .is_some()
+        });
+        let index = covered.or_else(|| {
+            let index = if let [only] = platforms.as_slice() {
+                *only
+            } else {
+                platforms
+                    .iter()
+                    .copied()
+                    .filter(|index| room.slots(*index) > 0)
+                    .max_by_key(|index| (room.slots(*index), std::cmp::Reverse(*index)))
+                    .or_else(|| platforms.iter().copied().find(|index| available[*index]))
+                    .or_else(|| platforms.first().copied())?
+            };
+            room.take(index);
+            Some(index)
+        });
+        if let Some(index) = index {
+            attributed.push((job, index));
+        }
+    }
+    Ok((attributed, room))
 }
 
 /// The platform a pool's next runner should use: the one with the
 /// longest-waiting prioritised job still short of a runner, else the one
-/// furthest behind the queued jobs it would run, else the first with a machine
-/// available, else the first. The flag says whether that platform is behind.
-/// Each job counts for one platform, as [`attribute_queued_jobs`] says.
+/// furthest behind the queued jobs it would run, else the first with room on a
+/// machine, else the first with a machine available, else the first. The flag
+/// says whether that platform is behind. Each job counts for one platform, as
+/// [`attribute_queued_jobs`] says.
 pub async fn choose_platform<'a>(
     pool: &SqlitePool,
     pool_id: &str,
@@ -964,9 +1197,17 @@ pub async fn choose_platform<'a>(
     // Per platform and repository: prioritised jobs, and when the oldest was
     // queued.
     let mut prioritised = vec![std::collections::HashMap::<i64, (i64, i64)>::new(); profiles.len()];
-    for (job, index) in
-        attribute_queued_jobs(pool, pool_id, configured_labels, profiles, &available).await?
-    {
+    let rows = pool_runners(pool, pool_id).await?;
+    let (jobs, room) = attribute_queued_jobs(
+        pool,
+        pool_id,
+        configured_labels,
+        profiles,
+        &available,
+        &rows,
+    )
+    .await?;
+    for (job, index) in jobs {
         queued[index] += 1;
         waiting[index].insert(job.repository_id);
         if job.prioritised {
@@ -977,15 +1218,6 @@ pub async fn choose_platform<'a>(
             *since = (*since).min(job.queued_at);
         }
     }
-    let rows = sqlx::query(
-        "SELECT i.profile_id,r.target_repository_id,r.busy
-           FROM runners r JOIN workload_intents i ON i.workload_id=r.id
-          WHERE r.pool_id=? AND r.deleted_at IS NULL
-            AND r.status IN ('starting','online','idle','busy','paused','stopped')",
-    )
-    .bind(pool_id)
-    .fetch_all(pool)
-    .await?;
     // An idle runner registered to a repository with no queued job its
     // platform can run cannot take another repository's job, so it doesn't
     // count toward covering the queue.
@@ -1040,7 +1272,8 @@ pub async fn choose_platform<'a>(
         .map(|index| (&profiles[index], true))
         .or_else(|| {
             (0..profiles.len())
-                .find(|index| available[*index])
+                .find(|index| room.slots(*index) > 0)
+                .or_else(|| (0..profiles.len()).find(|index| available[*index]))
                 .or((!profiles.is_empty()).then_some(0))
                 .map(|index| (&profiles[index], false))
         }))
