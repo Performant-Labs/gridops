@@ -848,6 +848,61 @@ async fn waiting_runners_explain_what_is_missing() -> Result<()> {
         )
         .await?
     );
+
+    // A pool an operator paused says so rather than blaming the machines.
+    let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let runner = Uuid::new_v4();
+    service
+        .submit_intent(
+            &Principal::Reconciler,
+            SubmitIntent {
+                idempotency_key: "runner:ready".into(),
+                pool_id: "fleet-pool".into(),
+                profile_id: machine.profile_id.parse()?,
+                target_id: machine.target.parse()?,
+                workload_id: WorkloadId::try_new(runner)?,
+                generation: Generation::new(1)?,
+                kind: WorkloadKind::CiRunner,
+                agent_run_id: None,
+                expected_profile_revision: None,
+            },
+        )
+        .await?;
+    let admit_in = |state: &'static str| {
+        let (database, service) = (f.database.clone(), service.clone());
+        async move {
+            sqlx::query("UPDATE runner_pools SET paused=?,state=? WHERE id='fleet-pool'")
+                .bind(state == "draining")
+                .bind(state)
+                .execute(&database)
+                .await?;
+            anyhow::Ok(
+                service
+                    .admit_queued(&Principal::Reconciler, 10)
+                    .await?
+                    .admitted,
+            )
+        }
+    };
+    assert_eq!(admit_in("draining").await?, 0);
+    let queue: Value = f
+        .client
+        .get(f.url("/pools/fleet-pool/queue"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let waiting = queue["items"]
+        .as_array()
+        .context("queue")?
+        .iter()
+        .find(|item| item["runnerId"] == runner.to_string())
+        .context("queued runner")?;
+    assert_eq!(waiting["reason"], "pool_paused");
+    // The reconcile pass that raises a pool to scaling is the one queuing the
+    // runner, so a ready machine takes it straight away.
+    assert_eq!(admit_in("scaling").await?, 1);
     Ok(())
 }
 
