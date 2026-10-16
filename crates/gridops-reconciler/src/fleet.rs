@@ -73,32 +73,29 @@ pub(super) async fn choose_profile<'a>(
     .await?)
 }
 
-/// The repository whose queued jobs this platform can run, furthest behind,
-/// so a Windows runner isn't registered to a repository waiting on Linux.
-/// Repositories with prioritised jobs still waiting for a runner come first,
-/// the longest-waiting first.
+/// The repository with queued jobs counted for this platform (see
+/// [`targets::platform_jobs`]), furthest behind, so a Windows runner isn't
+/// registered to a repository waiting on Linux, nor an x64 runner to one an
+/// arm64 machine is to serve. Repositories with prioritised jobs still waiting
+/// for a runner come first, the longest-waiting first.
 async fn repository_for_platform(
     app: &Reconciler,
     pool: &Pool,
+    profiles: &[Profile],
     profile: &Profile,
 ) -> Result<Option<gridops_core::RepositoryCapacity>> {
     let configured = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
     // Per repository: the jobs this platform runs, how many of them are
     // prioritised, and when the oldest of those was queued.
     let mut wanted = std::collections::HashMap::<i64, (i64, i64, Option<i64>)>::new();
-    for job in gridops_core::queued_job_assignments(&app.database, &pool.id).await? {
-        if targets::platform_supports_labels(
-            profile.input.execution_os,
-            profile.input.architecture,
-            &job.labels,
-            &configured,
-        ) {
-            let (queued, prioritised, since) = wanted.entry(job.repository_id).or_default();
-            *queued += 1;
-            if job.prioritised {
-                *prioritised += 1;
-                *since = Some(since.map_or(job.queued_at, |since| since.min(job.queued_at)));
-            }
+    for job in
+        targets::platform_jobs(&app.database, &pool.id, &configured, profiles, &profile.id).await?
+    {
+        let (queued, prioritised, since) = wanted.entry(job.repository_id).or_default();
+        *queued += 1;
+        if job.prioritised {
+            *prioritised += 1;
+            *since = Some(since.map_or(job.queued_at, |since| since.min(job.queued_at)));
         }
     }
     Ok(gridops_core::repository_capacities(&app.database, &pool.id)
@@ -148,14 +145,16 @@ pub(super) async fn machine_ready(
     Ok(targets::machine_ready(&app.database, &pool.id, &profile.id).await?)
 }
 
-/// Creates one fleet runner for the pool and tries to place it.
+/// Creates one fleet runner for the pool on `profile`, one of its
+/// `profiles`, and tries to place it.
 pub(super) async fn provision(
     app: &Reconciler,
     pool: &Pool,
+    profiles: &[Profile],
     profile: &Profile,
 ) -> Result<ProvisionAttempt> {
     let (target_id, repository_id) = if pool.scope == "repository" {
-        let repository = match repository_for_platform(app, pool, profile).await? {
+        let repository = match repository_for_platform(app, pool, profiles, profile).await? {
             Some(repository) => repository,
             None => next_runner_repository(&app.database, &pool.id, pool.queue_scale_factor)
                 .await?

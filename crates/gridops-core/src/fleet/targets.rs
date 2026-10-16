@@ -875,16 +875,81 @@ pub async fn machine_available(pool: &SqlitePool, profile_id: &str) -> Result<bo
     )
 }
 
-/// The platform a pool's next runner should use: the one with the
-/// longest-waiting prioritised job still short of a runner, else the one
-/// furthest behind the queued jobs it would run, else the first with a machine
-/// available, else the first. The flag says whether that platform is behind.
+/// The pool's queued jobs that count for `profile_id`, one of `profiles`.
+/// A runner for that platform should go to one of their repositories: a job
+/// another platform counts would wait for this platform's machines while
+/// that platform's sat idle, and its runner would cover neither queue.
+pub async fn platform_jobs(
+    pool: &SqlitePool,
+    pool_id: &str,
+    configured_labels: &[String],
+    profiles: &[Profile],
+    profile_id: &str,
+) -> Result<Vec<crate::QueuedJob>, FleetError> {
+    let platform = profiles.iter().position(|profile| profile.id == profile_id);
+    let available = machines_available(pool, profiles).await?;
+    Ok(
+        attribute_queued_jobs(pool, pool_id, configured_labels, profiles, &available)
+            .await?
+            .into_iter()
+            .filter(|(_, index)| Some(*index) == platform)
+            .map(|(job, _)| job)
+            .collect(),
+    )
+}
+
+async fn machines_available(
+    pool: &SqlitePool,
+    profiles: &[Profile],
+) -> Result<Vec<bool>, FleetError> {
+    let mut available = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        available.push(machine_available(pool, &profile.id).await?);
+    }
+    Ok(available)
+}
+
+/// The pool's queued jobs, each with the platform (its index in `profiles`)
+/// it counts for. Jobs no platform can run are left out.
 ///
 /// A queued job counts for the first platform that can run it and has a
 /// machine available; only when none has one does it count for the first
 /// that can run it. Otherwise a job any Linux machine could run would keep
 /// waiting on the first Linux platform while that machine had lost its
 /// authority (an uncertain placement, say) and another sat idle.
+async fn attribute_queued_jobs(
+    pool: &SqlitePool,
+    pool_id: &str,
+    configured_labels: &[String],
+    profiles: &[Profile],
+    available: &[bool],
+) -> Result<Vec<(crate::QueuedJob, usize)>, FleetError> {
+    Ok(crate::queued_job_assignments(pool, pool_id)
+        .await?
+        .into_iter()
+        .filter_map(|job| {
+            let runs = |index: &usize| {
+                platform_supports_labels(
+                    profiles[*index].input.execution_os,
+                    profiles[*index].input.architecture,
+                    &job.labels,
+                    configured_labels,
+                )
+            };
+            (0..profiles.len())
+                .filter(runs)
+                .find(|index| available[*index])
+                .or_else(|| (0..profiles.len()).find(runs))
+                .map(|index| (job, index))
+        })
+        .collect())
+}
+
+/// The platform a pool's next runner should use: the one with the
+/// longest-waiting prioritised job still short of a runner, else the one
+/// furthest behind the queued jobs it would run, else the first with a machine
+/// available, else the first. The flag says whether that platform is behind.
+/// Each job counts for one platform, as [`attribute_queued_jobs`] says.
 pub async fn choose_platform<'a>(
     pool: &SqlitePool,
     pool_id: &str,
@@ -892,39 +957,24 @@ pub async fn choose_platform<'a>(
     queue_scale_factor: i64,
     profiles: &'a [Profile],
 ) -> Result<Option<(&'a Profile, bool)>, FleetError> {
-    let mut available = Vec::with_capacity(profiles.len());
-    for profile in profiles {
-        available.push(machine_available(pool, &profile.id).await?);
-    }
+    let available = machines_available(pool, profiles).await?;
     let mut queued = vec![0_i64; profiles.len()];
     // Repositories with queued jobs each platform would run.
     let mut waiting = vec![std::collections::HashSet::<i64>::new(); profiles.len()];
     // Per platform and repository: prioritised jobs, and when the oldest was
     // queued.
     let mut prioritised = vec![std::collections::HashMap::<i64, (i64, i64)>::new(); profiles.len()];
-    for job in crate::queued_job_assignments(pool, pool_id).await? {
-        let runs = |index: &usize| {
-            platform_supports_labels(
-                profiles[*index].input.execution_os,
-                profiles[*index].input.architecture,
-                &job.labels,
-                configured_labels,
-            )
-        };
-        if let Some(index) = (0..profiles.len())
-            .filter(runs)
-            .find(|index| available[*index])
-            .or_else(|| (0..profiles.len()).find(runs))
-        {
-            queued[index] += 1;
-            waiting[index].insert(job.repository_id);
-            if job.prioritised {
-                let (count, since) = prioritised[index]
-                    .entry(job.repository_id)
-                    .or_insert((0, job.queued_at));
-                *count += 1;
-                *since = (*since).min(job.queued_at);
-            }
+    for (job, index) in
+        attribute_queued_jobs(pool, pool_id, configured_labels, profiles, &available).await?
+    {
+        queued[index] += 1;
+        waiting[index].insert(job.repository_id);
+        if job.prioritised {
+            let (count, since) = prioritised[index]
+                .entry(job.repository_id)
+                .or_insert((0, job.queued_at));
+            *count += 1;
+            *since = (*since).min(job.queued_at);
         }
     }
     let rows = sqlx::query(

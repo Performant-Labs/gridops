@@ -1252,23 +1252,23 @@ async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
     }
     let host = fleet::host_serves(pool, profile);
     match profile.input.placement {
-        Placement::Machines => fleet::provision(app, pool, profile).await,
+        Placement::Machines => fleet::provision(app, pool, &profiles, profile).await,
         Placement::MachinesFirst => {
             if !host || fleet::machine_ready(app, pool, profile).await? {
-                fleet::provision(app, pool, profile).await
+                fleet::provision(app, pool, &profiles, profile).await
             } else {
                 provision_on_host(app, pool).await
             }
         }
         Placement::HostFirst => {
             if !host {
-                return fleet::provision(app, pool, profile).await;
+                return fleet::provision(app, pool, &profiles, profile).await;
             }
             let attempt = provision_on_host(app, pool).await?;
             if matches!(attempt, ProvisionAttempt::Deferred { .. })
                 && fleet::machine_ready(app, pool, profile).await?
             {
-                return fleet::provision(app, pool, profile).await;
+                return fleet::provision(app, pool, &profiles, profile).await;
             }
             Ok(attempt)
         }
