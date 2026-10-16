@@ -5,7 +5,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use gridops_core::{
@@ -41,6 +41,8 @@ pub(super) struct FakeDocker {
     pub(super) alive: AtomicBool,
     bootstraps: Mutex<Vec<String>>,
     pub(super) operations: Mutex<Vec<&'static str>>,
+    /// How long each start takes, in milliseconds.
+    pub(super) start_millis: AtomicU64,
     /// The started container's console, written by the test.
     console: Mutex<Option<tokio::io::DuplexStream>>,
 }
@@ -50,6 +52,10 @@ impl RuntimeHelper for FakeDocker {
         let kind = request.operation.database_kind();
         if let Ok(mut operations) = self.operations.lock() {
             operations.push(kind);
+        }
+        if matches!(request.operation, AgentOperation::StartRunner(_)) {
+            let millis = self.start_millis.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(millis)).await;
         }
         let container = || LocalResourceIdentity::Docker {
             object_id: gridops_core::fleet::ids::UpstreamText::new("fake-container")
@@ -344,7 +350,7 @@ pub(super) async fn active_machine_on(
     })
 }
 
-/// Admits one runner of the pool onto `machine` and waits until its
+/// Admits one more runner of the pool onto `machine` and waits until its
 /// environment is prepared.
 pub(super) async fn prepared_placement(
     f: &Fixture,
@@ -352,15 +358,18 @@ pub(super) async fn prepared_placement(
     workload: Uuid,
 ) -> Result<PlacementId> {
     // As the reconciler does: the runner row exists before placement, and
-    // must not count against a pool that allows exactly one runner.
-    sqlx::query("UPDATE runner_pools SET max_count=1 WHERE id='fleet-pool'")
-        .execute(&f.database)
-        .await?;
+    // must not count against a pool that allows exactly the runners it has.
     sqlx::query(
         "INSERT INTO runners (id,pool_id,name,provider,ci_platform,os,architecture,status,ephemeral,configuration_version,created_at,updated_at)
          VALUES (?,'fleet-pool','fleet-runner','docker','github','linux','ARM64','starting',1,1,1,1)",
     )
     .bind(workload.to_string())
+    .execute(&f.database)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_pools SET max_count=(SELECT COUNT(*) FROM runners WHERE pool_id='fleet-pool')
+          WHERE id='fleet-pool'",
+    )
     .execute(&f.database)
     .await?;
     let profile_id = machine.profile_id.as_str();
@@ -373,7 +382,7 @@ pub(super) async fn prepared_placement(
         .submit_intent(
             &Principal::Reconciler,
             SubmitIntent {
-                idempotency_key: "runner:placement-test".into(),
+                idempotency_key: format!("runner:{workload}"),
                 pool_id: "fleet-pool".into(),
                 profile_id: profile_id.parse()?,
                 target_id: machine.target.parse()?,
@@ -387,12 +396,14 @@ pub(super) async fn prepared_placement(
         .await?;
     let report = service.admit_queued(&Principal::Reconciler, 10).await?;
     let reason: Option<String> =
-        sqlx::query_scalar("SELECT reason_code FROM workload_intents LIMIT 1")
+        sqlx::query_scalar("SELECT reason_code FROM workload_intents WHERE workload_id=?")
+            .bind(workload.to_string())
             .fetch_one(&f.database)
             .await?;
     assert_eq!(report.admitted, 1, "not admitted: {reason:?}");
     let placement_id: PlacementId =
-        sqlx::query_scalar::<_, String>("SELECT id FROM workload_placements")
+        sqlx::query_scalar::<_, String>("SELECT id FROM workload_placements WHERE workload_id=?")
+            .bind(workload.to_string())
             .fetch_one(&f.database)
             .await?
             .parse()?;
@@ -437,9 +448,15 @@ pub(super) async fn issue_start(
         allocation_ids: prepare.allocation_ids,
     });
     placement::mark_starting(&f.database, placement_id, &workload.to_string()).await?;
-    placement::issue_command(&f.database, placement_id, start, "start:test", ttl_ms)
-        .await?
-        .context("start command")?;
+    placement::issue_command(
+        &f.database,
+        placement_id,
+        start,
+        &format!("start:{placement_id}"),
+        ttl_ms,
+    )
+    .await?
+    .context("start command")?;
 
     Ok(())
 }

@@ -33,6 +33,8 @@ struct Faults {
     /// The next poll reply carrying a command reaches the API, which records
     /// the command as delivered, but never the agent.
     swallow_command: AtomicBool,
+    /// Requests for registration material wait while this is set.
+    hold_bootstrap: AtomicBool,
 }
 
 struct Proxy {
@@ -67,6 +69,9 @@ async fn forward(
         .to_owned();
     if path.ends_with("/commands/result") && faults.refuse_results.load(Ordering::SeqCst) {
         return unavailable();
+    }
+    while path.ends_with("/bootstrap") && faults.hold_bootstrap.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let mut forwarded = client.request(request.method().clone(), format!("{upstream}{path}"));
     for (name, value) in request.headers() {
@@ -127,6 +132,35 @@ async fn has_authority(f: &Fixture, host: &str) -> Result<Option<()>> {
         .then_some(()))
 }
 
+async fn agent_session(f: &Fixture, host: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT agent_session_id FROM fleet_hosts WHERE id=?")
+            .bind(host)
+            .fetch_one(&f.database)
+            .await?,
+    )
+}
+
+/// The placement's start command: its state and how often it was delivered.
+async fn start_command(f: &Fixture, placement: PlacementId) -> Result<(String, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT state,attempt_count FROM host_commands WHERE placement_id=? AND kind='start_runner'",
+    )
+    .bind(placement.to_string())
+    .fetch_one(&f.database)
+    .await?)
+}
+
+fn starts(runtime: &FakeDocker) -> Result<usize> {
+    Ok(runtime
+        .operations
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .iter()
+        .filter(|operation| **operation == "start_runner")
+        .count())
+}
+
 async fn allocation_states(f: &Fixture, placement: PlacementId) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT DISTINCT state FROM capacity_allocations WHERE placement_id=? ORDER BY state",
@@ -151,7 +185,7 @@ async fn host_recovers_when_a_started_runner_result_is_lost_past_its_deadline() 
     let placement_id = prepared_placement(&f, &machine, workload).await?;
 
     proxy.faults.refuse_results.store(true, Ordering::SeqCst);
-    issue_start(&f, placement_id, workload, 2_000).await?;
+    issue_start(&f, placement_id, workload, 7_000).await?;
     within("the start to run", || async {
         Ok(runtime
             .operations
@@ -161,7 +195,7 @@ async fn host_recovers_when_a_started_runner_result_is_lost_past_its_deadline() 
             .then_some(()))
     })
     .await?;
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    tokio::time::sleep(Duration::from_secs(7)).await;
     // Any poll for the host now finds the start past its deadline without
     // an answer: the placement is uncertain, which withholds work authority.
     let identity = machine.journal.identity().await?.context("identity")?;
@@ -232,6 +266,104 @@ async fn host_recovers_when_a_delivered_command_never_reaches_it() -> Result<()>
             .contains(&"start_runner")
     );
     within("work authority", || has_authority(&f, &host)).await?;
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
+    Ok(())
+}
+
+/// The 2026-10-16 12:07 lockout: three starts went to the Mac together. Its
+/// agent ran them one by one, each took 30 s under load, and it refused the
+/// third as expired. With no answer, that start went uncertain and the Mac
+/// took no work until its agent restarted. Commands now leave one at a time,
+/// so a start that waits too long expires in the API's outbox instead: it's
+/// cancelled, its capacity released, and the machine keeps working. This
+/// holds for agents that predate the fix.
+#[tokio::test]
+async fn a_start_queued_behind_a_slow_one_expires_before_reaching_the_machine() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+    let slow = prepared_placement(&f, &machine, first).await?;
+    let queued = prepared_placement(&f, &machine, second).await?;
+    let session = agent_session(&f, &host).await?;
+
+    runtime.start_millis.store(6_500, Ordering::SeqCst);
+    issue_start(&f, slow, first, 30_000).await?;
+    issue_start(&f, queued, second, 6_000).await?;
+    within("the slow start", || async {
+        Ok((placement_state(&f, slow).await? == "running").then_some(()))
+    })
+    .await?;
+    within("the queued start to settle", || async {
+        Ok((placement_state(&f, queued).await? == "failed").then_some(()))
+    })
+    .await?;
+    assert_eq!(
+        start_command(&f, queued).await?,
+        ("cancelled".to_owned(), 0)
+    );
+    assert_eq!(starts(&runtime)?, 1);
+    assert_eq!(allocation_states(&f, queued).await?, ["released"]);
+    assert_eq!(allocation_states(&f, slow).await?, ["committed"]);
+    within("work authority", || has_authority(&f, &host)).await?;
+    assert_eq!(agent_session(&f, &host).await?, session);
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
+    Ok(())
+}
+
+/// A start can still reach the machine too late to run: here its
+/// registration material arrives after the deadline, by which time the API
+/// holds the start uncertain and the machine has no work. The agent answers
+/// that it never ran the start, and that settles it: the runner fails, its
+/// capacity is released, and the machine works again with no restart.
+#[tokio::test]
+async fn host_recovers_when_its_agent_gets_a_start_too_late_to_run() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let proxy = Proxy::start(&f.origin).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &proxy.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    let session = agent_session(&f, &host).await?;
+
+    proxy.faults.hold_bootstrap.store(true, Ordering::SeqCst);
+    issue_start(&f, placement_id, workload, 7_000).await?;
+    within("the start to reach the agent", || async {
+        Ok((start_command(&f, placement_id).await?.0 == "delivered").then_some(()))
+    })
+    .await?;
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let identity = machine.journal.identity().await?.context("identity")?;
+    inventory::agent_post(
+        &f,
+        &host,
+        identity.credential.expose_secret(),
+        "commands/poll",
+    )
+    .json(&json!({"authority_session_id":Uuid::new_v4(),"wait_ms":0,"limit":1}))
+    .send()
+    .await?
+    .error_for_status()?;
+    assert_eq!(placement_state(&f, placement_id).await?, "uncertain");
+
+    proxy.faults.hold_bootstrap.store(false, Ordering::SeqCst);
+    within("the late start to settle", || async {
+        Ok((placement_state(&f, placement_id).await? == "failed").then_some(()))
+    })
+    .await?;
+    assert_eq!(start_command(&f, placement_id).await?.0, "failed");
+    assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
+    assert_eq!(starts(&runtime)?, 0);
+    within("work authority", || has_authority(&f, &host)).await?;
+    assert_eq!(agent_session(&f, &host).await?, session);
 
     let _ = machine.stop.send(());
     assert_eq!(machine.running.await??, Stop::Shutdown);
@@ -468,8 +600,8 @@ async fn an_administrator_repairs_a_placement_the_agent_cannot_confirm() -> Resu
 
     // The start's result never gets through, and its deadline passes.
     proxy.faults.refuse_results.store(true, Ordering::SeqCst);
-    issue_start(&f, placement_id, workload, 2_000).await?;
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    issue_start(&f, placement_id, workload, 7_000).await?;
+    tokio::time::sleep(Duration::from_millis(7_500)).await;
     let identity = machine.journal.identity().await?.context("identity")?;
     inventory::agent_post(
         &f,

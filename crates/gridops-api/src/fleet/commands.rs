@@ -28,7 +28,9 @@ const POLL_STEP: Duration = Duration::from_millis(500);
 pub(super) struct PollBody {
     authority_session_id: AuthoritySessionId,
     wait_ms: BoundedInteger<0, 25_000>,
-    limit: BoundedInteger<1, 16>,
+    /// Older agents ask for a batch; commands go out one at a time anyway.
+    #[serde(rename = "limit")]
+    _limit: BoundedInteger<1, 16>,
 }
 
 #[derive(Serialize)]
@@ -43,11 +45,10 @@ pub(super) async fn poll(
     FleetJson(body): FleetJson<PollBody>,
 ) -> Result<Json<PollResponse>, FleetApiError> {
     let service = RegistryService::new(state.database, state.vault);
-    let limit = u32::try_from(body.limit.get()).unwrap_or(16);
     let deadline = tokio::time::Instant::now() + Duration::from_millis(body.wait_ms.get());
     loop {
         let commands = service
-            .poll_commands(agent.authenticated(), body.authority_session_id, limit)
+            .poll_commands(agent.authenticated(), body.authority_session_id)
             .await
             .map_err(|error| context.registry_error(&error))?;
         if !commands.is_empty() || tokio::time::Instant::now() + POLL_STEP > deadline {

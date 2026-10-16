@@ -415,14 +415,7 @@ impl AgentCommandEnvelope {
         session: &ExpectedAgentSession,
         now: WireTimestamp,
     ) -> Result<ValidatedCommand<'_>, CommandError> {
-        self.check_shape()?;
-        if self.host_id != session.host_id
-            || self.host_epoch != session.host_epoch
-            || self.control_plane_incarnation != session.control_plane_incarnation
-            || self.authority_session_id != session.authority_session_id
-        {
-            return Err(CommandError::Authority);
-        }
+        self.validate_binding(session)?;
         if now < self.issued_at || now >= self.deadline_at || now >= session.authority_expires_at {
             return Err(CommandError::Deadline);
         }
@@ -431,9 +424,24 @@ impl AgentCommandEnvelope {
         {
             return Err(CommandError::Deadline);
         }
+        Ok(ValidatedCommand(self))
+    }
+
+    /// Everything [`Self::validate_against`] checks except time: the command
+    /// is well formed, sealed, and meant for this session. One that passes
+    /// this but not `validate_against` came outside its time to run.
+    pub fn validate_binding(&self, session: &ExpectedAgentSession) -> Result<(), CommandError> {
+        self.check_shape()?;
+        if self.host_id != session.host_id
+            || self.host_epoch != session.host_epoch
+            || self.control_plane_incarnation != session.control_plane_incarnation
+            || self.authority_session_id != session.authority_session_id
+        {
+            return Err(CommandError::Authority);
+        }
         if self.request_hash != self.canonical_hash()? {
             return Err(CommandError::Hash);
         }
-        Ok(ValidatedCommand(self))
+        Ok(())
     }
 }
