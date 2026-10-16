@@ -286,6 +286,16 @@ async fn a_start_queued_behind_a_slow_one_expires_before_reaching_the_machine() 
     let runtime = Arc::new(FakeDocker::default());
     let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
     let host = machine.host.to_string();
+    // The machine runs both runners at once. Its default budget follows the
+    // test host's CPU count, which on a 2-CPU runner fits only one, so an
+    // administrator sets a budget for two.
+    sqlx::query(
+        "UPDATE host_resource_domains SET cpu_millis=4000,revision=revision+1
+          WHERE host_id=? AND parent_domain_id IS NULL",
+    )
+    .bind(&host)
+    .execute(&f.database)
+    .await?;
     let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
     let slow = prepared_placement(&f, &machine, first).await?;
     let queued = prepared_placement(&f, &machine, second).await?;
