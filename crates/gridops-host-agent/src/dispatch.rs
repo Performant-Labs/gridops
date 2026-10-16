@@ -81,13 +81,19 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         bootstrap: Option<Bootstrap>,
     ) -> Result<AgentCommandResult, DispatchError> {
         let envelope: AgentCommandEnvelope = parse_json(body, DEFAULT_JSON_BYTES)?;
-        envelope.validate_against(session, now)?;
+        envelope.validate_binding(session)?;
+        // A command for this session that came too late (it waited behind
+        // others, or its deadline ran out in transit) is answered as not run
+        // rather than refused. With no answer the server holds it uncertain,
+        // and that keeps the whole host from work until the agent restarts.
+        let in_time = envelope.validate_against(session, now).is_ok();
         let outcome = match self.journal.receive(&envelope).await? {
             Receipt::Completed(result) => return Ok(*result),
             Receipt::Interrupted => CommandOutcome::Uncertain {
                 code: UncertainCode::LocalStateUnknown,
                 diagnostic: None,
             },
+            Receipt::New if !in_time => refused(FailureCode::Deadline),
             Receipt::New => self.execute(&envelope, bootstrap).await?,
         };
         let mut result = result(&envelope, outcome, now)?;

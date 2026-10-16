@@ -2,10 +2,10 @@
 //!
 //! Commands are sealed to the session that held work authority when they were
 //! issued and can't be rewritten. Delivery therefore only hands out commands
-//! for the agent's current session. A command that never left the outbox and
-//! no longer can (its session ended or its deadline passed) is cancelled here,
-//! which is also proof that nothing it would have started can exist, so its
-//! placement's capacity is released.
+//! for the agent's current session, one at a time. A command that never left
+//! the outbox and no longer can (its session ended or its deadline is too
+//! close) is cancelled here, which is also proof that nothing it would have
+//! started can exist, so its placement's capacity is released.
 //!
 //! Results are checked against the stored envelope, recorded once by hash, and
 //! move the placement forward. A result for a command that already finished is
@@ -25,6 +25,10 @@ use crate::fleet::{
 
 /// A delivered command is offered again if no result arrived within this long.
 const REDELIVERY_MILLIS: i64 = 60_000;
+/// A command is handed to the agent only with at least this long left before
+/// its deadline. The agent checks the deadline by its own clock after fetching
+/// what the command needs, and refuses a command it gets too late.
+const DELIVERY_MARGIN_MILLIS: i64 = 5_000;
 const MAX_ATTEMPTS: i64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,13 +38,20 @@ pub enum ResultDisposition {
 }
 
 impl RegistryService {
-    /// Commands the agent should run now, oldest first. Returns nothing when
-    /// the session has no current work authority.
+    /// The oldest command the agent should run now, if any. Returns nothing
+    /// when the session has no current work authority.
+    ///
+    /// The agent runs commands one at a time, so it gets them one at a time.
+    /// A batch would leave the later commands waiting on the host, where a
+    /// deadline can pass before the command runs: on 2026-10-16 three starts
+    /// went out together, each took 30 s under load, and the agent refused
+    /// the third as expired. Left with no answer, that start held the host
+    /// uncertain and without work until the agent restarted. A command that
+    /// waits here instead is cancelled once it can't be delivered in time.
     pub async fn poll_commands(
         &self,
         authenticated: &AuthenticatedHost,
         session_id: AuthoritySessionId,
-        limit: u32,
     ) -> Result<Vec<AgentCommandEnvelope>, RegistryError> {
         let now = self.clock.now_millis();
         let host_id = authenticated.host_id.to_string();
@@ -82,14 +93,13 @@ impl RegistryService {
                 AND json_extract(c.payload_json,'$.authority_session_id')=?
                 AND (c.state='pending' OR (c.state='delivered' AND c.attempt_count<? AND NOT EXISTS (
                      SELECT 1 FROM host_command_attempts a WHERE a.command_id=c.id AND a.recorded_at>?)))
-              ORDER BY c.cursor LIMIT ?",
+              ORDER BY c.cursor LIMIT 1",
         )
         .bind(&host_id)
-        .bind(now)
+        .bind(now + DELIVERY_MARGIN_MILLIS)
         .bind(session_id.to_string())
         .bind(MAX_ATTEMPTS)
         .bind(now - REDELIVERY_MILLIS)
-        .bind(i64::from(limit))
         .fetch_all(&mut *tx)
         .await?;
         let mut commands = Vec::with_capacity(rows.len());
@@ -500,10 +510,11 @@ pub(super) async fn settle_unreceived(
 }
 
 /// Cancels pending commands that can no longer be delivered: their session
-/// ended or their deadline passed. A delivered command past its deadline is
-/// uncertain, because the agent may have acted on it. Only commands that can
-/// change a workload make its placement uncertain; an unanswered `inspect`
-/// leaves the placement as it was, and a later inspect checks again.
+/// ended or their deadline is within the delivery margin. A delivered command
+/// past its deadline is uncertain, because the agent may have acted on it.
+/// Only commands that can change a workload make its placement uncertain; an
+/// unanswered `inspect` leaves the placement as it was, and a later inspect
+/// checks again.
 async fn cancel_undeliverable(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: &str,
@@ -511,14 +522,16 @@ async fn cancel_undeliverable(
 ) -> Result<(), RegistryError> {
     let rows = sqlx::query(
         "SELECT c.id,c.kind,c.state,c.placement_id FROM host_commands c JOIN fleet_hosts h ON h.id=c.host_id
-          WHERE c.host_id=? AND c.state IN ('pending','delivered') AND (
-            c.deadline_at<=? OR (c.state='pending' AND (
-              h.agent_session_id IS NULL
+          WHERE c.host_id=? AND (
+            (c.state='delivered' AND c.deadline_at<=?) OR (c.state='pending' AND (
+              c.deadline_at<=?
+              OR h.agent_session_id IS NULL
               OR json_extract(c.payload_json,'$.authority_session_id') IS NOT h.agent_session_id
               OR c.host_epoch IS NOT h.epoch)))",
     )
     .bind(host_id)
     .bind(now)
+    .bind(now + DELIVERY_MARGIN_MILLIS)
     .fetch_all(&mut **tx)
     .await?;
     for row in rows {

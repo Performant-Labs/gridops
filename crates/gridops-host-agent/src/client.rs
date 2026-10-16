@@ -163,7 +163,7 @@ impl Client {
             commands: Vec<serde_json::Value>,
         }
         let body = serde_json::json!({
-            "authority_session_id": session, "wait_ms": 25_000, "limit": 8,
+            "authority_session_id": session, "wait_ms": 25_000, "limit": 1,
         });
         let request = self
             .http
