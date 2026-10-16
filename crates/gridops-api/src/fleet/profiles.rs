@@ -7,12 +7,14 @@ use gridops_core::fleet::{
     FleetError, Principal,
     protocol::browser::ErrorCode,
     targets::{self, FleetSettings, FleetSettingsInput, TargetSummary},
+    workload::{self, FleetWorkload},
 };
 use serde::{Deserialize, Serialize};
 
 use super::{
     boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser},
     error::{FleetApiError, RequestContext},
+    query_boundary::FleetQuery,
 };
 use crate::state::AppState;
 
@@ -94,6 +96,33 @@ pub(super) async fn save_profile(
         .await
         .map_err(|error| fleet_error(context, &error))?;
     Ok(Json(ProfileResponse { item: Some(item) }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkloadParams {
+    window: Option<String>,
+}
+
+/// Each machine's runners, CPU load and memory over the last day, week or
+/// month, for the overview.
+pub(super) async fn workload(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetUser,
+    FleetQuery(params): FleetQuery<WorkloadParams>,
+) -> Result<Json<FleetWorkload>, FleetApiError> {
+    require_admin(&state, &context, user.principal()).await?;
+    let (window, bucket) = match params.window.as_deref().unwrap_or("24h") {
+        "24h" => (86_400_000, 10 * 60_000),
+        "7d" => (7 * 86_400_000, 60 * 60_000),
+        "30d" => (30 * 86_400_000, 6 * 60 * 60_000),
+        _ => return Err(context.error(ErrorCode::InvalidRequest)),
+    };
+    workload::fleet_workload(&state.database, gridops_core::now_millis(), window, bucket)
+        .await
+        .map(Json)
+        .map_err(|error| fleet_error(context, &error))
 }
 
 async fn require_admin(

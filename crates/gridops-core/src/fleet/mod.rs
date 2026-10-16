@@ -12,6 +12,7 @@ pub mod registry;
 pub mod service;
 mod store;
 pub mod targets;
+pub mod workload;
 
 pub use service::{
     FleetError, FleetService, OperationStatus, Submission, SubmissionState, SubmitIntent,

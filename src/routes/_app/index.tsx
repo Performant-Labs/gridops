@@ -10,6 +10,7 @@ import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusDot } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
 import { getCapacityHistory, getDashboardOverview } from "~/features/dashboard/dashboard.functions";
+import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
 import type { CapacityHistory, CapacityWindow, DashboardOverview } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
@@ -58,6 +59,7 @@ function OverviewPage() {
           <div className="grid gap-8 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,1fr)]">
             <div className="min-w-0 space-y-8">
               <CapacitySection installations={data.installations} />
+              {data.authenticated ? <FleetWorkloadSection /> : null}
               <PoolsSection pools={data.pools} />
               <RunsSection runs={data.runs} />
             </div>

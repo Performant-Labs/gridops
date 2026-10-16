@@ -1112,3 +1112,69 @@ async fn prioritised_repositories_get_the_next_runner_first() -> Result<()> {
     assert_eq!(considered().await?, [10]);
     Ok(())
 }
+
+#[tokio::test]
+async fn overview_charts_each_machines_workload() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    prepared_placement(&f, &machine, Uuid::new_v4()).await?;
+    // Two hours ago, before the agent's own samples: full CPU load and half
+    // the machine's memory.
+    let (domain, epoch, cpu, memory): (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT d.id,h.epoch,d.cpu_millis,d.memory_mib FROM host_resource_domains d
+           JOIN fleet_hosts h ON h.id=d.host_id WHERE d.host_id=? AND d.parent_domain_id IS NULL",
+    )
+    .bind(machine.host.to_string())
+    .fetch_one(&f.database)
+    .await?;
+    let earlier = gridops_core::now_millis() - 2 * 3_600_000;
+    sqlx::query(
+        "INSERT INTO host_samples (host_id,domain_id,host_epoch,observed_at,received_at,cpu_used_millis,memory_used_mib,coverage)
+         VALUES (?,?,?,?,?,?,?,'complete')",
+    )
+    .bind(machine.host.to_string())
+    .bind(&domain)
+    .bind(epoch)
+    .bind(earlier)
+    .bind(earlier)
+    .bind(cpu)
+    .bind(memory / 2)
+    .execute(&f.database)
+    .await?;
+
+    let workload: Value = f
+        .client
+        .get(f.url("/workload?window=24h"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let machines = workload["machines"].as_array().context("machines")?;
+    let slot = machines
+        .iter()
+        .position(|item| item["id"] == machine.host.to_string())
+        .context("the machine is charted")?;
+    let points = workload["points"].as_array().context("points")?;
+    assert_eq!(points.len(), 24 * 6 + 1, "ten-minute buckets over a day");
+    let latest = &points.last().context("latest")?["machines"][slot];
+    assert_eq!(latest["runners"], 1.0, "the runner on the machine now");
+    let sampled = points
+        .iter()
+        .map(|point| &point["machines"][slot])
+        .find(|load| load["cpuPercent"] == 100.0)
+        .context("the bucket with the sample")?;
+    assert!((sampled["memoryPercent"].as_f64().context("memory")? - 50.0).abs() <= 0.1);
+    // A day before the placement existed, the machine was idle.
+    assert_eq!(points[0]["machines"][slot]["runners"], 0.0);
+
+    let rejected = f
+        .client
+        .get(f.url("/workload?window=1y"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}

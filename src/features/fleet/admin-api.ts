@@ -8,7 +8,7 @@ import { FleetRequestError } from "./registry-api";
 import {
   backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
-  type GrantPolicy, type HostLifecycle, type ProfileInput, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema } from "./admin-contracts";
+  type GrantPolicy, type HostLifecycle, type ProfileInput, type WorkloadWindow, fleetWorkloadSchema, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema } from "./admin-contracts";
 
 type Options = { signal?: AbortSignal; body?: unknown; method?: "GET" | "POST" | "PUT" };
 
@@ -63,6 +63,8 @@ export const repairUnconfirmed = (hostId: string, placementIds: string[], signal
   });
 export const listTargets = (signal?: AbortSignal) =>
   request("/api/v1/fleet/targets", fleetTargetListSchema, { signal });
+export const getFleetWorkload = (window: WorkloadWindow, signal?: AbortSignal) =>
+  request(`/api/v1/fleet/workload?window=${window}`, fleetWorkloadSchema, { signal });
 export const getPoolQueue = (poolId: string, signal?: AbortSignal) =>
   request(`${profilePath(poolId).replace(/\/profile$/, "")}/queue`, poolQueueSchema, { signal });
 export const getPoolProfile = (poolId: string, signal?: AbortSignal) =>

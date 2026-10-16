@@ -32,6 +32,7 @@ pub(crate) fn router() -> Router<AppState> {
             get(profiles::profile).put(profiles::save_profile),
         )
         .route("/api/v1/fleet/pools/{pool_id}/queue", get(profiles::queue))
+        .route("/api/v1/fleet/workload", get(profiles::workload))
         .route("/api/v1/fleet/hosts", get(query::hosts))
         .route("/api/v1/fleet/hosts/{host_id}", get(query::host))
         .route(
