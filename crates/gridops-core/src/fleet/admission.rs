@@ -226,6 +226,10 @@ pub(crate) async fn admit_operation(
         }
         Err(error) => return Err(error),
     }
+    if let Some(reason) = pool_refusal(tx, &intent.pool_id).await? {
+        persist_rejection(tx, &intent.id, reason, now).await?;
+        return Ok(AdmissionOutcome::Queued);
+    }
     let candidates = candidates(tx, &intent, now).await?;
     let mut last_reason = None;
     for candidate in candidates {
@@ -254,6 +258,41 @@ pub(crate) async fn admit_operation(
     };
     persist_rejection(tx, &intent.id, reason, now).await?;
     Ok(AdmissionOutcome::Queued)
+}
+
+/// Why the intent's pool takes no new runners, if it doesn't: an operator
+/// paused it or all provisioning, or it is shedding runners it no longer
+/// needs. The passing states a reconcile pass sets (scaling, waiting,
+/// updating, backoff, blocked) don't hold work back: the pass that raises a
+/// pool to scaling is the one asking for this runner, and backoff and blocked
+/// track failures on the built-in host, not on machines.
+async fn pool_refusal(
+    tx: &mut Transaction<'_, Sqlite>,
+    pool_id: &str,
+) -> Result<Option<&'static str>, FleetError> {
+    let Some(row) = sqlx::query(
+        "SELECT paused,state,
+                EXISTS (SELECT 1 FROM settings WHERE key='provisioningPaused' AND value='true')
+                  AS provisioning_paused
+           FROM runner_pools WHERE id=?",
+    )
+    .bind(pool_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        if row.get::<bool, _>("paused") || row.get::<String, _>("state") == "paused" {
+            Some("pool_paused")
+        } else if row.get::<String, _>("state") == "draining" {
+            Some("pool_draining")
+        } else if row.get::<bool, _>("provisioning_paused") {
+            Some("provisioning_paused")
+        } else {
+            None
+        },
+    )
 }
 
 /// Names the first requirement no machine meets, so an operator can tell why
@@ -534,7 +573,6 @@ async fn candidates(
                 b.probe_boot_id,b.probe_incarnation
            FROM workload_intents i
            JOIN fleet_operations o ON o.id=i.id
-           JOIN runner_pools rp ON rp.id=i.pool_id
            JOIN pool_execution_profiles p ON p.id=i.profile_id AND p.pool_id=i.pool_id
            JOIN host_backends b ON b.runtime_kind=p.runtime_kind
                                 AND b.execution_os=p.execution_os
@@ -546,7 +584,6 @@ async fn candidates(
            JOIN host_target_grants g ON g.host_id=h.id AND g.target_id=i.target_id
           WHERE i.id=? AND i.status='queued' AND o.status='queued'
             AND NOT EXISTS (SELECT 1 FROM workload_placements existing WHERE existing.intent_id=i.id)
-            AND rp.paused=0 AND rp.state='active'
             AND p.enabled=1 AND p.revision=i.expected_profile_revision
             AND (i.kind != 'fix_sandbox' OR (
               p.runtime_kind='docker' AND p.execution_os='linux'
