@@ -3,7 +3,10 @@
 //! one-time registration material, live console output, inspection and
 //! cleanup. Only the container runtime is a stand-in.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use gridops_core::{
     Vault,
@@ -31,9 +34,11 @@ use tokio::{io::AsyncWriteExt as _, sync::oneshot};
 
 use super::*;
 
-/// Plays a Docker host whose runner exits as soon as it's inspected.
+/// Plays a Docker host whose runner exits as soon as it's inspected, unless
+/// it's `alive`.
 #[derive(Default)]
 pub(super) struct FakeDocker {
+    pub(super) alive: AtomicBool,
     bootstraps: Mutex<Vec<String>>,
     pub(super) operations: Mutex<Vec<&'static str>>,
     /// The started container's console, written by the test.
@@ -71,6 +76,13 @@ impl RuntimeHelper for FakeDocker {
                     execution_profile_id: start.execution_profile_id,
                     profile_revision: start.profile_revision,
                     local_identity: container(),
+                }
+            }
+            (AgentOperation::Inspect { expected_resource }, _)
+                if self.alive.load(Ordering::SeqCst) =>
+            {
+                SuccessEvidence::Inspected {
+                    local_identity: Some(expected_resource.clone()),
                 }
             }
             // The runner has already exited.

@@ -9,7 +9,11 @@ use std::sync::{
 };
 
 use axum::{body::Body, extract::State, http::Request, response::IntoResponse};
-use gridops_core::fleet::ids::PlacementId;
+use gridops_core::fleet::{
+    ids::PlacementId,
+    placement,
+    protocol::agent::{AgentOperation, LocalResourceIdentity},
+};
 use gridops_host_agent::supervisor::Stop;
 use secrecy::ExposeSecret as _;
 
@@ -228,6 +232,99 @@ async fn host_recovers_when_a_delivered_command_never_reaches_it() -> Result<()>
             .contains(&"start_runner")
     );
     within("work authority", || has_authority(&f, &host)).await?;
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
+    Ok(())
+}
+
+/// The 2026-10-16 deploy: the API restarted while a machine's runner was
+/// mid-job, with an inspect delivered but its answer not yet in. The agent's
+/// long poll drops, it reconnects to the new process with a new session and
+/// hands over the journaled answer. Nothing reads the restart as the runner
+/// exiting: the placement keeps running, its capacity stays committed, and
+/// the runtime is never told to stop or clean it up.
+#[tokio::test]
+async fn an_api_restart_leaves_a_running_runner_alone() -> Result<()> {
+    let mut f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let proxy = Proxy::start(&f.origin).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    runtime.alive.store(true, Ordering::SeqCst);
+    let machine = active_machine(&f, &proxy.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    issue_start(&f, placement_id, workload, 30_000).await?;
+    within("the runner to start", || async {
+        Ok((placement_state(&f, placement_id).await? == "running").then_some(()))
+    })
+    .await?;
+    let database = f.database.clone();
+    let session = || async {
+        Ok::<_, anyhow::Error>(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT agent_session_id FROM fleet_hosts WHERE id=?",
+            )
+            .bind(&host)
+            .fetch_one(&database)
+            .await?,
+        )
+    };
+    let before = session().await?.context("agent session")?;
+
+    proxy.faults.refuse_results.store(true, Ordering::SeqCst);
+    placement::issue_command(
+        &f.database,
+        placement_id,
+        AgentOperation::Inspect {
+            expected_resource: LocalResourceIdentity::Docker {
+                object_id: gridops_core::fleet::ids::UpstreamText::new("fake-container")?,
+            },
+        },
+        "inspect:before-restart",
+        25_000,
+    )
+    .await?
+    .context("inspect command")?;
+    let inspected = || async {
+        Ok::<_, anyhow::Error>(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM host_commands WHERE placement_id=? AND kind='inspect'",
+            )
+            .bind(placement_id.to_string())
+            .fetch_one(&database)
+            .await?,
+        )
+    };
+    within("the inspect to reach the agent", || async {
+        Ok((inspected().await? == "delivered").then_some(()))
+    })
+    .await?;
+
+    f.restart(Duration::from_secs(2)).await?;
+    proxy.faults.refuse_results.store(false, Ordering::SeqCst);
+    within("the agent to reconnect", || async {
+        let current = session().await?;
+        Ok((current.is_some_and(|current| current != before)
+            && has_authority(&f, &host).await?.is_some())
+        .then_some(()))
+    })
+    .await?;
+    within("the journaled inspect answer", || async {
+        Ok((inspected().await? == "succeeded").then_some(()))
+    })
+    .await?;
+    assert_eq!(placement_state(&f, placement_id).await?, "running");
+    assert!(!placement::reported_gone(&f.database, placement_id, "inspect").await?);
+    assert_eq!(allocation_states(&f, placement_id).await?, ["committed"]);
+    assert_eq!(
+        *runtime
+            .operations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?,
+        ["prepare_environment", "start_runner", "inspect"]
+    );
 
     let _ = machine.stop.send(());
     assert_eq!(machine.running.await??, Stop::Shutdown);

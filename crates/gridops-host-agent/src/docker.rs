@@ -246,20 +246,36 @@ impl RuntimeHelper for DockerRuntime {
             AgentOperation::PrepareEnvironment(prepare) => self.prepare(&request, prepare).await,
             AgentOperation::StartRunner(_) => self.start(&request).await,
             AgentOperation::Inspect { expected_resource } => {
-                let running = match self.owned(expected_resource).await {
-                    Some(id) => docker(&["inspect", "-f", "{{.State.Running}}", &id])
-                        .await
-                        .is_ok_and(|state| state == "true"),
-                    None => false,
+                let LocalResourceIdentity::Docker { object_id } = expected_resource else {
+                    return failed(FailureCode::Unsupported, false);
                 };
+                let state = docker(&[
+                    "inspect",
+                    "-f",
+                    &format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{LABEL}\"}}}}"),
+                    object_id.as_str(),
+                ])
+                .await;
                 // A stopped or missing runner is reported as unavailable, which
-                // tells the reconciler to clean it up.
-                if running {
-                    succeeded(SuccessEvidence::Inspected {
-                        local_identity: Some(expected_resource.clone()),
-                    })
-                } else {
-                    failed(FailureCode::ResourceUnavailable, false)
+                // tells the reconciler to retire it and clean it up. Docker
+                // failing to answer says nothing about the runner, so it must
+                // not read as an exit: that would kill a runner mid-job.
+                match state {
+                    // Running, and labelled as this agent's environment.
+                    Ok(state)
+                        if state.split_once(' ').is_some_and(|(running, label)| {
+                            running == "true" && !label.is_empty()
+                        }) =>
+                    {
+                        succeeded(SuccessEvidence::Inspected {
+                            local_identity: Some(expected_resource.clone()),
+                        })
+                    }
+                    Ok(_) => failed(FailureCode::ResourceUnavailable, false),
+                    Err(error) if missing(&error) => {
+                        failed(FailureCode::ResourceUnavailable, false)
+                    }
+                    Err(_) => failed(FailureCode::Runtime, true),
                 }
             }
             AgentOperation::Stop {
@@ -288,10 +304,10 @@ impl RuntimeHelper for DockerRuntime {
                 let LocalResourceIdentity::Docker { object_id } = expected_resource else {
                     return failed(FailureCode::Unsupported, false);
                 };
-                if docker(&["inspect", object_id.as_str()]).await.is_ok() {
-                    return failed(FailureCode::Runtime, true);
+                match docker(&["inspect", object_id.as_str()]).await {
+                    Err(error) if missing(&error) => cleaned(expected_resource),
+                    _ => failed(FailureCode::Runtime, true),
                 }
-                cleaned(expected_resource)
             }
             AgentOperation::InspectHost => succeeded(SuccessEvidence::Inspected {
                 local_identity: None,
@@ -476,6 +492,12 @@ async fn docker(args: &[&str]) -> anyhow::Result<String> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Whether a failed `docker` call failed because the object doesn't exist.
+fn missing(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("no such object") || message.contains("no such container")
 }
 
 fn started(

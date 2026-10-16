@@ -108,6 +108,28 @@ impl GitHubClient {
     }
 
     pub async fn delete(&self, path: &str, token: &str) -> Result<()> {
+        match self.try_delete(path, token).await? {
+            None => Ok(()),
+            Some((status, details)) => delete_failed(status, &details),
+        }
+    }
+
+    /// Removes a self-hosted runner's registration. `Ok(false)` when GitHub
+    /// refuses because the runner is running a job.
+    pub async fn remove_runner(&self, path: &str, token: &str) -> Result<bool> {
+        match self.try_delete(path, token).await? {
+            None => Ok(true),
+            Some((StatusCode::UNPROCESSABLE_ENTITY, details))
+                if details.contains("running a job") =>
+            {
+                Ok(false)
+            }
+            Some((status, details)) => delete_failed(status, &details),
+        }
+    }
+
+    /// Sends a DELETE; the status and body when GitHub refused it.
+    async fn try_delete(&self, path: &str, token: &str) -> Result<Option<(StatusCode, String)>> {
         let response = self
             .http
             .delete(format!("https://api.github.com{path}"))
@@ -117,14 +139,10 @@ impl GitHubClient {
             .send()
             .await?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
-            return Ok(());
+            return Ok(None);
         }
         let status = response.status();
-        let details = response.text().await.unwrap_or_default();
-        bail!(
-            "GitHub API delete failed ({status}): {}",
-            details.chars().take(500).collect::<String>()
-        );
+        Ok(Some((status, response.text().await.unwrap_or_default())))
     }
 
     pub async fn installation_token(&self, installation_id: i64) -> Result<Option<String>> {
@@ -496,4 +514,11 @@ pub struct RunnerGroup {
 #[derive(Deserialize)]
 struct RunnerGroupPage {
     runner_groups: Vec<RunnerGroup>,
+}
+
+fn delete_failed<T>(status: StatusCode, details: &str) -> Result<T> {
+    bail!(
+        "GitHub API delete failed ({status}): {}",
+        details.chars().take(500).collect::<String>()
+    )
 }
