@@ -1,6 +1,6 @@
 # GridOps CI runner
 
-GridOps' own CI uses an isolated runner image with Node.js 22.13 and Rust 1.96 already installed, plus the musl toolchain for the host's architecture so release builds of the host agent are static. The runtime runner remains capability-free with `no-new-privileges`; build tooling is installed while the image is built, never by a privileged workflow step.
+GridOps' own CI uses an isolated runner image with Node.js 22.13 and Rust 1.96 already installed, plus the musl toolchain for the host's architecture so release builds of the host agent are static. It also carries clang, CMake and the X11/Wayland/Vulkan, audio, D-Bus, font and OpenSSL headers that native GUI apps (such as kanso) need to build. The runtime runner remains capability-free with `no-new-privileges`; build tooling is installed while the image is built, never by a privileged workflow step.
 
 Build the image on the GridOps Docker host:
 

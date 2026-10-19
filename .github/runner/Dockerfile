@@ -11,6 +11,11 @@ USER root
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates musl-tools pkg-config \
+        clang cmake \
+        libasound2-dev libdbus-1-dev libegl-dev libfontconfig-dev libfreetype-dev libssl-dev \
+        libvulkan-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev \
+        libx11-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev \
+        libxcb-shm0-dev libxcb-xfixes0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node
