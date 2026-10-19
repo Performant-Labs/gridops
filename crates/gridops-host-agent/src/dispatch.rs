@@ -23,6 +23,7 @@ use gridops_core::fleet::{
 use uuid::Uuid;
 
 use crate::{
+    activity,
     helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper},
     journal::{Environment, Journal, JournalError, Receipt},
 };
@@ -87,14 +88,38 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         // rather than refused. With no answer the server holds it uncertain,
         // and that keeps the whole host from work until the agent restarts.
         let in_time = envelope.validate_against(session, now).is_ok();
+        let command = activity::kind(&envelope.operation);
+        let placement = activity::placement(&envelope);
+        let placement = placement.as_deref().map(tracing::field::display);
+        let command = tracing::field::display(command);
         let outcome = match self.journal.receive(&envelope).await? {
             Receipt::Completed(result) => return Ok(*result),
-            Receipt::Interrupted => CommandOutcome::Uncertain {
-                code: UncertainCode::LocalStateUnknown,
-                diagnostic: None,
-            },
-            Receipt::New if !in_time => refused(FailureCode::Deadline),
-            Receipt::New => self.execute(&envelope, bootstrap).await?,
+            Receipt::Interrupted => {
+                tracing::warn!(
+                    command,
+                    placement,
+                    "a command was cut short by an agent restart; reporting its effect as unknown"
+                );
+                CommandOutcome::Uncertain {
+                    code: UncertainCode::LocalStateUnknown,
+                    diagnostic: None,
+                }
+            }
+            Receipt::New if !in_time => {
+                tracing::warn!(
+                    command,
+                    placement,
+                    "a command arrived after its deadline; answered as not run"
+                );
+                refused(FailureCode::Deadline)
+            }
+            Receipt::New => {
+                let started = std::time::Instant::now();
+                activity::starting(&envelope, bootstrap.as_ref());
+                let outcome = self.execute(&envelope, bootstrap).await?;
+                activity::finished(&envelope, &outcome, started.elapsed());
+                outcome
+            }
         };
         let mut result = result(&envelope, outcome, now)?;
         if result.validate_against(&envelope).is_err() {

@@ -28,6 +28,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
+    activity,
     client::{Client, ClientError},
     dispatch::{Dispatcher, Trust},
     helper::{Bootstrap, NoRuntime, RuntimeHelper},
@@ -236,6 +237,20 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
             return Ok(Stop::Incompatible);
         }
         let observed_at = now()?;
+        let backends = self.probe.backends().await;
+        let offered = backends
+            .iter()
+            .map(|backend| {
+                format!(
+                    "{} {}/{} {}",
+                    activity::snake(&backend.runtime_kind),
+                    activity::snake(&backend.execution_os),
+                    activity::snake(&backend.architecture),
+                    activity::snake(&backend.readiness)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let report = InventoryReport::new(
             handshake.host_epoch,
             handshake.control_plane_incarnation,
@@ -244,7 +259,7 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
             BrowserCounter::new(1).map_err(internal)?,
             observed_at,
             vec![probe::root_domain(&self.name, (self.measure)()).map_err(internal)?],
-            self.probe.backends().await,
+            backends,
             Vec::new(),
             vec![probe::root_sample(observed_at, (self.measure)()).map_err(internal)?],
         )
@@ -260,6 +275,13 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
         *failures = 0;
         let interval =
             Duration::from_millis(inventory.lease.heartbeat_ms.get()).min(self.heartbeat);
+        tracing::info!(
+            session = %activity::short(&session_id.to_string()),
+            heartbeat = ?interval,
+            backends = %offered,
+            "connected to GridOps as {}",
+            self.name
+        );
         let (authority, watcher) = watch::channel(Authority {
             credential: Arc::new(credential),
             generation: identity.credential_generation,
@@ -275,6 +297,7 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
             let mut sequence = 1_u64;
             let mut inventory_sequence = 1_u64;
             let mut inventory_at = tokio::time::Instant::now();
+            let mut authorized = None;
             loop {
                 tokio::time::sleep(interval).await;
                 sequence += 1;
@@ -328,6 +351,17 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
                         .map_err(internal)?,
                     )
                     .await?;
+                let granted = heartbeat.work_authority_expires_at.is_some();
+                if authorized != Some(granted) {
+                    if granted {
+                        tracing::info!("GridOps granted work authority; taking commands");
+                    } else {
+                        tracing::warn!(
+                            "GridOps is withholding work authority, so this machine takes no commands; check that it's approved and active under Machines"
+                        );
+                    }
+                    authorized = Some(granted);
+                }
                 let mut next = current.clone();
                 next.expires_at = heartbeat.work_authority_expires_at;
                 if let Some(rotation) = heartbeat.pending_rotation {
@@ -495,7 +529,14 @@ impl<H: RuntimeHelper> Supervisor<H> {
     ) -> Result<(), ClientError> {
         let _in_flight = self.in_flight.lock().await;
         let since = gridops_core::now_millis() - RESULT_REDELIVERY_WINDOW.as_millis() as i64;
-        for (envelope, result) in self.journal.undelivered(since).await.map_err(internal)? {
+        let undelivered = self.journal.undelivered(since).await.map_err(internal)?;
+        if !undelivered.is_empty() {
+            tracing::info!(
+                "reporting {} command results GridOps didn't get before the reconnect",
+                undelivered.len()
+            );
+        }
+        for (envelope, result) in undelivered {
             let result = match result {
                 Some(result) => result,
                 None => self
