@@ -1207,3 +1207,97 @@ async fn overview_charts_each_machines_workload() -> Result<()> {
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     Ok(())
 }
+
+/// The overview breaks a fleet runner's start into its phases, and shows how
+/// long reconciler passes take, since a prepared runner waits for one.
+#[tokio::test]
+async fn overview_times_each_phase_of_a_runner_start() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    issue_start(&f, placement_id, workload, 55_000).await?;
+    eventually("running runner", || async {
+        Ok((placement_state(&f, placement_id).await? == "running").then_some(()))
+    })
+    .await?;
+    // The runner was requested five minutes before a machine had room, and
+    // took a job fifteen seconds after it was told to start. Commands keep
+    // the times they were really sent and answered.
+    let (placed, prepare_sent, prepared, start_sent): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT pl.created_at,prepare.issued_at,
+                (SELECT MIN(r.received_at) FROM host_command_results r WHERE r.command_id=prepare.id),
+                start.issued_at
+           FROM workload_placements pl
+           JOIN host_commands prepare ON prepare.placement_id=pl.id AND prepare.kind='prepare_environment'
+           JOIN host_commands start ON start.placement_id=pl.id AND start.kind='start_runner'
+          WHERE pl.id=?",
+    )
+    .bind(placement_id.to_string())
+    .fetch_one(&f.database)
+    .await?;
+    let requested = placed - 300_000;
+    sqlx::query("UPDATE workload_intents SET created_at=? WHERE workload_id=?")
+        .bind(requested)
+        .bind(workload.to_string())
+        .execute(&f.database)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_events (id,runner_id,pool_id,event,message,created_at)
+         VALUES (?,?,'fleet-pool','Workflow job in_progress','build',?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(workload.to_string())
+    .bind(start_sent + 15_000)
+    .execute(&f.database)
+    .await?;
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO reconciler_passes (started_at,duration_ms) VALUES (?,1500),(?,90000)")
+        .bind(now - 60_000)
+        .bind(now - 30_000)
+        .execute(&f.database)
+        .await?;
+
+    let overview: Value = f
+        .client
+        .get(format!("{}/api/v1/overview", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let starts = &overview["slo"]["runnerStarts"];
+    let phases = starts["phases"]
+        .as_array()
+        .context("phases")?
+        .iter()
+        .map(|phase| {
+            (
+                phase["id"].as_str().unwrap_or_default(),
+                phase["p50Seconds"].as_i64(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let seconds = |millis: i64| Some((millis + 999) / 1_000);
+    assert_eq!(
+        phases,
+        [
+            ("room", Some(300)),
+            ("preparing", seconds(prepared - prepare_sent)),
+            ("waitingToStart", seconds(start_sent - prepared)),
+            ("starting", Some(15)),
+        ]
+    );
+    assert_eq!(
+        starts["total"]["p50Seconds"].as_i64(),
+        seconds(start_sent + 15_000 - requested)
+    );
+    assert_eq!(starts["total"]["sampleSize"], 1);
+    let pass = &overview["slo"]["reconcilerPass"];
+    assert_eq!(pass["sampleSize"], 2);
+    assert_eq!(pass["p50Seconds"], 2, "1.5s, rounded up");
+    assert_eq!(pass["p95Seconds"], 90);
+    assert_eq!(pass["intervalSeconds"], 30);
+    Ok(())
+}

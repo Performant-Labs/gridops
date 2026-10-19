@@ -252,6 +252,7 @@ pub async fn overview(
               "windowHours": 24,
               "queue": { "oldestSeconds": null, "p95Seconds": null },
               "startLatency": { "sampleSize": 0, "p50Seconds": null, "p95Seconds": null },
+              "runnerStarts": null, "reconcilerPass": null,
               "failures": [], "alerts": [],
             },
             "pools": [], "runs": [], "activity": [], "installations": 0,
@@ -332,6 +333,9 @@ pub async fn overview(
     let queue_p95_ms = percentile_millis(&queue_ages, 95);
     let start_p50_ms = percentile_millis(&start_latencies, 50);
     let start_p95_ms = percentile_millis(&start_latencies, 95);
+    let window_start = now.saturating_sub(24 * 60 * 60 * 1_000);
+    let runner_starts = runner_start_phases(&state, &user.id, window_start).await?;
+    let reconciler_pass = reconciler_passes(&state, window_start).await?;
     let mut failures = failure_reasons.into_iter().collect::<Vec<_>>();
     failures.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     failures.truncate(3);
@@ -506,6 +510,8 @@ pub async fn overview(
                 "p50Seconds": start_p50_ms.map(millis_to_seconds),
                 "p95Seconds": start_p95_ms.map(millis_to_seconds),
             },
+            "runnerStarts": runner_starts,
+            "reconcilerPass": reconciler_pass,
             "failures": failures.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect::<Vec<_>>(),
             "alerts": alerts,
         },
@@ -4657,6 +4663,80 @@ fn capacity_window(window: &str) -> Option<(i64, i64)> {
         "30d" => Some((30 * 86_400_000, 2 * 60 * 60_000)),
         _ => None,
     }
+}
+
+/// How long fleet runners on the viewer's pools took to start since `since`,
+/// phase by phase: waiting for room on a machine, preparing it, waiting to be
+/// told to start (which happens on a reconciler pass), and starting until the
+/// runner took its first job. Each phase counts the runners that got through it.
+async fn runner_start_phases(state: &AppState, user_id: &str, since: i64) -> ApiResult<Value> {
+    let rows = sqlx::query(
+        r#"SELECT i.created_at AS requested_at,pl.created_at AS placed_at,
+             (SELECT MIN(c.issued_at) FROM host_commands c
+               WHERE c.placement_id=pl.id AND c.kind='prepare_environment') AS prepare_sent_at,
+             (SELECT MIN(result.received_at) FROM host_commands c
+                JOIN host_command_results result ON result.command_id=c.id
+               WHERE c.placement_id=pl.id AND c.kind='prepare_environment' AND c.state='succeeded') AS prepared_at,
+             (SELECT MIN(c.issued_at) FROM host_commands c
+               WHERE c.placement_id=pl.id AND c.kind='start_runner') AS start_sent_at,
+             (SELECT MIN(e.created_at) FROM runner_events e
+               WHERE e.runner_id=i.workload_id AND e.event='Workflow job in_progress') AS first_job_at
+           FROM workload_placements pl JOIN workload_intents i ON i.id=pl.intent_id
+          WHERE pl.created_at>=?
+            AND EXISTS (SELECT 1 FROM runner_pool_installations mapped
+                  JOIN user_installations access ON access.installation_id=mapped.installation_id
+                 WHERE mapped.pool_id=i.pool_id AND access.user_id=?)"#,
+    )
+    .bind(since)
+    .bind(user_id)
+    .fetch_all(&state.database)
+    .await?;
+    let span = |from: &str, to: &str| {
+        rows.iter()
+            .filter_map(|row| {
+                let from = row.get::<Option<i64>, _>(from)?;
+                let to = row.get::<Option<i64>, _>(to)?;
+                (to >= from).then_some(to - from)
+            })
+            .collect::<Vec<_>>()
+    };
+    let summary = |values: Vec<i64>| {
+        json!({
+            "sampleSize": values.len(),
+            "p50Seconds": percentile_millis(&values, 50).map(millis_to_seconds),
+            "p95Seconds": percentile_millis(&values, 95).map(millis_to_seconds),
+        })
+    };
+    let phase = |id: &str, from: &str, to: &str| {
+        let mut phase = summary(span(from, to));
+        phase["id"] = json!(id);
+        phase
+    };
+    Ok(json!({
+        "phases": [
+            phase("room", "requested_at", "placed_at"),
+            phase("preparing", "prepare_sent_at", "prepared_at"),
+            phase("waitingToStart", "prepared_at", "start_sent_at"),
+            phase("starting", "start_sent_at", "first_job_at"),
+        ],
+        "total": summary(span("requested_at", "first_job_at")),
+    }))
+}
+
+/// How long reconciler passes took since `since`, and how often they're meant
+/// to run.
+async fn reconciler_passes(state: &AppState, since: i64) -> ApiResult<Value> {
+    let durations: Vec<i64> =
+        sqlx::query_scalar("SELECT duration_ms FROM reconciler_passes WHERE started_at>=?")
+            .bind(since)
+            .fetch_all(&state.database)
+            .await?;
+    Ok(json!({
+        "sampleSize": durations.len(),
+        "p50Seconds": percentile_millis(&durations, 50).map(millis_to_seconds),
+        "p95Seconds": percentile_millis(&durations, 95).map(millis_to_seconds),
+        "intervalSeconds": setting_i64_value(state, "reconcileIntervalSeconds", 30).await,
+    }))
 }
 
 fn percentile_millis(values: &[i64], percentile: usize) -> Option<i64> {

@@ -21,6 +21,13 @@ export type DashboardOverview = {
     windowHours: number;
     queue: { oldestSeconds: number | null; p95Seconds: number | null };
     startLatency: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null };
+    /** Fleet runner starts by phase; older servers omit it. */
+    runnerStarts?: {
+      phases: Array<{ id: RunnerStartPhase; sampleSize: number; p50Seconds: number | null; p95Seconds: number | null }>;
+      total: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null };
+    } | null;
+    /** How long reconciler passes take; older servers omit it. */
+    reconcilerPass?: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null; intervalSeconds: number } | null;
     failures: Array<{ reason: string; count: number }>;
     alerts: Array<{ level: "warning" | "error"; title: string; detail: string; href: "/workflow-runs" | "/runner-pools" | "/webhooks" }>;
   };
@@ -69,3 +76,5 @@ export type CapacityHistory = {
     queued: number;
   }>;
 };
+
+export type RunnerStartPhase = "room" | "preparing" | "waitingToStart" | "starting";
