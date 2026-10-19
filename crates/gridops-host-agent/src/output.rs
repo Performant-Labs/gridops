@@ -20,6 +20,7 @@ use gridops_core::fleet::{
 use tokio::{io::AsyncReadExt as _, sync::watch, task::JoinSet, time::Instant};
 
 use crate::{
+    activity::{self, JobLines},
     client::{Client, ClientError},
     helper::{RunnerOutput, RuntimeHelper},
     journal::{Environment, Journal},
@@ -114,6 +115,10 @@ impl<H> Upload<'_, H> {
         let mut position = 0_u64;
         let mut buffer = Vec::with_capacity(CHUNK_BYTES + READ_BYTES);
         let mut scratch = vec![0; READ_BYTES];
+        let placement = activity::short(&self.placement.to_string());
+        // Only output GridOps doesn't have yet, so a restarted agent doesn't
+        // log a job again.
+        let mut jobs = JobLines::default();
         loop {
             let ended = gather(&mut output, &mut buffer, &mut scratch).await;
             let start = position;
@@ -121,6 +126,10 @@ impl<H> Upload<'_, H> {
             let skip = usize::try_from(self.received.saturating_sub(start))
                 .unwrap_or(usize::MAX)
                 .min(buffer.len());
+            jobs.scan(&placement, &buffer[skip..]);
+            if ended {
+                tracing::info!(placement = %placement, "runner output ended");
+            }
             if (skip < buffer.len() || ended)
                 && self
                     .send(start + skip as u64, &buffer[skip..], ended)

@@ -7,6 +7,7 @@
 //! to a privileged runtime helper ([`dispatch`], [`helper`]). It never accepts
 //! inbound connections or arbitrary commands.
 
+mod activity;
 pub mod client;
 pub mod dispatch;
 pub mod docker;

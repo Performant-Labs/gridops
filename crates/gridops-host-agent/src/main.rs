@@ -50,7 +50,12 @@ async fn main() -> ExitCode {
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                // A service writes to a log file, where colour codes are noise.
+                .with_ansi(std::io::stderr().is_terminal()),
+        )
         .with(LOGS.layer())
         .init();
     match run().await {
@@ -180,7 +185,10 @@ async fn serve(journal: Journal) -> Result<ExitCode> {
     let trust = Trust {
         docker_socket: env::var("GRIDOPS_AGENT_DOCKER_SOCKET").is_ok(),
     };
-    tracing::info!("connecting to {url}");
+    tracing::info!(
+        "gridops-host-agent {} connecting to {url}",
+        env!("CARGO_PKG_VERSION")
+    );
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
