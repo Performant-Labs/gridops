@@ -433,7 +433,7 @@ pub struct WorkflowRunPage {
     pub workflow_runs: Vec<GitHubWorkflowRun>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct GitHubWorkflowRun {
     pub id: i64,
     pub workflow_id: Option<i64>,
@@ -453,7 +453,7 @@ pub struct GitHubWorkflowRun {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct WorkflowActor {
     pub login: String,
 }

@@ -214,6 +214,36 @@ async fn github_sync_worker(app: Reconciler) {
     }
 }
 
+/// Runs a sync write again, up to three times a second apart, when another
+/// writer held the database past its busy timeout. The GitHub sync runs beside
+/// reconciler passes, so without this a long write in a pass would drop a page
+/// GitHub had already sent.
+async fn retry_when_busy<T, F, Fut>(mut write: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for _ in 0..3 {
+        match write().await {
+            Err(error) if database_busy(&error) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            result => return result,
+        }
+    }
+    write().await
+}
+
+/// Whether the database was locked (`SQLITE_BUSY`, in any of its extended forms).
+fn database_busy(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|error| error.code())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 0xff == 5)
+}
+
 /// Keeps how long a pass took, for the overview.
 async fn record_pass(database: &SqlitePool, started_at: i64, elapsed: Duration) -> Result<()> {
     sqlx::query("INSERT INTO reconciler_passes (started_at,duration_ms) VALUES (?,?)")
@@ -957,11 +987,16 @@ async fn sync_repository_workflows(
             job_run_ids.push(run.id);
         }
     }
-    let mut transaction = app.database.begin().await?;
-    for run in response.workflow_runs {
-        upsert_workflow_run(&mut transaction, repository.id, run, now).await?;
-    }
-    transaction.commit().await?;
+    let runs = &response.workflow_runs;
+    retry_when_busy(|| async move {
+        let mut transaction = app.database.begin().await?;
+        for run in runs {
+            upsert_workflow_run(&mut transaction, repository.id, run.clone(), now).await?;
+        }
+        transaction.commit().await?;
+        anyhow::Ok(())
+    })
+    .await?;
     for run_id in job_run_ids {
         if let Err(error) = sync_run_jobs(app, repository, run_id, token).await {
             tracing::warn!(repository = %repository.full_name, run_id, error = ?error, "GitHub workflow job polling failed");
@@ -1136,8 +1171,10 @@ async fn sync_run_jobs(
             .await?;
         let final_page = response.jobs.len() < 100;
         let now = now_millis();
+        let jobs = &response.jobs;
+        retry_when_busy(|| async move {
         let mut transaction = app.database.begin().await?;
-        for job in &response.jobs {
+        for job in jobs {
             sqlx::query(
                 r#"INSERT INTO workflow_jobs (
                   id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,
@@ -1169,6 +1206,9 @@ async fn sync_run_jobs(
             .await?;
         }
         transaction.commit().await?;
+        anyhow::Ok(())
+        })
+        .await?;
         for job in &response.jobs {
             associate_runner_with_job(
                 &app.database,
