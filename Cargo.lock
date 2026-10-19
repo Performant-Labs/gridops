@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-runtime",
  "anyhow",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-host-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-manager"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-reconciler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "gridops-tart-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
