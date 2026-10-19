@@ -254,7 +254,46 @@ fn runner_command() -> Command {
             "$s=[Console]::In.ReadLine(); if (-not $s) { exit 1 }; & .\\run.cmd --jitconfig $s; exit $LASTEXITCODE",
         ])
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if let Some(path) = std::env::var_os("PATH").and_then(|path| {
+        path_with_git_bash(&path, program_files.as_deref(), local_app_data.as_deref())
+    }) {
+        command.env("PATH", path);
+    }
     command
+}
+
+/// `path` with Git for Windows' `bin` first, so a job's `shell: bash` means
+/// Git Bash, as on GitHub's hosted Windows runners. Otherwise the first
+/// `bash` can be WSL's launcher, which can't run step scripts. Git may be
+/// installed for every user or only this one, so its `bin` is looked for
+/// beside the `git` on `path`, then under Program Files, then under the
+/// user's local programs. `None` when none of them has `bash.exe`.
+#[cfg(any(windows, test))]
+fn path_with_git_bash(
+    path: &std::ffi::OsStr,
+    program_files: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<std::ffi::OsString> {
+    let dirs = std::env::split_paths(path).collect::<Vec<_>>();
+    let beside_git = dirs
+        .iter()
+        .find(|dir| dir.join("git.exe").is_file())
+        .and_then(|dir| dir.parent())
+        .map(|git| git.join("bin"));
+    let bin = [
+        beside_git,
+        program_files.map(|dir| dir.join("Git").join("bin")),
+        local_app_data.map(|dir| dir.join("Programs").join("Git").join("bin")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|bin| bin.join("bash.exe").is_file())?;
+    std::env::join_paths(
+        std::iter::once(bin.clone()).chain(dirs.into_iter().filter(|dir| *dir != bin)),
+    )
+    .ok()
 }
 
 /// Starts the runner in its own process group and feeds it the secret.
@@ -543,4 +582,44 @@ fn succeeded(evidence: SuccessEvidence) -> HelperResponse {
 
 const fn failed(code: FailureCode, retryable: bool) -> HelperResponse {
     HelperResponse::Failed { code, retryable }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_runners_find_git_bash_wherever_git_is_installed() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("gridops-git-bash-{}", uuid::Uuid::new_v4()));
+        let per_user = root.join("Local").join("Programs").join("Git");
+        let system = root.join("WINDOWS").join("System32");
+        for dir in [per_user.join("cmd"), per_user.join("bin"), system.clone()] {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(per_user.join("cmd").join("git.exe"), "")?;
+        std::fs::write(system.join("bash.exe"), "")?;
+        let path = std::env::join_paths([system.clone(), per_user.join("cmd")])?;
+
+        // Git without its bash: nothing to put first.
+        assert_eq!(path_with_git_bash(&path, None, None), None);
+
+        // A per-user Git: found beside the git on PATH, or under the user's
+        // local programs, and its bin goes ahead of WSL's bash.
+        std::fs::write(per_user.join("bin").join("bash.exe"), "")?;
+        let expected =
+            std::env::join_paths([per_user.join("bin"), system.clone(), per_user.join("cmd")])?;
+        assert_eq!(
+            path_with_git_bash(&path, None, None),
+            Some(expected.clone())
+        );
+        let without_git = std::env::join_paths([system.clone()])?;
+        assert_eq!(
+            path_with_git_bash(&without_git, None, Some(&root.join("Local"))),
+            Some(std::env::join_paths([per_user.join("bin"), system])?)
+        );
+        // Already first: left where it is, not repeated.
+        assert_eq!(path_with_git_bash(&expected, None, None), Some(expected));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
