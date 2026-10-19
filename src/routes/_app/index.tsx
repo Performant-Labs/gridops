@@ -14,7 +14,7 @@ import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview } from "~/features/dashboard/dashboard.functions";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
-import type { CapacityHistory, CapacityWindow, DashboardOverview } from "~/features/dashboard/types";
+import type { CapacityHistory, CapacityWindow, DashboardOverview, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
 import { RunRow } from "~/features/workflow-runs/run-row";
@@ -332,6 +332,7 @@ function AttentionSection({ data }: { data: DashboardOverview }) {
         <SloCell className="border-l" hint={startLatency.sampleSize ? phrases([`p95 ${formatSeconds(startLatency.p95Seconds)}`, `${startLatency.sampleSize} starts`]) : "No starts"} label="Start latency" value={formatSeconds(startLatency.p50Seconds)} />
         <SloCell className="border-l" hint={failures.length ? phrases(failures.map((item) => `${item.count} ${failureLabel(item.reason)}`)) : "None"} label="Failures" value={String(failures.reduce((total, item) => total + item.count, 0))} />
       </div>
+      {data.slo.runnerStarts?.total.sampleSize ? <RunnerStarts pass={data.slo.reconcilerPass ?? null} starts={data.slo.runnerStarts} /> : null}
       <div className="overflow-hidden rounded-lg border border-border">
         <div className="flex h-9 items-center gap-2 border-b border-border bg-panel-subtle px-4 text-xs font-medium">
           Needs attention<span className="tabular text-faint">{alerts.length}</span>
@@ -350,6 +351,56 @@ function AttentionSection({ data }: { data: DashboardOverview }) {
         )}
       </div>
     </section>
+  );
+}
+
+const START_PHASES: Record<RunnerStartPhase, { label: string; color: string }> = {
+  room: { label: "Waiting for a machine", color: "var(--warning)" },
+  preparing: { label: "Preparing the machine", color: "var(--info)" },
+  waitingToStart: { label: "Waiting to start", color: "var(--progress)" },
+  starting: { label: "Starting, to first job", color: "var(--success)" },
+};
+
+/**
+ * Where a fleet runner's start goes, by median: a bar of the phases in order,
+ * each listed with its p50 and p95, and how long reconciler passes take, since
+ * a prepared runner waits for the next one to be told to start.
+ */
+function RunnerStarts({ starts, pass }: { starts: NonNullable<DashboardOverview["slo"]["runnerStarts"]>; pass: DashboardOverview["slo"]["reconcilerPass"] }) {
+  const total = starts.phases.reduce((sum, phase) => sum + (phase.p50Seconds ?? 0), 0);
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="flex h-9 items-center gap-2 border-b border-border bg-panel-subtle px-4 text-xs font-medium">
+        Runner starts
+        <span className="tabular ml-auto font-normal text-faint">
+          {phrases([`p50 ${formatSeconds(starts.total.p50Seconds)}`, `p95 ${formatSeconds(starts.total.p95Seconds)}`, `${starts.total.sampleSize} runners`])}
+        </span>
+      </div>
+      <div className="space-y-2.5 px-4 py-3">
+        {total > 0 ? (
+          <div aria-hidden className="flex h-2 overflow-hidden rounded-full bg-panel-subtle">
+            {starts.phases.map((phase) => (phase.p50Seconds ? (
+              <span key={phase.id} style={{ backgroundColor: START_PHASES[phase.id].color, width: `${(phase.p50Seconds / total) * 100}%` }} />
+            ) : null))}
+          </div>
+        ) : null}
+        <ul className="space-y-1 text-xs">
+          {starts.phases.map((phase) => (
+            <li className="flex items-center gap-2" key={phase.id}>
+              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: START_PHASES[phase.id].color }} />
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">{START_PHASES[phase.id].label}</span>
+              <span className="tabular font-medium text-foreground">{formatSeconds(phase.p50Seconds)}</span>
+              <span className="tabular w-20 text-right text-faint">p95 {formatSeconds(phase.p95Seconds)}</span>
+            </li>
+          ))}
+        </ul>
+        {pass?.sampleSize ? (
+          <div className="border-t border-border pt-2 text-2xs text-faint">
+            {phrases([`Reconciler pass p50 ${formatSeconds(pass.p50Seconds)}`, `p95 ${formatSeconds(pass.p95Seconds)}`, `every ${formatSeconds(pass.intervalSeconds)}`])}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

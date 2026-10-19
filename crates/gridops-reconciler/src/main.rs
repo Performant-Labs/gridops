@@ -183,23 +183,48 @@ async fn main() -> Result<()> {
     // Agent runs take minutes, so they get their own task rather than holding
     // up runner reconciliation.
     tokio::spawn(agent::worker(reconciler.clone()));
+    // Syncing every repository from GitHub takes over a minute; inside the
+    // pass it held up every runner waiting to be told to start.
+    tokio::spawn(github_sync_worker(reconciler.clone()));
     loop {
+        let started_at = now_millis();
         let started = std::time::Instant::now();
         if let Err(error) = reconcile(&reconciler).await {
             tracing::error!(error = ?error, "reconciliation pass failed");
         }
+        let elapsed = started.elapsed();
+        if let Err(error) = record_pass(&reconciler.database, started_at, elapsed).await {
+            tracing::warn!(error = ?error, "could not record reconciliation pass duration");
+        }
         let interval = setting_i64(&reconciler.database, "reconcileIntervalSeconds", 30)
             .await
             .clamp(5, 3_600);
-        let elapsed = started.elapsed();
         tokio::time::sleep(Duration::from_secs(interval as u64).saturating_sub(elapsed)).await;
     }
 }
 
-async fn reconcile(app: &Reconciler) -> Result<()> {
-    if let Err(error) = maybe_sync_github(app).await {
-        tracing::warn!(error = ?error, "periodic GitHub workflow sync failed");
+/// Polls GitHub for workflow runs and jobs on its own schedule
+/// (`githubSyncIntervalSeconds`), so a slow sync never delays a pass.
+async fn github_sync_worker(app: Reconciler) {
+    loop {
+        if let Err(error) = maybe_sync_github(&app).await {
+            tracing::warn!(error = ?error, "periodic GitHub workflow sync failed");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+/// Keeps how long a pass took, for the overview.
+async fn record_pass(database: &SqlitePool, started_at: i64, elapsed: Duration) -> Result<()> {
+    sqlx::query("INSERT INTO reconciler_passes (started_at,duration_ms) VALUES (?,?)")
+        .bind(started_at)
+        .bind(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Err(error) = retry_github_runner_cleanup(app).await {
         tracing::warn!(error = ?error, "deferred GitHub runner cleanup pass failed");
     }
@@ -1869,6 +1894,10 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
         .await?;
     // Machine samples back the overview's workload chart, which shows up to 30 days.
     sqlx::query("DELETE FROM host_samples WHERE received_at < ?")
+        .bind(capacity_cutoff)
+        .execute(&app.database)
+        .await?;
+    sqlx::query("DELETE FROM reconciler_passes WHERE started_at < ?")
         .bind(capacity_cutoff)
         .execute(&app.database)
         .await?;
