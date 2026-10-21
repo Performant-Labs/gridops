@@ -256,10 +256,15 @@ async fn send<T: DeserializeOwned>(request: reqwest::RequestBuilder) -> Result<T
         .map_err(|error| ClientError::Unavailable(error.without_url().to_string()))?;
     let status = response.status();
     if status.is_success() {
-        return response
-            .json()
+        let body = response
+            .bytes()
             .await
-            .map_err(|error| ClientError::Unavailable(error.without_url().to_string()));
+            .map_err(|error| ClientError::Unavailable(error.without_url().to_string()))?;
+        // A reply with no body (204) is read as null. Treating it as a
+        // failure made the agent resend every log batch it had delivered.
+        let body = if body.is_empty() { &b"null"[..] } else { &body };
+        return serde_json::from_slice(body)
+            .map_err(|error| ClientError::Unavailable(error.to_string()));
     }
     if status == StatusCode::UNAUTHORIZED {
         return Err(ClientError::Unauthenticated);

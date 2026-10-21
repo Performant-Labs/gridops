@@ -118,12 +118,14 @@ pub(super) async fn logs(
     context: RequestContext,
     agent: FleetAgent,
     FleetJson(body): FleetJson<gridops_core::fleet::registry::logs::AgentLogBatch>,
-) -> Result<axum::http::StatusCode, FleetApiError> {
+) -> Result<Json<serde_json::Value>, FleetApiError> {
     RegistryService::new(state.database, state.vault)
         .store_agent_logs(agent.authenticated(), body)
         .await
         .map_err(|error| context.registry_error(&error))?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    // Agents up to 0.1.2 read a JSON body from every reply, and resend the
+    // batch when there is none.
+    Ok(Json(serde_json::json!({})))
 }
 
 /// Console output of a runner on this host, for the job log view.

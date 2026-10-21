@@ -286,3 +286,88 @@ async fn agent_ships_its_log_lines() -> Result<()> {
     assert_eq!(running.await??, Stop::Shutdown);
     Ok(())
 }
+
+#[tokio::test]
+async fn agent_log_resends_are_stored_once_and_floods_are_capped() -> Result<()> {
+    let f = Fixture::new().await?;
+    control_plane(&f).await?;
+    let (supervisor, journal) = agent(&f).await?;
+    let code = f.issue("agent-log-flood").await?;
+    supervisor
+        .enroll(code["code"].as_str().context("code")?, None)
+        .await?;
+    let identity = journal.identity().await?.context("identity")?;
+    let (host, credential) = (identity.host_id, identity.credential);
+    let client = Client::new(&f.origin)?;
+    let lines = |range: std::ops::Range<i64>| -> Vec<gridops_host_agent::logs::LogLine> {
+        range
+            .map(|n| gridops_host_agent::logs::LogLine {
+                logged_at: 1_000 + n,
+                level: "info",
+                target: "gridops_host_agent::activity".into(),
+                message: format!("line {n}"),
+            })
+            .collect()
+    };
+    let stored = || async {
+        let body: Value = f
+            .client
+            .get(f.url(&format!("/hosts/{host}/logs")))
+            .header(header::COOKIE, &f.cookie)
+            .send()
+            .await?
+            .json()
+            .await?;
+        anyhow::Ok(body["items"].as_array().cloned().unwrap_or_default())
+    };
+
+    // The agent reads the reply as delivered, so it doesn't resend; a batch
+    // sent again anyway (a reply lost on the way) adds only its new lines.
+    client.post_logs(host, &credential, &lines(0..3), 0).await?;
+    client.post_logs(host, &credential, &lines(0..5), 0).await?;
+    let messages: Vec<String> = stored()
+        .await?
+        .iter()
+        .filter_map(|item| item["message"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        messages,
+        (0..5).map(|n| format!("line {n}")).collect::<Vec<_>>()
+    );
+
+    // A flood stops at the hourly cap with one notice, and later batches add
+    // nothing until the hour is out.
+    let mut next = 5;
+    let notice = loop {
+        assert!(next < 8_000, "the cap never applied");
+        client
+            .post_logs(host, &credential, &lines(next..next + 500), 0)
+            .await?;
+        next += 500;
+        let items = stored().await?;
+        if let Some(last) = items.last()
+            && last["target"] == "gridops"
+        {
+            break last.clone();
+        }
+    };
+    assert!(
+        notice["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("log lines this hour")),
+        "{notice}"
+    );
+    client
+        .post_logs(host, &credential, &lines(next..next + 500), 0)
+        .await?;
+    let items = stored().await?;
+    assert_eq!(items.last().map(|item| &item["id"]), Some(&notice["id"]));
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["target"] == "gridops")
+            .count(),
+        1
+    );
+    Ok(())
+}
