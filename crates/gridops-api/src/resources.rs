@@ -273,6 +273,7 @@ pub async fn overview(
               "runnerStarts": null, "reconcilerPass": null,
               "failures": [], "alerts": [],
             },
+            "machines": null,
             "pools": [], "runs": [], "activity": [], "installations": 0,
         })));
     };
@@ -357,6 +358,12 @@ pub async fn overview(
     let window_start = now.saturating_sub(24 * 60 * 60 * 1_000);
     let runner_starts = runner_start_phases(&state, &user.id, window_start).await?;
     let reconciler_pass = reconciler_passes(&state, window_start).await?;
+    let machines = machine_performance(
+        &state,
+        &user.id,
+        now.saturating_sub(MACHINE_WINDOW_DAYS * 24 * 60 * 60 * 1_000),
+    )
+    .await?;
     let mut failures = failure_reasons.into_iter().collect::<Vec<_>>();
     failures.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     failures.truncate(3);
@@ -541,6 +548,7 @@ pub async fn overview(
             "failures": failures.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect::<Vec<_>>(),
             "alerts": alerts,
         },
+        "machines": machines,
         "pools": pools, "runs": runs, "activity": activity, "installations": installations,
     })))
 }
@@ -4791,6 +4799,130 @@ async fn runner_start_phases(state: &AppState, user_id: &str, since: i64) -> Api
         ],
         "total": summary(span("requested_at", "first_job_at")),
     }))
+}
+
+/// Days of finished jobs the machine comparison covers.
+const MACHINE_WINDOW_DAYS: i64 = 7;
+/// Same-job comparisons a machine needs before it can be called the fastest.
+const MIN_COMPARED_JOBS: usize = 3;
+
+/// How each fleet machine ran the viewer's jobs since `since`. Speed compares
+/// like with like: each successful job against the typical time of the same
+/// job (repository, workflow and job name) on every machine that ran it, so a
+/// machine doesn't look fast just because it got short jobs.
+async fn machine_performance(state: &AppState, user_id: &str, since: i64) -> ApiResult<Value> {
+    #[derive(Default)]
+    struct Machine {
+        id: String,
+        name: String,
+        os: String,
+        architecture: String,
+        jobs: i64,
+        succeeded: i64,
+        failed: i64,
+        durations: Vec<i64>,
+        /// Each compared job's time as a percentage of that job's typical time.
+        percents: Vec<i64>,
+    }
+    let rows = sqlx::query(
+        r#"SELECT fh.id AS host_id,fh.name AS host_name,fh.host_os,fh.architecture,
+             wr.repository_id,wr.workflow_name,wj.name AS job_name,wj.conclusion,
+             wj.started_at,wj.completed_at
+           FROM workflow_jobs wj
+           JOIN workflow_runs wr ON wr.id=wj.run_id
+           JOIN repositories repo ON repo.id=wr.repository_id
+           JOIN user_installations ui ON ui.installation_id=repo.installation_id AND ui.user_id=?
+           JOIN runners r ON r.id=(SELECT named.id FROM runners named WHERE named.name=wj.runner_name
+             ORDER BY named.created_at DESC LIMIT 1)
+           JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
+             WHERE latest.workload_id=r.id ORDER BY latest.generation DESC LIMIT 1)
+           JOIN fleet_hosts fh ON fh.id=wp.host_id
+          WHERE wj.status='completed' AND wj.completed_at>=? AND wj.started_at IS NOT NULL
+            AND COALESCE(wj.runner_name,'')<>''"#,
+    )
+    .bind(user_id)
+    .bind(since)
+    .fetch_all(&state.database)
+    .await?;
+    let mut machines = Vec::<Machine>::new();
+    let mut slots = HashMap::<String, usize>::new();
+    let mut same_job = HashMap::<(i64, String, String), Vec<(usize, i64)>>::new();
+    for row in &rows {
+        let id = row.get::<String, _>("host_id");
+        let slot = *slots.entry(id.clone()).or_insert_with(|| {
+            machines.push(Machine {
+                id,
+                name: row.get("host_name"),
+                os: row.get("host_os"),
+                architecture: row.get("architecture"),
+                ..Machine::default()
+            });
+            machines.len() - 1
+        });
+        let machine = &mut machines[slot];
+        machine.jobs += 1;
+        match row.get::<Option<String>, _>("conclusion").as_deref() {
+            Some("success") => {
+                machine.succeeded += 1;
+                let millis = row.get::<i64, _>("completed_at") - row.get::<i64, _>("started_at");
+                if millis > 0 {
+                    machine.durations.push(millis);
+                    same_job
+                        .entry((
+                            row.get("repository_id"),
+                            row.get("workflow_name"),
+                            row.get("job_name"),
+                        ))
+                        .or_default()
+                        .push((slot, millis));
+                }
+            }
+            Some("failure") => machine.failed += 1,
+            _ => {}
+        }
+    }
+    for runs in same_job.values() {
+        let ran_on = runs.iter().map(|(slot, _)| *slot).collect::<HashSet<_>>();
+        let durations = runs.iter().map(|(_, millis)| *millis).collect::<Vec<_>>();
+        let Some(typical) = percentile_millis(&durations, 50).filter(|_| ran_on.len() > 1) else {
+            continue;
+        };
+        for (slot, millis) in runs {
+            machines[*slot].percents.push(millis * 100 / typical.max(1));
+        }
+    }
+    let relative = |machine: &Machine| {
+        (machine.percents.len() >= MIN_COMPARED_JOBS)
+            .then(|| percentile_millis(&machine.percents, 50))
+            .flatten()
+    };
+    let ranked = machines
+        .iter()
+        .filter_map(|machine| Some((relative(machine)?, &machine.id)))
+        .collect::<Vec<_>>();
+    let fastest = (ranked.len() > 1)
+        .then(|| ranked.iter().min().map(|(_, id)| (*id).clone()))
+        .flatten();
+    machines.sort_by(|left, right| {
+        right
+            .jobs
+            .cmp(&left.jobs)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let items = machines
+        .iter()
+        .map(|machine| {
+            json!({
+                "id": machine.id, "name": machine.name, "os": machine.os,
+                "architecture": machine.architecture, "jobs": machine.jobs,
+                "succeeded": machine.succeeded, "failed": machine.failed,
+                "medianSeconds": percentile_millis(&machine.durations, 50).map(millis_to_seconds),
+                "relativePercent": relative(machine), "comparedJobs": machine.percents.len(),
+                "fastest": fastest.as_ref() == Some(&machine.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "windowDays": MACHINE_WINDOW_DAYS, "items": items }))
 }
 
 /// How long reconciler passes took since `since`, and how often they're meant

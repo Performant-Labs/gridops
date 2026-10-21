@@ -1,5 +1,5 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowRight, ArrowUpRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 
@@ -9,12 +9,13 @@ import { Callout, EmptyState, PageBody, PageHeader, SectionHeading, listRowClass
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusDot } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
+import { Tooltip } from "~/components/ui/tooltip";
 import { AgentRunRow } from "~/features/agent/agent-run-row";
 import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview } from "~/features/dashboard/dashboard.functions";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
-import type { CapacityHistory, CapacityWindow, DashboardOverview, RunnerStartPhase } from "~/features/dashboard/types";
+import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
 import { RunRow } from "~/features/workflow-runs/run-row";
@@ -71,6 +72,7 @@ function OverviewPage() {
               <CapacitySection installations={data.installations} />
               {data.authenticated ? <FleetWorkloadSection /> : null}
               <PoolsSection pools={data.pools} />
+              {data.machines?.items.length ? <MachinesSection machines={data.machines} /> : null}
               <RunsSection runs={data.runs} />
               {data.agentRuns ? <AgentRunsSection runs={data.agentRuns} /> : null}
             </div>
@@ -277,6 +279,46 @@ function PoolsSection({ pools }: { pools: DashboardOverview["pools"] }) {
         ))}
       </div>
     </section>
+  );
+}
+
+function MachinesSection({ machines }: { machines: NonNullable<DashboardOverview["machines"]> }) {
+  return (
+    <section className="space-y-3">
+      <SectionHeading actions={<ViewAll to="/fleet" label="Machines" />}>Machine performance</SectionHeading>
+      <div className="overflow-hidden rounded-lg border border-border">
+        {machines.items.map((machine) => (
+          <Link className={cn(listRowClassName, "last:border-b-0 focus:bg-hover focus:shadow-[inset_2px_0_0_var(--primary)] focus:outline-none")} data-list-row="" key={machine.id} params={{ hostId: machine.id }} to="/fleet/machines/$hostId">
+            <span className="min-w-0 flex-1 truncate font-medium">{machine.name}</span>
+            {machine.fastest ? (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-2 py-0.5 text-2xs font-medium text-foreground"><Zap className="size-3" />Fastest</span>
+            ) : null}
+            <span className="hidden text-xs text-muted-foreground sm:inline">{machine.os} {machine.architecture}</span>
+            <span className="tabular hidden w-28 text-right text-xs text-muted-foreground md:inline">
+              {machine.jobs} {machine.jobs === 1 ? "job" : "jobs"} · {machine.jobs ? Math.round((machine.succeeded / machine.jobs) * 100) : 0}% passed
+            </span>
+            <span className="tabular hidden w-20 text-right text-xs text-muted-foreground sm:inline" title="Typical successful job">{formatSeconds(machine.medianSeconds)}</span>
+            <MachineSpeed machine={machine} />
+          </Link>
+        ))}
+      </div>
+      <p className="text-2xs text-faint">
+        Your jobs over the last {machines.windowDays} days. Speed compares each machine’s time on a job with that job’s usual time on every machine that ran it.
+      </p>
+    </section>
+  );
+}
+
+function MachineSpeed({ machine }: { machine: MachinePerformance }) {
+  const percent = machine.relativePercent;
+  const label = percent === null ? "—" : percent < 100 ? `${100 - percent}% quicker` : percent > 100 ? `${percent - 100}% slower` : "Usual speed";
+  const hint = percent === null
+    ? "Needs 3 successful jobs that also ran on another machine"
+    : `Takes ${percent}% of the usual time, compared on ${machine.comparedJobs} ${machine.comparedJobs === 1 ? "job" : "jobs"}`;
+  return (
+    <Tooltip content={hint}>
+      <span className={cn("tabular relative z-[1] w-24 shrink-0 text-right text-xs", percent === null ? "text-faint" : percent < 100 ? "text-success" : percent > 100 ? "text-warning" : "text-muted-foreground")}>{label}</span>
+    </Tooltip>
   );
 }
 
