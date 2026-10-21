@@ -254,7 +254,11 @@ pub(super) async fn active_machine_on(
 
     let issued: Value = f
         .admin_post("/enrollments")
-        .header("idempotency-key", "placement-enrollment")
+        // One code per machine, so a test can enroll several.
+        .header(
+            "idempotency-key",
+            format!("placement-enrollment-{}", Uuid::new_v4()),
+        )
         .json(&json!({"targetIds": [target]}))
         .send()
         .await?
@@ -1241,6 +1245,109 @@ async fn overview_charts_each_machines_workload() -> Result<()> {
         .send()
         .await?;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+/// The overview names the machine that runs the same jobs faster, and counts
+/// each machine's jobs, failures and typical job time.
+#[tokio::test]
+async fn overview_compares_machines_on_the_same_jobs() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    // One runner on each machine: the second machine joins once the first
+    // has its runner, and the first stops taking more.
+    let slow = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let slow_runner = Uuid::new_v4();
+    admitted_placement(&f, &slow, slow_runner).await?;
+    let fast = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    sqlx::query("UPDATE host_backends SET enabled=0 WHERE host_id=?")
+        .bind(slow.host.to_string())
+        .execute(&f.database)
+        .await?;
+    let fast_runner = Uuid::new_v4();
+    admitted_placement(&f, &fast, fast_runner).await?;
+    for (runner, name) in [(slow_runner, "runner-slow"), (fast_runner, "runner-fast")] {
+        sqlx::query("UPDATE runners SET name=? WHERE id=?")
+            .bind(name)
+            .bind(runner.to_string())
+            .execute(&f.database)
+            .await?;
+    }
+    // The same "test" job takes 120 s on one machine and 60 s on the other;
+    // the slow machine also failed a build, and GitHub ran a job itself.
+    let now = gridops_core::now_millis();
+    sqlx::query(
+        "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+         VALUES (20,10,'CI',1,'push','completed','abc','https://github.com/octo-org/gridops/actions/runs/20',?,?,?,?)",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(&f.database)
+    .await?;
+    let jobs = [
+        ("test", "runner-slow", "success", 120),
+        ("test", "runner-slow", "success", 120),
+        ("test", "runner-slow", "success", 120),
+        ("build", "runner-slow", "failure", 30),
+        ("test", "runner-fast", "success", 60),
+        ("test", "runner-fast", "success", 60),
+        ("test", "runner-fast", "success", 60),
+        ("test", "GitHub Actions 1", "success", 10),
+    ];
+    for (index, (name, runner, conclusion, seconds)) in jobs.into_iter().enumerate() {
+        let started = now - 3_600_000;
+        sqlx::query(
+            "INSERT INTO workflow_jobs (id,run_id,name,status,conclusion,labels,html_url,runner_name,started_at,completed_at,created_at,updated_at)
+             VALUES (?,20,?,'completed',?,'[\"self-hosted\"]','https://github.com/octo-org/gridops/actions/runs/20',?,?,?,?,?)",
+        )
+        .bind(100 + i64::try_from(index)?)
+        .bind(name)
+        .bind(conclusion)
+        .bind(runner)
+        .bind(started)
+        .bind(started + seconds * 1_000)
+        .bind(started)
+        .bind(started)
+        .execute(&f.database)
+        .await?;
+    }
+
+    let overview: Value = f
+        .client
+        .get(format!("{}/api/v1/overview", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let machines = overview["machines"]["items"]
+        .as_array()
+        .context("machines")?;
+    let shown = |host: &gridops_core::fleet::ids::HostId| {
+        machines
+            .iter()
+            .find(|machine| machine["id"] == host.to_string())
+            .map(|machine| {
+                (
+                    machine["jobs"].as_i64(),
+                    machine["failed"].as_i64(),
+                    machine["medianSeconds"].as_i64(),
+                    machine["relativePercent"].as_i64(),
+                    machine["fastest"].as_bool(),
+                )
+            })
+    };
+    assert_eq!(machines.len(), 2, "GitHub's own runners aren't machines");
+    assert_eq!(
+        shown(&slow.host),
+        Some((Some(4), Some(1), Some(120), Some(200), Some(false)))
+    );
+    assert_eq!(
+        shown(&fast.host),
+        Some((Some(3), Some(0), Some(60), Some(100), Some(true)))
+    );
     Ok(())
 }
 

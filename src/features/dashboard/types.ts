@@ -54,6 +54,11 @@ export type DashboardOverview = {
     completedAt: string | null;
     htmlUrl: string;
   }>;
+  /** How each fleet machine ran the viewer's jobs; null when signed out. */
+  machines: {
+    windowDays: number;
+    items: MachinePerformance[];
+  } | null;
   activity: Array<{
     id: string;
     level: string;
@@ -64,6 +69,21 @@ export type DashboardOverview = {
     createdAt: string;
   }>;
   installations: number;
+};
+
+export type MachinePerformance = {
+  id: string;
+  name: string;
+  os: string;
+  architecture: string;
+  jobs: number;
+  succeeded: number;
+  failed: number;
+  medianSeconds: number | null;
+  /** Its time on jobs that also ran elsewhere, as a percentage of their usual time; null until it has enough of them. */
+  relativePercent: number | null;
+  comparedJobs: number;
+  fastest: boolean;
 };
 
 export type CapacityWindow = "24h" | "7d" | "30d";
