@@ -577,6 +577,7 @@ async fn candidate_compatible(
     }
 }
 
+/// Machines that could take `intent`, in the order to try them.
 async fn candidates(
     tx: &mut Transaction<'_, Sqlite>,
     intent: &store::IntentRow,
@@ -589,7 +590,20 @@ async fn candidates(
                 p.runtime_kind,p.execution_os,p.architecture,p.mode,p.requires_interactive,
                 p.requires_docker_socket,p.labels_json,p.config_json,p.image,
                 b.capabilities_json,b.last_probed_at,b.probe_epoch,b.probe_session_id,
-                b.probe_boot_id,b.probe_incarnation
+                b.probe_boot_id,b.probe_incarnation,
+                (SELECT COUNT(DISTINCT other.runtime_kind||'/'||other.execution_os||'/'||other.architecture)
+                   FROM pool_execution_profiles other
+                   JOIN host_backends served ON served.host_id=h.id AND served.enabled=1
+                                            AND served.runtime_kind=other.runtime_kind
+                                            AND served.execution_os=other.execution_os
+                                            AND served.architecture=other.architecture
+                  WHERE other.enabled=1 AND other.archived_at IS NULL
+                    AND NOT (other.runtime_kind=p.runtime_kind AND other.execution_os=p.execution_os
+                             AND other.architecture=p.architecture)) AS other_platforms,
+                (SELECT d.cpu_millis FROM host_resource_domains d WHERE d.id=b.domain_id AND d.host_id=h.id)
+                  - COALESCE((SELECT SUM(a.cpu_millis) FROM capacity_allocations a
+                               WHERE a.domain_id=b.domain_id AND a.host_id=h.id AND a.state != 'released'), 0)
+                  AS free_cpu_millis
            FROM workload_intents i
            JOIN fleet_operations o ON o.id=i.id
            JOIN pool_execution_profiles p ON p.id=i.profile_id AND p.pool_id=i.pool_id
@@ -704,7 +718,9 @@ async fn candidates(
             )
             AND (p.runtime_kind != 'native_process' OR g.allow_native=1)
             AND (p.requires_docker_socket=0 OR g.allow_docker_socket=1)
-          ORDER BY h.id,b.id",
+          -- A machine other platforms also run on goes last, so it stays free
+          -- for work that may have nowhere else to go; then the roomiest.
+          ORDER BY other_platforms,free_cpu_millis DESC,h.id,b.id",
     )
     .bind(&intent.id)
     .bind(now.saturating_sub(45_000))
