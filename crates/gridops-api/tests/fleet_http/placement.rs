@@ -1398,6 +1398,17 @@ async fn placement_prefers_the_least_needed_machine_then_the_roomiest() -> Resul
                 .await
         }
     };
+    // The dedicated machine takes two runners. The default budgets follow the
+    // test host's CPU count, which on a 2-CPU runner fits only one, so an
+    // administrator sets the same budget for two on both machines.
+    sqlx::query(
+        "UPDATE host_resource_domains SET cpu_millis=4000,revision=revision+1
+          WHERE host_id IN (?,?) AND parent_domain_id IS NULL",
+    )
+    .bind(shared.host.to_string())
+    .bind(dedicated.host.to_string())
+    .execute(&f.database)
+    .await?;
     for _ in 0..2 {
         let placement = admitted_placement(&f, &dedicated, Uuid::new_v4()).await?;
         assert_eq!(placed_on(placement).await?, dedicated.host.to_string());
