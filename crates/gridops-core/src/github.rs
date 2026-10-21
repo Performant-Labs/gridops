@@ -61,6 +61,15 @@ impl GitHubClient {
         response.json().await.context("invalid GitHub response")
     }
 
+    fn api_request(&self, method: Method, path: &str, token: &str) -> reqwest::RequestBuilder {
+        let base = self.config.github_api_url().as_str().trim_end_matches('/');
+        self.http
+            .request(method, format!("{base}{path}"))
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", API_VERSION)
+    }
+
     async fn send(
         &self,
         method: Method,
@@ -68,12 +77,7 @@ impl GitHubClient {
         token: &str,
         body: Option<Value>,
     ) -> Result<reqwest::Response> {
-        let mut request = self
-            .http
-            .request(method, format!("https://api.github.com{path}"))
-            .bearer_auth(token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION);
+        let mut request = self.api_request(method, path, token);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -128,16 +132,29 @@ impl GitHubClient {
         }
     }
 
-    /// Sends a DELETE; the status and body when GitHub refused it.
-    async fn try_delete(&self, path: &str, token: &str) -> Result<Option<(StatusCode, String)>> {
+    /// Sends a POST with no response body; the status and body when GitHub
+    /// refused it.
+    pub async fn try_post_empty(
+        &self,
+        path: &str,
+        token: &str,
+        body: Value,
+    ) -> Result<Option<(StatusCode, String)>> {
         let response = self
-            .http
-            .delete(format!("https://api.github.com{path}"))
-            .bearer_auth(token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
+            .api_request(Method::POST, path, token)
+            .json(&body)
             .send()
             .await?;
+        if response.status().is_success() {
+            return Ok(None);
+        }
+        let status = response.status();
+        Ok(Some((status, response.text().await.unwrap_or_default())))
+    }
+
+    /// Sends a DELETE; the status and body when GitHub refused it.
+    async fn try_delete(&self, path: &str, token: &str) -> Result<Option<(StatusCode, String)>> {
+        let response = self.api_request(Method::DELETE, path, token).send().await?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }

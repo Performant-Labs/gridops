@@ -33,7 +33,7 @@ use crate::{
         require_system_admin,
     },
     error::{ApiError, ApiResult},
-    oauth::{control_token, upsert_repository},
+    oauth::{control_token, upsert_repository, user_access_token},
     state::AppState,
 };
 
@@ -2568,31 +2568,64 @@ pub async fn workflow_run_action(
     ).bind(run_id).bind(&user.id).fetch_optional(&state.database).await?
         .ok_or_else(|| ApiError::NotFound("Workflow run does not exist or is not accessible.".into()))?;
     let endpoint = workflow_action_endpoint(&input.action)?;
-    assert_installation_admin(&state, &user, run.get("installation_id")).await?;
-    let token = control_token(&state, &user.id, run.get("installation_id")).await?;
-    state
-        .github
-        .post_empty(
-            &format!(
-                "/repos/{}/{}/actions/runs/{run_id}/{endpoint}",
-                run.get::<String, _>("owner"),
-                run.get::<String, _>("name")
-            ),
-            &token,
-            json!({}),
-        )
-        .await
-        .map_err(ApiError::Internal)?;
+    let installation_id = run.get::<i64, _>("installation_id");
+    assert_installation_admin(&state, &user, installation_id).await?;
+    let path = format!(
+        "/repos/{}/{}/actions/runs/{run_id}/{endpoint}",
+        run.get::<String, _>("owner"),
+        run.get::<String, _>("name")
+    );
+    let github_actor = act_on_run(&state, &user, installation_id, &path).await?;
     audit(
         &state,
         &user,
         &format!("workflow_run.{}", input.action),
         "workflow_run",
         Some(&run_id.to_string()),
-        json!({}),
+        json!({ "githubActor": github_actor }),
     )
     .await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Sends a run control as the signed-in user, so GitHub credits that person.
+/// Sent with the installation token, GitHub names the App instead
+/// (`canceled by @gridops-self-hosted[bot]`), which reads as the App
+/// cancelling the run on its own. Falls back to the installation token when
+/// the user has no usable GitHub token or GitHub refuses theirs. Returns who
+/// GitHub saw act.
+async fn act_on_run(
+    state: &AppState,
+    user: &AuthUser,
+    installation_id: i64,
+    path: &str,
+) -> ApiResult<&'static str> {
+    if let Ok(token) = user_access_token(state, &user.id).await {
+        match state
+            .github
+            .try_post_empty(path, &token, json!({}))
+            .await
+            .map_err(ApiError::Internal)?
+        {
+            None => return Ok("user"),
+            Some((status, _)) if matches!(status.as_u16(), 401 | 403 | 404) => {
+                tracing::info!(user = %user.login, %status, "GitHub refused the user's token for a run control; using the installation token");
+            }
+            Some((status, details)) => {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "GitHub API request failed ({status}): {}",
+                    details.chars().take(500).collect::<String>()
+                )));
+            }
+        }
+    }
+    let token = control_token(state, &user.id, installation_id).await?;
+    state
+        .github
+        .post_empty(path, &token, json!({}))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok("app")
 }
 
 pub async fn workflow_run_logs(
