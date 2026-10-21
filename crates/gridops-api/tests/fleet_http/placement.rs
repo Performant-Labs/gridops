@@ -43,6 +43,8 @@ pub(super) struct FakeDocker {
     pub(super) operations: Mutex<Vec<&'static str>>,
     /// How long each start takes, in milliseconds.
     pub(super) start_millis: AtomicU64,
+    /// Prepares never finish while this is set.
+    pub(super) hold_prepare: AtomicBool,
     /// The started container's console, written by the test.
     console: Mutex<Option<tokio::io::DuplexStream>>,
 }
@@ -56,6 +58,11 @@ impl RuntimeHelper for FakeDocker {
         if matches!(request.operation, AgentOperation::StartRunner(_)) {
             let millis = self.start_millis.load(Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(millis)).await;
+        }
+        if matches!(request.operation, AgentOperation::PrepareEnvironment(_))
+            && self.hold_prepare.load(Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
         }
         let container = || LocalResourceIdentity::Docker {
             object_id: gridops_core::fleet::ids::UpstreamText::new("fake-container")
@@ -255,27 +262,12 @@ pub(super) async fn active_machine_on(
         .await?;
     let journal =
         Journal::open(&f.directory.join(format!("agent-{}.sqlite", Uuid::new_v4()))).await?;
-    let supervisor = Supervisor::new(Client::new(origin)?, journal.clone(), "fleet-host".into())
-        .with_heartbeat(Duration::from_millis(200))
-        .with_measurements(|| gridops_host_agent::probe::Measurement {
-            memory_total_mib: Some(16_384),
-            memory_used_mib: Some(4_096),
-            cpu_used_millis: Some(500),
-            uptime_seconds: Some(60),
-        })
-        .with_runtime(Arc::clone(&runtime), Trust::default());
+    let supervisor = supervisor(origin, journal.clone(), Arc::clone(&runtime))?;
     supervisor
         .enroll(issued["code"].as_str().context("code")?, None)
         .await?;
     let host = journal.identity().await?.context("identity")?.host_id;
-    let (stop, stopped) = oneshot::channel::<()>();
-    let running = tokio::spawn(async move {
-        supervisor
-            .run(async {
-                let _ = stopped.await;
-            })
-            .await
-    });
+    let (stop, running) = run(supervisor);
 
     let read = eventually("inventory", || async {
         let read: Value = f
@@ -350,9 +342,58 @@ pub(super) async fn active_machine_on(
     })
 }
 
+/// The machine's agent, with its journal in `journal`.
+pub(super) fn supervisor(
+    origin: &str,
+    journal: Journal,
+    runtime: Arc<FakeDocker>,
+) -> Result<Supervisor<Arc<FakeDocker>>> {
+    Ok(
+        Supervisor::new(Client::new(origin)?, journal, "fleet-host".into())
+            .with_heartbeat(Duration::from_millis(200))
+            .with_measurements(|| gridops_host_agent::probe::Measurement {
+                memory_total_mib: Some(16_384),
+                memory_used_mib: Some(4_096),
+                cpu_used_millis: Some(500),
+                uptime_seconds: Some(60),
+            })
+            .with_runtime(runtime, Trust::default()),
+    )
+}
+
+/// Runs an enrolled agent until the returned sender fires.
+pub(super) fn run(
+    supervisor: Supervisor<Arc<FakeDocker>>,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<Result<Stop>>) {
+    let (stop, stopped) = oneshot::channel::<()>();
+    let running = tokio::spawn(async move {
+        supervisor
+            .run(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    (stop, running)
+}
+
 /// Admits one more runner of the pool onto `machine` and waits until its
 /// environment is prepared.
 pub(super) async fn prepared_placement(
+    f: &Fixture,
+    machine: &Machine,
+    workload: Uuid,
+) -> Result<PlacementId> {
+    let placement_id = admitted_placement(f, machine, workload).await?;
+    eventually("prepared environment", || async {
+        Ok((placement_state(f, placement_id).await? == "registering").then_some(()))
+    })
+    .await?;
+    Ok(placement_id)
+}
+
+/// Admits one more runner of the pool onto `machine`, which is sent its
+/// prepare.
+pub(super) async fn admitted_placement(
     f: &Fixture,
     machine: &Machine,
     workload: Uuid,
@@ -407,11 +448,6 @@ pub(super) async fn prepared_placement(
             .fetch_one(&f.database)
             .await?
             .parse()?;
-
-    eventually("prepared environment", || async {
-        Ok((placement_state(f, placement_id).await? == "registering").then_some(()))
-    })
-    .await?;
     Ok(placement_id)
 }
 

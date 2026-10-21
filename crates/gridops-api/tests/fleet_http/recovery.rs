@@ -10,17 +10,21 @@ use std::sync::{
 
 use axum::{body::Body, extract::State, http::Request, response::IntoResponse};
 use gridops_core::fleet::{
-    ids::PlacementId,
+    ids::{PlacementId, ResultId},
     placement,
-    protocol::agent::{AgentOperation, LocalResourceIdentity},
+    protocol::{
+        agent::{AgentOperation, CommandScope, LocalResourceIdentity},
+        outcomes::{AgentCommandResult, CommandOutcome, UncertainCode},
+        primitives::{Sha256Digest, WireTimestamp},
+    },
 };
 use gridops_host_agent::supervisor::Stop;
 use secrecy::ExposeSecret as _;
 
 use super::{
     placement::{
-        FakeDocker, active_machine, active_machine_on, issue_start, placement_state,
-        prepared_placement, seed_pool,
+        FakeDocker, active_machine, active_machine_on, admitted_placement, issue_start,
+        placement_state, prepared_placement, run, seed_pool, supervisor,
     },
     *,
 };
@@ -224,6 +228,114 @@ async fn host_recovers_when_a_started_runner_result_is_lost_past_its_deadline() 
     let _ = machine.stop.send(());
     assert_eq!(machine.running.await??, Stop::Shutdown);
     Ok(())
+}
+
+/// The 2026-10-21 lockout: the Mac rebooted while preparing a runner. Back
+/// up, its agent found the prepare in its journal without a result and
+/// reported its effect as unknown, so the placement went uncertain and the
+/// Mac took no work until an administrator repaired it. A prepare starts
+/// nothing, so the machine now keeps working: the agent reports a prepare
+/// that journaled no environment as not done, and the API fails one that an
+/// older agent still reports as unknown.
+async fn restart_mid_prepare(older_agent: bool) -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    runtime.hold_prepare.store(true, Ordering::SeqCst);
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let placement_id = admitted_placement(&f, &machine, Uuid::new_v4()).await?;
+    within("the prepare to start", || async {
+        Ok(runtime
+            .operations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .contains(&"prepare_environment")
+            .then_some(()))
+    })
+    .await?;
+
+    // The machine goes down part way through the prepare.
+    let session = agent_session(&f, &host).await?;
+    machine.running.abort();
+    if older_agent {
+        let (envelope, _) = machine
+            .journal
+            .undelivered(0)
+            .await?
+            .pop()
+            .context("journaled prepare")?;
+        machine
+            .journal
+            .complete(&AgentCommandResult {
+                result_id: ResultId::try_new(Uuid::new_v4())?,
+                command_id: envelope.command_id,
+                operation_id: envelope.operation_id,
+                host_id: envelope.host_id,
+                host_epoch: envelope.host_epoch,
+                control_plane_incarnation: envelope.control_plane_incarnation,
+                authority_session_id: envelope.authority_session_id,
+                generation: match envelope.scope {
+                    CommandScope::Placement { generation, .. } => Some(generation),
+                    CommandScope::Host => None,
+                },
+                scope: envelope.scope.clone(),
+                request_hash: Sha256Digest::try_from(envelope.request_hash.clone())?,
+                observed_at: WireTimestamp::from_millis(gridops_core::now_millis())?,
+                outcome: CommandOutcome::Uncertain {
+                    code: UncertainCode::LocalStateUnknown,
+                    diagnostic: None,
+                },
+            })
+            .await?;
+    }
+    let restarted = Arc::new(FakeDocker::default());
+    let (stop, running) = run(supervisor(
+        &f.origin,
+        machine.journal.clone(),
+        Arc::clone(&restarted),
+    )?);
+
+    within("the prepare to settle", || async {
+        Ok((placement_state(&f, placement_id).await? == "failed").then_some(()))
+    })
+    .await?;
+    assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
+    let reported: String = sqlx::query_scalar(
+        "SELECT json_extract(r.result_json,'$.outcome.kind') FROM host_command_results r
+           JOIN host_commands c ON c.id=r.command_id
+          WHERE c.placement_id=? AND c.kind='prepare_environment'",
+    )
+    .bind(placement_id.to_string())
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(reported, if older_agent { "uncertain" } else { "failed" });
+    within("a new session", || async {
+        Ok((agent_session(&f, &host).await? != session).then_some(()))
+    })
+    .await?;
+    within("work authority", || has_authority(&f, &host)).await?;
+    assert!(
+        restarted
+            .operations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .is_empty()
+    );
+
+    let _ = stop.send(());
+    assert_eq!(running.await??, Stop::Shutdown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_machine_that_restarts_mid_prepare_keeps_working() -> Result<()> {
+    restart_mid_prepare(false).await
+}
+
+#[tokio::test]
+async fn an_older_agent_that_restarts_mid_prepare_keeps_working() -> Result<()> {
+    restart_mid_prepare(true).await
 }
 
 /// The 2026-10-14 21:05 lockout: the API recorded a command as delivered,

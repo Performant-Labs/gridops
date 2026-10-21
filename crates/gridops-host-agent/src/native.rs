@@ -29,7 +29,7 @@ use serde::Deserialize;
 use sha2::Digest as _;
 use tokio::{io::AsyncWriteExt as _, process::Command, sync::Mutex};
 
-use crate::helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper};
+use crate::helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper, StartRemains};
 
 /// The environment reference native profiles use.
 pub const NATIVE_ENVIRONMENT: &str = "native:actions-runner";
@@ -174,6 +174,26 @@ impl RuntimeHelper for NativeRuntime {
                 crate::docker::cleaned(expected_resource)
             }
             _ => failed(FailureCode::Unsupported, false),
+        }
+    }
+
+    async fn interrupted_start(&self, request: HelperRequest, rebooted: bool) -> StartRemains {
+        let Some(id) = request.environment_id else {
+            return StartRemains::Unknown;
+        };
+        let root = self.environment(&id.to_string());
+        if let Some(identity) = recorded_identity(&root).await {
+            return StartRemains::Runner(identity);
+        }
+        // A runner's log is opened before it's spawned and its identity is
+        // written right after, so without the log nothing was spawned. A
+        // process spawned before the host's last boot can't be running.
+        if rebooted {
+            return StartRemains::Nothing;
+        }
+        match tokio::fs::try_exists(root.join("gridops-runner.log")).await {
+            Ok(false) => StartRemains::Nothing,
+            _ => StartRemains::Unknown,
         }
     }
 

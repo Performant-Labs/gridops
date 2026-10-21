@@ -4,19 +4,22 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use gridops_core::fleet::{
-    ids::Generation,
+    ids::{Generation, PreparedEnvironmentId},
     protocol::{
-        agent::{AgentCommandEnvelope, AgentOperation, ExpectedAgentSession},
+        agent::{
+            AgentCommandEnvelope, AgentOperation, CommandScope, ExpectedAgentSession,
+            LocalResourceIdentity,
+        },
         outcomes::{CommandOutcome, FailureCode, SuccessEvidence, UncertainCode},
         primitives::WireTimestamp,
     },
 };
 use gridops_host_agent::{
     dispatch::{DispatchError, Dispatcher, Trust},
-    helper::{HelperRequest, HelperResponse, RuntimeHelper},
-    journal::{Journal, JournalError},
+    helper::{HelperRequest, HelperResponse, RuntimeHelper, StartRemains},
+    journal::{Environment, Journal, JournalError},
 };
 use serde_json::{Value, json};
 
@@ -67,6 +70,10 @@ fn sealed(value: Value) -> Result<Vec<u8>> {
 #[derive(Default)]
 struct Recorder {
     requests: Mutex<Vec<HelperRequest>>,
+    /// What an interrupted start left; unknown when unset.
+    remains: Mutex<Option<StartRemains>>,
+    /// Whether each look at an interrupted start was told the host rebooted.
+    rebooted: Mutex<Vec<bool>>,
 }
 
 impl Recorder {
@@ -76,6 +83,17 @@ impl Recorder {
 }
 
 impl RuntimeHelper for Recorder {
+    async fn interrupted_start(&self, _request: HelperRequest, rebooted: bool) -> StartRemains {
+        if let Ok(mut seen) = self.rebooted.lock() {
+            seen.push(rebooted);
+        }
+        self.remains
+            .lock()
+            .ok()
+            .and_then(|remains| remains.clone())
+            .unwrap_or(StartRemains::Unknown)
+    }
+
     async fn call(&self, request: HelperRequest) -> HelperResponse {
         if let Ok(mut requests) = self.requests.lock() {
             requests.push(request.clone());
@@ -126,7 +144,7 @@ struct Harness {
     journal: Journal,
     session: ExpectedAgentSession,
     now: WireTimestamp,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
 struct TempDir(std::path::PathBuf);
@@ -160,8 +178,17 @@ impl Harness {
                 )?,
             },
             now: sample.issued_at,
-            _dir: TempDir(dir),
+            dir: TempDir(dir),
         })
+    }
+
+    /// Sends a command the agent had received before it stopped part way.
+    async fn interrupted(&self, n: u32, operation: Value) -> Result<CommandOutcome> {
+        let body = sealed(command(n, operation))?;
+        self.journal
+            .receive(&serde_json::from_slice(&body)?)
+            .await?;
+        Ok(self.send(&body).await?)
     }
 
     async fn send(&self, body: &[u8]) -> Result<CommandOutcome, DispatchError> {
@@ -337,6 +364,124 @@ async fn redelivery_replays_the_journal_and_interrupted_work_is_uncertain() -> R
     );
     assert_eq!(h.recorder.calls(), 1);
     Ok(())
+}
+
+/// The 2026-10-21 lockout came from a reboot during a prepare that had
+/// journaled nothing, reported as unknown. What the journal and the runtime
+/// show is reported instead; only what they can't tell stays uncertain.
+#[tokio::test]
+async fn interrupted_prepares_and_starts_report_what_they_left() -> Result<()> {
+    let h = Harness::new(Trust::default()).await?;
+    let cut_short = |outcome: &CommandOutcome| {
+        matches!(
+            outcome,
+            CommandOutcome::Failed {
+                code: FailureCode::Cancelled,
+                ..
+            }
+        )
+    };
+
+    // No environment journaled: nothing of the prepare can be reached.
+    assert!(cut_short(
+        &h.interrupted(1, prepare("ci_runner", false)).await?
+    ));
+
+    // The environment was journaled, so the prepare finished.
+    let envelope: AgentCommandEnvelope =
+        serde_json::from_value(command(2, prepare("ci_runner", false)))?;
+    let (
+        AgentOperation::PrepareEnvironment(prepared),
+        CommandScope::Placement {
+            placement_id,
+            generation,
+            ..
+        },
+    ) = (&envelope.operation, &envelope.scope)
+    else {
+        anyhow::bail!("not a placement prepare");
+    };
+    let id = PreparedEnvironmentId::try_new(uuid::Uuid::new_v4())?;
+    h.journal
+        .record_environment(&Environment {
+            id,
+            placement_id: *placement_id,
+            generation: *generation,
+            workload: prepared.workload,
+            runtime_kind: prepared.runtime_kind,
+            execution_os: prepared.execution_os,
+            docker_socket: false,
+            prepare: prepared.clone(),
+            local_identity: None,
+        })
+        .await?;
+    let CommandOutcome::Succeeded { evidence } =
+        h.interrupted(2, prepare("ci_runner", false)).await?
+    else {
+        anyhow::bail!("a journaled prepare reads as not done");
+    };
+    assert_eq!(
+        *evidence,
+        SuccessEvidence::PreparedEnvironment {
+            prepared_environment_id: id
+        }
+    );
+
+    // A start the runtime finds nothing of, received before the host's last
+    // boot, never launched a runner.
+    let body = sealed(command(3, start(&id.to_string())))?;
+    h.journal.receive(&serde_json::from_slice(&body)?).await?;
+    let journal = sqlx::SqlitePool::connect(&format!(
+        "sqlite://{}",
+        h.dir.0.join("journal.sqlite").display()
+    ))
+    .await?;
+    sqlx::query("UPDATE commands SET boot_id='an-earlier-boot' WHERE command_id=?")
+        .bind(id_of(&body)?)
+        .execute(&journal)
+        .await?;
+    *h.recorder
+        .remains
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(StartRemains::Nothing);
+    assert!(cut_short(&h.send(&body).await?));
+
+    // A runner it finds is the one the start launched, and is now owned.
+    let runner: LocalResourceIdentity =
+        serde_json::from_value(json!({"kind":"docker","object_id":"launched-container"}))?;
+    *h.recorder
+        .remains
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(StartRemains::Runner(runner.clone()));
+    let CommandOutcome::Succeeded { evidence } = h.interrupted(4, start(&id.to_string())).await?
+    else {
+        anyhow::bail!("a launched runner reads as not started");
+    };
+    assert!(matches!(
+        evidence.as_ref(),
+        SuccessEvidence::RunnerStarted { local_identity, .. } if *local_identity == runner
+    ));
+    let owned = h
+        .journal
+        .placement_environment(*placement_id, *generation)
+        .await?
+        .context("environment")?;
+    assert_eq!(owned.local_identity, Some(runner));
+    assert_eq!(
+        *h.recorder
+            .rebooted
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?,
+        [true, false]
+    );
+    assert_eq!(h.recorder.calls(), 0);
+    Ok(())
+}
+
+fn id_of(body: &[u8]) -> Result<String> {
+    Ok(serde_json::from_slice::<AgentCommandEnvelope>(body)?
+        .command_id
+        .to_string())
 }
 
 trait HostScope {

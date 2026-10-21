@@ -67,8 +67,30 @@ pub enum HelperResponse {
     Failed { code: FailureCode, retryable: bool },
 }
 
+/// What a start cut short by an agent restart left in its environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartRemains {
+    /// The runner the start launched, whether or not it still runs.
+    Runner(LocalResourceIdentity),
+    /// Nothing: no runner from this start exists.
+    Nothing,
+    /// The runtime can't tell.
+    Unknown,
+}
+
 pub trait RuntimeHelper: Send + Sync {
     fn call(&self, request: HelperRequest) -> impl Future<Output = HelperResponse> + Send;
+
+    /// What a start in the request's environment launched before the agent
+    /// stopped part way through it. `rebooted` says the host has booted since
+    /// the agent received the start, so no process it spawned still runs.
+    fn interrupted_start(
+        &self,
+        _request: HelperRequest,
+        _rebooted: bool,
+    ) -> impl Future<Output = StartRemains> + Send {
+        async { StartRemains::Unknown }
+    }
 
     /// Execution backends this host can offer right now, for inventory.
     fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {
@@ -137,6 +159,14 @@ impl<H: RuntimeHelper> RuntimeHelper for std::sync::Arc<H> {
 
     fn backends(&self) -> impl Future<Output = Vec<ObservedBackend>> + Send {
         (**self).backends()
+    }
+
+    fn interrupted_start(
+        &self,
+        request: HelperRequest,
+        rebooted: bool,
+    ) -> impl Future<Output = StartRemains> + Send {
+        (**self).interrupted_start(request, rebooted)
     }
 }
 

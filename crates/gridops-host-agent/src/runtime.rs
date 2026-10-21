@@ -12,7 +12,7 @@ use gridops_core::fleet::{
 
 use crate::{
     docker::DockerRuntime,
-    helper::{HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper},
+    helper::{HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper, StartRemains},
     native::NativeRuntime,
 };
 
@@ -55,6 +55,20 @@ impl RuntimeHelper for HostRuntime {
                 code: FailureCode::Unsupported,
                 retryable: false,
             },
+        }
+    }
+
+    async fn interrupted_start(&self, request: HelperRequest, rebooted: bool) -> StartRemains {
+        match request
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.runtime_kind)
+        {
+            Some(RuntimeKind::Docker) => self.docker.interrupted_start(request, rebooted).await,
+            Some(RuntimeKind::NativeProcess) => {
+                self.native.interrupted_start(request, rebooted).await
+            }
+            _ => StartRemains::Unknown,
         }
     }
 
