@@ -103,7 +103,9 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
         let metadata = event.metadata();
         let level = *metadata.level();
-        if level > Level::INFO {
+        // sqlx warns whenever the journal waits on a slow disk; that stays in
+        // the local log rather than filling GridOps.
+        if level > Level::INFO || metadata.target().starts_with("sqlx") {
             return;
         }
         let mut visitor = Visitor::default();
