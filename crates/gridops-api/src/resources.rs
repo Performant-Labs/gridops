@@ -266,7 +266,7 @@ pub async fn overview(
           (SELECT COUNT(*) FROM workflow_jobs wj JOIN workflow_runs wr ON wr.id=wj.run_id
             JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui2 ON ui2.installation_id=repo.installation_id
-            WHERE ui2.user_id=? AND wj.status='queued') AS queued_jobs,
+            WHERE ui2.user_id=? AND wj.status='queued' AND wr.status!='completed') AS queued_jobs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui3 ON ui3.installation_id=repo.installation_id
             WHERE ui3.user_id=? AND wr.completed_at IS NOT NULL) AS completed_runs,
@@ -295,7 +295,7 @@ pub async fn overview(
     });
     let now = now_millis();
     let slo_rows = sqlx::query(
-        r#"SELECT wj.status,wj.conclusion,wj.created_at,wj.started_at
+        r#"SELECT wj.status,wr.status AS run_status,wj.conclusion,wj.created_at,wj.started_at
           FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
@@ -311,7 +311,10 @@ pub async fn overview(
     let mut failure_reasons = HashMap::<String, i64>::new();
     for row in &slo_rows {
         let created_at = row.get::<i64, _>("created_at");
-        if row.get::<String, _>("status") == "queued" {
+        // A job still listed as queued in a finished run never runs.
+        if row.get::<String, _>("status") == "queued"
+            && row.get::<String, _>("run_status") != "completed"
+        {
             queue_ages.push(now.saturating_sub(created_at));
         }
         if let Some(started_at) = row.try_get::<Option<i64>, _>("started_at").ok().flatten()
@@ -402,7 +405,7 @@ pub async fn overview(
           (SELECT COUNT(*) FROM workflow_jobs wj
             JOIN workflow_runs wr ON wr.id=wj.run_id
             JOIN repositories queued_repo ON queued_repo.id=wr.repository_id
-            WHERE wj.status='queued' AND (
+            WHERE wj.status='queued' AND wr.status!='completed' AND (
               EXISTS (SELECT 1 FROM runner_pool_repositories membership
                 WHERE membership.pool_id=p.id AND membership.repository_id=queued_repo.id) OR
               queued_repo.id=p.repository_id OR

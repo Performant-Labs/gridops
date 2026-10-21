@@ -151,7 +151,7 @@ async fn load_viewer(state: &AppState, user: &AuthUser) -> ApiResult<Viewer> {
                   WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
             )) AS failed_runners,
         (SELECT COUNT(*) FROM webhook_deliveries wd WHERE wd.status IN ('failed','rejected') AND (wd.installation_id IS NULL OR EXISTS (SELECT 1 FROM user_installations ui WHERE ui.installation_id=wd.installation_id AND ui.user_id=?))) AS failed_webhooks,
-        (SELECT COUNT(*) FROM workflow_jobs wj JOIN workflow_runs wr ON wr.id=wj.run_id JOIN repositories repo ON repo.id=wr.repository_id JOIN user_installations ui ON ui.installation_id=repo.installation_id WHERE ui.user_id=? AND wj.status='queued') AS queued_jobs,
+        (SELECT COUNT(*) FROM workflow_jobs wj JOIN workflow_runs wr ON wr.id=wj.run_id JOIN repositories repo ON repo.id=wr.repository_id JOIN user_installations ui ON ui.installation_id=repo.installation_id WHERE ui.user_id=? AND wj.status='queued' AND wr.status!='completed') AS queued_jobs,
         (SELECT COUNT(*) FROM github_runner_cleanup cleanup JOIN user_installations ui ON ui.installation_id=cleanup.installation_id WHERE ui.user_id=?) AS deferred_runner_cleanup
     "#).bind(&user.id).bind(&user.id).bind(&user.id).bind(&user.id).fetch_one(&state.database).await?;
     Ok(Viewer {

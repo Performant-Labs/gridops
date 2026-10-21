@@ -153,7 +153,7 @@ pub async fn assigned_queued_jobs(
         r#"SELECT COUNT(*) FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          WHERE wj.status='queued' AND ?=(
+          WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
             SELECT candidate.id FROM runner_pools candidate
             WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
               EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
@@ -323,6 +323,11 @@ pub fn provider_capacity_deficit(capacity: &ProviderCapacity, factor: i64) -> i6
 }
 
 /// Labels of the queued jobs assigned to this pool, with their repository.
+///
+/// Here and wherever jobs count as queued, a job in a finished run doesn't:
+/// GitHub sometimes leaves one listed as queued after its run completes, and
+/// it never runs, so a runner for it would wait forever (and, once it's old
+/// enough to be prioritised, take every new runner).
 pub async fn queued_job_assignments(
     database: &SqlitePool,
     pool_id: &str,
@@ -334,7 +339,7 @@ pub async fn queued_job_assignments(
         r#" AS prioritised FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          WHERE wj.status='queued' AND ?=(
+          WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
             SELECT candidate.id FROM runner_pools candidate
             WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
               EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
@@ -418,7 +423,7 @@ pub async fn repository_capacities(
             FROM workflow_jobs wj
             JOIN workflow_runs wr ON wr.id=wj.run_id
             JOIN repositories repo ON repo.id=wr.repository_id
-            WHERE wj.status='queued' AND ?=(
+            WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
               SELECT candidate.id FROM runner_pools candidate
               WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
                 EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
@@ -637,6 +642,50 @@ mod tests {
             .await?,
             Some("tart".into())
         );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn jobs_left_queued_in_a_finished_run_dont_count() -> anyhow::Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-finished-run-queue-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        // Run 21 finished but GitHub still lists its old job 32 as queued.
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+            INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,provider,providers,labels,image,docker_image,autoscaling_enabled,created_at,updated_at)
+              VALUES ('linux',1,10,'linux','repository','docker','["docker"]','["linux"]','runner:latest','runner:latest',1,1,1);
+            INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at)
+              VALUES ('linux',10,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES
+              (20,10,'CI',2,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1),
+              (21,10,'Release',1,'push','completed','abc122','https://github.com/octo-org/gridops/actions/runs/21',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES
+              (30,20,'test','queued','["self-hosted","linux"]','https://github.com/octo-org/gridops/actions/runs/20/job/30',9999999999999,9999999999999),
+              (32,21,'publish','queued','["self-hosted","linux"]','https://github.com/octo-org/gridops/actions/runs/21/job/32',1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        let jobs = queued_job_assignments(&database, "linux").await?;
+        assert_eq!(jobs.len(), 1);
+        assert!(!jobs[0].prioritised);
+        assert_eq!(assigned_queued_jobs(&database, "linux").await?, 1);
+        let capacities = repository_capacities(&database, "linux").await?;
+        assert_eq!(capacities.len(), 1);
+        assert_eq!((capacities[0].queued, capacities[0].prioritised), (1, 0));
 
         database.close().await;
         fs::remove_dir_all(directory)?;

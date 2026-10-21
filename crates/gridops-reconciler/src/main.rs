@@ -640,6 +640,7 @@ async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> 
                          WHERE waiting.pool_id=r.pool_id AND waiting.status='queued')
             AND NOT EXISTS (SELECT 1 FROM workflow_jobs job JOIN workflow_runs run ON run.id=job.run_id
                              WHERE run.repository_id=r.target_repository_id AND job.status IN ('queued','waiting')
+                               AND run.status!='completed'
                                AND (instr(lower(job.labels),'"'||lower(r.os)||'"')>0
                                     OR (instr(lower(job.labels),'"linux"')=0 AND instr(lower(job.labels),'"windows"')=0
                                         AND instr(lower(job.labels),'"macos"')=0)))
@@ -2152,6 +2153,11 @@ async fn manager_request<T: serde::de::DeserializeOwned>(
             "runner manager request failed ({status}) [{code}]: {}",
             message.chars().take(500).collect::<String>()
         );
+    }
+    // A 204 (a removed sandbox or a released lease) has no body; callers that
+    // ignore the result read it as null.
+    if text.trim().is_empty() {
+        return Ok(serde_json::from_value(Value::Null)?);
     }
     Ok(serde_json::from_str(&text)?)
 }
