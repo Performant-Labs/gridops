@@ -82,7 +82,10 @@ function WorkflowRunDetailPage() {
 
           <PropertiesPanel>
             <PropertyGroup title="Run">
-              <PropertyRow label="Status"><StatusBadge status={state} /></PropertyRow>
+              <PropertyRow label="Status">
+                <StatusBadge status={state} />
+                {run.waitingJobs ? <span className="tabular text-xs text-warning">{run.waitingJobs} waiting</span> : null}
+              </PropertyRow>
               <PropertyRow label="Repository" title={run.repository}><span className="truncate">{run.repository}</span></PropertyRow>
               <PropertyRow label="Branch" title={run.headBranch ?? "detached"}><GitBranch className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate font-mono text-xs">{run.headBranch ?? "detached"}</span></PropertyRow>
               <PropertyRow label="Commit"><GitCommitHorizontal className="size-3.5 shrink-0 text-muted-foreground" /><span className="font-mono text-xs">{run.headSha.slice(0, 7)}</span></PropertyRow>

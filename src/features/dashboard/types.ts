@@ -49,6 +49,7 @@ export type DashboardOverview = {
     branch: string | null;
     status: string;
     conclusion: string | null;
+    waitingJobs: number;
     startedAt: string | null;
     completedAt: string | null;
     htmlUrl: string;

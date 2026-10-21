@@ -222,6 +222,71 @@ async fn installers_are_public_and_point_at_this_deployment() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_queued_run_with_a_running_job_shows_as_in_progress_with_its_waiting_jobs() -> Result<()>
+{
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // GitHub still lists run 100 as queued: one job runs while two wait for a
+    // runner. Run 101 finished but left a job listed as queued.
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+          VALUES (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',1,1,1);
+        INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+          VALUES
+          (100,7,'CI',2,'push','queued','abc','https://github.com/fixture/app/actions/runs/100',2,2,2,2),
+          (101,7,'Release',1,'push','completed','abd','https://github.com/fixture/app/actions/runs/101',1,1,1,1);
+        INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+          VALUES
+          (1000,100,'build','in_progress','["self-hosted"]','https://github.com/fixture/app/actions/runs/100/job/1000',2,2),
+          (1001,100,'test','queued','["self-hosted"]','https://github.com/fixture/app/actions/runs/100/job/1001',2,2),
+          (1002,100,'lint','queued','["self-hosted"]','https://github.com/fixture/app/actions/runs/100/job/1002',2,2),
+          (1010,101,'publish','queued','["self-hosted"]','https://github.com/fixture/app/actions/runs/101/job/1010',1,1);
+        "#,
+    )
+    .execute(&database)
+    .await?;
+
+    let get = |path: &'static str| {
+        let request = fixture
+            .client
+            .get(format!("{}{path}", fixture.base_url))
+            .header(
+                header::COOKIE,
+                ApiFixture::session_cookie().unwrap_or_default(),
+            );
+        async move {
+            let response = request.send().await?;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            Ok::<Value, anyhow::Error>(response.json().await?)
+        }
+    };
+    let shown = |run: &Value| (run["status"].clone(), run["waitingJobs"].clone());
+    let running = (Value::from("in_progress"), Value::from(2));
+    let finished = (Value::from("completed"), Value::from(0));
+
+    let list = get("/api/v1/workflow-runs").await?;
+    let by_id = |id: i64| {
+        list["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|run| run["id"] == id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(shown(&by_id(100)), running);
+    assert_eq!(shown(&by_id(101)), finished);
+    assert_eq!(shown(&get("/api/v1/workflow-runs/100").await?), running);
+    let overview = get("/api/v1/overview").await?;
+    let recent = overview["runs"]
+        .as_array()
+        .and_then(|runs| runs.iter().find(|run| run["id"] == 100))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(shown(&recent), running);
+    Ok(())
+}
+
+#[tokio::test]
 async fn webhook_signature_idempotency_and_rejection_are_persistent() -> Result<()> {
     let fixture = ApiFixture::start().await?;
     let body = r#"{"zen":"fixture"}"#;
