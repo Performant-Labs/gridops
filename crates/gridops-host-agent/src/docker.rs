@@ -2,8 +2,8 @@
 //!
 //! Runs GitHub Actions runner containers for fleet placements. Containers are
 //! named and labelled after their prepared environment, so every later
-//! operation targets exactly the object this agent created. Only images on the
-//! operator's allowlist can be prepared. The runner's registration material is
+//! operation targets exactly the object this agent created. `GridOps` chooses
+//! the image: each platform names it. The runner's registration material is
 //! written to the container's stdin and never appears in its environment,
 //! arguments or `docker inspect`.
 
@@ -41,7 +41,6 @@ const LABEL: &str = "io.gridops.fleet.environment";
 const DOCKER_WAIT_ATTEMPTS: u32 = 20;
 
 pub struct DockerRuntime {
-    images: Vec<String>,
     network: Option<String>,
     socket: Option<String>,
     /// The last probe failure, so a change is logged once, not every probe.
@@ -65,11 +64,10 @@ enum Material {
 }
 
 impl DockerRuntime {
-    /// `images` is the operator's allowlist; `socket` is the host Docker
-    /// socket path to share when a trusted profile asks for it.
-    pub fn new(images: Vec<String>, network: Option<String>, socket: Option<String>) -> Self {
+    /// `socket` is the host Docker socket path to share when a trusted
+    /// profile asks for it.
+    pub fn new(network: Option<String>, socket: Option<String>) -> Self {
         Self {
-            images,
             network,
             socket,
             last_problem: std::sync::Mutex::new(None),
@@ -88,9 +86,6 @@ impl DockerRuntime {
             return failed(FailureCode::Unsupported, false);
         }
         let image = String::from(prepare.image.clone());
-        if !self.images.contains(&image) {
-            return failed(FailureCode::Permission, false);
-        }
         // Pull every time, so a tag that moved (`latest`, a rebuilt CI image)
         // is picked up. The copy already here serves if the registry can't be
         // reached.
@@ -412,15 +407,6 @@ async fn docker_backend(runtime: &DockerRuntime) -> anyhow::Result<ObservedBacke
         ),
     };
     let engine = docker(&["info", "--format", "{{.ID}}"]).await?;
-    let mut environments = Vec::new();
-    for image in &runtime.images {
-        let ready = docker(&["image", "inspect", image]).await.is_ok();
-        environments.push(serde_json::json!({
-            "reference": image,
-            "readiness": if ready { "ready" } else { "preparable" },
-            "version": null,
-        }));
-    }
     let arch = if architecture == Architecture::Arm64 {
         "arm64"
     } else {
@@ -447,7 +433,9 @@ async fn docker_backend(runtime: &DockerRuntime) -> anyhow::Result<ObservedBacke
                 {"target_kind": "github_organization", "mode": "ephemeral"},
                 {"target_kind": "github_organization", "mode": "persistent"}
             ],
-            "environments": environments,
+            "environments": [],
+            // Preparing pulls whatever image the platform names.
+            "any_image": true,
             "resources": {"cpu": "hard_limit", "memory": "hard_limit", "disk": "estimate"},
             "interactive": "unsupported",
             "docker_socket": if runtime.socket.is_some() { "requires_explicit_grant" } else { "unsupported" },

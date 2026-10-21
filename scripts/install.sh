@@ -13,7 +13,6 @@
 #   GRIDOPS_VERSION           agent version to install, e.g. 0.1.0 (default: latest)
 #   GRIDOPS_INSTALL_DIR       where the binary goes (default: ~/.local/bin)
 #   GRIDOPS_ENROLLMENT_CODE   enroll without a prompt
-#   GRIDOPS_AGENT_IMAGES      Docker runner images the machine may run
 #   GRIDOPS_NO_ENROLL=1       install only
 #   GRIDOPS_NO_SERVICE=1      don't install or start the user service
 set -eu
@@ -29,8 +28,6 @@ VERSION="${GRIDOPS_VERSION:-$SERVED_VERSION}"
 VERSION="${VERSION#v}"
 INSTALL_DIR="${GRIDOPS_INSTALL_DIR:-$HOME/.local/bin}"
 STATE_DIR="${GRIDOPS_AGENT_STATE_DIR:-$HOME/.gridops/host-agent}"
-IMAGES="${GRIDOPS_AGENT_IMAGES:-}"
-DEFAULT_IMAGES="ghcr.io/actions/actions-runner:latest"
 LABEL="dev.gridops.host-agent"
 
 say() { printf '%s\n' "$*"; }
@@ -127,8 +124,6 @@ if [ "$os" = macos ]; then
     fail "an agent is already running outside launchd; stop it, then run this again (or set GRIDOPS_NO_SERVICE=1)"
   fi
   # Keep the allowlist from an earlier install unless a new one is given.
-  [ -n "$IMAGES" ] || IMAGES="$(plutil -extract EnvironmentVariables.GRIDOPS_AGENT_IMAGES raw "$plist" 2>/dev/null || true)"
-  IMAGES="${IMAGES:-$DEFAULT_IMAGES}"
   mkdir -p "$(dirname "$plist")"
   path="$(printf '%s' "$service_path" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
   cat >"$plist" <<EOF
@@ -141,7 +136,6 @@ if [ "$os" = macos ]; then
   <key>EnvironmentVariables</key>
   <dict>
     <key>GRIDOPS_AGENT_STATE_DIR</key><string>$STATE_DIR</string>
-    <key>GRIDOPS_AGENT_IMAGES</key><string>$IMAGES</string>
     <key>PATH</key><string>$path</string>
     <key>RUST_LOG</key><string>gridops_host_agent=info</string>
   </dict>
@@ -164,8 +158,6 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >
   if [ ! -f "$unit" ] && pgrep -f "gridops-host-agent run" >/dev/null 2>&1; then
     fail "an agent is already running outside systemd; stop it, then run this again (or set GRIDOPS_NO_SERVICE=1)"
   fi
-  [ -n "$IMAGES" ] || IMAGES="$(sed -n 's/^Environment=GRIDOPS_AGENT_IMAGES=//p' "$unit" 2>/dev/null || true)"
-  IMAGES="${IMAGES:-$DEFAULT_IMAGES}"
   mkdir -p "$unit_dir"
   cat >"$unit" <<EOF
 [Unit]
@@ -176,7 +168,6 @@ Wants=network-online.target
 [Service]
 ExecStart=$bin run
 Environment=GRIDOPS_AGENT_STATE_DIR=$STATE_DIR
-Environment=GRIDOPS_AGENT_IMAGES=$IMAGES
 Environment="PATH=$(printf '%s' "$service_path" | sed 's/%/%%/g')"
 Environment=RUST_LOG=gridops_host_agent=info
 Restart=always

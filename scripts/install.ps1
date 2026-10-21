@@ -11,7 +11,6 @@
 #   GRIDOPS_VERSION           agent version to install, e.g. 0.1.0 (default: latest)
 #   GRIDOPS_INSTALL_DIR       where the binary goes (default: %LOCALAPPDATA%\GridOps\bin)
 #   GRIDOPS_ENROLLMENT_CODE   enroll without a prompt
-#   GRIDOPS_AGENT_IMAGES      Docker runner images the machine may run
 #   GRIDOPS_NO_ENROLL=1       install only
 #   GRIDOPS_NO_SERVICE=1      don't register or start the scheduled task
 $ErrorActionPreference = 'Stop'
@@ -65,9 +64,6 @@ $ProgressPreference = 'SilentlyContinue'
     if (-not (($userPath -split ';') -contains $installDir)) {
         [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $installDir).TrimStart(';'), 'User')
         Write-Host "Added $installDir to your PATH for new terminals."
-    }
-    if ($env:GRIDOPS_AGENT_IMAGES) {
-        [Environment]::SetEnvironmentVariable('GRIDOPS_AGENT_IMAGES', $env:GRIDOPS_AGENT_IMAGES, 'User')
     }
 
     $savedConfig = Join-Path $stateDir 'agent.json'

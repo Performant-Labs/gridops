@@ -14,7 +14,7 @@ docker buildx build \
   --load .github/runner
 ```
 
-Push the image to GHCR, then set every Linux Docker platform of the pool to that image, allow it on each machine's agent (`GRIDOPS_AGENT_IMAGES`), and give the pool the `gridops-ci` label:
+Push the image to GHCR, then set every Linux Docker platform of the pool to that image and give the pool the `gridops-ci` label:
 
 ```sh
 docker push ghcr.io/iamngoni/gridops-ci-runner:node22-rust196

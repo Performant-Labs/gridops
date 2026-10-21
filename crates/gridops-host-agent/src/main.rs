@@ -16,8 +16,7 @@
 //! (overrides the saved address), `GRIDOPS_AGENT_STATE_DIR` (default
 //! `~/.gridops/host-agent`), `GRIDOPS_AGENT_NAME` (defaults to the hostname),
 //! `GRIDOPS_AGENT_HELPER_SOCKET` (use a separate privileged helper; otherwise
-//! the runtime runs in-process), `GRIDOPS_AGENT_IMAGES` (comma-separated runner
-//! image allowlist), `GRIDOPS_AGENT_DOCKER_NETWORK` and
+//! the runtime runs in-process), `GRIDOPS_AGENT_DOCKER_NETWORK` and
 //! `GRIDOPS_AGENT_DOCKER_SOCKET` (share this socket with profiles granted
 //! Docker access).
 
@@ -305,14 +304,7 @@ fn host_runtime() -> Result<HostRuntime> {
 }
 
 fn docker_runtime() -> DockerRuntime {
-    let images = env::var("GRIDOPS_AGENT_IMAGES")
-        .unwrap_or_else(|_| "ghcr.io/actions/actions-runner:latest".into())
-        .split(',')
-        .map(|image| image.trim().to_owned())
-        .filter(|image| !image.is_empty())
-        .collect();
     DockerRuntime::new(
-        images,
         env::var("GRIDOPS_AGENT_DOCKER_NETWORK").ok(),
         env::var("GRIDOPS_AGENT_DOCKER_SOCKET").ok(),
     )

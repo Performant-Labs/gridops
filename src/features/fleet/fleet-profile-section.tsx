@@ -99,7 +99,7 @@ const waitingReason: Record<string, string> = {
   pool_paused: "The pool is paused.",
   pool_draining: "The pool has more runners than it needs and is winding some down.",
   provisioning_paused: "New runner provisioning is paused in Settings › General.",
-  image_unavailable: "No machine allows this image. Add it to GRIDOPS_AGENT_IMAGES on the machine.",
+  image_unavailable: "No machine can run this image. Agents up to 0.1.2 only run the images in their GRIDOPS_AGENT_IMAGES; upgrade them by running the installer again.",
   capability_unverified: "The machine hasn’t confirmed this runtime recently.",
   unsupported_mode: "The machine’s runtime doesn’t support this runner mode.",
 };
@@ -295,7 +295,7 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
                 form={FORM_ID}
                 onChange={(event) => update(platform.key, (current) => ({ ...current, image: event.target.value }))}
                 required
-                title={platform.runtimeKind === "native_process" ? "Native runners don’t use a container image." : platform.runtimeKind === "docker" ? "The machine must allow this image in GRIDOPS_AGENT_IMAGES." : "The Tart VM image each runner clones."}
+                title={platform.runtimeKind === "native_process" ? "Native runners don’t use a container image." : platform.runtimeKind === "docker" ? "Machines pull this image for each runner." : "The Tart VM image each runner clones."}
                 value={platform.image}
               />
               {platform.runtimeKind === "docker" ? (

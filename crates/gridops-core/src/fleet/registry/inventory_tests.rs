@@ -65,6 +65,7 @@ mod tests {
                 readiness: EnvironmentReadiness::Unknown,
                 version: None,
             }],
+            any_image: false,
             resources: ResourceEnforcement {
                 cpu: CpuMemoryEnforcement::Reservation,
                 memory: CpuMemoryEnforcement::Reservation,

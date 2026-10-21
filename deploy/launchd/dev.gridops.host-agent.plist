@@ -15,8 +15,6 @@
     <string>__FLEET_URL__</string>
     <key>GRIDOPS_AGENT_STATE_DIR</key>
     <string>__STATE_DIR__</string>
-    <key>GRIDOPS_AGENT_IMAGES</key>
-    <string>ghcr.io/actions/actions-runner:latest</string>
     <!-- launchd starts with a minimal PATH; the Docker CLI must be on it. -->
     <key>PATH</key>
     <string>__PATH__</string>

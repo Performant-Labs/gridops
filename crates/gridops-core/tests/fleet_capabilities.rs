@@ -401,3 +401,27 @@ fn compatibility_ceilings_apply_even_when_agent_claims_support() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_backend_that_runs_any_image_takes_the_image_the_platform_names() -> Result<()> {
+    let f = fixture()?;
+    let mut value = report();
+    value["environments"] = json!([]);
+    assert_eq!(
+        evaluate(value.clone(), &f)?.err(),
+        Some(CapabilityRejection::ImageUnavailable)
+    );
+    value["any_image"] = true.into();
+    assert_eq!(
+        evaluate(value, &f)?.map(|compatible| compatible.environment_readiness()),
+        Ok(EnvironmentReadiness::Preparable)
+    );
+    // An image it already has still counts as ready.
+    let mut value = report();
+    value["any_image"] = true.into();
+    assert_eq!(
+        evaluate(value, &f)?.map(|compatible| compatible.environment_readiness()),
+        Ok(EnvironmentReadiness::Ready)
+    );
+    Ok(())
+}

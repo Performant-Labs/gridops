@@ -55,7 +55,7 @@ async fn a_runner_is_reported_gone_only_when_docker_says_so() -> Result<()> {
         return Ok(());
     };
     let directory = Path::new(&directory);
-    let runtime = DockerRuntime::new(Vec::new(), None, None);
+    let runtime = DockerRuntime::new(None, None);
     let resource = serde_json::from_value(json!({"kind": "docker", "object_id": "runner"}))?;
     let request = |operation| HelperRequest {
         environment_id: None,
