@@ -54,7 +54,7 @@ function WorkflowRunsPage() {
                   <RunRow
                     key={run.id}
                     meta={<JobSummary run={run} />}
-                    run={{ id: run.id, workflow: run.workflowName, repository: run.repository, runNumber: run.runNumber, branch: run.headBranch, status: run.status, conclusion: run.conclusion, actor: run.actorLogin, startedAt: run.startedAt, completedAt: run.completedAt, createdAt: run.createdAt, prioritised: run.prioritised }}
+                    run={{ id: run.id, workflow: run.workflowName, repository: run.repository, runNumber: run.runNumber, branch: run.headBranch, status: run.status, conclusion: run.conclusion, actor: run.actorLogin, startedAt: run.startedAt, completedAt: run.completedAt, createdAt: run.createdAt, prioritised: run.prioritised, waitingJobs: run.waitingJobs }}
                     trailing={<RunActionsMenu run={run} />}
                   />
                 ))}

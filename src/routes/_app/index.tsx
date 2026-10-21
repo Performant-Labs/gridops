@@ -288,7 +288,7 @@ function RunsSection({ runs }: { runs: DashboardOverview["runs"] }) {
         {runs.length === 0 ? (
           <EmptyState className="min-h-0 py-10" description="Runs appear once a repository installation is connected." icon={Workflow} title="No workflow runs synced" />
         ) : runs.map((run) => (
-          <RunRow key={run.id} run={{ id: run.id, workflow: run.workflow, repository: run.repository, branch: run.branch, status: run.status, conclusion: run.conclusion, startedAt: run.startedAt, completedAt: run.completedAt }} />
+          <RunRow key={run.id} run={{ id: run.id, workflow: run.workflow, repository: run.repository, branch: run.branch, status: run.status, conclusion: run.conclusion, startedAt: run.startedAt, completedAt: run.completedAt, waitingJobs: run.waitingJobs }} />
         ))}
       </div>
     </section>

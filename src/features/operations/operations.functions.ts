@@ -53,6 +53,8 @@ export type WorkflowRun = {
   status: string; conclusion: string | null; headBranch: string | null; headSha: string;
   actorLogin: string | null; htmlUrl: string; startedAt: string | null; completedAt: string | null;
   createdAt: string; repository: string; jobCount: number; activeJobs: number; failedJobs: number; canManage: boolean;
+  /** Jobs that haven't started yet; 0 once the run has finished. */
+  waitingJobs: number;
   runsOn?: RunPlatform[];
   /** Its repository is prioritised in a runner pool. */
   prioritised?: boolean;

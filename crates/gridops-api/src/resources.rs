@@ -47,6 +47,24 @@ const DEFAULT_PAGE_SIZE: i64 = 25;
 const FALLBACK_MANAGER_CPU_LIMIT: i64 = 2;
 const FALLBACK_MANAGER_MEMORY_LIMIT_MB: i64 = 2_048;
 
+/// The status a run `wr` is shown with. GitHub keeps a run queued until none of
+/// its jobs is waiting for a runner, even while others run, so a run with a
+/// running job shows as in progress.
+macro_rules! run_status {
+    () => {
+        "CASE WHEN wr.status<>'completed' AND EXISTS (SELECT 1 FROM workflow_jobs running
+          WHERE running.run_id=wr.id AND running.status='in_progress') THEN 'in_progress' ELSE wr.status END"
+    };
+}
+
+/// How many jobs of an unfinished run `wr` haven't started yet.
+macro_rules! waiting_jobs {
+    () => {
+        "CASE WHEN wr.status='completed' THEN 0 ELSE (SELECT COUNT(*) FROM workflow_jobs waiting
+          WHERE waiting.run_id=wr.id AND waiting.status IN ('queued','waiting','pending','requested')) END"
+    };
+}
+
 #[derive(Debug, FromRow)]
 struct PoolAccess {
     installation_id: i64,
@@ -436,13 +454,17 @@ pub async fn overview(
             })
         })
         .collect::<Vec<_>>();
-    let run_rows = sqlx::query(
-        r#"SELECT wr.id,repo.full_name,wr.workflow_name,wr.head_branch,wr.status,wr.conclusion,
+    let run_rows = sqlx::query(concat!(
+        "SELECT wr.id,repo.full_name,wr.workflow_name,wr.head_branch,",
+        run_status!(),
+        " AS status,",
+        waiting_jobs!(),
+        r#" AS waiting_jobs,wr.conclusion,
           wr.started_at,wr.completed_at,wr.html_url FROM workflow_runs wr
         JOIN repositories repo ON repo.id=wr.repository_id
         JOIN user_installations ui ON ui.installation_id=repo.installation_id
         WHERE ui.user_id=? ORDER BY wr.github_created_at DESC LIMIT 6"#,
-    )
+    ))
     .bind(&user.id)
     .fetch_all(&state.database)
     .await?;
@@ -453,6 +475,7 @@ pub async fn overview(
                 "id": row.get::<i64, _>("id"), "repository": row.get::<String, _>("full_name"),
                 "workflow": row.get::<String, _>("workflow_name"), "branch": row.try_get::<Option<String>, _>("head_branch").ok().flatten(),
                 "status": row.get::<String, _>("status"), "conclusion": row.try_get::<Option<String>, _>("conclusion").ok().flatten(),
+                "waitingJobs": row.get::<i64, _>("waiting_jobs"),
                 "startedAt": iso_optional(row.try_get::<Option<i64>, _>("started_at").ok().flatten()),
                 "completedAt": iso_optional(row.try_get::<Option<i64>, _>("completed_at").ok().flatten()),
                 "htmlUrl": row.get::<String, _>("html_url"),
@@ -886,7 +909,7 @@ pub async fn search(
         ));
     }
     let pattern = like_pattern(query);
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"SELECT kind,id,title,subtitle,href,state FROM (
           SELECT 'repository' AS kind,CAST(repo.id AS TEXT) AS id,repo.full_name AS title,
             i.account_login AS subtitle,'/repositories' AS href,repo.full_name AS sort_value,
@@ -920,13 +943,15 @@ pub async fn search(
           SELECT 'workflow run',CAST(wr.id AS TEXT),wr.workflow_name || ' #' || wr.run_number,
             repo.full_name || COALESCE(' · ' || wr.head_branch,''),
             '/workflow-runs/' || wr.id,wr.workflow_name,
-            CASE WHEN wr.status='completed' THEN COALESCE(wr.conclusion,'completed') ELSE wr.status END,
+            CASE WHEN wr.status='completed' THEN COALESCE(wr.conclusion,'completed') ELSE "#,
+        run_status!(),
+        r#" END,
             wr.github_created_at FROM workflow_runs wr
           JOIN repositories repo ON repo.id=wr.repository_id
           JOIN user_installations ui ON ui.installation_id=repo.installation_id
           WHERE ui.user_id=? AND (wr.workflow_name LIKE ? ESCAPE '\' OR repo.full_name LIKE ? ESCAPE '\')
         ) ORDER BY sort_value,recency DESC LIMIT 12"#,
-    )
+    ))
     .bind(&user.id).bind(&pattern).bind(&pattern).bind(&user.id)
     .bind(&pattern).bind(&user.id).bind(&user.id).bind(&pattern).bind(&pattern)
     .fetch_all(&state.database).await?;
@@ -1581,8 +1606,12 @@ pub async fn workflow_runs(
     .fetch_one(&state.database)
     .await?;
     let (page, offset) = bounded_pagination(requested_page, total, per_page);
-    let rows = sqlx::query(
-        r#"SELECT wr.id,wr.workflow_name,wr.run_number,wr.run_attempt,wr.event,wr.status,
+    let rows = sqlx::query(concat!(
+        "SELECT wr.id,wr.workflow_name,wr.run_number,wr.run_attempt,wr.event,",
+        run_status!(),
+        " AS status,",
+        waiting_jobs!(),
+        r#" AS waiting_jobs,
           wr.conclusion,wr.head_branch,wr.head_sha,wr.actor_login,wr.html_url,wr.started_at,
           wr.completed_at,wr.github_created_at,repo.full_name,ui.permission AS installation_permission,
           COUNT(wj.id) AS job_count,COUNT(CASE WHEN wj.status='in_progress' THEN 1 END) AS active_jobs,
@@ -1593,7 +1622,7 @@ pub async fn workflow_runs(
         JOIN user_installations ui ON ui.installation_id=repo.installation_id AND ui.user_id=?
         LEFT JOIN workflow_jobs wj ON wj.run_id=wr.id GROUP BY wr.id
         ORDER BY wr.github_created_at DESC LIMIT ? OFFSET ?"#,
-    )
+    ))
     .bind(&user.id)
     .bind(per_page)
     .bind(offset)
@@ -1668,15 +1697,19 @@ pub async fn workflow_run(
     Path(run_id): Path<i64>,
     user: AuthUser,
 ) -> ApiResult<Json<Value>> {
-    let run = sqlx::query(
-        r#"SELECT wr.id,wr.workflow_name,wr.run_number,wr.run_attempt,wr.event,wr.status,
+    let run = sqlx::query(concat!(
+        "SELECT wr.id,wr.workflow_name,wr.run_number,wr.run_attempt,wr.event,",
+        run_status!(),
+        " AS status,",
+        waiting_jobs!(),
+        r#" AS waiting_jobs,
           wr.conclusion,wr.head_branch,wr.head_sha,wr.actor_login,wr.html_url,wr.started_at,
           wr.completed_at,wr.github_created_at,repo.id AS repository_id,repo.installation_id,
           repo.full_name,ui.permission AS installation_permission
         FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
         JOIN user_installations ui ON ui.installation_id=repo.installation_id
         WHERE wr.id=? AND ui.user_id=?"#,
-    )
+    ))
     .bind(run_id)
     .bind(&user.id)
     .fetch_optional(&state.database)
@@ -1741,7 +1774,7 @@ pub async fn workflow_run(
         "headSha": run.get::<String,_>("head_sha"), "actorLogin": run.try_get::<Option<String>,_>("actor_login").ok().flatten(),
         "htmlUrl": run.get::<String,_>("html_url"), "startedAt": iso_optional(run.try_get::<Option<i64>,_>("started_at").ok().flatten()),
         "completedAt": iso_optional(run.try_get::<Option<i64>,_>("completed_at").ok().flatten()), "createdAt": iso(run.get::<i64,_>("github_created_at")),
-        "repository": run.get::<String,_>("full_name"), "jobs": job_items,
+        "repository": run.get::<String,_>("full_name"), "waitingJobs": run.get::<i64,_>("waiting_jobs"), "jobs": job_items,
         "canManage": user.role == "admin" || run.get::<String,_>("installation_permission") == "admin",
     })))
 }
@@ -4403,6 +4436,7 @@ fn workflow_run_json(row: &sqlx::sqlite::SqliteRow, system_admin: bool) -> Value
         "completedAt": iso_optional(row.try_get::<Option<i64>,_>("completed_at").ok().flatten()), "createdAt": iso(row.get::<i64,_>("github_created_at")),
         "repository": row.get::<String,_>("full_name"), "jobCount": row.get::<i64,_>("job_count"),
         "activeJobs": row.get::<i64,_>("active_jobs"), "failedJobs": row.get::<i64,_>("failed_jobs"),
+        "waitingJobs": row.get::<i64,_>("waiting_jobs"),
         "canManage": system_admin || row.get::<String,_>("installation_permission") == "admin",
         "prioritised": row.try_get::<bool,_>("prioritised").unwrap_or(false),
     })

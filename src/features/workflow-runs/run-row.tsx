@@ -21,6 +21,8 @@ export type RunRowData = {
   completedAt: string | null;
   createdAt?: string | null;
   prioritised?: boolean;
+  /** Jobs that haven't started yet. A run shows as in progress once any job runs. */
+  waitingJobs?: number;
 };
 
 /** One workflow run in Linear's issue-row shape: status, identifier, title, then metadata on the right. */
@@ -42,6 +44,11 @@ export function RunRow({ run, meta, trailing, className }: { run: RunRowData; me
         </span>
       </span>
       {meta}
+      {run.waitingJobs && run.status !== "completed" ? (
+        <Tooltip content={`${run.waitingJobs} ${run.waitingJobs === 1 ? "job hasn't" : "jobs haven't"} started yet`}>
+          <span className="tabular relative z-[1] hidden shrink-0 text-xs text-warning sm:inline">{run.waitingJobs} waiting</span>
+        </Tooltip>
+      ) : null}
       {run.prioritised && run.status !== "completed" ? (
         <Tooltip content="Its repository is prioritised: queued jobs get the next runner first">
           <span className="relative z-[1] hidden shrink-0 items-center gap-1 rounded-full border border-border-strong px-2 py-0.5 text-2xs font-medium text-foreground sm:inline-flex">
