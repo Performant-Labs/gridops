@@ -244,7 +244,7 @@ async fn agent_ships_its_log_lines() -> Result<()> {
         }],
         3,
     );
-    let supervisor = supervisor.with_logs(logs);
+    let supervisor = supervisor.with_logs(logs.clone());
     let (stop, stopped) = oneshot::channel::<()>();
     let running = tokio::spawn(async move {
         supervisor
@@ -282,6 +282,11 @@ async fn agent_ships_its_log_lines() -> Result<()> {
             .iter()
             .any(|message| message.starts_with("3 agent log lines were dropped"))
     );
+    // A delivered batch leaves the buffer. One the agent took for failed went
+    // back in and was uploaded again every interval.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (unsent, dropped) = logs.take();
+    assert!(unsent.is_empty() && dropped == 0, "{unsent:?} {dropped}");
     let _ = stop.send(());
     assert_eq!(running.await??, Stop::Shutdown);
     Ok(())
