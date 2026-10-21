@@ -1351,6 +1351,69 @@ async fn overview_compares_machines_on_the_same_jobs() -> Result<()> {
     Ok(())
 }
 
+/// A runner goes to the machine fewer other platforms run on, even with less
+/// room, so a machine that other work may need stays free for it. Between
+/// machines needed equally, the roomier one wins.
+#[tokio::test]
+async fn placement_prefers_the_least_needed_machine_then_the_roomiest() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let platforms = json!([
+        {"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"},
+        {"runtimeKind": "native_process", "executionOs": "linux", "architecture": "arm64", "image": "native:actions-runner"},
+    ]);
+    let mut shared = active_machine_on(
+        &f,
+        &f.origin,
+        Arc::new(FakeDocker::default()),
+        platforms.clone(),
+    )
+    .await?;
+    let mut dedicated =
+        active_machine_on(&f, &f.origin, Arc::new(FakeDocker::default()), platforms).await?;
+    let docker: String = sqlx::query_scalar(
+        "SELECT id FROM pool_execution_profiles
+          WHERE pool_id='fleet-pool' AND runtime_kind='docker' AND enabled=1 AND archived_at IS NULL",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    shared.profile_id.clone_from(&docker);
+    dedicated.profile_id = docker;
+    // The shared machine can also run the pool's native platform.
+    sqlx::query(
+        "INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
+         SELECT ?,host_id,domain_id,'native_process',execution_os,architecture,'ready',1,1,1
+           FROM host_backends WHERE host_id=?",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(shared.host.to_string())
+    .execute(&f.database)
+    .await?;
+    let placed_on = |placement: PlacementId| {
+        let database = f.database.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT host_id FROM workload_placements WHERE id=?")
+                .bind(placement.to_string())
+                .fetch_one(&database)
+                .await
+        }
+    };
+    for _ in 0..2 {
+        let placement = admitted_placement(&f, &dedicated, Uuid::new_v4()).await?;
+        assert_eq!(placed_on(placement).await?, dedicated.host.to_string());
+    }
+    // Nothing else needs the shared machine now, and it has more room.
+    sqlx::query(
+        "UPDATE host_backends SET enabled=0 WHERE host_id=? AND runtime_kind='native_process'",
+    )
+    .bind(shared.host.to_string())
+    .execute(&f.database)
+    .await?;
+    let placement = admitted_placement(&f, &shared, Uuid::new_v4()).await?;
+    assert_eq!(placed_on(placement).await?, shared.host.to_string());
+    Ok(())
+}
+
 /// The overview breaks a fleet runner's start into its phases, and shows how
 /// long reconciler passes take, since a prepared runner waits for one.
 #[tokio::test]
