@@ -10,7 +10,6 @@ User=gridops-agent
 SupplementaryGroups=docker
 Environment=GRIDOPS_FLEET_URL=https://gridops.example.com
 Environment=GRIDOPS_AGENT_STATE_DIR=/var/lib/gridops-agent
-Environment=GRIDOPS_AGENT_IMAGES=ghcr.io/actions/actions-runner:latest
 Environment=RUST_LOG=gridops_host_agent=info
 ExecStart=/usr/local/bin/gridops-host-agent run
 Restart=always

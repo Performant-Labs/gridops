@@ -34,7 +34,7 @@ repository, anyone can pull them without logging in.
 
 - **Linux:** the `gridops-ci` image (`.github/runner/Dockerfile`) has the musl
   toolchain for the host's architecture. Both Linux Docker platforms must run
-  it and allow it in `GRIDOPS_AGENT_IMAGES`.
+  it.
 - **macOS:** Xcode command line tools and Docker (OrbStack or Docker Desktop)
   with buildx on the Mac. The job installs its own Rust toolchain under the
   job's temporary directory.

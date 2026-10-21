@@ -108,9 +108,21 @@ pub struct CapabilityReport {
     pub architecture: Architecture,
     pub supported_runners: Vec<SupportedRunner>,
     pub environments: Vec<EnvironmentCapability>,
+    /// The backend runs whatever image `GridOps` asks for, so the platform's
+    /// image decides. Agents up to 0.1.2 only run the `environments` they list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub any_image: bool,
     pub resources: ResourceEnforcement,
     pub interactive: InteractiveCapability,
     pub docker_socket: DockerSocketCapability,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes fields by reference"
+)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,17 +317,18 @@ impl BackendCapabilities {
         if !report.supported_runners.contains(&requirement.runner) {
             return Err(CapabilityRejection::UnsupportedMode);
         }
-        let environment = report
-            .environments
-            .iter()
-            .find(|environment| {
-                environment.reference == requirement.environment
-                    && matches!(
-                        environment.readiness,
-                        EnvironmentReadiness::Ready | EnvironmentReadiness::Preparable
-                    )
-            })
-            .ok_or(CapabilityRejection::ImageUnavailable)?;
+        let environment_readiness = match report.environments.iter().find(|environment| {
+            environment.reference == requirement.environment
+                && matches!(
+                    environment.readiness,
+                    EnvironmentReadiness::Ready | EnvironmentReadiness::Preparable
+                )
+        }) {
+            Some(environment) => environment.readiness,
+            // The agent pulls the image when it prepares the runner.
+            None if report.any_image => EnvironmentReadiness::Preparable,
+            None => return Err(CapabilityRejection::ImageUnavailable),
+        };
         if (requirement.resources.cpu_millis() > 0
             && report.resources.cpu == CpuMemoryEnforcement::Unsupported)
             || (requirement.resources.memory_mib() > 0
@@ -336,7 +349,7 @@ impl BackendCapabilities {
             return Err(CapabilityRejection::DockerSocketUnsupported);
         }
         Ok(CompatibleBackend {
-            environment_readiness: environment.readiness,
+            environment_readiness,
         })
     }
 }

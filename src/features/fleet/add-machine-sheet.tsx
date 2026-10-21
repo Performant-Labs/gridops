@@ -120,9 +120,6 @@ function EnrollmentInstructions({ issued, onDone }: { issued: Issued; onDone: ()
         </p>
       </div>
       <CopyField label="Enrollment code" value={issued.code} />
-      <p className="text-xs leading-5 text-muted-foreground">
-        To run Docker jobs, list the images the machine may pull in <code className="font-mono">GRIDOPS_AGENT_IMAGES</code> (comma-separated) before running the installer. The default is <code className="font-mono">ghcr.io/actions/actions-runner:latest</code>.
-      </p>
       <p className="text-sm text-muted-foreground">Once the agent enrolls, the machine appears in the list as pending. Open it to approve it.</p>
       <div className="flex justify-end">
         <Button onClick={onDone}>Done</Button>

@@ -43,8 +43,9 @@ The installer downloads the agent for the machine's OS and architecture from
 the GitHub release matching your GridOps version, and checks its SHA-256. It
 then asks for the enrollment code and runs the agent as a user service: a
 LaunchAgent on macOS, a systemd user unit on Linux, or a scheduled task at
-logon on Windows. Set `GRIDOPS_AGENT_IMAGES` before running it to allow
-Docker runner images. Other settings are listed at the top of each script.
+logon on Windows. Docker runners use the image each platform names in
+GridOps, so a machine needs no image setup. Other settings are listed at the
+top of each script.
 Running the installer again upgrades the agent and keeps its settings.
 
 Release binaries (`gridops-host-agent-<linux|macos|windows>-<x64|arm64>`) can
@@ -128,7 +129,6 @@ sudo systemctl enable --now gridops-host-agent
 | `GRIDOPS_FLEET_URL` | GridOps address, overriding the one saved at enrollment. Must be HTTPS except on loopback. |
 | `GRIDOPS_AGENT_STATE_DIR` | Journal, credential, saved address and native runner files (default `~/.gridops/host-agent`). |
 | `GRIDOPS_AGENT_NAME` | Machine name shown in GridOps (default: hostname). |
-| `GRIDOPS_AGENT_IMAGES` | Comma-separated runner images Docker profiles may use. Images outside this list are refused. |
 | `GRIDOPS_AGENT_DOCKER_NETWORK` | Docker network for runner containers. |
 | `GRIDOPS_AGENT_DOCKER_SOCKET` | Host Docker socket to share with profiles that need Docker-in-job, when the machine's grant allows it. |
 | `GRIDOPS_AGENT_HELPER_SOCKET` | Use a separate privileged helper (`gridops-host-agent helper <socket>`) instead of running runtimes in-process. |
