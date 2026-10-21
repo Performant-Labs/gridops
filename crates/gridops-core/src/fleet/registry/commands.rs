@@ -338,6 +338,17 @@ async fn apply_to_placement(
             "failed"
         }
         (CommandOutcome::Failed { .. }, _) => return Ok(()),
+        // A prepare never starts a runner and nothing can start one in an
+        // environment the server never learned, so one that ended unknown
+        // fails like one that failed outright. Held uncertain, it would keep
+        // the whole host from work: on 2026-10-21 a reboot during a prepare
+        // locked a host for over an hour.
+        (CommandOutcome::Uncertain { .. }, "prepare_environment") => {
+            release(tx, placement_id, now).await?;
+            "failed"
+        }
+        // An inspect changes nothing; a later one checks again.
+        (CommandOutcome::Uncertain { .. }, "inspect") => return Ok(()),
         (CommandOutcome::Uncertain { .. }, _) => "uncertain",
     };
     sqlx::query("UPDATE workload_placements SET state=?,updated_at=? WHERE id=?")
@@ -514,7 +525,8 @@ pub(super) async fn settle_unreceived(
 /// past its deadline is uncertain, because the agent may have acted on it.
 /// Only commands that can change a workload make its placement uncertain; an
 /// unanswered `inspect` leaves the placement as it was, and a later inspect
-/// checks again.
+/// checks again. An unanswered prepare fails its placement, as an uncertain
+/// one does (see `apply_to_placement`).
 async fn cancel_undeliverable(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: &str,
@@ -549,7 +561,7 @@ async fn cancel_undeliverable(
         if delivered && kind == "inspect" {
             continue;
         }
-        if delivered {
+        if delivered && kind != "prepare_environment" {
             sqlx::query("UPDATE workload_placements SET state='uncertain',updated_at=? WHERE id=?")
                 .bind(now)
                 .bind(&placement_id)

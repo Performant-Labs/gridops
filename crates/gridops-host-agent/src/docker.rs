@@ -33,9 +33,12 @@ use uuid::Uuid;
 
 use crate::helper::{
     Bootstrap, ChildOutput, HelperRequest, HelperResponse, RunnerOutput, RuntimeHelper,
+    StartRemains,
 };
 
 const LABEL: &str = "io.gridops.fleet.environment";
+/// How many times, 3 s apart, an interrupted start waits for Docker to answer.
+const DOCKER_WAIT_ATTEMPTS: u32 = 20;
 
 pub struct DockerRuntime {
     images: Vec<String>,
@@ -314,6 +317,27 @@ impl RuntimeHelper for DockerRuntime {
             }),
             _ => failed(FailureCode::Unsupported, false),
         }
+    }
+
+    async fn interrupted_start(&self, request: HelperRequest, _rebooted: bool) -> StartRemains {
+        let Some(environment) = request.environment_id else {
+            return StartRemains::Unknown;
+        };
+        let name = format!("gridops-{environment}");
+        // A container outlives a reboot, but Docker may still be starting
+        // after one, and until it answers nothing can be said.
+        for _ in 0..DOCKER_WAIT_ATTEMPTS {
+            match docker(&["inspect", "-f", "{{.Id}}", &name]).await {
+                Ok(id) => {
+                    return UpstreamText::new(id).map_or(StartRemains::Unknown, |object_id| {
+                        StartRemains::Runner(LocalResourceIdentity::Docker { object_id })
+                    });
+                }
+                Err(error) if missing(&error) => return StartRemains::Nothing,
+                Err(_) => tokio::time::sleep(Duration::from_secs(3)).await,
+            }
+        }
+        StartRemains::Unknown
     }
 
     /// `docker logs --follow` of a container this agent created, with

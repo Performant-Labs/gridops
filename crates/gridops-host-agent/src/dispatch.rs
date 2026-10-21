@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::{
     activity,
-    helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper},
+    helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper, StartRemains},
     journal::{Environment, Journal, JournalError, Receipt},
 };
 
@@ -94,17 +94,7 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         let command = tracing::field::display(command);
         let outcome = match self.journal.receive(&envelope).await? {
             Receipt::Completed(result) => return Ok(*result),
-            Receipt::Interrupted => {
-                tracing::warn!(
-                    command,
-                    placement,
-                    "a command was cut short by an agent restart; reporting its effect as unknown"
-                );
-                CommandOutcome::Uncertain {
-                    code: UncertainCode::LocalStateUnknown,
-                    diagnostic: None,
-                }
-            }
+            Receipt::Interrupted => self.recover(&envelope).await?,
             Receipt::New if !in_time => {
                 tracing::warn!(
                     command,
@@ -125,33 +115,106 @@ impl<H: RuntimeHelper> Dispatcher<H> {
         if result.validate_against(&envelope).is_err() {
             // The helper reported evidence for something other than this
             // command. Treat the local state as unknown rather than trust it.
-            result.outcome = CommandOutcome::Uncertain {
-                code: UncertainCode::LocalStateUnknown,
-                diagnostic: None,
-            };
+            result.outcome = unknown();
         }
         self.journal.complete(&result).await?;
         Ok(result)
     }
 
-    /// The result of a command this agent received but never finished: it
-    /// stopped part way, so the command's local effect is unknown. Journaled
+    /// The result of a command this agent received but never finished, as
+    /// far as what it left behind shows (see [`Self::recover`]). Journaled
     /// like any other result, so it is reported once and stays the answer.
     pub async fn interrupted(
         &self,
         envelope: &AgentCommandEnvelope,
         now: WireTimestamp,
     ) -> Result<AgentCommandResult, DispatchError> {
-        let result = result(
-            envelope,
-            CommandOutcome::Uncertain {
-                code: UncertainCode::LocalStateUnknown,
-                diagnostic: None,
-            },
-            now,
-        )?;
+        let outcome = self.recover(envelope).await?;
+        let mut result = result(envelope, outcome, now)?;
+        if result.validate_against(envelope).is_err() {
+            result.outcome = unknown();
+        }
         self.journal.complete(&result).await?;
         Ok(result)
+    }
+
+    /// Works out what a command cut short by an agent restart did. A prepare
+    /// journals its environment, and a start the runner it launched, before
+    /// reporting success, so the journal and the runtime can usually tell.
+    /// An unknown outcome holds the placement uncertain and the whole host
+    /// without work until someone repairs it, so it's left for what can't be
+    /// told: on 2026-10-21 a reboot during a prepare locked a host for over
+    /// an hour although that prepare had journaled nothing.
+    async fn recover(&self, envelope: &AgentCommandEnvelope) -> anyhow::Result<CommandOutcome> {
+        let outcome = self.remains(envelope).await?;
+        tracing::warn!(
+            command = %activity::kind(&envelope.operation),
+            placement = activity::placement(envelope).as_deref().map(tracing::field::display),
+            "a command was cut short by an agent restart; reporting it as {}",
+            match &outcome {
+                CommandOutcome::Succeeded { .. } => "done",
+                CommandOutcome::Failed { .. } => "not done",
+                _ => "unknown",
+            }
+        );
+        Ok(outcome)
+    }
+
+    async fn remains(&self, envelope: &AgentCommandEnvelope) -> anyhow::Result<CommandOutcome> {
+        let CommandScope::Placement {
+            placement_id,
+            generation,
+            ..
+        } = envelope.scope
+        else {
+            return Ok(unknown());
+        };
+        let owned = self
+            .journal
+            .placement_environment(placement_id, generation)
+            .await?;
+        match (&envelope.operation, owned) {
+            (AgentOperation::PrepareEnvironment(_), Some(environment)) => {
+                Ok(succeeded(SuccessEvidence::PreparedEnvironment {
+                    prepared_environment_id: environment.id,
+                }))
+            }
+            // Nothing journaled, so no command can ever reach what the
+            // prepare staged, and a prepare never starts anything.
+            (AgentOperation::PrepareEnvironment(_), None) => Ok(cut_short()),
+            (AgentOperation::StartRunner(start), Some(environment))
+                if environment.id == start.prepared_environment_id =>
+            {
+                let local_identity = if let Some(identity) = environment.local_identity.clone() {
+                    identity
+                } else {
+                    let rebooted = self.journal.rebooted_since(envelope.command_id).await?;
+                    let request = self.request(Some(&environment), &envelope.operation, None);
+                    match self.helper.interrupted_start(request, rebooted).await {
+                        StartRemains::Runner(identity) => {
+                            self.journal
+                                .bind_local_identity(environment.id, &identity)
+                                .await?;
+                            identity
+                        }
+                        StartRemains::Nothing => return Ok(cut_short()),
+                        StartRemains::Unknown => return Ok(unknown()),
+                    }
+                };
+                // Whether it still runs is for the reconciler's inspect to
+                // find; a runner gone since is then cleaned up.
+                Ok(succeeded(SuccessEvidence::RunnerStarted {
+                    prepared_environment_id: start.prepared_environment_id,
+                    execution_profile_id: start.execution_profile_id,
+                    profile_revision: start.profile_revision,
+                    local_identity,
+                }))
+            }
+            // Dispatch refuses a start outside an owned environment before
+            // the helper sees it.
+            (AgentOperation::StartRunner(_), _) => Ok(refused(FailureCode::Permission)),
+            _ => Ok(unknown()),
+        }
     }
 
     async fn execute(
@@ -285,12 +348,7 @@ impl<H: RuntimeHelper> Dispatcher<H> {
                 } if *prepared_environment_id == environment.id => {
                     self.journal.record_environment(&environment).await?;
                 }
-                _ => {
-                    return Ok(CommandOutcome::Uncertain {
-                        code: UncertainCode::LocalStateUnknown,
-                        diagnostic: None,
-                    });
-                }
+                _ => return Ok(unknown()),
             }
         }
         Ok(outcome(response))
@@ -328,6 +386,28 @@ const fn refused(code: FailureCode) -> CommandOutcome {
         code,
         retryable: false,
         diagnostic: None,
+    }
+}
+
+/// Cut short before it took effect, so nothing of it exists.
+const fn cut_short() -> CommandOutcome {
+    CommandOutcome::Failed {
+        code: FailureCode::Cancelled,
+        retryable: true,
+        diagnostic: None,
+    }
+}
+
+const fn unknown() -> CommandOutcome {
+    CommandOutcome::Uncertain {
+        code: UncertainCode::LocalStateUnknown,
+        diagnostic: None,
+    }
+}
+
+fn succeeded(evidence: SuccessEvidence) -> CommandOutcome {
+    CommandOutcome::Succeeded {
+        evidence: Box::new(evidence),
     }
 }
 

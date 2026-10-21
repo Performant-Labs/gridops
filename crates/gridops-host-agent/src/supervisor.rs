@@ -521,7 +521,7 @@ impl<H: RuntimeHelper> Supervisor<H> {
     /// with the last session would otherwise leave its command uncertain and
     /// the host without work. Afterwards the handshake can tell the server
     /// that commands with no result never arrived here. A command that was
-    /// interrupted part way is reported as uncertain.
+    /// interrupted part way is reported as what its leftovers show.
     async fn deliver_results(
         &self,
         host_id: HostId,

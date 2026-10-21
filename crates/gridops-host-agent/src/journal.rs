@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS commands (
   request_hash TEXT NOT NULL,
   envelope TEXT NOT NULL,
   received_at INTEGER NOT NULL,
-  result TEXT
+  result TEXT,
+  boot_id TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS environments (
   id TEXT PRIMARY KEY,
@@ -138,6 +139,18 @@ impl Journal {
             .await
             .with_context(|| format!("opening journal {}", path.display()))?;
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+        // Journals written before 0.1.3 don't record the boot a command
+        // arrived in.
+        let has_boot: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('commands') WHERE name='boot_id')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if !has_boot {
+            sqlx::query("ALTER TABLE commands ADD COLUMN boot_id TEXT")
+                .execute(&pool)
+                .await?;
+        }
         restrict_permissions(path)?;
         Ok(Self { pool })
     }
@@ -233,13 +246,14 @@ impl Journal {
     pub async fn receive(&self, envelope: &AgentCommandEnvelope) -> Result<Receipt, JournalError> {
         let command_id = envelope.command_id.to_string();
         let inserted = sqlx::query(
-            "INSERT INTO commands (command_id,request_hash,envelope,received_at)
-             VALUES (?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
+            "INSERT INTO commands (command_id,request_hash,envelope,received_at,boot_id)
+             VALUES (?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
         )
         .bind(&command_id)
         .bind(&envelope.request_hash)
         .bind(to_json(envelope)?)
         .bind(gridops_core::now_millis())
+        .bind(crate::probe::boot_id())
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -257,6 +271,18 @@ impl Journal {
             Some(result) => Receipt::Completed(Box::new(from_json(&result)?)),
             None => Receipt::Interrupted,
         })
+    }
+
+    /// Whether the host has booted since this command was received. `false`
+    /// when the journal didn't record the boot.
+    pub async fn rebooted_since(&self, command_id: CommandId) -> Result<bool> {
+        let boot: Option<String> =
+            sqlx::query_scalar("SELECT boot_id FROM commands WHERE command_id=?")
+                .bind(command_id.to_string())
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
+        Ok(boot.is_some_and(|boot| boot != crate::probe::boot_id()))
     }
 
     pub async fn complete(&self, result: &AgentCommandResult) -> Result<()> {
