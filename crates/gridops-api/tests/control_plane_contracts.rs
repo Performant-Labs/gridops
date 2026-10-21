@@ -3,21 +3,30 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::post,
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use gridops_core::{
-    compatible_runner_provider, connect_database_path, crypto::hash_token,
-    models::CreateRunnerPool, runner_system_labels, scale_up_target,
+    compatible_runner_provider, connect_database_path,
+    crypto::{Vault, hash_token},
+    models::CreateRunnerPool,
+    runner_system_labels, scale_up_target,
 };
 use hmac::{Hmac, Mac as _};
 use reqwest::{Client, StatusCode, header};
-use serde_json::Value;
+use rsa::pkcs1::{EncodeRsaPrivateKey as _, LineEnding};
+use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::{Row as _, SqlitePool};
-use tokio::time::sleep;
+use tokio::{sync::Mutex, time::sleep};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -35,6 +44,10 @@ struct ApiFixture {
 
 impl ApiFixture {
     async fn start() -> Result<Self> {
+        Self::start_with(&[]).await
+    }
+
+    async fn start_with(extra_env: &[(&str, String)]) -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let database_path =
             env::temp_dir().join(format!("gridops-api-test-{}.sqlite", Uuid::new_v4()));
@@ -52,6 +65,7 @@ impl ApiFixture {
             .env("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
             .env("GRIDOPS_WEBHOOK_ACTIVE", "false")
             .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
+            .envs(extra_env.iter().map(|(name, value)| (*name, value)))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -371,6 +385,129 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
         .await?,
         1
     );
+    Ok(())
+}
+
+/// Each run cancellation's run id and `Authorization` header.
+type SeenTokens = Arc<Mutex<Vec<(i64, String)>>>;
+
+/// Stands in for api.github.com: mints installation tokens and records the
+/// token each run cancellation arrives with. It refuses the user's token for
+/// run 3, as GitHub does when the person can't write to the repository.
+async fn fake_github() -> Result<(String, SeenTokens)> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route(
+            "/app/installations/{id}/access_tokens",
+            post(|| async {
+                Json(json!({
+                    "token": "installation-token",
+                    "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                }))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{repo}/actions/runs/{run_id}/cancel",
+            post(
+                |State(seen): State<SeenTokens>,
+                 Path((_, _, run_id)): Path<(String, String, i64)>,
+                 headers: axum::http::HeaderMap| async move {
+                    let token = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    let refused = run_id == 3 && token == "Bearer user-token";
+                    seen.lock().await.push((run_id, token));
+                    if refused {
+                        axum::http::StatusCode::FORBIDDEN
+                    } else {
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                },
+            ),
+        )
+        .with_state(Arc::clone(&seen));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok((url, seen))
+}
+
+fn app_private_key() -> Result<String> {
+    let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)?;
+    Ok(key.to_pkcs1_pem(LineEnding::LF)?.to_string())
+}
+
+#[tokio::test]
+async fn run_controls_act_as_the_signed_in_user() -> Result<()> {
+    let (github_url, seen) = fake_github().await?;
+    let fixture = ApiFixture::start_with(&[
+        ("GRIDOPS_GITHUB_API_URL", github_url),
+        ("GITHUB_APP_ID", "1".into()),
+        ("GITHUB_APP_PRIVATE_KEY", app_private_key()?),
+    ])
+    .await?;
+    let database = fixture.database().await?;
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at) VALUES (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',?,?,?)")
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&database)
+        .await?;
+    for run_id in 1..=3_i64 {
+        sqlx::query("INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at) VALUES (?,7,'CI',?,'push','queued','abc','https://github.com/fixture/app/actions/runs',?,?,?,?)")
+            .bind(run_id)
+            .bind(run_id)
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&database)
+            .await?;
+    }
+    let cancel = |run_id: i64| {
+        fixture
+            .client
+            .post(format!(
+                "{}/api/v1/workflow-runs/{run_id}/action",
+                fixture.base_url
+            ))
+            .header(
+                header::COOKIE,
+                ApiFixture::session_cookie().unwrap_or_default(),
+            )
+            .header(header::ORIGIN, &fixture.base_url)
+            .json(&json!({ "action": "cancel" }))
+            .send()
+    };
+
+    // The fixture user holds no GitHub token of their own, so the App acts.
+    assert_eq!(cancel(1).await?.status(), StatusCode::OK);
+    let vault = Vault::new([0; 32], SESSION_SECRET.as_bytes().to_vec());
+    sqlx::query("UPDATE users SET access_token=? WHERE id='user-1'")
+        .bind(vault.seal("user-token")?)
+        .execute(&database)
+        .await?;
+    assert_eq!(cancel(2).await?.status(), StatusCode::OK);
+    assert_eq!(cancel(3).await?.status(), StatusCode::OK);
+
+    assert_eq!(
+        *seen.lock().await,
+        [
+            (1, "Bearer installation-token".to_owned()),
+            (2, "Bearer user-token".to_owned()),
+            (3, "Bearer user-token".to_owned()),
+            (3, "Bearer installation-token".to_owned()),
+        ]
+    );
+    let actors = sqlx::query_scalar::<_, String>(
+        "SELECT json_extract(metadata,'$.githubActor') FROM audit_events WHERE action='workflow_run.cancel' ORDER BY target_id",
+    )
+    .fetch_all(&database)
+    .await?;
+    assert_eq!(actors, ["app", "user", "app"]);
     Ok(())
 }
 

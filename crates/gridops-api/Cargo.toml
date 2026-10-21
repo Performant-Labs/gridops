@@ -35,6 +35,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 gridops-host-agent = { path = "../gridops-host-agent" }
+rsa = { version = "0.9", features = ["getrandom"] }
 
 [lints]
 workspace = true

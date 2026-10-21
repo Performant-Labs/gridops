@@ -22,6 +22,7 @@ struct Inner {
     github_webhook_secret: Option<SecretString>,
     github_webhook_active: Option<bool>,
     github_webhook_url: Option<Url>,
+    github_api_url: Url,
     session_secret: Option<SecretString>,
     encryption_key: Option<SecretString>,
     manager_url: Url,
@@ -43,6 +44,8 @@ impl Config {
         let github_webhook_url = optional("GRIDOPS_GITHUB_WEBHOOK_URL")
             .map(|value| Url::parse(&value).context("GRIDOPS_GITHUB_WEBHOOK_URL must be a URL"))
             .transpose()?;
+        let github_api_url =
+            env::var("GRIDOPS_GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into());
         Ok(Self(Arc::new(Inner {
             base_url: Url::parse(&base_url).context("GRIDOPS_BASE_URL must be a URL")?,
             database_path: env::var("GRIDOPS_DATABASE_PATH")
@@ -60,6 +63,8 @@ impl Config {
             github_webhook_secret: secret("GITHUB_WEBHOOK_SECRET"),
             github_webhook_active: optional_bool("GRIDOPS_GITHUB_WEBHOOK_ACTIVE")?,
             github_webhook_url,
+            github_api_url: Url::parse(&github_api_url)
+                .context("GRIDOPS_GITHUB_API_URL must be a URL")?,
             session_secret: secret("GRIDOPS_SESSION_SECRET"),
             encryption_key: secret("GRIDOPS_ENCRYPTION_KEY"),
             manager_url: Url::parse(&manager_url).context("GRIDOPS_MANAGER_URL must be a URL")?,
@@ -119,6 +124,10 @@ impl Config {
     }
     pub fn github_webhook_url(&self) -> Option<&Url> {
         self.0.github_webhook_url.as_ref()
+    }
+    /// Where GitHub's REST API answers. Tests point it at a local fake.
+    pub fn github_api_url(&self) -> &Url {
+        &self.0.github_api_url
     }
     pub fn webhook_delivery_active(&self) -> bool {
         self.0.github_webhook_active.unwrap_or_else(|| {
