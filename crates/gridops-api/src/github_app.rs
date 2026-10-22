@@ -13,8 +13,8 @@ use crate::{
     auth::{AuthUser, assert_same_origin, random_token, require_system_admin},
     error::{ApiError, ApiResult},
     state::{
-        AppState, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_SLUG, GITHUB_CLIENT_ID,
-        GITHUB_CLIENT_SECRET, GITHUB_WEBHOOK_SECRET,
+        AppState, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_SETTINGS_URL, GITHUB_APP_SLUG,
+        GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_WEBHOOK_SECRET,
     },
 };
 
@@ -209,6 +209,12 @@ pub async fn manifest_callback(
         .execute(&mut *transaction)
         .await?;
     }
+    // The settings page belonged to the previous App; the next refresh
+    // stores this one's.
+    sqlx::query("DELETE FROM runtime_secrets WHERE key=?")
+        .bind(GITHUB_APP_SETTINGS_URL)
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query(
         r#"INSERT INTO audit_events (id,actor_user_id,actor_label,action,target_type,target_id,metadata,created_at)
            VALUES (?,?,?,?,?,?,?,?)"#,

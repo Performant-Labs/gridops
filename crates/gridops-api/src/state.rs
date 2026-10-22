@@ -9,6 +9,7 @@ pub const GITHUB_CLIENT_SECRET: &str = "github.client_secret";
 pub const GITHUB_APP_ID: &str = "github.app_id";
 pub const GITHUB_APP_PRIVATE_KEY: &str = "github.app_private_key";
 pub const GITHUB_APP_SLUG: &str = "github.app_slug";
+pub const GITHUB_APP_SETTINGS_URL: &str = "github.app_settings_url";
 pub const GITHUB_WEBHOOK_SECRET: &str = "github.webhook_secret";
 
 #[derive(Clone)]
@@ -102,6 +103,65 @@ impl AppState {
             .runtime_secret(GITHUB_APP_SLUG)
             .await?
             .unwrap_or_else(|| self.config.github_app_slug().to_owned()))
+    }
+
+    /// The App's settings page. Stored once GitHub reports the App's owner,
+    /// since an organization's App lives under that organization.
+    pub async fn github_app_settings_url(&self) -> Result<String> {
+        match self.runtime_secret(GITHUB_APP_SETTINGS_URL).await? {
+            Some(url) => Ok(url),
+            None => Ok(format!(
+                "https://github.com/settings/apps/{}",
+                self.github_app_slug().await?
+            )),
+        }
+    }
+
+    /// Stores the App's slug and settings page as GitHub now has them, so
+    /// links follow a rename or a move to another owner. Returns the slug
+    /// when either changed.
+    pub async fn refresh_github_app(&self) -> Result<Option<String>> {
+        let Some((app_id, private_key)) = self.github_app_credentials().await? else {
+            return Ok(None);
+        };
+        let app = self
+            .github
+            .app_with_credentials(&app_id, &private_key)
+            .await?;
+        let settings_url = app.settings_url();
+        if app.slug == self.github_app_slug().await?
+            && settings_url == self.github_app_settings_url().await?
+        {
+            return Ok(None);
+        }
+        let now = gridops_core::now_millis();
+        let mut transaction = self.database.begin().await?;
+        for (key, value) in [
+            (GITHUB_APP_SLUG, app.slug.as_str()),
+            (GITHUB_APP_SETTINGS_URL, settings_url.as_str()),
+        ] {
+            sqlx::query(
+                r#"INSERT INTO runtime_secrets (key,value,updated_by,updated_at) VALUES (?,?,NULL,?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_by=NULL,updated_at=excluded.updated_at"#,
+            )
+            .bind(key)
+            .bind(self.vault.seal(value)?)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(Some(app.slug))
+    }
+
+    /// Refreshes the App's slug and owner, logging rather than failing: they
+    /// only build links, so a GitHub hiccup must not block anything else.
+    pub async fn follow_github_app_rename(&self) {
+        match self.refresh_github_app().await {
+            Ok(Some(slug)) => tracing::info!(slug = %slug, "GitHub App was renamed or moved"),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = ?error, "could not refresh the GitHub App's name"),
+        }
     }
 
     pub async fn github_webhook_secret(&self) -> Result<Option<String>> {

@@ -142,10 +142,10 @@ async fn github_permissions_json(state: &AppState, user: &AuthUser) -> ApiResult
         })
         .collect::<Vec<_>>();
     let app_settings_url = state
-        .github_app_slug()
+        .github_app_settings_url()
         .await
         .ok()
-        .map(|slug| format!("https://github.com/settings/apps/{slug}/permissions"));
+        .map(|url| format!("{url}/permissions"));
     Ok(json!({
         "ready": missing.is_empty(),
         "missing": missing,

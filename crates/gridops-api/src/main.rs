@@ -54,6 +54,10 @@ async fn main() -> Result<()> {
     let bitbucket = BitbucketClient::new()?;
     let state = AppState::new(config.clone(), database, vault, github, bitbucket)?;
     state.validate_api().await?;
+    tokio::spawn({
+        let state = state.clone();
+        async move { state.follow_github_app_rename().await }
+    });
     let request_id = HeaderName::from_static("x-request-id");
     let origin: HeaderValue = config.base_url().origin().ascii_serialization().parse()?;
     let web_root = config.web_root();

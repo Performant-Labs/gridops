@@ -211,6 +211,12 @@ impl GitHubClient {
         Ok(response.token)
     }
 
+    /// The App as GitHub has it now, which follows renames and transfers.
+    pub async fn app_with_credentials(&self, app_id: &str, private_key: &str) -> Result<GitHubApp> {
+        let jwt = app_jwt(app_id, private_key)?;
+        self.get("/app", &jwt).await
+    }
+
     /// A token limited to one repository and the given permissions, for work
     /// that must not reach anything else the installation can. Never cached.
     pub async fn scoped_installation_token(
@@ -373,6 +379,33 @@ pub struct GitHubInstallation {
     #[serde(default)]
     pub events: Vec<String>,
     pub suspended_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitHubApp {
+    pub slug: String,
+    pub owner: GitHubAppOwner,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitHubAppOwner {
+    pub login: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl GitHubApp {
+    /// Where the App's owner edits it on github.com.
+    pub fn settings_url(&self) -> String {
+        if self.owner.kind == "Organization" {
+            format!(
+                "https://github.com/organizations/{}/settings/apps/{}",
+                self.owner.login, self.slug
+            )
+        } else {
+            format!("https://github.com/settings/apps/{}", self.slug)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

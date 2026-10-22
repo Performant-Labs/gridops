@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::post,
+    routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use gridops_core::{
@@ -391,12 +391,22 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
 /// Each run cancellation's run id and `Authorization` header.
 type SeenTokens = Arc<Mutex<Vec<(i64, String)>>>;
 
-/// Stands in for api.github.com: mints installation tokens and records the
+/// Stands in for api.github.com: reports the App renamed to `gridopsbot` and
+/// moved to that organization, mints installation tokens and records the
 /// token each run cancellation arrives with. It refuses the user's token for
 /// run 3, as GitHub does when the person can't write to the repository.
 async fn fake_github() -> Result<(String, SeenTokens)> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
+        .route(
+            "/app",
+            get(|| async {
+                Json(json!({
+                    "slug": "gridopsbot",
+                    "owner": { "login": "gridopsbot", "type": "Organization" },
+                }))
+            }),
+        )
         .route(
             "/app/installations/{id}/access_tokens",
             post(|| async {
@@ -437,6 +447,52 @@ async fn fake_github() -> Result<(String, SeenTokens)> {
 fn app_private_key() -> Result<String> {
     let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)?;
     Ok(key.to_pkcs1_pem(LineEnding::LF)?.to_string())
+}
+
+#[tokio::test]
+async fn links_follow_the_github_app_to_its_new_name_and_owner() -> Result<()> {
+    let (github_url, _) = fake_github().await?;
+    let fixture = ApiFixture::start_with(&[
+        ("GRIDOPS_GITHUB_API_URL", github_url),
+        ("GITHUB_APP_ID", "1".into()),
+        ("GITHUB_APP_PRIVATE_KEY", app_private_key()?),
+        ("GITHUB_APP_SLUG", "gridops-self-hosted".into()),
+    ])
+    .await?;
+    let read = |path: &str| {
+        fixture
+            .client
+            .get(format!("{}{path}", fixture.base_url))
+            .header(
+                header::COOKIE,
+                ApiFixture::session_cookie().unwrap_or_default(),
+            )
+            .send()
+    };
+
+    // The API asks GitHub for the App's name as it starts.
+    let mut install_url = Value::Null;
+    for _ in 0..60 {
+        install_url = read("/api/v1/runner-pools/options")
+            .await?
+            .json::<Value>()
+            .await?["installUrl"]
+            .clone();
+        if install_url != "https://github.com/apps/gridops-self-hosted/installations/new" {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        install_url,
+        "https://github.com/apps/gridopsbot/installations/new"
+    );
+    let settings = read("/api/v1/settings/ai").await?.json::<Value>().await?;
+    assert_eq!(
+        settings["github"]["appSettingsUrl"],
+        "https://github.com/organizations/gridopsbot/settings/apps/gridopsbot/permissions"
+    );
+    Ok(())
 }
 
 #[tokio::test]
