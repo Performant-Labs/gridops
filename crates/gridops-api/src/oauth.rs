@@ -245,6 +245,7 @@ pub async fn sync(State(state): State<AppState>, user: AuthUser) -> ApiResult<Js
             "Create the controller GitHub App before synchronizing installations.".into(),
         ));
     }
+    state.follow_github_app_rename().await;
     let token = user_access_token(&state, &user.id).await?;
     sync_user_installations(&state, &user.id, &token).await?;
     let count = sqlx::query(

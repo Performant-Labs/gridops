@@ -26,9 +26,9 @@ pub use config::Config;
 pub use crypto::Vault;
 pub use db::{associate_runner_with_job, connect_database, connect_database_path, now_millis};
 pub use github::{
-    GitHubClient, GitHubInstallation, GitHubOrganizationMembership, GitHubRepository, GitHubUser,
-    GitHubWorkflowJob, GitHubWorkflowRun, GitHubWorkflowStep, InstallationPage, JitRequest,
-    JitResponse, RepositoryPage, RunnerTarget, WorkflowJobPage, WorkflowRunPage,
+    GitHubApp, GitHubClient, GitHubInstallation, GitHubOrganizationMembership, GitHubRepository,
+    GitHubUser, GitHubWorkflowJob, GitHubWorkflowRun, GitHubWorkflowStep, InstallationPage,
+    JitRequest, JitResponse, RepositoryPage, RunnerTarget, WorkflowJobPage, WorkflowRunPage,
 };
 pub use models::{Alerts, ConfigurationState, CreateRunnerPool, UpdateRunnerPool, Viewer};
 pub use provisioning::{FailureCleanup, ProvisioningPlan, failure_cleanup};

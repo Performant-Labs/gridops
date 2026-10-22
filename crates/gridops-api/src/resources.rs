@@ -2598,7 +2598,7 @@ pub async fn workflow_run_action(
 
 /// Sends a run control as the signed-in user, so GitHub credits that person.
 /// Sent with the installation token, GitHub names the App instead
-/// (`canceled by @gridops-self-hosted[bot]`), which reads as the App
+/// (`canceled by @gridopsbot[bot]`), which reads as the App
 /// cancelling the run on its own. Falls back to the installation token when
 /// the user has no usable GitHub token or GitHub refuses theirs. Returns who
 /// GitHub saw act.
