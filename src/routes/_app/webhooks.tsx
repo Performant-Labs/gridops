@@ -11,7 +11,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
-import { type WebhookDelivery, type WebhookPayload, getWebhookPayloadAction, getWebhooksPage, retryWebhookAction } from "~/features/operations/operations.functions";
+import { type WebhookDelivery, type WebhookPayload, dismissFailedWebhooksAction, getWebhookPayloadAction, getWebhooksPage, retryWebhookAction } from "~/features/operations/operations.functions";
 import { validatePageSearch } from "~/lib/pagination";
 import { useAction } from "~/lib/use-action";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
@@ -29,9 +29,11 @@ const GROUPS = [
   { key: "failed", label: "Failed", status: "failed" },
   { key: "pending", label: "Received", status: "received" },
   { key: "processed", label: "Processed", status: "processed" },
+  { key: "dismissed", label: "Dismissed", status: "dismissed" },
 ] as const;
 
 function deliveryGroup(delivery: WebhookDelivery): (typeof GROUPS)[number]["key"] {
+  if (delivery.status === "dismissed") return "dismissed";
   if (delivery.status === "failed" || delivery.status === "rejected" || !delivery.signatureValid) return "failed";
   if (delivery.status === "processed") return "processed";
   return "pending";
@@ -42,6 +44,7 @@ type PayloadState = { delivery: WebhookDelivery; payload: WebhookPayload | null;
 function WebhooksPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
+  const run = useAction();
   useLiveRouteRefresh(10_000, data.authenticated);
   const [peek, setPeek] = useState<PayloadState | null>(null);
   const groups = GROUPS.map((group) => ({ ...group, deliveries: data.items.filter((delivery) => deliveryGroup(delivery) === group.key) })).filter((group) => group.deliveries.length);
@@ -67,7 +70,19 @@ function WebhooksPage() {
         ) : (
           <>
             {groups.map((group) => (
-              <ListGroup count={group.deliveries.length} icon={<StatusBadge iconOnly status={group.status} />} key={group.key} label={group.label}>
+              <ListGroup
+                actions={group.key === "failed" ? (
+                  <Button onClick={() => void run({
+                    action: () => dismissFailedWebhooksAction(),
+                    confirm: `Dismiss all ${group.deliveries.length} failed deliveries? They'll stop counting toward "Needs attention" and the failure rate, but stay visible here under Dismissed.`,
+                    success: "Failed deliveries dismissed.",
+                  })} size="xs" variant="outline">Dismiss all</Button>
+                ) : undefined}
+                count={group.deliveries.length}
+                icon={<StatusBadge iconOnly status={group.status} />}
+                key={group.key}
+                label={group.label}
+              >
                 {group.deliveries.map((delivery) => <DeliveryRow delivery={delivery} key={delivery.id} onOpen={() => void openPayload(delivery)} />)}
               </ListGroup>
             ))}

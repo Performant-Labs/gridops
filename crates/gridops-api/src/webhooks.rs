@@ -183,6 +183,62 @@ pub async fn retry(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Bulk-clears the "N webhook deliveries failed" alert without pretending anything was
+/// reprocessed: a batch of failures from an already-fixed bug (or one GitHub's own retries
+/// already resolved) otherwise sits in the 24h window forever, since nothing ever marks it
+/// as seen. This moves those rows out of `status='failed'` so the dashboard's failure count
+/// (which only counts that status) drops, while keeping the rows themselves for history —
+/// the delivery list on /webhooks still shows them, just as "Dismissed" instead of "Failed".
+pub async fn dismiss_failed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: AuthUser,
+) -> ApiResult<Json<Value>> {
+    assert_same_origin(&state, &headers)?;
+    let installation_ids = sqlx::query_scalar::<_, Option<i64>>(
+        r#"SELECT DISTINCT wd.installation_id FROM webhook_deliveries wd
+           WHERE wd.status='failed' AND (wd.installation_id IS NULL OR EXISTS (
+             SELECT 1 FROM user_installations ui
+             WHERE ui.installation_id=wd.installation_id AND ui.user_id=?
+           ))"#,
+    )
+    .bind(&user.id)
+    .fetch_all(&state.database)
+    .await?;
+    let mut needs_system_admin = false;
+    for installation_id in &installation_ids {
+        match installation_id {
+            Some(id) => assert_installation_admin(&state, &user, *id).await?,
+            None => needs_system_admin = true,
+        }
+    }
+    if needs_system_admin {
+        require_system_admin(&user)?;
+    }
+    let dismissed = sqlx::query(
+        r#"UPDATE webhook_deliveries SET status='dismissed',processed_at=?
+           WHERE status='failed' AND (installation_id IS NULL OR EXISTS (
+             SELECT 1 FROM user_installations ui
+             WHERE ui.installation_id=webhook_deliveries.installation_id AND ui.user_id=?
+           ))"#,
+    )
+    .bind(now_millis())
+    .bind(&user.id)
+    .execute(&state.database)
+    .await?
+    .rows_affected();
+    audit(
+        &state,
+        &user,
+        "webhook.dismissed_failed",
+        "webhook_delivery",
+        None,
+        json!({ "count": dismissed }),
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true, "dismissed": dismissed })))
+}
+
 async fn process(
     state: &AppState,
     event: &str,

@@ -175,6 +175,8 @@ export const searchAction = ({ data }: { data: { query: string } }) =>
   api<Array<{ kind: string; id: string; title: string; subtitle: string; href: string }>>(`/api/v1/search?q=${encodeURIComponent(data.query)}`);
 export const retryWebhookAction = ({ data }: { data: { deliveryId: string } }) =>
   api<{ ok: true }>(`/api/v1/webhooks/${data.deliveryId}/retry`, { method: "POST" });
+export const dismissFailedWebhooksAction = () =>
+  api<{ ok: true; dismissed: number }>("/api/v1/webhooks/dismiss-failed", { method: "POST" });
 export const getWebhookPayloadAction = ({ data }: { data: { deliveryId: string } }) =>
   api<WebhookPayload>(`/api/v1/webhooks/${encodeURIComponent(data.deliveryId)}`);
 export const saveSettingsAction = ({ data }: { data: {

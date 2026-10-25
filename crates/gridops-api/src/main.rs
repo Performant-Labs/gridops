@@ -215,6 +215,10 @@ async fn main() -> Result<()> {
             "/api/v1/webhooks/{delivery_id}/retry",
             post(webhooks::retry),
         )
+        .route(
+            "/api/v1/webhooks/dismiss-failed",
+            post(webhooks::dismiss_failed),
+        )
         .route("/api/v1/audit", get(resources::audit_events))
         .route("/api/v1/log-streams", get(resources::log_targets))
         .route(
