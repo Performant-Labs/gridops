@@ -973,11 +973,24 @@ fn runner_cap_drop() -> Vec<String> {
 /// root bypass them, so even writing its own files under /actions-runner and /_work fails.
 /// DAC_OVERRIDE restores exactly that bypass; nothing else is needed here because the
 /// chown/gosu branch (which would also need CHOWN/SETUID/SETGID) never runs in this
-/// configuration. Verified empirically against such a runner image:
-/// with ALL dropped and no cap_add, `touch`/`mkdir` under /actions-runner fail with
-/// "Permission denied" even as uid 0; adding only DAC_OVERRIDE back is sufficient.
+/// configuration. Verified empirically against such a runner image: with ALL dropped and no
+/// cap_add, `touch`/`mkdir` under /actions-runner fail with "Permission denied" even as uid 0;
+/// adding only DAC_OVERRIDE back is sufficient.
 fn runner_cap_add() -> Vec<String> {
     vec!["DAC_OVERRIDE".into()]
+}
+
+/// Entrypoint override for provisioned runner containers.
+///
+/// The runner image's own `/entrypoint.sh` ignores our `Cmd` for its own purposes: it runs an
+/// unconditional, env-var-driven registration flow (`RUNNER_SCOPE`/`ORG_NAME`/`REPO_URL`/
+/// `ACCESS_TOKEN`) before ever reaching the `"$@"` exec at the bottom that would run our `Cmd`.
+/// GridOps never sets those vars (bootstrap secrets are piped over stdin instead, never put in
+/// the environment), so that flow always fails (e.g. "REPO_URL required for repo runners") and
+/// our `Cmd` never runs. This bypasses `/entrypoint.sh` entirely while keeping `dumb-init` as
+/// PID 1 for zombie reaping, same as the image's own entrypoint shebang does.
+fn runner_entrypoint() -> Vec<String> {
+    vec!["/usr/bin/dumb-init".into(), "--".into()]
 }
 
 async fn provision_runner(
@@ -1054,6 +1067,7 @@ async fn provision_runner_inner(
     ]);
     let body = ContainerCreateBody {
         image: Some(input.image.clone()),
+        entrypoint: Some(runner_entrypoint()),
         cmd: Some(cmd),
         env: Some(env),
         attach_stdin: Some(true),
@@ -1939,6 +1953,14 @@ mod tests {
     fn runner_containers_drop_all_capabilities_but_keep_dac_override() {
         assert_eq!(runner_cap_drop(), vec!["ALL".to_string()]);
         assert_eq!(runner_cap_add(), vec!["DAC_OVERRIDE".to_string()]);
+    }
+
+    #[test]
+    fn runner_containers_bypass_the_images_own_entrypoint() {
+        assert_eq!(
+            runner_entrypoint(),
+            vec!["/usr/bin/dumb-init".to_string(), "--".to_string()]
+        );
     }
 
     fn provision_request(mode: &str) -> ProvisionRunner {
