@@ -159,11 +159,22 @@ impl ApiFixture {
         body: &str,
         signature: &str,
     ) -> Result<reqwest::Response> {
+        self.post_webhook_event(delivery, "ping", body, signature)
+            .await
+    }
+
+    async fn post_webhook_event(
+        &self,
+        delivery: &str,
+        event: &str,
+        body: &str,
+        signature: &str,
+    ) -> Result<reqwest::Response> {
         Ok(self
             .client
             .post(format!("{}/api/v1/webhooks/github", self.base_url))
             .header("x-github-delivery", delivery)
-            .header("x-github-event", "ping")
+            .header("x-github-event", event)
             .header("x-hub-signature-256", signature)
             .body(body.to_owned())
             .send()
@@ -674,5 +685,74 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         runner_group_id: 1,
     };
     input.validate().map_err(|error| anyhow!(error))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecting_it(
+) -> Result<()> {
+    // `fixture/unsynced-app` is never seeded into `repositories`: no pool has ever selected it
+    // individually (an org-scope pool has no repository picker to do that), and GitHub never
+    // sends `installation_repositories` for an "all repositories" install. Before this fix, every
+    // `workflow_job`/`workflow_run` webhook for such a repo failed forever with "Repository ...
+    // is not synced yet", because the handler only checked for the row instead of creating it
+    // from the payload it already received.
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+
+    let body = json!({
+        "action": "queued",
+        "installation": { "id": 42 },
+        "repository": {
+            "id": 99,
+            "name": "unsynced-app",
+            "full_name": "fixture/unsynced-app",
+            "private": false,
+            "archived": false,
+            "default_branch": "main",
+            "html_url": "https://github.com/fixture/unsynced-app",
+        },
+        "workflow_job": {
+            "id": 5000,
+            "run_id": 500,
+            "run_attempt": 1,
+            "workflow_name": "CI",
+            "head_branch": "main",
+            "head_sha": "abc123",
+            "name": "build",
+            "status": "queued",
+            "labels": ["self-hosted-linux"],
+            "html_url": "https://github.com/fixture/unsynced-app/actions/runs/500/job/5000",
+            "created_at": "2026-10-25T00:00:00Z",
+        },
+    })
+    .to_string();
+    let signature = ApiFixture::webhook_signature(&body)?;
+
+    let response = fixture
+        .post_webhook_event("delivery-unsynced", "workflow_job", &body, &signature)
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let delivery_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM webhook_deliveries WHERE id='delivery-unsynced'",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(delivery_status, "processed");
+
+    let full_name = sqlx::query_scalar::<_, String>(
+        "SELECT full_name FROM repositories WHERE id=99",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(full_name, "fixture/unsynced-app");
+
+    let job_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM workflow_jobs WHERE id=5000")
+            .fetch_one(&database)
+            .await?;
+    assert_eq!(job_status, "queued");
+
     Ok(())
 }
