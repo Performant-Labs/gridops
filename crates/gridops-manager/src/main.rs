@@ -1058,7 +1058,11 @@ async fn provision_runner_inner(
     }
 
     let memory_bytes = input.memory_limit_mb * 1_024 * 1_024;
-    let (cmd, env) = runner_command(input)?;
+    let (cmd, mut env) = runner_command(input)?;
+    // We run as root (bypassing the image's own entrypoint, which otherwise exports this)
+    // and the runner's own run-helper.sh refuses to start as root without it, exiting 0
+    // with "Must not run interactively with sudo" and no indication anything is wrong.
+    env.push("RUNNER_ALLOW_RUNASROOT=1".into());
     let labels = HashMap::from([
         ("io.gridops.managed".into(), "true".into()),
         ("io.gridops.runner-id".into(), input.runner_id.clone()),
