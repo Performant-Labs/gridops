@@ -959,6 +959,27 @@ async fn list_runners(
     Ok(Json(json!({ "runners": runners })))
 }
 
+/// Capabilities dropped from every provisioned runner container.
+fn runner_cap_drop() -> Vec<String> {
+    vec!["ALL".into()]
+}
+
+/// Capabilities added back on top of `runner_cap_drop()`.
+///
+/// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
+/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so the entrypoint execs the
+/// listener directly as root with no chown/gosu privilege drop. Dropping every capability from
+/// that root process makes the kernel enforce normal DAC checks against it instead of letting
+/// root bypass them, so even writing its own files under /actions-runner and /_work fails.
+/// DAC_OVERRIDE restores exactly that bypass; nothing else is needed here because the
+/// chown/gosu branch (which would also need CHOWN/SETUID/SETGID) never runs in this
+/// configuration. Verified empirically against such a runner image:
+/// with ALL dropped and no cap_add, `touch`/`mkdir` under /actions-runner fail with
+/// "Permission denied" even as uid 0; adding only DAC_OVERRIDE back is sufficient.
+fn runner_cap_add() -> Vec<String> {
+    vec!["DAC_OVERRIDE".into()]
+}
+
 async fn provision_runner(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
@@ -1055,7 +1076,8 @@ async fn provision_runner_inner(
                 .shared_docker_socket
                 .as_ref()
                 .map(|socket| vec![socket.group_id.to_string()]),
-            cap_drop: Some(vec!["ALL".into()]),
+            cap_drop: Some(runner_cap_drop()),
+            cap_add: Some(runner_cap_add()),
             security_opt: Some(vec!["no-new-privileges:true".into()]),
             oom_score_adj: Some(500),
             log_config: Some(HostConfigLogConfig {
@@ -1911,6 +1933,12 @@ mod tests {
         assert_eq!(free_disk_floor_mb(10_240, 10, 500_000), 10_240);
         assert_eq!(free_disk_floor_mb(10_240, 10, 40_000), 4_000);
         assert_eq!(free_disk_floor_mb(10_240, 0, 40_000), 10_240);
+    }
+
+    #[test]
+    fn runner_containers_drop_all_capabilities_but_keep_dac_override() {
+        assert_eq!(runner_cap_drop(), vec!["ALL".to_string()]);
+        assert_eq!(runner_cap_add(), vec!["DAC_OVERRIDE".to_string()]);
     }
 
     fn provision_request(mode: &str) -> ProvisionRunner {
