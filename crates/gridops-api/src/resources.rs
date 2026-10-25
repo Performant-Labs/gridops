@@ -4719,7 +4719,7 @@ async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
                 .filter(|cpus| *cpus > 0)
         })
         .unwrap_or(FALLBACK_MANAGER_CPU_LIMIT)
-        .clamp(1, FALLBACK_MANAGER_CPU_LIMIT);
+        .max(1);
     let memory = manager
         .as_ref()
         .and_then(|value| {
@@ -4730,7 +4730,7 @@ async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
                 .filter(|memory| *memory >= 256)
         })
         .unwrap_or(FALLBACK_MANAGER_MEMORY_LIMIT_MB)
-        .clamp(256, FALLBACK_MANAGER_MEMORY_LIMIT_MB);
+        .max(256);
     (cpu, memory)
 }
 
