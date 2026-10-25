@@ -63,6 +63,19 @@ function WebhooksPage() {
     <>
       <PageHeader count={data.total || undefined} icon={Webhook} title="Webhooks" />
       <PageBody>
+        {data.failedTotal > 0 ? (
+          <Callout
+            action={<Button onClick={() => void run({
+              action: () => dismissFailedWebhooksAction(),
+              confirm: `Dismiss all ${data.failedTotal} failed deliveries? They'll stop counting toward "Needs attention" and the failure rate, but stay visible here under Dismissed.`,
+              success: "Failed deliveries dismissed.",
+            })} size="xs" variant="outline">Dismiss all</Button>}
+            title={`${data.failedTotal} failed ${data.failedTotal === 1 ? "delivery" : "deliveries"}`}
+            tone="warning"
+          >
+            These may not all appear on the current page — deliveries are listed newest first, and failures can be buried behind healthy traffic.
+          </Callout>
+        ) : null}
         {data.items.length === 0 ? (
           <EmptyState description="Verified GitHub App deliveries appear here with their processing history. Private deployments poll GitHub instead." icon={Webhook} title="No webhook deliveries">
             <Link className={buttonVariants({ variant: "outline" })} to="/settings/github"><Settings />GitHub settings</Link>
@@ -71,13 +84,6 @@ function WebhooksPage() {
           <>
             {groups.map((group) => (
               <ListGroup
-                actions={group.key === "failed" ? (
-                  <Button onClick={() => void run({
-                    action: () => dismissFailedWebhooksAction(),
-                    confirm: `Dismiss all ${group.deliveries.length} failed deliveries? They'll stop counting toward "Needs attention" and the failure rate, but stay visible here under Dismissed.`,
-                    success: "Failed deliveries dismissed.",
-                  })} size="xs" variant="outline">Dismiss all</Button>
-                ) : undefined}
                 count={group.deliveries.length}
                 icon={<StatusBadge iconOnly status={group.status} />}
                 key={group.key}

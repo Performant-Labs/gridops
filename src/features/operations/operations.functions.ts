@@ -153,7 +153,7 @@ export const getRepositoriesPage = ({ query = "", page = 1 }: { query?: string; 
 export const getWorkflowRunsPage = ({ page = 1 }: { page?: number } = {}) =>
   api<PaginatedPage<WorkflowRun>>(paginatedUrl("/api/v1/workflow-runs", page));
 export const getWebhooksPage = ({ page = 1 }: { page?: number } = {}) =>
-  api<PaginatedPage<WebhookDelivery>>(paginatedUrl("/api/v1/webhooks", page));
+  api<PaginatedPage<WebhookDelivery> & { failedTotal: number }>(paginatedUrl("/api/v1/webhooks", page));
 export const getAuditLogPage = ({ page = 1 }: { page?: number } = {}) =>
   api<PaginatedPage<AuditEvent>>(paginatedUrl("/api/v1/audit", page));
 export const getLiveLogsPage = ({ page = 1, target }: { page?: number; target?: string } = {}) =>
