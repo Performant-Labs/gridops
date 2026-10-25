@@ -967,17 +967,24 @@ fn runner_cap_drop() -> Vec<String> {
 /// Capabilities added back on top of `runner_cap_drop()`.
 ///
 /// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
-/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so the entrypoint execs the
-/// listener directly as root with no chown/gosu privilege drop. Dropping every capability from
-/// that root process makes the kernel enforce normal DAC checks against it instead of letting
-/// root bypass them, so even writing its own files under /actions-runner and /_work fails.
-/// DAC_OVERRIDE restores exactly that bypass; nothing else is needed here because the
-/// chown/gosu branch (which would also need CHOWN/SETUID/SETGID) never runs in this
-/// configuration. Verified empirically against such a runner image: with ALL dropped and no
-/// cap_add, `touch`/`mkdir` under /actions-runner fail with "Permission denied" even as uid 0;
-/// adding only DAC_OVERRIDE back is sufficient.
+/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so jobs execute directly as
+/// root with no chown/gosu privilege drop. Dropping every capability from that root process
+/// makes the kernel enforce normal DAC checks against it instead of letting root bypass them.
+/// Job steps routinely need more than DAC_OVERRIDE's raw read/write bypass: `actions/setup-*`
+/// actions unpack a downloaded tool into a cache directory and then `chown` it, and build steps
+/// may `chmod`/change ownership of files they create. Without CHOWN/FOWNER/SETUID/SETGID those
+/// calls fail even as uid 0, since dropping ALL capabilities also strips root's usual exemption
+/// from capability checks (it does not just restore DAC checks). This set matches
+/// `sandbox::SANDBOX_CAPABILITIES`, which grants the same root-run build sandbox exactly these
+/// five for the same reason.
 fn runner_cap_add() -> Vec<String> {
-    vec!["DAC_OVERRIDE".into()]
+    vec![
+        "CHOWN".into(),
+        "DAC_OVERRIDE".into(),
+        "FOWNER".into(),
+        "SETUID".into(),
+        "SETGID".into(),
+    ]
 }
 
 /// Entrypoint override for provisioned runner containers.
@@ -1954,9 +1961,18 @@ mod tests {
     }
 
     #[test]
-    fn runner_containers_drop_all_capabilities_but_keep_dac_override() {
+    fn runner_containers_drop_all_capabilities_but_keep_build_essentials() {
         assert_eq!(runner_cap_drop(), vec!["ALL".to_string()]);
-        assert_eq!(runner_cap_add(), vec!["DAC_OVERRIDE".to_string()]);
+        assert_eq!(
+            runner_cap_add(),
+            vec![
+                "CHOWN".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "SETUID".to_string(),
+                "SETGID".to_string(),
+            ]
+        );
     }
 
     #[test]
