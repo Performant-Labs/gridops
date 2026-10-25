@@ -103,7 +103,7 @@ trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT
 # GitHub's runner writes the actual step console stream to rotating files under
 # _diag/pages. Mirror every page to container stdout so GridOps can stream job
 # output while it is still running, while retaining the runner's secret masking.
-runner_root=${{GRIDOPS_RUNNER_ROOT:-/home/runner}}
+runner_root=${{GRIDOPS_RUNNER_ROOT:-/actions-runner}}
 forwarded_state=/tmp/gridops-forwarded-job-state
 rm -rf "$forwarded_state"
 mkdir -p "$forwarded_state"

@@ -1819,7 +1819,7 @@ IFS= read -r GRIDOPS_BOOTSTRAP_SECRET
 [ -n "$GRIDOPS_BOOTSTRAP_SECRET" ]
 runner_args=(--jitconfig "$GRIDOPS_BOOTSTRAP_SECRET")
 unset GRIDOPS_BOOTSTRAP_SECRET"#,
-                    r#"/home/runner/run.sh "${runner_args[@]}""#,
+                    r#"./run.sh "${runner_args[@]}""#,
                 ),
             ],
             vec![],
