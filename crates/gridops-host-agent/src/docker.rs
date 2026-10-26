@@ -122,11 +122,11 @@ impl DockerRuntime {
         if let Ok(id) = docker(&["inspect", "-f", "{{.Id}}", &name]).await {
             return started(start, id);
         }
-        let (script, secret, env) = match (&material, prepared.mode) {
+        let (script, secret, mut env) = match (&material, prepared.mode) {
             (Material::GithubJit { jit_config }, RunnerMode::Ephemeral) => (
                 instrumented_runner_script(
                     "set -euo pipefail\nIFS= read -r S\n[ -n \"$S\" ]\nrunner_args=(--jitconfig \"$S\")\nunset S",
-                    "/home/runner/run.sh \"${runner_args[@]}\"",
+                    "./run.sh \"${runner_args[@]}\"",
                 ),
                 jit_config.clone(),
                 Vec::new(),
@@ -155,6 +155,9 @@ impl DockerRuntime {
             ),
             _ => return failed(FailureCode::Configuration, false),
         };
+        // We bypass the runner image's own entrypoint below (which otherwise exports
+        // this itself) because we run its registration/run scripts as root.
+        env.push("RUNNER_ALLOW_RUNASROOT=1".into());
         let resources = &prepared.resource_request;
         let mut args = vec![
             "create".to_owned(),
@@ -171,10 +174,31 @@ impl DockerRuntime {
             "4096".into(),
             "--cap-drop".into(),
             "ALL".into(),
+            // Dropping ALL also strips root's usual exemption from capability checks, so
+            // chown/chmod calls the runner's own setup actions make (e.g. actions/setup-node)
+            // fail even as uid 0 without these restored explicitly.
+            "--cap-add".into(),
+            "CHOWN".into(),
+            "--cap-add".into(),
+            "DAC_OVERRIDE".into(),
+            "--cap-add".into(),
+            "FOWNER".into(),
+            "--cap-add".into(),
+            "SETUID".into(),
+            "--cap-add".into(),
+            "SETGID".into(),
             "--security-opt".into(),
             "no-new-privileges:true".into(),
             "--log-opt".into(),
             "max-size=20m".into(),
+            // The runner image's own /entrypoint.sh runs an unconditional, env-var-driven
+            // registration flow (RUNNER_SCOPE/ORG_NAME/REPO_URL/ACCESS_TOKEN) before ever
+            // reaching the "$@" exec that would run our own Cmd below. GridOps never sets
+            // those vars (bootstrap secrets are piped over stdin instead), so that flow always
+            // fails fast and our Cmd never runs. Bypass it entirely, keeping dumb-init as PID 1
+            // for zombie reaping, same job the image's own entrypoint shebang does.
+            "--entrypoint".into(),
+            "/usr/bin/dumb-init".into(),
         ];
         if let Some(network) = prepared
             .configuration
@@ -196,6 +220,9 @@ impl DockerRuntime {
         }
         args.extend([
             String::from(prepared.image.clone()),
+            // Separates dumb-init's own args (set via --entrypoint above) from the child
+            // command below, matching dumb-init's own invocation convention.
+            "--".into(),
             "/bin/bash".into(),
             "-lc".into(),
             script,
