@@ -959,6 +959,34 @@ async fn list_runners(
     Ok(Json(json!({ "runners": runners })))
 }
 
+/// Capabilities dropped from every provisioned runner container.
+fn runner_cap_drop() -> Vec<String> {
+    vec!["ALL".into()]
+}
+
+/// Capabilities added back on top of `runner_cap_drop()`.
+///
+/// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
+/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so jobs execute directly as
+/// root with no chown/gosu privilege drop. Dropping every capability from that root process
+/// makes the kernel enforce normal DAC checks against it instead of letting root bypass them,
+/// so even `touch`/`mkdir` under the runner's own working directory fails with "Permission
+/// denied" despite `id` reporting uid=0 — every provisioned container used to exit immediately
+/// with code 126 as a result. `DAC_OVERRIDE` alone fixes that, but job steps routinely need more:
+/// `actions/setup-*` actions unpack a downloaded tool into a cache directory and then `chown` it,
+/// and build steps may `chmod`/change ownership of files they create. Without CHOWN/FOWNER/
+/// SETUID/SETGID those calls fail even as uid 0, since dropping ALL capabilities also strips
+/// root's usual exemption from capability checks (it does not just restore DAC checks).
+fn runner_cap_add() -> Vec<String> {
+    vec![
+        "CHOWN".into(),
+        "DAC_OVERRIDE".into(),
+        "FOWNER".into(),
+        "SETUID".into(),
+        "SETGID".into(),
+    ]
+}
+
 async fn provision_runner(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
@@ -1055,7 +1083,8 @@ async fn provision_runner_inner(
                 .shared_docker_socket
                 .as_ref()
                 .map(|socket| vec![socket.group_id.to_string()]),
-            cap_drop: Some(vec!["ALL".into()]),
+            cap_drop: Some(runner_cap_drop()),
+            cap_add: Some(runner_cap_add()),
             security_opt: Some(vec!["no-new-privileges:true".into()]),
             oom_score_adj: Some(500),
             log_config: Some(HostConfigLogConfig {
@@ -1911,6 +1940,21 @@ mod tests {
         assert_eq!(free_disk_floor_mb(10_240, 10, 500_000), 10_240);
         assert_eq!(free_disk_floor_mb(10_240, 10, 40_000), 4_000);
         assert_eq!(free_disk_floor_mb(10_240, 0, 40_000), 10_240);
+    }
+
+    #[test]
+    fn runner_containers_drop_all_capabilities_but_keep_build_essentials() {
+        assert_eq!(runner_cap_drop(), vec!["ALL".to_string()]);
+        assert_eq!(
+            runner_cap_add(),
+            vec![
+                "CHOWN".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "SETUID".to_string(),
+                "SETGID".to_string(),
+            ]
+        );
     }
 
     fn provision_request(mode: &str) -> ProvisionRunner {
