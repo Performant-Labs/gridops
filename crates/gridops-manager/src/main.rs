@@ -967,12 +967,12 @@ fn runner_cap_drop() -> Vec<String> {
 /// Capabilities added back on top of `runner_cap_drop()`.
 ///
 /// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
-/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so jobs execute directly as
+/// `RUN_AS_ROOT=true` by default, and nothing here overrides that, so jobs execute directly as
 /// root with no chown/gosu privilege drop. Dropping every capability from that root process
 /// makes the kernel enforce normal DAC checks against it instead of letting root bypass them,
 /// so even `touch`/`mkdir` under the runner's own working directory fails with "Permission
 /// denied" despite `id` reporting uid=0, and the container exits with code 126.
-/// Job steps routinely need more than DAC_OVERRIDE's raw read/write bypass: `actions/setup-*`
+/// Job steps routinely need more than `DAC_OVERRIDE`'s raw read/write bypass: `actions/setup-*`
 /// actions unpack a downloaded tool into a cache directory and then `chown` it, and build steps
 /// may `chmod`/change ownership of files they create. Without CHOWN/FOWNER/SETUID/SETGID those
 /// calls fail even as uid 0, since dropping ALL capabilities also strips root's usual exemption
@@ -994,8 +994,8 @@ fn runner_cap_add() -> Vec<String> {
 /// The runner image's own `/entrypoint.sh` ignores our `Cmd` for its own purposes: it runs an
 /// unconditional, env-var-driven registration flow (`RUNNER_SCOPE`/`ORG_NAME`/`REPO_URL`/
 /// `ACCESS_TOKEN`) before ever reaching the `"$@"` exec at the bottom that would run our `Cmd`.
-/// GridOps never sets those vars (bootstrap secrets are piped over stdin instead, never put in
-/// the environment), so that flow always fails (e.g. "REPO_URL required for repo runners") and
+/// Nothing here sets those vars (bootstrap secrets are piped over stdin instead, never put in
+/// the environment), so that flow always fails (e.g. "`REPO_URL` required for repo runners") and
 /// our `Cmd` never runs. This bypasses `/entrypoint.sh` entirely while keeping `dumb-init` as
 /// PID 1 for zombie reaping, same as the image's own entrypoint shebang does.
 fn runner_entrypoint() -> Vec<String> {
