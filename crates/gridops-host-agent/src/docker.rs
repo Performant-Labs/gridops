@@ -191,14 +191,17 @@ impl DockerRuntime {
             "no-new-privileges:true".into(),
             "--log-opt".into(),
             "max-size=20m".into(),
-            // The runner image's own /entrypoint.sh runs an unconditional, env-var-driven
-            // registration flow (RUNNER_SCOPE/ORG_NAME/REPO_URL/ACCESS_TOKEN) before ever
-            // reaching the "$@" exec that would run our own Cmd below. GridOps never sets
-            // those vars (bootstrap secrets are piped over stdin instead), so that flow always
-            // fails fast and our Cmd never runs. Bypass it entirely, keeping dumb-init as PID 1
-            // for zombie reaping, same job the image's own entrypoint shebang does.
+            // An empty entrypoint runs the Cmd below as given. myoung34/github-runner's
+            // `/entrypoint.sh` would otherwise take it as arguments and first run a
+            // registration from env vars GridOps never sets (bootstrap secrets are piped
+            // over stdin instead), which fails before our Cmd runs. GitHub's own image has
+            // no entrypoint, so this changes nothing there.
             "--entrypoint".into(),
-            "/usr/bin/dumb-init".into(),
+            "".into(),
+            // Docker's own init reaps the job's orphaned processes, whatever the image
+            // ships. dumb-init would do the same job, but GitHub's own image doesn't carry
+            // that binary, so PID 1 duty falls to Docker's --init instead.
+            "--init".into(),
         ];
         if let Some(network) = prepared
             .configuration
@@ -220,9 +223,6 @@ impl DockerRuntime {
         }
         args.extend([
             String::from(prepared.image.clone()),
-            // Separates dumb-init's own args (set via --entrypoint above) from the child
-            // command below, matching dumb-init's own invocation convention.
-            "--".into(),
             "/bin/bash".into(),
             "-lc".into(),
             script,
