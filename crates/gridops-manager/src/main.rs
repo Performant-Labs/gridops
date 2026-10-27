@@ -969,7 +969,9 @@ fn runner_cap_drop() -> Vec<String> {
 /// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
 /// RUN_AS_ROOT=true by default, and GridOps never overrides that, so jobs execute directly as
 /// root with no chown/gosu privilege drop. Dropping every capability from that root process
-/// makes the kernel enforce normal DAC checks against it instead of letting root bypass them.
+/// makes the kernel enforce normal DAC checks against it instead of letting root bypass them,
+/// so even `touch`/`mkdir` under the runner's own working directory fails with "Permission
+/// denied" despite `id` reporting uid=0, and the container exits with code 126.
 /// Job steps routinely need more than DAC_OVERRIDE's raw read/write bypass: `actions/setup-*`
 /// actions unpack a downloaded tool into a cache directory and then `chown` it, and build steps
 /// may `chmod`/change ownership of files they create. Without CHOWN/FOWNER/SETUID/SETGID those
