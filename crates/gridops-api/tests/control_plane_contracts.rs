@@ -689,8 +689,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
 }
 
 #[tokio::test]
-async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecting_it(
-) -> Result<()> {
+async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecting_it() -> Result<()>
+{
     // `fixture/unsynced-app` is never seeded into `repositories`: no pool has ever selected it
     // individually (an org-scope pool has no repository picker to do that), and GitHub never
     // sends `installation_repositories` for an "all repositories" install. Before this fix, every
@@ -741,11 +741,10 @@ async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecti
     .await?;
     assert_eq!(delivery_status, "processed");
 
-    let full_name = sqlx::query_scalar::<_, String>(
-        "SELECT full_name FROM repositories WHERE id=99",
-    )
-    .fetch_one(&database)
-    .await?;
+    let full_name =
+        sqlx::query_scalar::<_, String>("SELECT full_name FROM repositories WHERE id=99")
+            .fetch_one(&database)
+            .await?;
     assert_eq!(full_name, "fixture/unsynced-app");
 
     let job_status =
