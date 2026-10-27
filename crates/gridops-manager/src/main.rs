@@ -989,19 +989,6 @@ fn runner_cap_add() -> Vec<String> {
     ]
 }
 
-/// Entrypoint override for provisioned runner containers.
-///
-/// The runner image's own `/entrypoint.sh` ignores our `Cmd` for its own purposes: it runs an
-/// unconditional, env-var-driven registration flow (`RUNNER_SCOPE`/`ORG_NAME`/`REPO_URL`/
-/// `ACCESS_TOKEN`) before ever reaching the `"$@"` exec at the bottom that would run our `Cmd`.
-/// Nothing here sets those vars (bootstrap secrets are piped over stdin instead, never put in
-/// the environment), so that flow always fails (e.g. "`REPO_URL` required for repo runners") and
-/// our `Cmd` never runs. This bypasses `/entrypoint.sh` entirely while keeping `dumb-init` as
-/// PID 1 for zombie reaping, same as the image's own entrypoint shebang does.
-fn runner_entrypoint() -> Vec<String> {
-    vec!["/usr/bin/dumb-init".into(), "--".into()]
-}
-
 async fn provision_runner(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
@@ -1068,9 +1055,10 @@ async fn provision_runner_inner(
 
     let memory_bytes = input.memory_limit_mb * 1_024 * 1_024;
     let (cmd, mut env) = runner_command(input)?;
-    // We run as root (bypassing the image's own entrypoint, which otherwise exports this)
+    // Images that run as root (myoung34's) export this from the entrypoint skipped below,
     // and the runner's own run-helper.sh refuses to start as root without it, exiting 0
     // with "Must not run interactively with sudo" and no indication anything is wrong.
+    // GitHub's image runs as `runner`, which this doesn't affect.
     env.push("RUNNER_ALLOW_RUNASROOT=1".into());
     let labels = HashMap::from([
         ("io.gridops.managed".into(), "true".into()),
@@ -1080,7 +1068,12 @@ async fn provision_runner_inner(
     ]);
     let body = ContainerCreateBody {
         image: Some(input.image.clone()),
-        entrypoint: Some(runner_entrypoint()),
+        // An empty entrypoint runs `cmd` as given. myoung34/github-runner's
+        // `/entrypoint.sh` would otherwise take it as arguments and first run a
+        // registration from env vars GridOps never sets, which fails before
+        // `cmd` runs. GitHub's image has no entrypoint, so this changes nothing
+        // there.
+        entrypoint: Some(vec![String::new()]),
         cmd: Some(cmd),
         env: Some(env),
         attach_stdin: Some(true),
@@ -1103,6 +1096,9 @@ async fn provision_runner_inner(
                 .shared_docker_socket
                 .as_ref()
                 .map(|socket| vec![socket.group_id.to_string()]),
+            // Docker's own init reaps the job's orphaned processes, whatever
+            // the image ships.
+            init: Some(true),
             cap_drop: Some(runner_cap_drop()),
             cap_add: Some(runner_cap_add()),
             security_opt: Some(vec!["no-new-privileges:true".into()]),
@@ -1977,14 +1973,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runner_containers_bypass_the_images_own_entrypoint() {
-        assert_eq!(
-            runner_entrypoint(),
-            vec!["/usr/bin/dumb-init".to_string(), "--".to_string()]
-        );
-    }
-
     fn provision_request(mode: &str) -> ProvisionRunner {
         ProvisionRunner {
             provider: "docker".into(),
@@ -2302,6 +2290,38 @@ mod tests {
     }
 
     #[test]
+    fn runner_exit_status_survives_the_login_shells_logout() -> Result<(), ManagerError> {
+        // Ubuntu's ~/.bash_logout, as GitHub's runner image ships it.
+        let home =
+            std::env::temp_dir().join(format!("gridops-runner-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).map_err(|error| ManagerError::Internal(error.into()))?;
+        std::fs::write(
+            home.join(".bash_logout"),
+            "if [ \"$SHLVL\" = 1 ]; then\n    [ -x /usr/bin/clear_console ] && /usr/bin/clear_console -q\nfi\n",
+        )
+        .map_err(|error| ManagerError::Internal(error.into()))?;
+        let exit_code = |status: i32| {
+            let script = instrumented_runner_script(
+                "set -euo pipefail",
+                &format!("/bin/bash -c 'exit {status}'"),
+            );
+            std::process::Command::new("bash")
+                .args(["-lc", &script])
+                .current_dir(&home)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .status()
+                .map(|status| status.code())
+                .map_err(|error| ManagerError::Internal(error.into()))
+        };
+        let (succeeded, failed) = (exit_code(0)?, exit_code(3)?);
+        std::fs::remove_dir_all(&home).map_err(|error| ManagerError::Internal(error.into()))?;
+        assert_eq!((succeeded, failed), (Some(0), Some(3)));
+        Ok(())
+    }
+
+    #[test]
     fn job_console_pages_are_forwarded_to_runner_stdout() -> Result<(), ManagerError> {
         let directory =
             std::env::temp_dir().join(format!("gridops-runner-log-test-{}", uuid::Uuid::new_v4()));
@@ -2309,11 +2329,14 @@ mod tests {
             .map_err(|error| ManagerError::Internal(error.into()))?;
         let script = instrumented_runner_script(
             "set -euo pipefail",
-            r#"/bin/bash -lc 'sleep 0.2; printf "secret-masked job output\n" > "$GRIDOPS_RUNNER_ROOT/_diag/pages/job.log"; sleep 0.5'"#,
+            r#"/bin/bash -lc 'sleep 0.2; printf "secret-masked job output\n" > _diag/pages/job.log; sleep 0.5'"#,
         );
+        // Started in the runner's directory, as the image's working directory
+        // starts it, with nothing saying where that is.
         let output = std::process::Command::new("bash")
             .args(["-c", &script])
-            .env("GRIDOPS_RUNNER_ROOT", &directory)
+            .current_dir(&directory)
+            .env_remove("GRIDOPS_RUNNER_ROOT")
             .output()
             .map_err(|error| ManagerError::Internal(error.into()))?;
         std::fs::remove_dir_all(&directory)

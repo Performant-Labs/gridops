@@ -103,7 +103,9 @@ trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT
 # GitHub's runner writes the actual step console stream to rotating files under
 # _diag/pages. Mirror every page to container stdout so GridOps can stream job
 # output while it is still running, while retaining the runner's secret masking.
-runner_root=${{GRIDOPS_RUNNER_ROOT:-/actions-runner}}
+# The runner lives in the image's working directory: /home/runner in GitHub's
+# image, /actions-runner in myoung34/github-runner and its derivatives.
+runner_root=${{GRIDOPS_RUNNER_ROOT:-$PWD}}
 forwarded_state=/tmp/gridops-forwarded-job-state
 rm -rf "$forwarded_state"
 mkdir -p "$forwarded_state"
@@ -139,6 +141,10 @@ wait "$runner_pid"
 runner_status=$?
 set -e
 wait "$forwarder_pid" 2>/dev/null || true
+# Runners start this in a login shell, which runs ~/.bash_logout on the way out.
+# GitHub's image ships Ubuntu's, whose clear_console test fails; with errexit
+# still on, that turns every exit into 1.
+set +e
 exit "$runner_status""#
     )
 }
