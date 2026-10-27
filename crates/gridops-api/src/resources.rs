@@ -1804,6 +1804,17 @@ pub async fn webhook_deliveries(
     .bind(&user.id)
     .fetch_one(&state.database)
     .await?;
+    // Scoped the same way as `total`, but counting failed deliveries across all history
+    // (not just the current page) so the "dismiss all failed" action can tell whether there
+    // is anything to dismiss even when none of them land on the first page of recent items.
+    let failed_total = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM webhook_deliveries wd
+        WHERE wd.status='failed' AND (wd.installation_id IS NULL OR EXISTS (SELECT 1 FROM user_installations ui
+          WHERE ui.installation_id=wd.installation_id AND ui.user_id=?))"#,
+    )
+    .bind(&user.id)
+    .fetch_one(&state.database)
+    .await?;
     let (page, offset) = bounded_pagination(requested_page, total, per_page);
     let rows = sqlx::query(
         r#"SELECT wd.id,wd.event,wd.action,wd.installation_id,wd.repository_id,
@@ -1835,7 +1846,9 @@ pub async fn webhook_deliveries(
         "accountLogin": row.try_get::<Option<String>,_>("account_login").ok().flatten(), "repository": row.try_get::<Option<String>,_>("full_name").ok().flatten(),
         "canRetry": row.get::<bool,_>("can_retry"), "hasPayload": row.get::<bool,_>("has_payload"),
     })).collect::<Vec<_>>();
-    Ok(paginated_page(&items, total, page, per_page))
+    let mut page_json = paginated_page(&items, total, page, per_page).0;
+    page_json["failedTotal"] = json!(failed_total);
+    Ok(Json(page_json))
 }
 
 pub async fn webhook_delivery(
@@ -4719,7 +4732,7 @@ async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
                 .filter(|cpus| *cpus > 0)
         })
         .unwrap_or(FALLBACK_MANAGER_CPU_LIMIT)
-        .clamp(1, FALLBACK_MANAGER_CPU_LIMIT);
+        .max(1);
     let memory = manager
         .as_ref()
         .and_then(|value| {
@@ -4730,7 +4743,7 @@ async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
                 .filter(|memory| *memory >= 256)
         })
         .unwrap_or(FALLBACK_MANAGER_MEMORY_LIMIT_MB)
-        .clamp(256, FALLBACK_MANAGER_MEMORY_LIMIT_MB);
+        .max(256);
     (cpu, memory)
 }
 

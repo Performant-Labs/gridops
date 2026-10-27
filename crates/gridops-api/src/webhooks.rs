@@ -183,6 +183,62 @@ pub async fn retry(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Bulk-clears the "N webhook deliveries failed" alert without pretending anything was
+/// reprocessed: a batch of failures from an already-fixed bug (or one GitHub's own retries
+/// already resolved) otherwise sits in the 24h window forever, since nothing ever marks it
+/// as seen. This moves those rows out of `status='failed'` so the dashboard's failure count
+/// (which only counts that status) drops, while keeping the rows themselves for history —
+/// the delivery list on /webhooks still shows them, just as "Dismissed" instead of "Failed".
+pub async fn dismiss_failed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: AuthUser,
+) -> ApiResult<Json<Value>> {
+    assert_same_origin(&state, &headers)?;
+    let installation_ids = sqlx::query_scalar::<_, Option<i64>>(
+        r#"SELECT DISTINCT wd.installation_id FROM webhook_deliveries wd
+           WHERE wd.status='failed' AND (wd.installation_id IS NULL OR EXISTS (
+             SELECT 1 FROM user_installations ui
+             WHERE ui.installation_id=wd.installation_id AND ui.user_id=?
+           ))"#,
+    )
+    .bind(&user.id)
+    .fetch_all(&state.database)
+    .await?;
+    let mut needs_system_admin = false;
+    for installation_id in &installation_ids {
+        match installation_id {
+            Some(id) => assert_installation_admin(&state, &user, *id).await?,
+            None => needs_system_admin = true,
+        }
+    }
+    if needs_system_admin {
+        require_system_admin(&user)?;
+    }
+    let dismissed = sqlx::query(
+        r#"UPDATE webhook_deliveries SET status='dismissed',processed_at=?
+           WHERE status='failed' AND (installation_id IS NULL OR EXISTS (
+             SELECT 1 FROM user_installations ui
+             WHERE ui.installation_id=webhook_deliveries.installation_id AND ui.user_id=?
+           ))"#,
+    )
+    .bind(now_millis())
+    .bind(&user.id)
+    .execute(&state.database)
+    .await?
+    .rows_affected();
+    audit(
+        &state,
+        &user,
+        "webhook.dismissed_failed",
+        "webhook_delivery",
+        None,
+        json!({ "count": dismissed }),
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true, "dismissed": dismissed })))
+}
+
 async fn process(
     state: &AppState,
     event: &str,
@@ -377,6 +433,58 @@ async fn process_installation_repositories(
     Ok(())
 }
 
+/// Create or refresh a `repositories` row from a webhook's own embedded `repository` object.
+///
+/// Org-scope pools (unlike repository-scope pools) never select individual repositories, so
+/// nothing ever calls the API-driven `oauth::upsert_repository` for the repos they cover, and
+/// `installation_repositories` is never sent by GitHub for "all repositories" installs either.
+/// Every `workflow_run`/`workflow_job` webhook already carries the full repository object, so
+/// use that instead of requiring a separate sync step the UI has no way to trigger.
+async fn upsert_repository_from_webhook(
+    database: &SqlitePool,
+    installation_id: i64,
+    repository: &Map<String, Value>,
+    now: i64,
+) -> ApiResult<()> {
+    let Some(full_name) = string(repository, "full_name") else {
+        return Ok(());
+    };
+    let Some(id) = i64_value(repository, "id") else {
+        return Ok(());
+    };
+    let (owner, name) = full_name.split_once('/').unwrap_or(("unknown", full_name));
+    sqlx::query(
+        r#"INSERT INTO repositories (
+          id,installation_id,owner,name,full_name,private,archived,default_branch,
+          html_url,last_synced_at,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,
+          owner=excluded.owner,name=excluded.name,full_name=excluded.full_name,
+          private=excluded.private,default_branch=excluded.default_branch,
+          html_url=excluded.html_url,
+          last_synced_at=excluded.last_synced_at,updated_at=excluded.updated_at"#,
+    )
+    .bind(id)
+    .bind(installation_id)
+    .bind(owner)
+    .bind(name)
+    .bind(full_name)
+    .bind(bool_value(repository, "private"))
+    .bind(bool_value(repository, "archived"))
+    .bind(string(repository, "default_branch").unwrap_or("master"))
+    .bind(
+        string(repository, "html_url")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("https://github.com/{full_name}")),
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(database)
+    .await?;
+    Ok(())
+}
+
 async fn process_workflow_run(state: &AppState, payload: &Map<String, Value>) -> ApiResult<()> {
     let Some(run) = nested_object(payload, "workflow_run") else {
         return Ok(());
@@ -387,16 +495,22 @@ async fn process_workflow_run(state: &AppState, payload: &Map<String, Value>) ->
     ) else {
         return Ok(());
     };
+    let now = now_millis();
     let exists = sqlx::query("SELECT 1 FROM repositories WHERE id=?")
         .bind(repository_id)
         .fetch_optional(&state.database)
         .await?;
     if exists.is_none() {
-        return Err(ApiError::Conflict(format!(
-            "Repository {repository_id} is not synced yet."
-        )));
+        let (Some(installation_id), Some(repository)) = (
+            nested_i64(payload, "installation", "id"),
+            nested_object(payload, "repository"),
+        ) else {
+            return Err(ApiError::Conflict(format!(
+                "Repository {repository_id} arrived without enough information to sync it."
+            )));
+        };
+        upsert_repository_from_webhook(&state.database, installation_id, repository, now).await?;
     }
-    let now = now_millis();
     let status = string(run, "status").unwrap_or("queued");
     let updated_at = date_value(run, "updated_at").unwrap_or(now);
     sqlx::query(
@@ -539,9 +653,15 @@ async fn insert_placeholder_run(
         .await?
         .is_none()
     {
-        return Err(ApiError::Conflict(format!(
-            "Repository {repository_id} is not synced yet."
-        )));
+        let (Some(installation_id), Some(repository)) = (
+            nested_i64(payload, "installation", "id"),
+            nested_object(payload, "repository"),
+        ) else {
+            return Err(ApiError::Conflict(format!(
+                "Repository {repository_id} arrived without enough information to sync it."
+            )));
+        };
+        upsert_repository_from_webhook(database, installation_id, repository, now).await?;
     }
     let status = string(job, "status").unwrap_or("queued");
     let job_html_url = string(job, "html_url").unwrap_or("");

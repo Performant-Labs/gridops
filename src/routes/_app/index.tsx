@@ -66,6 +66,7 @@ function OverviewPage() {
       <PageBody>
         <div className="w-full space-y-8 px-4 py-6 sm:px-6 lg:px-8">
           {!configurationComplete ? <ConfigurationCallout data={data} /> : null}
+          {data.authenticated && data.slo.alerts.length ? <AttentionAlerts alerts={data.slo.alerts} /> : null}
           <MetricStrip data={data} />
           <div className="grid gap-8 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,1fr)]">
             <div className="min-w-0 space-y-8">
@@ -364,6 +365,28 @@ function AgentRunsSection({ runs }: { runs: AgentRunListItem[] }) {
   );
 }
 
+function AttentionAlerts({ alerts }: { alerts: DashboardOverview["slo"]["alerts"] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="flex h-9 items-center gap-2 border-b border-border bg-panel-subtle px-4 text-xs font-medium">
+        Needs attention<span className="tabular text-faint">{alerts.length}</span>
+      </div>
+      {alerts.length ? alerts.map((alert) => (
+        <Link className={cn(listRowClassName, "items-start py-3 last:border-b-0")} key={`${alert.href}-${alert.title}`} to={alert.href}>
+          <StatusDot className="mt-1.5" tone={alert.level === "error" ? "danger" : "warning"} />
+          <span className="min-w-0 flex-1">
+            <span className="block font-medium">{alert.title}</span>
+            <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{alert.detail}</span>
+          </span>
+          <ArrowRight className="mt-1 size-3.5 shrink-0 text-faint" />
+        </Link>
+      )) : (
+        <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground"><StatusDot tone="success" />No active runner-control incidents.</div>
+      )}
+    </div>
+  );
+}
+
 function AttentionSection({ data }: { data: DashboardOverview }) {
   const { alerts, failures, queue, startLatency, windowHours } = data.slo;
   return (
@@ -375,23 +398,7 @@ function AttentionSection({ data }: { data: DashboardOverview }) {
         <SloCell className="border-l" hint={failures.length ? phrases(failures.map((item) => `${item.count} ${failureLabel(item.reason)}`)) : "None"} label="Failures" value={String(failures.reduce((total, item) => total + item.count, 0))} />
       </div>
       {data.slo.runnerStarts?.total.sampleSize ? <RunnerStarts pass={data.slo.reconcilerPass ?? null} starts={data.slo.runnerStarts} /> : null}
-      <div className="overflow-hidden rounded-lg border border-border">
-        <div className="flex h-9 items-center gap-2 border-b border-border bg-panel-subtle px-4 text-xs font-medium">
-          Needs attention<span className="tabular text-faint">{alerts.length}</span>
-        </div>
-        {alerts.length ? alerts.map((alert) => (
-          <Link className={cn(listRowClassName, "items-start py-3 last:border-b-0")} key={`${alert.href}-${alert.title}`} to={alert.href}>
-            <StatusDot className="mt-1.5" tone={alert.level === "error" ? "danger" : "warning"} />
-            <span className="min-w-0 flex-1">
-              <span className="block font-medium">{alert.title}</span>
-              <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{alert.detail}</span>
-            </span>
-            <ArrowRight className="mt-1 size-3.5 shrink-0 text-faint" />
-          </Link>
-        )) : (
-          <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground"><StatusDot tone="success" />No active runner-control incidents.</div>
-        )}
-      </div>
+      {alerts.length ? null : <AttentionAlerts alerts={alerts} />}
     </section>
   );
 }

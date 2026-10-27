@@ -959,6 +959,47 @@ async fn list_runners(
     Ok(Json(json!({ "runners": runners })))
 }
 
+/// Capabilities dropped from every provisioned runner container.
+fn runner_cap_drop() -> Vec<String> {
+    vec!["ALL".into()]
+}
+
+/// Capabilities added back on top of `runner_cap_drop()`.
+///
+/// The runner images this provisions (e.g. myoung34/github-runner derivatives) run with
+/// RUN_AS_ROOT=true by default, and GridOps never overrides that, so jobs execute directly as
+/// root with no chown/gosu privilege drop. Dropping every capability from that root process
+/// makes the kernel enforce normal DAC checks against it instead of letting root bypass them.
+/// Job steps routinely need more than DAC_OVERRIDE's raw read/write bypass: `actions/setup-*`
+/// actions unpack a downloaded tool into a cache directory and then `chown` it, and build steps
+/// may `chmod`/change ownership of files they create. Without CHOWN/FOWNER/SETUID/SETGID those
+/// calls fail even as uid 0, since dropping ALL capabilities also strips root's usual exemption
+/// from capability checks (it does not just restore DAC checks). This set matches
+/// `sandbox::SANDBOX_CAPABILITIES`, which grants the same root-run build sandbox exactly these
+/// five for the same reason.
+fn runner_cap_add() -> Vec<String> {
+    vec![
+        "CHOWN".into(),
+        "DAC_OVERRIDE".into(),
+        "FOWNER".into(),
+        "SETUID".into(),
+        "SETGID".into(),
+    ]
+}
+
+/// Entrypoint override for provisioned runner containers.
+///
+/// The runner image's own `/entrypoint.sh` ignores our `Cmd` for its own purposes: it runs an
+/// unconditional, env-var-driven registration flow (`RUNNER_SCOPE`/`ORG_NAME`/`REPO_URL`/
+/// `ACCESS_TOKEN`) before ever reaching the `"$@"` exec at the bottom that would run our `Cmd`.
+/// GridOps never sets those vars (bootstrap secrets are piped over stdin instead, never put in
+/// the environment), so that flow always fails (e.g. "REPO_URL required for repo runners") and
+/// our `Cmd` never runs. This bypasses `/entrypoint.sh` entirely while keeping `dumb-init` as
+/// PID 1 for zombie reaping, same as the image's own entrypoint shebang does.
+fn runner_entrypoint() -> Vec<String> {
+    vec!["/usr/bin/dumb-init".into(), "--".into()]
+}
+
 async fn provision_runner(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
@@ -1024,7 +1065,11 @@ async fn provision_runner_inner(
     }
 
     let memory_bytes = input.memory_limit_mb * 1_024 * 1_024;
-    let (cmd, env) = runner_command(input)?;
+    let (cmd, mut env) = runner_command(input)?;
+    // We run as root (bypassing the image's own entrypoint, which otherwise exports this)
+    // and the runner's own run-helper.sh refuses to start as root without it, exiting 0
+    // with "Must not run interactively with sudo" and no indication anything is wrong.
+    env.push("RUNNER_ALLOW_RUNASROOT=1".into());
     let labels = HashMap::from([
         ("io.gridops.managed".into(), "true".into()),
         ("io.gridops.runner-id".into(), input.runner_id.clone()),
@@ -1033,6 +1078,7 @@ async fn provision_runner_inner(
     ]);
     let body = ContainerCreateBody {
         image: Some(input.image.clone()),
+        entrypoint: Some(runner_entrypoint()),
         cmd: Some(cmd),
         env: Some(env),
         attach_stdin: Some(true),
@@ -1055,7 +1101,8 @@ async fn provision_runner_inner(
                 .shared_docker_socket
                 .as_ref()
                 .map(|socket| vec![socket.group_id.to_string()]),
-            cap_drop: Some(vec!["ALL".into()]),
+            cap_drop: Some(runner_cap_drop()),
+            cap_add: Some(runner_cap_add()),
             security_opt: Some(vec!["no-new-privileges:true".into()]),
             oom_score_adj: Some(500),
             log_config: Some(HostConfigLogConfig {
@@ -1783,7 +1830,7 @@ IFS= read -r GRIDOPS_BOOTSTRAP_SECRET
 [ -n "$GRIDOPS_BOOTSTRAP_SECRET" ]
 runner_args=(--jitconfig "$GRIDOPS_BOOTSTRAP_SECRET")
 unset GRIDOPS_BOOTSTRAP_SECRET"#,
-                    r#"/home/runner/run.sh "${runner_args[@]}""#,
+                    r#"./run.sh "${runner_args[@]}""#,
                 ),
             ],
             vec![],
@@ -1911,6 +1958,29 @@ mod tests {
         assert_eq!(free_disk_floor_mb(10_240, 10, 500_000), 10_240);
         assert_eq!(free_disk_floor_mb(10_240, 10, 40_000), 4_000);
         assert_eq!(free_disk_floor_mb(10_240, 0, 40_000), 10_240);
+    }
+
+    #[test]
+    fn runner_containers_drop_all_capabilities_but_keep_build_essentials() {
+        assert_eq!(runner_cap_drop(), vec!["ALL".to_string()]);
+        assert_eq!(
+            runner_cap_add(),
+            vec![
+                "CHOWN".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "SETUID".to_string(),
+                "SETGID".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runner_containers_bypass_the_images_own_entrypoint() {
+        assert_eq!(
+            runner_entrypoint(),
+            vec!["/usr/bin/dumb-init".to_string(), "--".to_string()]
+        );
     }
 
     fn provision_request(mode: &str) -> ProvisionRunner {
