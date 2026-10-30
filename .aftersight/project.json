@@ -39,10 +39,8 @@
   },
   "pathSets": {
     "tests": [
-      "crates/**/tests/**",
-      "crates/**/src/**/*_tests.rs",
-      "crates/**/src/**/tests.rs",
-      "crates/**/src/**/tests/**",
+      "crates/*/tests/**",
+      "crates/*/src/*tests.rs",
       "tests/**"
     ],
     "production": [
