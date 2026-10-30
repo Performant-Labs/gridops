@@ -155,10 +155,8 @@ impl DockerRuntime {
             ),
             _ => return failed(FailureCode::Configuration, false),
         };
-        // Images that run as root (myoung34's) export this from the entrypoint skipped
-        // below, and the runner's own run-helper.sh refuses to start as root without it,
-        // exiting 0 with "Must not run interactively with sudo" and no indication anything
-        // is wrong. GitHub's image runs as `runner`, which this doesn't affect.
+        // We bypass the runner image's own entrypoint below (which otherwise exports
+        // this itself) because we run its registration/run scripts as root.
         env.push("RUNNER_ALLOW_RUNASROOT=1".into());
         let resources = &prepared.resource_request;
         let mut args = vec![
@@ -195,12 +193,14 @@ impl DockerRuntime {
             "max-size=20m".into(),
             // An empty entrypoint runs the Cmd below as given. myoung34/github-runner's
             // `/entrypoint.sh` would otherwise take it as arguments and first run a
-            // registration from env vars GridOps never sets, which fails before our Cmd
-            // runs. GitHub's image has no entrypoint, so this changes nothing there.
+            // registration from env vars GridOps never sets (bootstrap secrets are piped
+            // over stdin instead), which fails before our Cmd runs. GitHub's own image has
+            // no entrypoint, so this changes nothing there.
             "--entrypoint".into(),
             "".into(),
             // Docker's own init reaps the job's orphaned processes, whatever the image
-            // ships.
+            // ships. dumb-init would do the same job, but GitHub's own image doesn't carry
+            // that binary, so PID 1 duty falls to Docker's --init instead.
             "--init".into(),
         ];
         if let Some(network) = prepared

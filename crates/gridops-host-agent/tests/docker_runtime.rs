@@ -155,9 +155,10 @@ esac
 /// Actions runner image needs: `cap-drop ALL` alone leaves root unable to
 /// `chown`/`chmod` as setup actions do, the image's own entrypoint (if any)
 /// must be bypassed rather than left to run its env-var-driven registration
-/// flow, and ephemeral containers must invoke the run script relative to the
-/// image's own working directory, not a `myoung34`-specific absolute path
-/// GitHub's own runner image doesn't have.
+/// flow, that bypass must not assume `dumb-init` (GitHub's own image doesn't
+/// ship it, so `--init` reaps zombies instead), and ephemeral containers
+/// must invoke the run script relative to the image's own working directory,
+/// not a `myoung34`-specific absolute path GitHub's own runner image lacks.
 #[tokio::test]
 async fn a_runner_container_is_created_with_the_flags_its_image_needs() -> Result<()> {
     let Some(_directory) = std::env::var_os("STAND_IN_DOCKER_CREATE") else {
@@ -190,8 +191,9 @@ async fn a_runner_container_is_created_with_the_flags_its_image_needs() -> Resul
             "missing a capability restored on top of --cap-drop ALL: {recorded}"
         );
         ensure!(
-            recorded.contains("--entrypoint "),
-            "the image's own entrypoint must be bypassed: {recorded}"
+            recorded.contains("--entrypoint ")
+                && !recorded.contains("--entrypoint /usr/bin/dumb-init"),
+            "the image's own entrypoint must be bypassed without assuming dumb-init: {recorded}"
         );
         ensure!(
             recorded.contains("--init"),
