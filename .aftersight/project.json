@@ -9,22 +9,32 @@
   ],
   "testSuites": {
     "fmt": {
-      "command": "cargo fmt --all -- --check",
-      "filter": "none"
+      "filter": "none",
+      "script": [
+        "cargo fmt --all -- --check"
+      ]
     },
     "clippy": {
-      "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
-      "filter": "none"
+      "filter": "none",
+      "script": [
+        "cargo clippy --workspace --all-targets --locked -- -D warnings"
+      ]
     },
     "unit": {
-      "command": "cargo test --workspace --locked",
       "filter": "none",
-      "timeoutMs": 1800000
+      "timeoutMs": 1800000,
+      "script": [
+        "cargo test --workspace --locked"
+      ]
     },
     "web": {
-      "command": "npm ci --no-audit --no-fund && npm run lint && npm test",
       "filter": "none",
-      "timeoutMs": 900000
+      "timeoutMs": 900000,
+      "script": [
+        "npm ci --no-audit --no-fund",
+        "npm run lint",
+        "npm test"
+      ]
     }
   },
   "pathSets": {
