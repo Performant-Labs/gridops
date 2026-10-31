@@ -42,7 +42,7 @@ use super::{
     protocol::primitives::IdempotencyKey,
 };
 
-pub use credentials::{CredentialError, OneTimeSecret};
+pub use credentials::{CredentialError, OneTimeSecret, Verifier};
 pub use enrollment::{
     ApproveHost, EnrollmentInputError, EnrollmentIssue, EnrollmentMetadata, EnrollmentReceipt,
     EnrollmentScope, HostRegistration, IssueEnrollment, IssuedEnrollment, IssuedRecoveryEnrollment,
@@ -51,7 +51,7 @@ pub use enrollment::{
 pub use inventory::InventoryError;
 pub use queries::QueryError;
 
-use credentials::{Verifier, validate_secret_for_authentication};
+use credentials::validate_secret_for_authentication;
 use enrollment::{ROTATION_OVERLAP_MILLIS, ROTATION_TTL_MILLIS, require_user};
 
 /// Trusted server time source. It is intentionally not constructible from a
@@ -67,6 +67,12 @@ impl RegistryClock for SystemClock {
     fn now_millis(&self) -> i64 {
         now_millis()
     }
+}
+
+/// The real-time clock shared by services that need trusted server time.
+#[must_use]
+pub fn system_clock() -> std::sync::Arc<dyn RegistryClock> {
+    std::sync::Arc::new(SystemClock)
 }
 
 /// A host authenticated against a current verifier and epoch.
