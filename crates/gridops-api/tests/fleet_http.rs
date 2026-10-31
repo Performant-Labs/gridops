@@ -26,6 +26,8 @@ const SESSION_TOKEN: &str = "fleet-http-test-session-token";
 
 #[path = "fleet_http/agent.rs"]
 mod agent;
+#[path = "fleet_http/api_tokens.rs"]
+mod api_tokens;
 #[path = "fleet_http/inventory.rs"]
 mod inventory;
 #[path = "fleet_http/placement.rs"]

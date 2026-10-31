@@ -1,7 +1,7 @@
 //! Narrow fleet HTTP parsing and cookie authentication boundaries.
 //! Cookie writes require an exact Origin; agent bearer requests use a separate extractor.
 
-use std::{panic::AssertUnwindSafe, time::Duration};
+use std::{marker::PhantomData, panic::AssertUnwindSafe, time::Duration};
 
 use axum::{
     Json,
@@ -11,7 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::FutureExt as _;
-use gridops_core::fleet::{authorization::Principal, protocol::browser::ErrorCode};
+use gridops_core::api_tokens::{ApiTokenScope, ApiTokenService};
+use gridops_core::fleet::{UpstreamText, authorization::Principal, protocol::browser::ErrorCode};
 use serde::de::DeserializeOwned;
 
 use super::error::{FleetApiError, RequestContext};
@@ -79,90 +80,197 @@ impl FromRequestParts<AppState> for RequestContext {
     }
 }
 
-pub(super) struct FleetUser {
-    principal: Principal,
+/// Scope markers naming what a route's extractor demands of a bearer token.
+/// The default, [`CookieOnly`], rejects tokens outright, so a handler opts
+/// in by naming a scope type; that opt-in is the default-deny mechanism.
+pub(super) trait RouteScope {
+    const REQUIRED: Option<ApiTokenScope>;
 }
 
-impl FleetUser {
+pub(super) struct CookieOnly;
+impl RouteScope for CookieOnly {
+    const REQUIRED: Option<ApiTokenScope> = None;
+}
+
+pub(super) struct Read;
+impl RouteScope for Read {
+    const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetRead);
+}
+
+pub(super) struct Enroll;
+impl RouteScope for Enroll {
+    const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetEnroll);
+}
+
+pub(super) struct Approve;
+impl RouteScope for Approve {
+    const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetApprove);
+}
+
+pub(super) struct Operate;
+impl RouteScope for Operate {
+    const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetOperate);
+}
+
+/// Parse the `Authorization: Bearer gat_...` header of a token request.
+/// Mirrors the agent `bearer()` rules: no cookie alongside, exactly one
+/// header, case-insensitive scheme, exact charset and length.
+pub(super) fn token_bearer(headers: &HeaderMap) -> Option<&str> {
+    if headers.contains_key(header::COOKIE) {
+        return None;
+    }
+    let mut authorizations = headers.get_all(header::AUTHORIZATION).iter();
+    let value = authorizations.next()?.to_str().ok()?;
+    if authorizations.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = value.split_once(' ')?;
+    let body = token.strip_prefix("gat_")?;
+    (scheme.eq_ignore_ascii_case("bearer")
+        && body.len() == 43
+        && body
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || b"_-".contains(&ch)))
+    .then_some(token)
+}
+
+/// Resolve a browser request's credential and principal. Cookie-only routes
+/// reject every `Authorization` header. Scoped routes accept either the
+/// cookie path (unchanged) or a token that holds the route's scope; every
+/// authentication failure is the same `unauthenticated`, and a scope miss is
+/// `forbidden` naming the scope.
+async fn resolve_user<S: RouteScope>(
+    parts: &mut Parts,
+    state: &AppState,
+    refresh_activity: bool,
+) -> Result<Principal, FleetApiError> {
+    let context = context(parts);
+    let authorizations = parts.headers.get_all(header::AUTHORIZATION).iter();
+    let authorization_count = authorizations.count();
+    if authorization_count > 1 {
+        return Err(context.error(ErrorCode::Unauthenticated));
+    }
+    if authorization_count == 1 {
+        let Some(required) = S::REQUIRED else {
+            // Cookie-only route: any Authorization header is refused.
+            return Err(context.error(ErrorCode::Unauthenticated));
+        };
+        let token = token_bearer(&parts.headers)
+            .ok_or_else(|| context.error(ErrorCode::Unauthenticated))?;
+        let authenticated = ApiTokenService::new(state.database.clone())
+            .authenticate(token)
+            .await
+            .map_err(|error| {
+                if matches!(error, gridops_core::api_tokens::ApiTokenError::Database(_)) {
+                    context.error(ErrorCode::DependencyUnavailable)
+                } else {
+                    // Unknown, malformed, expired, revoked and ownerless all
+                    // look alike.
+                    context.error(ErrorCode::Unauthenticated)
+                }
+            })?;
+        if !authenticated.scopes.contains(&required) {
+            let required_scope = UpstreamText::new(required.as_str())
+                .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
+            return Err(context.error_with_details(
+                ErrorCode::Forbidden,
+                gridops_core::fleet::protocol::browser::ErrorDetails::Scope { required_scope },
+            ));
+        }
+        return Ok(Principal::AuthenticatedUser {
+            user_id: authenticated.user_id,
+        });
+    }
+    let session = if refresh_activity {
+        AuthUser::from_request_parts(parts, state)
+            .await
+            .map(|user| user.id)
+            .map_err(session_error(&context))
+    } else {
+        authenticate_session(parts, state)
+            .await
+            .map(|session| session.user.id)
+            .map_err(session_error(&context))
+    }?;
+    Ok(Principal::AuthenticatedUser { user_id: session })
+}
+
+fn session_error(context: &RequestContext) -> impl Fn(ApiError) -> FleetApiError + '_ {
+    move |error| {
+        context.error(match error {
+            ApiError::Unauthorized => ErrorCode::Unauthenticated,
+            ApiError::Forbidden => ErrorCode::Forbidden,
+            _ => ErrorCode::DependencyUnavailable,
+        })
+    }
+}
+
+pub(super) struct FleetUser<S: RouteScope = CookieOnly> {
+    principal: Principal,
+    scope: PhantomData<S>,
+}
+
+impl<S: RouteScope> FleetUser<S> {
     pub(super) fn principal(&self) -> &Principal {
         &self.principal
     }
 }
 
-impl FromRequestParts<AppState> for FleetUser {
+impl<S: RouteScope> FromRequestParts<AppState> for FleetUser<S> {
     type Rejection = FleetApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let context = context(parts);
-        if parts.headers.contains_key(header::AUTHORIZATION) {
-            return Err(context.error(ErrorCode::Unauthenticated));
-        }
-        let user = AuthUser::from_request_parts(parts, state)
-            .await
-            .map_err(|error| {
-                context.error(match error {
-                    ApiError::Unauthorized => ErrorCode::Unauthenticated,
-                    ApiError::Forbidden => ErrorCode::Forbidden,
-                    _ => ErrorCode::DependencyUnavailable,
-                })
-            })?;
+        let principal = resolve_user::<S>(parts, state, true).await?;
         Ok(Self {
-            principal: Principal::AuthenticatedUser { user_id: user.id },
+            principal,
+            scope: PhantomData,
         })
     }
 }
 
 /// Proves cookie authentication for read-only queries without refreshing session activity.
-pub(super) struct FleetReadUser {
+pub(super) struct FleetReadUser<S: RouteScope = CookieOnly> {
     principal: Principal,
+    scope: PhantomData<S>,
 }
 
-impl FleetReadUser {
+impl<S: RouteScope> FleetReadUser<S> {
     pub(super) fn principal(&self) -> &Principal {
         &self.principal
     }
 }
 
-impl FromRequestParts<AppState> for FleetReadUser {
+impl<S: RouteScope> FromRequestParts<AppState> for FleetReadUser<S> {
     type Rejection = FleetApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let context = context(parts);
-        if parts.headers.contains_key(header::AUTHORIZATION) {
-            return Err(context.error(ErrorCode::Unauthenticated));
-        }
-        let session = authenticate_session(parts, state).await.map_err(|error| {
-            context.error(match error {
-                ApiError::Unauthorized => ErrorCode::Unauthenticated,
-                ApiError::Forbidden => ErrorCode::Forbidden,
-                _ => ErrorCode::DependencyUnavailable,
-            })
-        })?;
+        let principal = resolve_user::<S>(parts, state, false).await?;
         Ok(Self {
-            principal: Principal::AuthenticatedUser {
-                user_id: session.user.id,
-            },
+            principal,
+            scope: PhantomData,
         })
     }
 }
 
 /// Proves cookie authentication plus Origin validation, not administration.
 /// The core write transaction still reloads the current user's permissions.
-pub(super) struct FleetWriteUser(FleetUser);
+/// A bearer token carries no ambient credential, so it skips the `Origin`
+/// check; a cookie request is unchanged.
+pub(super) struct FleetWriteUser<S: RouteScope = CookieOnly>(FleetUser<S>);
 
-impl FleetWriteUser {
+impl<S: RouteScope> FleetWriteUser<S> {
     pub(super) fn principal(&self) -> &Principal {
         self.0.principal()
     }
 }
 
-impl FromRequestParts<AppState> for FleetWriteUser {
+impl<S: RouteScope> FromRequestParts<AppState> for FleetWriteUser<S> {
     type Rejection = FleetApiError;
 
     async fn from_request_parts(
@@ -170,11 +278,24 @@ impl FromRequestParts<AppState> for FleetWriteUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let context = context(parts);
-        let expected = state.config.base_url().origin().ascii_serialization();
-        if !same_origin(&parts.headers, &expected) {
-            return Err(context.error(ErrorCode::Forbidden));
+        // The ambient cookie credential needs the exact-`Origin` check before
+        // anything else, exactly as before. A scoped route's bearer request
+        // carries no ambient credential and skips it; a cookie-only route
+        // checks `Origin` first even when an `Authorization` header is
+        // present, preserving the original ordering.
+        let bearer_candidate =
+            S::REQUIRED.is_some() && parts.headers.contains_key(header::AUTHORIZATION);
+        if !bearer_candidate {
+            let expected = state.config.base_url().origin().ascii_serialization();
+            if !same_origin(&parts.headers, &expected) {
+                return Err(context.error(ErrorCode::Forbidden));
+            }
         }
-        Ok(Self(FleetUser::from_request_parts(parts, state).await?))
+        let principal = resolve_user::<S>(parts, state, true).await?;
+        Ok(Self(FleetUser {
+            principal,
+            scope: PhantomData,
+        }))
     }
 }
 

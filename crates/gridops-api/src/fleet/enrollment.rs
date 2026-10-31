@@ -24,7 +24,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use super::{
-    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser, context},
+    boundary::{
+        Approve, CookieOnly, Enroll, FleetJson, FleetPath, FleetUser, FleetWriteUser, Operate,
+        Read, context,
+    },
     error::{FleetApiError, RequestContext},
 };
 use crate::state::AppState;
@@ -199,7 +202,7 @@ struct EnrollmentResponse {
 pub(super) async fn issue(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Enroll>,
     key: RequestKey,
     FleetJson(body): FleetJson<IssueBody>,
 ) -> Result<Response, FleetApiError> {
@@ -248,7 +251,7 @@ pub(super) async fn issue(
 pub(super) async fn status(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(id): FleetPath<NonNilUuid>,
 ) -> Result<Response, FleetApiError> {
     let value = RegistryService::new(state.database, state.vault)
@@ -261,7 +264,7 @@ pub(super) async fn status(
 pub(super) async fn revoke(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Enroll>,
     FleetPath(id): FleetPath<NonNilUuid>,
 ) -> Result<Response, FleetApiError> {
     RegistryService::new(state.database, state.vault)
@@ -303,7 +306,7 @@ pub(super) async fn consume(
 pub(super) async fn recover(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<CookieOnly>,
     key: RequestKey,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<RecoverBody>,
@@ -350,7 +353,7 @@ pub(super) struct LifecycleBody {
 pub(super) async fn lifecycle(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Operate>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<LifecycleBody>,
 ) -> Result<Response, FleetApiError> {
@@ -371,7 +374,7 @@ pub(super) struct UnconfirmedList {
 pub(super) async fn unconfirmed(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
 ) -> Result<Json<UnconfirmedList>, FleetApiError> {
     let items = RegistryService::new(state.database, state.vault)
@@ -396,7 +399,7 @@ pub(super) struct RepairResponse {
 pub(super) async fn repair_unconfirmed(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<CookieOnly>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<RepairBody>,
 ) -> Result<Json<RepairResponse>, FleetApiError> {
@@ -422,7 +425,7 @@ pub(super) struct BackendPath {
 pub(super) async fn backend_enabled(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Operate>,
     FleetPath(path): FleetPath<BackendPath>,
     FleetJson(body): FleetJson<BackendEnabledBody>,
 ) -> Result<Response, FleetApiError> {
@@ -446,7 +449,7 @@ pub(super) struct GrantList {
 pub(super) async fn grants(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
 ) -> Result<Json<GrantList>, FleetApiError> {
     let items = RegistryService::new(state.database, state.vault)
@@ -473,7 +476,7 @@ pub(super) struct GrantPath {
 pub(super) async fn set_grant(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Operate>,
     FleetPath(path): FleetPath<GrantPath>,
     FleetJson(body): FleetJson<GrantBody>,
 ) -> Result<Response, FleetApiError> {
@@ -500,7 +503,7 @@ pub(super) struct RetireBody {
 pub(super) async fn retire(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<CookieOnly>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<RetireBody>,
 ) -> Result<Response, FleetApiError> {
@@ -522,7 +525,7 @@ pub(super) struct AgentLogList {
 pub(super) async fn agent_logs(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<CookieOnly>,
     FleetPath(host_id): FleetPath<HostId>,
 ) -> Result<Json<AgentLogList>, FleetApiError> {
     let items = RegistryService::new(state.database, state.vault)
@@ -535,7 +538,7 @@ pub(super) async fn agent_logs(
 pub(super) async fn approve(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Approve>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<ApproveBody>,
 ) -> Result<Response, FleetApiError> {

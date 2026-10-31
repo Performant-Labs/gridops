@@ -420,12 +420,26 @@ pub enum ErrorCode {
     deny_unknown_fields
 )]
 pub enum ErrorDetails {
-    Revision { current_revision: BrowserCounter },
-    InvalidField { field: UpstreamText },
-    Limit { maximum: BrowserUint53 },
-    Retry { retry_after_ms: BrowserUint53 },
+    Revision {
+        current_revision: BrowserCounter,
+    },
+    InvalidField {
+        field: UpstreamText,
+    },
+    Limit {
+        maximum: BrowserUint53,
+    },
+    Retry {
+        retry_after_ms: BrowserUint53,
+    },
     CursorGap,
-    Readiness { reason: RejectionReason },
+    Readiness {
+        reason: RejectionReason,
+    },
+    /// A bearer token authenticated but lacks the scope this route requires.
+    Scope {
+        required_scope: UpstreamText,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

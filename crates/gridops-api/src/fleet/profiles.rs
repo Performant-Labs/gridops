@@ -12,7 +12,7 @@ use gridops_core::fleet::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser},
+    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser, Operate, Read},
     error::{FleetApiError, RequestContext},
     query_boundary::FleetQuery,
 };
@@ -36,7 +36,7 @@ pub(super) struct PoolPath {
 pub(super) async fn targets(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
 ) -> Result<Json<Targets>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
     let items = targets::list_targets(&state.database)
@@ -48,7 +48,7 @@ pub(super) async fn targets(
 pub(super) async fn profile(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(path): FleetPath<PoolPath>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
@@ -68,7 +68,7 @@ pub(super) struct QueueResponse {
 pub(super) async fn queue(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(path): FleetPath<PoolPath>,
 ) -> Result<Json<QueueResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
@@ -87,7 +87,7 @@ pub(super) async fn queue(
 pub(super) async fn save_profile(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Operate>,
     FleetPath(path): FleetPath<PoolPath>,
     FleetJson(body): FleetJson<FleetSettingsInput>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
@@ -153,7 +153,7 @@ pub(super) struct WorkloadParams {
 pub(super) async fn workload(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetQuery(params): FleetQuery<WorkloadParams>,
 ) -> Result<Json<FleetWorkload>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
