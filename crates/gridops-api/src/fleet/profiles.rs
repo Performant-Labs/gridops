@@ -110,7 +110,7 @@ async fn record_profile_saved(
     pool_id: &str,
     body: &FleetSettingsInput,
 ) -> Result<(), FleetApiError> {
-    let Principal::AuthenticatedUser { user_id } = principal else {
+    let Some(user_id) = principal.user_id() else {
         return Ok(());
     };
     let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id=?")
@@ -124,7 +124,7 @@ async fn record_profile_saved(
     )
     .bind(uuid::Uuid::new_v4().to_string())
     .bind(user_id)
-    .bind(login.unwrap_or_else(|| user_id.clone()))
+    .bind(login.unwrap_or_else(|| user_id.to_owned()))
     .bind(pool_id)
     .bind(
         serde_json::json!({
@@ -174,7 +174,7 @@ async fn require_admin(
     context: &RequestContext,
     principal: &Principal,
 ) -> Result<(), FleetApiError> {
-    let Principal::AuthenticatedUser { user_id } = principal else {
+    let Some(user_id) = principal.user_id() else {
         return Err(context.error(ErrorCode::Forbidden));
     };
     let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id=?")

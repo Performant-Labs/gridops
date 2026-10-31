@@ -19,10 +19,31 @@ use super::{
 /// The actor represented by a fleet grant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Principal {
-    AuthenticatedUser { user_id: String },
+    AuthenticatedUser {
+        user_id: String,
+    },
+    /// An authenticated user acting through a scoped API token. The
+    /// registry re-checks the owner's live role exactly as for a session;
+    /// the extra identity exists so audit rows can name the token.
+    ApiToken {
+        user_id: String,
+        token_id: String,
+        token_name: String,
+    },
     Reconciler,
     Autoscaler,
     FixAgent,
+}
+
+impl Principal {
+    /// The user this principal acts for, if any.
+    #[must_use]
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Self::AuthenticatedUser { user_id } | Self::ApiToken { user_id, .. } => Some(user_id),
+            Self::Reconciler | Self::Autoscaler | Self::FixAgent => None,
+        }
+    }
 }
 
 /// A named operation that may be authorized independently of other powers.

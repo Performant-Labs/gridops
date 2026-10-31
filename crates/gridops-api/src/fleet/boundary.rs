@@ -157,19 +157,31 @@ async fn resolve_user<S: RouteScope>(
         };
         let token = token_bearer(&parts.headers)
             .ok_or_else(|| context.error(ErrorCode::Unauthenticated))?;
-        let authenticated = ApiTokenService::new(state.database.clone())
-            .authenticate(token)
-            .await
-            .map_err(|error| {
-                if matches!(error, gridops_core::api_tokens::ApiTokenError::Database(_)) {
-                    context.error(ErrorCode::DependencyUnavailable)
-                } else {
-                    // Unknown, malformed, expired, revoked and ownerless all
-                    // look alike.
-                    context.error(ErrorCode::Unauthenticated)
-                }
-            })?;
+        let service = ApiTokenService::new(state.database.clone());
+        let authenticated = service.authenticate(token).await.map_err(|error| {
+            if matches!(error, gridops_core::api_tokens::ApiTokenError::Database(_)) {
+                context.error(ErrorCode::DependencyUnavailable)
+            } else {
+                // Unknown, malformed, expired, revoked and ownerless all
+                // look alike.
+                context.error(ErrorCode::Unauthenticated)
+            }
+        })?;
         if !authenticated.scopes.contains(&required) {
+            // The denial lands in the audit trail, rate-capped per token;
+            // a failure to record it never changes the refusal.
+            if let Err(error) = service
+                .record_denial(
+                    &authenticated.token_id,
+                    Some(&authenticated.user_id),
+                    parts.method.as_str(),
+                    parts.uri.path(),
+                    required.as_str(),
+                )
+                .await
+            {
+                tracing::warn!(request_id = %context.id(), kind = ?error, "api token denial audit failed");
+            }
             let required_scope = UpstreamText::new(required.as_str())
                 .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
             return Err(context.error_with_details(
@@ -177,8 +189,16 @@ async fn resolve_user<S: RouteScope>(
                 gridops_core::fleet::protocol::browser::ErrorDetails::Scope { required_scope },
             ));
         }
-        return Ok(Principal::AuthenticatedUser {
+        let token_id = authenticated.token_id.clone();
+        // A successful authentication bumps `last_used_at`, throttled to one
+        // write per token per minute inside the service.
+        if let Err(error) = service.record_use(&token_id).await {
+            tracing::warn!(request_id = %context.id(), kind = ?error, "api token use recording failed");
+        }
+        return Ok(Principal::ApiToken {
             user_id: authenticated.user_id,
+            token_id,
+            token_name: authenticated.name,
         });
     }
     let session = if refresh_activity {

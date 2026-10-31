@@ -506,6 +506,78 @@ async fn demoting_the_owner_neuters_their_token_without_touching_it() -> Result<
 /// The full onboarding a bot performs with the four v1 scopes: read the
 /// host's approval evidence, approve it, enable a runtime and activate it.
 #[tokio::test]
+async fn token_actions_are_audited_with_the_token_and_record_last_use() -> Result<()> {
+    let f = Fixture::new().await?;
+    let token = mint(&f, "audited-bot", &[ApiTokenScope::FleetEnroll]).await?;
+
+    // Before use: no last_used_at.
+    let before: Option<i64> =
+        sqlx::query_scalar("SELECT last_used_at FROM api_tokens WHERE name='audited-bot'")
+            .fetch_one(&f.database)
+            .await?;
+    assert_eq!(before, None);
+
+    let created = token_post(&f, "/enrollments", &token)
+        .header("idempotency-key", "audited-issue")
+        .json(&json!({"targetIds":[]}))
+        .send()
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    // The enrollment audit event names the token, same action as cookies.
+    let row: (String, String) = sqlx::query_as(
+        "SELECT actor_label,metadata FROM audit_events WHERE action='fleet.enrollment.issued'",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    assert!(
+        row.0.contains("(token: audited-bot)"),
+        "label was {}",
+        row.0
+    );
+    let metadata: Value = serde_json::from_str(&row.1)?;
+    assert_eq!(metadata["viaApiToken"]["name"], "audited-bot");
+    assert!(
+        metadata["viaApiToken"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+
+    // A successful call moved last_used_at.
+    let after: Option<i64> =
+        sqlx::query_scalar("SELECT last_used_at FROM api_tokens WHERE name='audited-bot'")
+            .fetch_one(&f.database)
+            .await?;
+    assert!(after.is_some());
+
+    // A scope denial is audited, rate-capped to one row per minute.
+    let denied = token_get(&f, "/targets", &token).send().await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied = token_get(&f, "/targets", &token).send().await?;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denials: Vec<String> =
+        sqlx::query_scalar("SELECT metadata FROM audit_events WHERE action='api_token.denied'")
+            .fetch_all(&f.database)
+            .await?;
+    assert_eq!(denials.len(), 1, "denial audit is rate-capped");
+    let metadata: Value = serde_json::from_str(&denials[0])?;
+    assert_eq!(metadata["requiredScope"], "fleet:read");
+    assert_eq!(metadata["method"], "GET");
+    assert_eq!(metadata["route"], "/api/v1/fleet/targets");
+
+    // A rejected authentication never records use.
+    let dead = format!("gat_{}", "B".repeat(43));
+    token_get(&f, "/hosts", &dead).send().await?;
+    let untouched: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_tokens WHERE last_used_at IS NOT NULL AND user_id!='fleet-user'",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(untouched, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_token_drives_a_host_from_enrolled_to_active() -> Result<()> {
     let f = Fixture::new().await?;
     let token = mint(

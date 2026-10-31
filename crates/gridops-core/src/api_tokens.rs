@@ -577,6 +577,52 @@ impl ApiTokenService {
         .await?;
         Ok(())
     }
+
+    /// Record a scope denial, at most one row per token per minute so a
+    /// misbehaving bot cannot flood the audit table. Never blocks the
+    /// refusal: a write failure is swallowed after logging.
+    pub async fn record_denial(
+        &self,
+        token_id: &str,
+        actor_user_id: Option<&str>,
+        method: &str,
+        route: &str,
+        required_scope: &str,
+    ) -> Result<(), ApiTokenError> {
+        let now = self.clock.now_millis();
+        let mut tx = self.pool.begin().await?;
+        let recent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events
+              WHERE action='api_token.denied' AND target_id=? AND created_at > ?",
+        )
+        .bind(token_id)
+        .bind(now - 60_000)
+        .fetch_one(&mut *tx)
+        .await?;
+        if recent == 0 {
+            sqlx::query(
+                "INSERT INTO audit_events
+                 (id,actor_user_id,actor_label,action,target_type,target_id,metadata,created_at)
+                 VALUES (?,?,?,?,?,?,?,?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(actor_user_id)
+            .bind(actor_user_id.unwrap_or("fleet-agent"))
+            .bind("api_token.denied")
+            .bind("api_token")
+            .bind(token_id)
+            .bind(serde_json::to_string(&serde_json::json!({
+                "method": method,
+                "route": route,
+                "requiredScope": required_scope,
+            }))?)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
 }
 
 impl From<serde_json::Error> for ApiTokenError {
