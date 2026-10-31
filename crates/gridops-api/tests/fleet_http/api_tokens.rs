@@ -577,6 +577,137 @@ async fn token_actions_are_audited_with_the_token_and_record_last_use() -> Resul
     Ok(())
 }
 
+/// The documented recipe, verbatim: the shipped script drives a host from
+/// nothing to active against the real API process, with the test standing
+/// in for the agent on the machine.
+#[tokio::test]
+async fn the_documented_script_onboards_a_host_end_to_end() -> Result<()> {
+    let f = Fixture::new().await?;
+    let token = mint(
+        &f,
+        "script-bot",
+        &[
+            ApiTokenScope::FleetRead,
+            ApiTokenScope::FleetEnroll,
+            ApiTokenScope::FleetApprove,
+            ApiTokenScope::FleetOperate,
+        ],
+    )
+    .await?;
+
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fleet-enroll-bot.sh");
+    let run = |args: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("sh")
+            .arg(script.as_os_str())
+            .args(args)
+            .env("GRIDOPS_URL", &f.origin)
+            .env("GRIDOPS_API_TOKEN", &token)
+            .env("GRIDOPS_ALLOW_INSECURE", "1")
+            .env("GRIDOPS_POLL_SECONDS", "1")
+            .env("GRIDOPS_TIMEOUT_SECONDS", "60")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        anyhow::ensure!(
+            output.status.success(),
+            "script {args:?} failed: {stdout}{stderr}"
+        );
+        // The token never crosses into the script's output.
+        assert!(!stdout.contains(&token) && !stderr.contains(&token));
+        Ok(stdout)
+    };
+
+    // 1. issue — the code and enrollment id arrive on stdout.
+    let issued = run(&["issue"])?;
+    let code = issued
+        .lines()
+        .find_map(|line| line.strip_prefix("code="))
+        .context("code=")?
+        .to_owned();
+    let enrollment_id = issued
+        .lines()
+        .find_map(|line| line.strip_prefix("enrollment_id="))
+        .context("enrollment_id=")?
+        .to_owned();
+    assert!(code.len() >= 40, "one-time code: {code}");
+
+    // 2. the agent enrolls on the machine (the test plays the agent).
+    let body: Value = f.consume(&code).await?.json().await?;
+    let host = body["host_id"].as_str().context("host id")?.to_owned();
+    let secret = body["credential"]
+        .as_str()
+        .context("credential")?
+        .to_owned();
+    let incarnation = control_plane(&f).await?;
+    let handshake = receipt(
+        agent_post(&f, &host, &secret, "handshake")
+            .json(&handshake_body())
+            .send()
+            .await?,
+    )
+    .await?;
+    receipt(
+        agent_post(&f, &host, &secret, "inventory")
+            .json(&inventory_body(&handshake, &incarnation))
+            .send()
+            .await?,
+    )
+    .await?;
+
+    // 3+4. approve waits for evidence and approves.
+    let approved = run(&["approve", &enrollment_id])?;
+    let script_host = approved
+        .lines()
+        .find_map(|line| line.strip_prefix("host_id="))
+        .context("host_id=")?
+        .to_owned();
+    assert_eq!(script_host, host, "correlated through the enrollment");
+
+    // 5. activate enables the runtimes and sets the host active.
+    run(&["activate", &host])?;
+    let state: (String, String) =
+        sqlx::query_as("SELECT enrollment_state,lifecycle_state FROM fleet_hosts WHERE id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert_eq!(state, ("approved".into(), "active".into()));
+    let enabled: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM host_backends WHERE host_id=? AND enabled=1")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert!(enabled > 0, "at least one runtime enabled");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_script_refuses_unsafe_urls_and_missing_tokens() -> Result<()> {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fleet-enroll-bot.sh");
+    let attempt = |url: &str, token: &str| -> String {
+        std::process::Command::new("sh")
+            .arg(script.as_os_str())
+            .arg("issue")
+            .env("GRIDOPS_URL", url)
+            .env("GRIDOPS_API_TOKEN", token)
+            .output()
+            .map(|output| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+            .unwrap_or_default()
+    };
+    let refused = attempt("http://gridops.example.com", "gat_x");
+    assert!(refused.contains("HTTPS"), "{refused}");
+    let scheme = attempt("gridops.example.com", "gat_x");
+    assert!(scheme.contains("https://"), "{scheme}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_token_drives_a_host_from_enrolled_to_active() -> Result<()> {
     let f = Fixture::new().await?;

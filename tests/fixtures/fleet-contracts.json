@@ -1422,5 +1422,32 @@
       "requestId": "00000001-0000-4000-8000-000000000001",
       "details": null
     }
+  },
+  {
+    "name": "scope denial names the required scope",
+    "schema": "error",
+    "valid": true,
+    "body": {
+      "code": "forbidden",
+      "message": "Fleet action is not authorized",
+      "requestId": "00000009-0000-4000-8000-000000000002",
+      "details": {
+        "kind": "scope",
+        "requiredScope": "fleet:approve"
+      }
+    }
+  },
+  {
+    "name": "unknown error detail kind is rejected",
+    "schema": "error",
+    "valid": false,
+    "body": {
+      "code": "forbidden",
+      "message": "Fleet action is not authorized",
+      "requestId": "00000009-0000-4000-8000-000000000003",
+      "details": {
+        "kind": "mystery"
+      }
+    }
   }
 ]

@@ -3,7 +3,9 @@
 A fleet machine is any Linux or macOS host you enroll in GridOps. It runs
 `gridops-host-agent`, which connects out to GridOps over HTTPS. Nothing
 connects in to the machine. Pools can then run their GitHub Actions runners on
-it, in Docker containers or natively on the host.
+it, in Docker containers or natively on the host. Scripts and bots can
+onboard machines without a browser; see
+[the automation guide](fleet-automation.md).
 
 ## How it fits together
 
