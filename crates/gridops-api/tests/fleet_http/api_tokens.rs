@@ -23,6 +23,222 @@ fn token_post(f: &Fixture, path: &str, token: &str) -> reqwest::RequestBuilder {
     f.client.post(f.url(path)).bearer_auth(token)
 }
 
+async fn member_fixture() -> Result<Fixture> {
+    let f = Fixture::new().await?;
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('fleet-member',2,'fleet-member','member','',?,?,?)")
+        .bind(now).bind(now).bind(now).execute(&f.database).await?;
+    Ok(f)
+}
+
+/// Logs the member in by reusing the seeded session machinery: their cookie
+/// is a second valid session row for the member user.
+async fn member_cookie(f: &Fixture) -> Result<String> {
+    let now = gridops_core::now_millis();
+    let token = format!("member-{}", Uuid::new_v4());
+    sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES (?,?,'fleet-member',?,?,?)")
+        .bind(Uuid::new_v4().to_string())
+        .bind(gridops_core::crypto::hash_token(&token))
+        .bind(now + 3_600_000).bind(now).bind(now)
+        .execute(&f.database)
+        .await?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"fleet-http-test-session-key")?;
+    mac.update(token.as_bytes());
+    Ok(format!(
+        "gridops_session={token}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    ))
+}
+
+#[tokio::test]
+async fn management_routes_are_cookie_only_and_admin_only() -> Result<()> {
+    let f = member_fixture().await?;
+    let cookie = member_cookie(&f).await?;
+
+    // Member cookie: forbidden on create and revoke, and their list is empty.
+    let refused = f
+        .client
+        .post(f.url("/api-tokens"))
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, &f.origin)
+        .header("idempotency-key", "member-create")
+        .json(&json!({"name":"member-token","scopes":["fleet:read"]}))
+        .send()
+        .await?;
+    error(refused, StatusCode::FORBIDDEN, "forbidden").await?;
+
+    let listed = f
+        .client
+        .get(f.url("/api-tokens"))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body: Value = listed.json().await?;
+    assert_eq!(body["items"], json!([]));
+
+    // A valid admin token cannot manage tokens: not even the list. The
+    // Origin is correct so the write refusal is the token itself.
+    let admin_token = mint(&f, "admin", &[ApiTokenScope::FleetRead]).await?;
+    let bearer_list = token_get(&f, "/api-tokens", &admin_token).send().await?;
+    error(bearer_list, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    let bearer_create = token_post(&f, "/api-tokens", &admin_token)
+        .header(header::ORIGIN, &f.origin)
+        .header("idempotency-key", "bearer-create")
+        .json(&json!({"name":"self-replicate","scopes":["fleet:read"]}))
+        .send()
+        .await?;
+    error(bearer_create, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+
+    // Unauthenticated entirely.
+    let anonymous = f.client.get(f.url("/api-tokens")).send().await?;
+    error(anonymous, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_shows_the_plaintext_once_and_honours_idempotency() -> Result<()> {
+    let f = Fixture::new().await?;
+
+    let created = f
+        .admin_post("/api-tokens")
+        .header("idempotency-key", "manage-1")
+        .json(&json!({"name":"ci-bot","scopes":["fleet:read","fleet:enroll"],"expiresInDays":30}))
+        .send()
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_body: Value = created.json().await?;
+    let secret = created_body["tokenSecret"]
+        .as_str()
+        .context("plaintext once")?
+        .to_owned();
+    assert!(secret.starts_with("gat_"));
+    assert_eq!(created_body["name"], "ci-bot");
+    assert_eq!(
+        created_body["scopes"],
+        json!(["fleet:read", "fleet:enroll"])
+    );
+    assert_eq!(
+        created_body["displayPrefix"],
+        &secret["gat_".len().."gat_".len() + 8]
+    );
+
+    // The created token authenticates immediately.
+    let used = token_get(&f, "/hosts", &secret).send().await?;
+    assert_eq!(used.status(), StatusCode::OK);
+
+    // Replay: same key, same body: metadata only, no second secret.
+    let replay = f
+        .admin_post("/api-tokens")
+        .header("idempotency-key", "manage-1")
+        .json(&json!({"name":"ci-bot","scopes":["fleet:read","fleet:enroll"],"expiresInDays":30}))
+        .send()
+        .await?;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body: Value = replay.json().await?;
+    assert_eq!(replay_body["token"]["id"], created_body["id"]);
+    assert!(replay_body.get("tokenSecret").is_none());
+
+    // Same key, different body: conflict.
+    let conflict = f
+        .admin_post("/api-tokens")
+        .header("idempotency-key", "manage-1")
+        .json(&json!({"name":"other","scopes":["fleet:read"],"expiresInDays":30}))
+        .send()
+        .await?;
+    error(conflict, StatusCode::CONFLICT, "idempotency_conflict").await?;
+
+    // The list carries no secret in any shape.
+    let list = f
+        .client
+        .get(f.url("/api-tokens"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?;
+    let list_body: Value = list.json().await?;
+    assert_eq!(list_body["items"].as_array().context("items")?.len(), 1);
+    let serialized = serde_json::to_string(&list_body)?;
+    assert!(!serialized.contains(&secret));
+
+    // The audit row names the token but never carries it.
+    let audit: String =
+        sqlx::query_scalar("SELECT metadata FROM audit_events WHERE action='api_token.created'")
+            .fetch_one(&f.database)
+            .await?;
+    assert!(!audit.contains(&secret));
+    assert!(audit.contains("ci-bot"));
+
+    // Unknown scope is an invalid_request naming the field.
+    let bad_scope = f
+        .admin_post("/api-tokens")
+        .header("idempotency-key", "manage-2")
+        .json(&json!({"name":"bad","scopes":["fleet:admin"]}))
+        .send()
+        .await?;
+    let body = expect_error(bad_scope, StatusCode::BAD_REQUEST).await?;
+    assert_eq!(body["details"]["kind"], "invalid_field");
+    assert_eq!(body["details"]["field"], "scopes");
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoking_through_the_api_kills_the_token_immediately() -> Result<()> {
+    let f = Fixture::new().await?;
+    let created = f
+        .admin_post("/api-tokens")
+        .header("idempotency-key", "revoke-1")
+        .json(&json!({"name":"short-lived","scopes":["fleet:read"]}))
+        .send()
+        .await?;
+    let created_body: Value = created.json().await?;
+    let secret = created_body["tokenSecret"]
+        .as_str()
+        .context("secret")?
+        .to_owned();
+    let token_id = created_body["id"].as_str().context("id")?.to_owned();
+
+    let revoked = f
+        .admin_post(&format!("/api-tokens/{token_id}/revoke"))
+        .send()
+        .await?;
+    assert_eq!(revoked.status(), StatusCode::OK);
+    let revoked_body: Value = revoked.json().await?;
+    assert_eq!(revoked_body["token"]["id"], token_id);
+    assert!(revoked_body["token"]["revokedAt"].is_string());
+
+    // The very next request with the plaintext fails...
+    let dead = token_get(&f, "/hosts", &secret).send().await?;
+    error(dead, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+
+    // ...and revoking again is a no-op, not an error.
+    let again = f
+        .admin_post(&format!("/api-tokens/{token_id}/revoke"))
+        .send()
+        .await?;
+    assert_eq!(again.status(), StatusCode::OK);
+
+    // A member may not revoke the admin's token.
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('fleet-member',2,'fleet-member','member','',?,?,?)")
+        .bind(now).bind(now).bind(now).execute(&f.database).await?;
+    let member_session = member_cookie(&f).await?;
+    let refused = f
+        .client
+        .post(f.url(&format!("/api-tokens/{token_id}/revoke")))
+        .header(header::COOKIE, &member_session)
+        .header(header::ORIGIN, &f.origin)
+        .send()
+        .await?;
+    error(refused, StatusCode::FORBIDDEN, "forbidden").await?;
+
+    let missing = f
+        .admin_post("/api-tokens/00000000-0000-4000-8000-000000000000/revoke")
+        .send()
+        .await?;
+    error(missing, StatusCode::NOT_FOUND, "not_found").await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn reads_with_a_fleet_read_token_match_cookie_responses() -> Result<()> {
     let f = Fixture::new().await?;

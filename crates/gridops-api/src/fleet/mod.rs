@@ -1,6 +1,7 @@
 //! Fleet transport is isolated from legacy routes and host runtime execution.
 //! Only implemented registry operations are exposed; enrollment grants no start authority.
 
+mod api_tokens;
 mod auth;
 mod boundary;
 mod commands;
@@ -218,6 +219,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v1/fleet/agent/hosts/{host_id}/credentials/ack",
             post(credentials::acknowledge),
+        )
+        .route(
+            "/api/v1/fleet/api-tokens",
+            post(api_tokens::create).get(api_tokens::list),
+        )
+        .route(
+            "/api/v1/fleet/api-tokens/{token_id}/revoke",
+            post(api_tokens::revoke),
         )
         .route("/api/v1/fleet", any(not_found))
         .route("/api/v1/fleet/", any(not_found))
