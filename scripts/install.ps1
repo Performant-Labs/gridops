@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 & {
-    $repository = 'iamngoni/gridops'
+    $repository = if ($env:GRIDOPS_REPOSITORY) { $env:GRIDOPS_REPOSITORY } else { 'Performant-Labs/gridops' }
     $servedUrl = '__GRIDOPS_URL__'
     $servedVersion = '__GRIDOPS_VERSION__'
     if ($servedUrl.StartsWith('__')) { $servedUrl = '' }
