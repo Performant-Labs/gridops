@@ -142,7 +142,7 @@ impl DockerRuntime {
                 RunnerMode::Persistent,
             ) => (
                 instrumented_runner_script(
-                    "set -euo pipefail\nIFS= read -r S\nargs=(--unattended --url \"$GRIDOPS_REGISTRATION_URL\" --token \"$S\" --name \"$GRIDOPS_RUNNER_NAME\" --labels \"$GRIDOPS_RUNNER_LABELS\" --work _work --replace --disableupdate)\nif [ -n \"${GRIDOPS_RUNNER_GROUP:-}\" ]; then args+=(--runnergroup \"$GRIDOPS_RUNNER_GROUP\"); fi\n./config.sh \"${args[@]}\"\nunset S",
+                    "set -euo pipefail\nIFS= read -r S\nargs=(--unattended --url \"$GRIDOPS_REGISTRATION_URL\" --token \"$S\" --name \"$GRIDOPS_RUNNER_NAME\" --labels \"$GRIDOPS_RUNNER_LABELS\" --work \"${GRIDOPS_RUNNER_WORK:-_work}\" --replace --disableupdate)\nif [ -n \"${GRIDOPS_RUNNER_GROUP:-}\" ]; then args+=(--runnergroup \"$GRIDOPS_RUNNER_GROUP\"); fi\n./config.sh \"${args[@]}\"\nunset S",
                     "./run.sh",
                 ),
                 token.clone(),
@@ -217,6 +217,15 @@ impl DockerRuntime {
                 return failed(FailureCode::Permission, false);
             };
             args.extend(["-v".into(), format!("{socket}:/var/run/docker.sock")]);
+            // Jobs now drive the host's daemon, which resolves bind-mount paths on the host. Give the
+            // runner a work folder with the same absolute path in both places (the server put the same
+            // path in the runner's registration).
+            let work = gridops_core::fleet::shared_work_folder(environment);
+            if std::fs::create_dir_all(&work).is_err() {
+                return failed(FailureCode::Configuration, false);
+            }
+            args.extend(["-v".into(), format!("{work}:{work}")]);
+            env.push(format!("GRIDOPS_RUNNER_WORK={work}"));
         }
         for variable in env {
             args.extend(["-e".into(), variable]);
@@ -322,8 +331,13 @@ impl RuntimeHelper for DockerRuntime {
             }
             AgentOperation::Cleanup { expected_resource } => {
                 if let Some(id) = self.owned(expected_resource).await {
+                    // Read the shared work folder and image before the container goes.
+                    let leftover = shared_work_leftover(&id).await;
                     if docker(&["rm", "-f", &id]).await.is_err() {
                         return failed(FailureCode::Runtime, true);
+                    }
+                    if let Some((folder, image)) = leftover {
+                        remove_shared_work_folder(&folder, &image).await;
                     }
                 }
                 let LocalResourceIdentity::Docker { object_id } = expected_resource else {
@@ -509,6 +523,63 @@ async fn feed_secret(id: &str, secret: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The image and shared work folder of a runner container, when it has one.
+async fn shared_work_leftover(id: &str) -> Option<(String, String)> {
+    let output = docker(&[
+        "inspect",
+        "-f",
+        "{{.Config.Image}}{{\"\\n\"}}{{range .Mounts}}{{.Source}}{{\"\\n\"}}{{end}}",
+        id,
+    ])
+    .await
+    .ok()?;
+    parse_shared_work_leftover(&output)
+}
+
+/// First line is the image; any later line under the shared work root is the folder.
+fn parse_shared_work_leftover(inspect: &str) -> Option<(String, String)> {
+    let mut lines = inspect.lines();
+    let image = lines.next()?.trim();
+    let prefix = format!("{}/", gridops_core::fleet::SHARED_WORK_ROOT);
+    let folder = lines.map(str::trim).find(|line| {
+        line.strip_prefix(prefix.as_str())
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains('/') && rest != "..")
+    })?;
+    (!image.is_empty()).then(|| (folder.to_owned(), image.to_owned()))
+}
+
+/// Empty a runner's shared work folder, then remove it. The runner wrote as root, so the files are
+/// not the agent's to delete: a throwaway container from the runner's own image (already pulled) does
+/// it. Best effort: a failure only leaves disk behind and must not fail the runner's cleanup.
+async fn remove_shared_work_folder(folder: &str, image: &str) {
+    let mount = format!("{folder}:/w");
+    let emptied = docker(&[
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
+        "--entrypoint",
+        "/bin/sh",
+        "-v",
+        &mount,
+        image,
+        "-c",
+        "find /w -mindepth 1 -delete",
+    ])
+    .await
+    .is_ok();
+    if !emptied || std::fs::remove_dir(folder).is_err() {
+        tracing::warn!("Could not remove the runner work folder {folder}");
+    }
+}
+
 async fn docker(args: &[&str]) -> anyhow::Result<String> {
     let output = tokio::time::timeout(
         Duration::from_mins(10),
@@ -591,4 +662,48 @@ fn succeeded(evidence: SuccessEvidence) -> HelperResponse {
 
 const fn failed(code: FailureCode, retryable: bool) -> HelperResponse {
     HelperResponse::Failed { code, retryable }
+}
+
+#[cfg(test)]
+mod shared_work_folder_tests {
+    use super::parse_shared_work_leftover;
+
+    #[test]
+    fn finds_the_image_and_the_shared_folder() {
+        let inspect = "harbor.example/pl-runner:1.70.4\n/var/run/docker.sock\n/var/lib/gridops-agent/work/0a1b\n";
+        assert_eq!(
+            parse_shared_work_leftover(inspect),
+            Some((
+                "/var/lib/gridops-agent/work/0a1b".to_owned(),
+                "harbor.example/pl-runner:1.70.4".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_runner_without_a_shared_folder_has_nothing_to_remove() {
+        assert_eq!(
+            parse_shared_work_leftover("img\n/var/run/docker.sock\n"),
+            None
+        );
+        assert_eq!(parse_shared_work_leftover(""), None);
+    }
+
+    #[test]
+    fn only_a_direct_child_of_the_work_root_is_ever_removed() {
+        for source in [
+            "/var/lib/gridops-agent/work",
+            "/var/lib/gridops-agent/work/",
+            "/var/lib/gridops-agent/work/a/b",
+            "/var/lib/gridops-agent/work/..",
+            "/var/lib/gridops-agent/workaround/x",
+            "/etc",
+        ] {
+            assert_eq!(
+                parse_shared_work_leftover(&format!("img\n{source}\n")),
+                None,
+                "{source}"
+            );
+        }
+    }
 }

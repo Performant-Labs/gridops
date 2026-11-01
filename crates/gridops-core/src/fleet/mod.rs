@@ -12,7 +12,10 @@ pub mod registry;
 pub mod service;
 mod store;
 pub mod targets;
+pub mod work_folder;
 pub mod workload;
+
+pub use work_folder::{DEFAULT_WORK_FOLDER, SHARED_WORK_ROOT, job_work_folder, shared_work_folder};
 
 pub use service::{
     FleetError, FleetService, OperationStatus, Submission, SubmissionState, SubmitIntent,
