@@ -1,9 +1,9 @@
 /**
  * Browser contracts for fleet administration: host lifecycle, backend
- * enablement, CI targets and pool execution profiles.
+ * enablement, CI targets, pool execution profiles and API tokens.
  */
 import { z } from "zod";
-import { fleetCounterSchema, fleetIdSchema } from "./contracts";
+import { fleetCounterSchema, fleetIdSchema, fleetTimestampSchema } from "./contracts";
 
 const safeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
@@ -125,6 +125,60 @@ export const unconfirmedListSchema = z.strictObject({ items: z.array(unconfirmed
 export const repairResultSchema = z.strictObject({ repaired: z.array(fleetIdSchema).max(64) });
 export type UnconfirmedPlacement = z.infer<typeof unconfirmedPlacementSchema>;
 
+/** The v1 token scopes, in the order the server stores them. */
+export const apiTokenScopes = ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate"] as const;
+export const apiTokenScopeSchema = z.enum(apiTokenScopes);
+export const API_TOKEN_DEFAULT_DAYS = 90;
+export const API_TOKEN_MAX_DAYS = 365;
+export const API_TOKEN_MAX_NAME_CHARS = 64;
+
+// Counted in code points and free of control characters, as the server checks it.
+export const apiTokenNameSchema = z.string().refine((value) => {
+  const length = [...value].length;
+  return length > 0 && length <= API_TOKEN_MAX_NAME_CHARS && !/\p{Cc}/u.test(value);
+}, "Name must be 1–64 characters without control characters");
+const scopeList = z.array(apiTokenScopeSchema).min(1).max(apiTokenScopes.length)
+  .refine((scopes) => new Set(scopes).size === scopes.length, "Duplicate scope");
+
+export const createApiTokenRequestSchema = z.strictObject({
+  name: apiTokenNameSchema,
+  scopes: scopeList,
+  expiresInDays: fleetCounterSchema.max(API_TOKEN_MAX_DAYS).optional(),
+});
+
+/**
+ * Everything about a token except its secret. Strict, so a list or replay
+ * item that ever carried `tokenSecret`, a verifier or any other extra field
+ * is rejected instead of being kept in memory.
+ */
+export const apiTokenSchema = z.strictObject({
+  id: fleetIdSchema,
+  name: apiTokenNameSchema,
+  displayPrefix: z.string().regex(/^[A-Za-z0-9_-]{8}$/),
+  scopes: scopeList,
+  createdAt: fleetTimestampSchema,
+  expiresAt: fleetTimestampSchema,
+  lastUsedAt: fleetTimestampSchema.nullable(),
+  revokedAt: fleetTimestampSchema.nullable(),
+});
+export const apiTokenListSchema = z.strictObject({ items: z.array(apiTokenSchema).max(10_000) });
+export const apiTokenResultSchema = z.strictObject({ token: apiTokenSchema });
+
+// `gat_` plus a canonical, unpadded base64url encoding of 32 bytes.
+const apiTokenSecretSchema = z.string().regex(/^gat_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
+
+/**
+ * `201` carries the plaintext once, flattened beside the metadata; a replay of
+ * the same key is `200` with the metadata only. Both normalise to one union so
+ * callers cannot mistake a replay for a fresh secret.
+ */
+export const createApiTokenResultSchema = z.union([
+  apiTokenSchema.extend({ tokenSecret: apiTokenSecretSchema })
+    .refine((value) => value.tokenSecret.slice(4, 12) === value.displayPrefix, "Prefix must match the secret")
+    .transform(({ tokenSecret, ...token }) => ({ status: "created" as const, token, secret: tokenSecret })),
+  apiTokenResultSchema.transform(({ token }) => ({ status: "replay" as const, token })),
+]);
+
 export type HostLifecycle = z.infer<typeof hostLifecycleSchema>;
 export type GrantPolicy = z.infer<typeof grantPolicySchema>;
 export type HostGrant = z.infer<typeof hostGrantSchema>;
@@ -132,3 +186,7 @@ export type FleetTarget = z.infer<typeof fleetTargetSchema>;
 export type ProfileInput = z.input<typeof profileInputSchema>;
 export type PlatformInput = z.input<typeof platformInputSchema>;
 export type Profile = z.infer<typeof profileSchema>;
+export type ApiTokenScope = z.infer<typeof apiTokenScopeSchema>;
+export type ApiToken = z.infer<typeof apiTokenSchema>;
+export type CreateApiTokenRequest = z.input<typeof createApiTokenRequestSchema>;
+export type CreateApiTokenResult = z.infer<typeof createApiTokenResultSchema>;

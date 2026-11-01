@@ -5,16 +5,19 @@
 import { z } from "zod";
 import { fleetErrorSchema, fleetIdSchema } from "./contracts";
 import { FleetRequestError } from "./registry-api";
+import { fleetIdempotencyKeySchema } from "./registry-contracts";
 import {
   backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
-  type GrantPolicy, type HostLifecycle, type ProfileInput, type WorkloadWindow, fleetWorkloadSchema, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema } from "./admin-contracts";
+  type GrantPolicy, type HostLifecycle, type ProfileInput, type WorkloadWindow, fleetWorkloadSchema, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema,
+  apiTokenListSchema, apiTokenResultSchema, createApiTokenRequestSchema, createApiTokenResultSchema, type CreateApiTokenRequest } from "./admin-contracts";
 
-type Options = { signal?: AbortSignal; body?: unknown; method?: "GET" | "POST" | "PUT" };
+type Options = { signal?: AbortSignal; body?: unknown; key?: string; method?: "GET" | "POST" | "PUT" };
 
 async function request<S extends z.ZodType>(path: string, schema: S, options: Options = {}): Promise<z.output<S>> {
   const headers = new Headers({ Accept: "application/json" });
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  if (options.key !== undefined) headers.set("Idempotency-Key", fleetIdempotencyKeySchema.parse(options.key));
   const response = await fetch(path, {
     method: options.method ?? "GET", credentials: "same-origin", cache: "no-store",
     redirect: "error", headers, signal: options.signal,
@@ -73,3 +76,20 @@ export const savePoolProfile = (poolId: string, input: ProfileInput, signal?: Ab
   request(profilePath(poolId), savedProfileResultSchema, {
     method: "PUT", body: profileInputSchema.parse(input), signal,
   });
+
+const apiTokensPath = "/api/v1/fleet/api-tokens";
+/** Cookie-only, the caller's own tokens, newest first; never a secret. */
+export const listApiTokens = (signal?: AbortSignal) =>
+  request(apiTokensPath, apiTokenListSchema, { signal });
+/**
+ * Admin only. Reuse `key` when retrying the same submission: the server then
+ * replays the original token's metadata instead of minting a second one.
+ * The plaintext comes back once, in the `created` result; never retain it.
+ */
+export const createApiToken = (input: CreateApiTokenRequest, key: string, signal?: AbortSignal) =>
+  request(apiTokensPath, createApiTokenResultSchema, {
+    method: "POST", body: createApiTokenRequestSchema.parse(input), key, signal,
+  });
+/** Idempotent by state: revoking an already revoked token returns it again. */
+export const revokeApiToken = (tokenId: string, signal?: AbortSignal) =>
+  request(`${apiTokensPath}/${fleetIdSchema.parse(tokenId)}/revoke`, apiTokenResultSchema, { method: "POST", signal });
