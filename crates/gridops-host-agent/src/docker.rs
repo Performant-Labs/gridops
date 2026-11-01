@@ -221,7 +221,11 @@ impl DockerRuntime {
             // runner a work folder with the same absolute path in both places (the server put the same
             // path in the runner's registration).
             let work = gridops_core::fleet::shared_work_folder(environment);
-            if std::fs::create_dir_all(&work).is_err() {
+            if let Err(error) = create_shared_work_folder(
+                std::path::Path::new(gridops_core::fleet::SHARED_WORK_ROOT),
+                std::path::Path::new(&work),
+            ) {
+                tracing::warn!("Could not create the runner work folder {work}: {error}");
                 return failed(FailureCode::Configuration, false);
             }
             args.extend(["-v".into(), format!("{work}:{work}")]);
@@ -523,6 +527,36 @@ async fn feed_secret(id: &str, secret: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Create a runner's shared work folder under `root`.
+///
+/// If the Docker daemon is ever asked to bind-mount a path that does not exist yet, it creates it
+/// as root, and the agent can then no longer create folders inside it. That happens when a runner
+/// that was started without the shared folder (an older agent) is told to use one. The agent owns
+/// the directory that holds `root`, so it can move such a root-owned `root` aside and start a fresh
+/// one. Nothing of ours can be inside it: the agent could not have created anything there.
+fn create_shared_work_folder(
+    root: &std::path::Path,
+    work: &std::path::Path,
+) -> std::io::Result<()> {
+    match std::fs::create_dir_all(work) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let mut aside = root.as_os_str().to_owned();
+            aside.push(format!(".not-ours-{stamp}"));
+            std::fs::rename(root, &aside)?;
+            tracing::warn!(
+                "Moved the unwritable work root {} aside to {}",
+                root.display(),
+                std::path::Path::new(&aside).display()
+            );
+            std::fs::create_dir_all(work)
+        }
+        other => other,
+    }
+}
+
 /// The image and shared work folder of a runner container, when it has one.
 async fn shared_work_leftover(id: &str) -> Option<(String, String)> {
     let output = docker(&[
@@ -666,7 +700,7 @@ const fn failed(code: FailureCode, retryable: bool) -> HelperResponse {
 
 #[cfg(test)]
 mod shared_work_folder_tests {
-    use super::parse_shared_work_leftover;
+    use super::{create_shared_work_folder, parse_shared_work_leftover};
 
     #[test]
     fn finds_the_image_and_the_shared_folder() {
@@ -705,5 +739,50 @@ mod shared_work_folder_tests {
                 "{source}"
             );
         }
+    }
+    #[test]
+    fn creates_the_folder_under_a_fresh_root() -> std::io::Result<()> {
+        let dir = scratch_dir("fresh")?;
+        let root = dir.join("work");
+        let work = root.join("env1");
+        create_shared_work_folder(&root, &work)?;
+        assert!(work.is_dir());
+        std::fs::remove_dir_all(&dir)
+    }
+
+    #[test]
+    fn moves_an_unwritable_root_aside_and_starts_a_fresh_one() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("foreign")?;
+        let root = dir.join("work");
+        std::fs::create_dir_all(&root)?;
+        // A root nobody can write to stands in for one the Docker daemon created as root.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555))?;
+        if std::fs::create_dir(root.join("probe")).is_ok() {
+            // Running as root: permissions do not apply, so there is nothing to move aside.
+            return std::fs::remove_dir_all(&dir);
+        }
+        let work = root.join("env1");
+        create_shared_work_folder(&root, &work)?;
+        assert!(work.is_dir());
+        let mut aside = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with("work.not-ours-") {
+                aside.push(name);
+            }
+        }
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        for name in &aside {
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::remove_dir_all(&dir)
+    }
+
+    fn scratch_dir(tag: &str) -> std::io::Result<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("gridops-work-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 }
