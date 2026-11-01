@@ -17,7 +17,7 @@ For full host onboarding a bot needs all four v1 scopes:
 | `fleet:read` | Read hosts, backends, grants, events, targets, queues, operations |
 | `fleet:enroll` | Issue, check and revoke enrollment codes |
 | `fleet:approve` | Approve a pending host |
-| `fleet:operate` | Turn runtimes on/off, set lifecycle intent, set grants, save a pool's fleet execution profile |
+| `fleet:operate` | Turn runtimes on/off, set lifecycle intent, set grants, save a pool's fleet execution profile, set a pool's runner counts |
 
 Recovering, retiring or rotating a host's credentials, reading agent logs,
 and managing tokens stay cookie-only. A token belongs to its creator: their

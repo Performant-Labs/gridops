@@ -34,6 +34,8 @@ mod disk_alerts;
 mod inventory;
 #[path = "fleet_http/placement.rs"]
 mod placement;
+#[path = "fleet_http/pool_capacity.rs"]
+mod pool_capacity;
 #[path = "fleet_http/query.rs"]
 mod query;
 #[path = "fleet_http/recovery.rs"]
