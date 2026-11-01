@@ -1,6 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { Command } from "cmdk";
-import { Activity, ArrowRight, Boxes, LoaderCircle, LogOut, Moon, PackageSearch, Plus, RefreshCw, Search, Sun, type LucideIcon } from "lucide-react";
+import { Activity, ArrowRight, Boxes, KeyRound, LoaderCircle, LogOut, Moon, PackageSearch, Plus, RefreshCw, Search, Sun, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -112,6 +112,16 @@ export function CommandMenu({ open, onOpenChange, signedIn }: { open: boolean; o
               <Command.Item className={itemClassName} keywords={["new", "provision", "add"]} onSelect={() => run(() => void navigate({ to: "/runner-pools/new" }))} value="Create runner pool">
                 <Plus /><span className="flex-1">Create runner pool</span><Shortcut keys={["C"]} />
               </Command.Item>
+              {signedIn ? (
+                <Command.Item
+                  className={itemClassName}
+                  keywords={["api", "token", "bot", "automation", "bearer", "settings", "create", "revoke"]}
+                  onSelect={() => run(() => void navigate({ to: "/settings/api-tokens" }))}
+                  value="Manage API tokens"
+                >
+                  <KeyRound /><span className="flex-1">Manage API tokens</span><ArrowRight />
+                </Command.Item>
+              ) : null}
               {signedIn ? (
                 <Command.Item
                   className={itemClassName}
