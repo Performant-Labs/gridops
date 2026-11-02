@@ -61,6 +61,9 @@ jobs:
           cargo fmt --version
           cargo clippy --version
 
+      - name: Test the installer
+        run: sh scripts/test-install.sh
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
