@@ -492,7 +492,7 @@ impl RegistryService {
         &self,
         principal: &Principal,
     ) -> Result<(Transaction<'_, Sqlite>, Snapshot), QueryError> {
-        let Principal::AuthenticatedUser { user_id } = principal else {
+        let Some(user_id) = principal.user_id() else {
             return Err(QueryError::Forbidden);
         };
         let mut tx = self.pool.begin().await?;
@@ -515,7 +515,7 @@ impl RegistryService {
         Ok((
             tx,
             Snapshot {
-                user_id: user_id.clone(),
+                user_id: user_id.to_owned(),
                 system_admin: role == "admin",
                 incarnation,
                 now,

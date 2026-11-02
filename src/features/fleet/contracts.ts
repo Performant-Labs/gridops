@@ -108,6 +108,7 @@ const errorDetails = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("retry"), retryAfterMs: safeInteger }),
   z.strictObject({ kind: z.literal("cursor_gap") }),
   z.strictObject({ kind: z.literal("readiness"), reason: rejectionReasonSchema }),
+  z.strictObject({ kind: z.literal("scope"), requiredScope: text }),
 ]);
 export const fleetErrorSchema = z.strictObject({
   code: z.enum(["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range"]),

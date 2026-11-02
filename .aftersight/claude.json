@@ -1,0 +1,68 @@
+{
+  "release": "latest",
+  "gate": {
+    "DUAL_REVIEW_MODEL": "deepseek-v4-pro",
+    "DUAL_REVIEW_PROVIDER": "deepseek",
+    "DUAL_REVIEW_API_KEY_VAR": "DEEPSEEK_API_KEY",
+    "DUAL_REVIEW_TRANSPORT": "chat",
+    "DUAL_REVIEW_CHAT_PATH": "/chat/completions"
+  },
+  "stages": {
+    "D": {
+      "executor": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "A_ARCH": {
+      "executor": "claude-cli",
+      "model": "claude-opus-5-5",
+      "effort": "xhigh",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "T_RED": {
+      "executor": "claude-cli",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "F": {
+      "executor": "claude-cli",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "T_GREEN": {
+      "executor": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "A_DUP": {
+      "executor": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "U": {
+      "executor": "opencode-agent",
+      "model": "anthropic/claude-sonnet-5-5",
+      "effort": "medium",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    },
+    "S": {
+      "executor": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "timeoutSec": 1800,
+      "maxBudgetUsd": 5
+    }
+  }
+}

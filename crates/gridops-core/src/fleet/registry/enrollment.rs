@@ -303,7 +303,9 @@ impl HardwareFingerprint {
 /// The actor used by browser-side registry transitions.
 pub(crate) fn require_user(principal: &Principal) -> Result<&str, EnrollmentInputError> {
     match principal {
-        Principal::AuthenticatedUser { user_id } => Ok(user_id),
+        Principal::AuthenticatedUser { user_id } | Principal::ApiToken { user_id, .. } => {
+            Ok(user_id)
+        }
         Principal::Reconciler | Principal::Autoscaler | Principal::FixAgent => {
             Err(EnrollmentInputError::InvalidCounter)
         }

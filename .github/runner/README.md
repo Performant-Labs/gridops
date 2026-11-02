@@ -4,20 +4,18 @@ GridOps' own CI uses an isolated runner image with Node.js 22.13 and Rust 1.96 a
 
 Build the image on the GridOps Docker host:
 
-Build it for both architectures, since the pool runs on arm64 and x64 machines:
+Build it on a Docker host of the fleet. This fork publishes to its own Harbor registry (the fleet machines already hold pull credentials for it); build for the architectures the fleet actually runs:
 
 ```sh
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/amd64 \
   --file .github/runner/Dockerfile \
-  --tag ghcr.io/iamngoni/gridops-ci-runner:node22-rust196 \
+  --tag harbor.performantlabs.com/performantlabs/gridops-ci-runner:node22-rust196 \
   --load .github/runner
+
+docker push harbor.performantlabs.com/performantlabs/gridops-ci-runner:node22-rust196
 ```
 
-Push the image to GHCR, then set every Linux Docker platform of the pool to that image and give the pool the `gridops-ci` label:
-
-```sh
-docker push ghcr.io/iamngoni/gridops-ci-runner:node22-rust196
-```
+Then set every Linux Docker platform of the build pool to that image and give the pool the `gridops-ci` label.
 
 The CI workflow requests the `gridops-ci` label so jobs cannot land on a generic runner without the required toolchain.

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::{
     auth::FleetAgent,
-    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser},
+    boundary::{CookieOnly, FleetJson, FleetPath, FleetUser, FleetWriteUser, Read},
     enrollment::{RequestKey, SecretInput},
     error::{FleetApiError, RequestContext},
 };
@@ -67,7 +67,7 @@ struct AckReceipt {
 pub(super) async fn request(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<CookieOnly>,
     key: RequestKey,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<RotateBody>,
@@ -98,7 +98,7 @@ pub(super) async fn request(
 pub(super) async fn status(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(id): FleetPath<OperationId>,
 ) -> Result<Response, FleetApiError> {
     let receipt = RegistryService::new(state.database, state.vault)

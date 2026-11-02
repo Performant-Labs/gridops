@@ -1,6 +1,7 @@
 //! Fleet transport is isolated from legacy routes and host runtime execution.
 //! Only implemented registry operations are exposed; enrollment grants no start authority.
 
+mod api_tokens;
 mod auth;
 mod boundary;
 mod commands;
@@ -23,6 +24,81 @@ use gridops_core::fleet::protocol::{browser::ErrorCode, primitives::DEFAULT_JSON
 
 use self::error::RequestContext;
 use crate::state::AppState;
+
+/// The v1 token scope map, as data. A fleet browser route accepts a bearer
+/// token only when it appears here; every other fleet route is cookie-only.
+/// The extractors in `boundary.rs` name the same scope per handler, and the
+/// HTTP tests cross-check both against this table.
+#[allow(dead_code)] // consumed by the OpenAPI and docs issues (#21, #22); kept beside the router so they cannot drift
+pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/api/v1/fleet/hosts", "fleet:read"),
+    ("GET", "/api/v1/fleet/hosts/{host_id}", "fleet:read"),
+    (
+        "GET",
+        "/api/v1/fleet/hosts/{host_id}/backends",
+        "fleet:read",
+    ),
+    (
+        "GET",
+        "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}",
+        "fleet:read",
+    ),
+    ("GET", "/api/v1/fleet/hosts/{host_id}/domains", "fleet:read"),
+    (
+        "GET",
+        "/api/v1/fleet/hosts/{host_id}/domains/{domain_id}",
+        "fleet:read",
+    ),
+    ("GET", "/api/v1/fleet/hosts/{host_id}/samples", "fleet:read"),
+    ("GET", "/api/v1/fleet/hosts/{host_id}/events", "fleet:read"),
+    ("GET", "/api/v1/fleet/hosts/{host_id}/grants", "fleet:read"),
+    (
+        "GET",
+        "/api/v1/fleet/hosts/{host_id}/unconfirmed",
+        "fleet:read",
+    ),
+    ("GET", "/api/v1/fleet/targets", "fleet:read"),
+    ("GET", "/api/v1/fleet/workload", "fleet:read"),
+    ("GET", "/api/v1/fleet/pools/{pool_id}/profile", "fleet:read"),
+    ("GET", "/api/v1/fleet/pools/{pool_id}/queue", "fleet:read"),
+    ("GET", "/api/v1/operations/{operation_id}", "fleet:read"),
+    ("POST", "/api/v1/fleet/enrollments", "fleet:enroll"),
+    (
+        "GET",
+        "/api/v1/fleet/enrollments/{enrollment_id}",
+        "fleet:enroll",
+    ),
+    (
+        "POST",
+        "/api/v1/fleet/enrollments/{enrollment_id}/revoke",
+        "fleet:enroll",
+    ),
+    (
+        "POST",
+        "/api/v1/fleet/hosts/{host_id}/approve",
+        "fleet:approve",
+    ),
+    (
+        "POST",
+        "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled",
+        "fleet:operate",
+    ),
+    (
+        "POST",
+        "/api/v1/fleet/hosts/{host_id}/lifecycle",
+        "fleet:operate",
+    ),
+    (
+        "POST",
+        "/api/v1/fleet/hosts/{host_id}/grants/{target_id}",
+        "fleet:operate",
+    ),
+    (
+        "PUT",
+        "/api/v1/fleet/pools/{pool_id}/profile",
+        "fleet:operate",
+    ),
+];
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -143,6 +219,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v1/fleet/agent/hosts/{host_id}/credentials/ack",
             post(credentials::acknowledge),
+        )
+        .route(
+            "/api/v1/fleet/api-tokens",
+            post(api_tokens::create).get(api_tokens::list),
+        )
+        .route(
+            "/api/v1/fleet/api-tokens/{token_id}/revoke",
+            post(api_tokens::revoke),
         )
         .route("/api/v1/fleet", any(not_found))
         .route("/api/v1/fleet/", any(not_found))

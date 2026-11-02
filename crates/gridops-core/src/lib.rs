@@ -1,3 +1,4 @@
+pub mod api_tokens;
 pub mod autoscaling;
 pub mod bitbucket;
 pub mod config;

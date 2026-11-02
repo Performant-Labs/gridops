@@ -3,7 +3,9 @@
 A fleet machine is any Linux or macOS host you enroll in GridOps. It runs
 `gridops-host-agent`, which connects out to GridOps over HTTPS. Nothing
 connects in to the machine. Pools can then run their GitHub Actions runners on
-it, in Docker containers or natively on the host.
+it, in Docker containers or natively on the host. Scripts and bots can
+onboard machines without a browser; see
+[the automation guide](fleet-automation.md).
 
 ## How it fits together
 
@@ -130,10 +132,33 @@ sudo systemctl enable --now gridops-host-agent
 | `GRIDOPS_AGENT_STATE_DIR` | Journal, credential, saved address and native runner files (default `~/.gridops/host-agent`). |
 | `GRIDOPS_AGENT_NAME` | Machine name shown in GridOps (default: hostname). |
 | `GRIDOPS_AGENT_DOCKER_NETWORK` | Docker network for runner containers. |
-| `GRIDOPS_AGENT_DOCKER_SOCKET` | Host Docker socket to share with profiles that need Docker-in-job, when the machine's grant allows it. |
+| `GRIDOPS_AGENT_DOCKER_SOCKET` | Host Docker socket (usually `/var/run/docker.sock`) to share with profiles that need Docker-in-job, when the machine's grant allows it. Must be set for the agent to advertise the capability at all; see below. |
 | `GRIDOPS_AGENT_HELPER_SOCKET` | Use a separate privileged helper (`gridops-host-agent helper <socket>`) instead of running runtimes in-process. |
 
 Native profiles use the image `native:actions-runner` and must be ephemeral.
+
+### Docker-in-job profiles
+
+A profile that needs the host Docker socket is only placed on a machine when
+both of these hold:
+
+1. The agent has `GRIDOPS_AGENT_DOCKER_SOCKET` set. Without it the agent
+   reports the socket as unsupported, and GridOps leaves the placement queued
+   with the reason `capability_unverified`.
+2. The machine's grant in GridOps allows the Docker socket.
+
+On Linux, add the variable with a drop-in so it survives reinstalling the unit
+file, then restart the agent:
+
+```sh
+sudo systemctl edit gridops-host-agent
+# [Service]
+# Environment=GRIDOPS_AGENT_DOCKER_SOCKET=/var/run/docker.sock
+sudo systemctl daemon-reload && sudo systemctl restart gridops-host-agent
+```
+
+Once the agent reconnects, the queued placements should clear on the next
+admission pass.
 
 ## Exit codes
 
