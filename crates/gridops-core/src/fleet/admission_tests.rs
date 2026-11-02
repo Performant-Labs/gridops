@@ -1156,16 +1156,15 @@ async fn a_replaced_profile_is_staleness_and_a_disabled_pool_stays_forbidden() -
 
     // Submitting against the archived profile is staleness too, so a
     // controller retrying with the old identity learns to re-read the pool.
-    let error = service
+    let stale = service
         .submit_intent(
             &principal(),
             request("superseded-submit", "52000000-0000-4000-8000-00000000000a")?,
         )
-        .await
-        .expect_err("submitting against an archived, replaced profile must fail");
+        .await;
     assert!(
-        matches!(error, FleetError::StaleProfileRevision),
-        "{error:?}"
+        matches!(stale, Err(FleetError::StaleProfileRevision)),
+        "submitting against an archived, replaced profile must fail as stale: {stale:?}"
     );
 
     // A pool whose every profile ends up disabled is a policy refusal, not
