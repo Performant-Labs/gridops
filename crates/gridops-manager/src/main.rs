@@ -90,6 +90,45 @@ struct ManagerLimits {
     log_max_files: u64,
     runner_pids_limit: i64,
     runner_swap_percent: i64,
+    /// Where the fallback figures above came from, so the budget in force can
+    /// say so and a runner count fixed in the environment stays fixed.
+    budget_origin: BudgetOrigin,
+}
+
+/// Which of the manager's own budget figures were set in its environment
+/// rather than derived from the host.
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct BudgetOrigin {
+    cpu_from_env: bool,
+    memory_from_env: bool,
+    max_runners_from_env: bool,
+}
+
+/// The built-in host's budget in force, and where each figure came from:
+/// `setting` (`GridOps`), `environment` (the manager's variables) or `default`
+/// (95% of the host).
+#[derive(Clone, Copy, Debug)]
+struct EffectiveBudget {
+    budget: CapacityBudget,
+    cpu_source: &'static str,
+    memory_source: &'static str,
+}
+
+impl EffectiveBudget {
+    fn to_json(self) -> Value {
+        json!({
+            "cpuBudget": self.budget.cpu,
+            "memoryBudgetMb": self.budget.memory_mb,
+            "maxRunners": self.budget.max_runners,
+            "source": { "cpu": self.cpu_source, "memory": self.memory_source },
+        })
+    }
+}
+
+/// Two cores and 2 GB per runner, at least one.
+fn derived_max_runners(cpu: f64, memory_mb: i64) -> usize {
+    usize::try_from(((cpu / 2.0).floor() as i64).min(memory_mb / 2_048).max(1)).unwrap_or(1)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,6 +482,9 @@ struct ManagerPolicy {
     /// Whether runners may start on this manager's own host. Callers that
     /// predate the setting leave it out, which leaves it as it was.
     builtin_host_enabled: Option<bool>,
+    /// The host's budget as set in `GridOps`; a `null` figure falls back to
+    /// the manager's own. Left out (older callers), it stays as it was.
+    builtin_host_budget: Option<builtin_host::Budget>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -483,9 +525,10 @@ impl ManagerLimits {
         let total_memory_mb = (total_memory_bytes / 1_024 / 1_024).max(512);
         let default_cpu_budget = (available_cpus * 0.95).max(1.0);
         let default_memory_budget_mb = (total_memory_mb * 95 / 100).max(512);
-        let cpu_budget = optional_env("GRIDOPS_RUNNER_CPU_BUDGET")?.unwrap_or(default_cpu_budget);
-        let memory_budget_mb =
-            optional_env("GRIDOPS_RUNNER_MEMORY_BUDGET_MB")?.unwrap_or(default_memory_budget_mb);
+        let env_cpu_budget = optional_env("GRIDOPS_RUNNER_CPU_BUDGET")?;
+        let env_memory_budget_mb = optional_env("GRIDOPS_RUNNER_MEMORY_BUDGET_MB")?;
+        let cpu_budget = env_cpu_budget.unwrap_or(default_cpu_budget);
+        let memory_budget_mb = env_memory_budget_mb.unwrap_or(default_memory_budget_mb);
         anyhow::ensure!(
             cpu_budget > 0.0 && cpu_budget <= available_cpus,
             "GRIDOPS_RUNNER_CPU_BUDGET must be positive and no greater than the Docker host CPU count"
@@ -494,13 +537,9 @@ impl ManagerLimits {
             memory_budget_mb >= 256 && memory_budget_mb <= total_memory_mb,
             "GRIDOPS_RUNNER_MEMORY_BUDGET_MB must be between 256 MB and Docker host memory"
         );
-        let default_max_runners = usize::try_from(
-            ((cpu_budget / 2.0).floor() as i64)
-                .min(memory_budget_mb / 2_048)
-                .max(1),
-        )?;
+        let env_max_runners = optional_env("GRIDOPS_MAX_MANAGED_RUNNERS")?;
         let max_runners =
-            optional_env("GRIDOPS_MAX_MANAGED_RUNNERS")?.unwrap_or(default_max_runners);
+            env_max_runners.unwrap_or_else(|| derived_max_runners(cpu_budget, memory_budget_mb));
         anyhow::ensure!(
             (1..=1_000).contains(&max_runners),
             "GRIDOPS_MAX_MANAGED_RUNNERS must be between 1 and 1000"
@@ -553,15 +592,65 @@ impl ManagerLimits {
             log_max_files,
             runner_pids_limit,
             runner_swap_percent,
+            budget_origin: BudgetOrigin {
+                cpu_from_env: env_cpu_budget.is_some(),
+                memory_from_env: env_memory_budget_mb.is_some(),
+                max_runners_from_env: env_max_runners.is_some(),
+            },
         })
     }
 
+    /// The manager's own budget, before any setting from `GridOps`.
+    #[cfg(test)]
     fn docker_budget(&self) -> CapacityBudget {
-        CapacityBudget {
-            cpu: self.cpu_budget,
-            memory_mb: self.memory_budget_mb,
-            max_runners: self.max_runners,
+        self.effective_budget(builtin_host::Budget::default())
+            .budget
+    }
+
+    /// The budget in force: a figure `GridOps` sets replaces the manager's
+    /// own, and never exceeds what the host has. Unless the environment fixes
+    /// the runner count, it follows the budget as it does at startup.
+    fn effective_budget(&self, setting: builtin_host::Budget) -> EffectiveBudget {
+        let origin = |from_env: bool| if from_env { "environment" } else { "default" };
+        let (cpu, cpu_source) = match setting.cpu_millis {
+            Some(millis) => (
+                (millis as f64 / 1_000.0).min(self.available_cpus),
+                "setting",
+            ),
+            None => (self.cpu_budget, origin(self.budget_origin.cpu_from_env)),
+        };
+        let (memory_mb, memory_source) = match setting.memory_mib {
+            Some(mib) => (mib.min(self.total_memory_mb), "setting"),
+            None => (
+                self.memory_budget_mb,
+                origin(self.budget_origin.memory_from_env),
+            ),
+        };
+        let max_runners = if self.budget_origin.max_runners_from_env {
+            self.max_runners
+        } else {
+            derived_max_runners(cpu, memory_mb)
+        };
+        EffectiveBudget {
+            budget: CapacityBudget {
+                cpu,
+                memory_mb,
+                max_runners,
+            },
+            cpu_source,
+            memory_source,
         }
+    }
+}
+
+impl ManagerState {
+    /// The built-in host's budget in force.
+    fn effective_budget(&self) -> EffectiveBudget {
+        self.limits.effective_budget(self.builtin_host.budget())
+    }
+
+    fn docker_budget(&self) -> CapacityBudget {
+        self.effective_budget().budget
     }
 }
 
@@ -863,6 +952,7 @@ async fn health(
     let usage = docker_active_usage(&state.docker).await?;
     let reserved = reserved_capacity(&state, "docker").await;
     let disk = disk_capacity(&state.limits)?;
+    let budget = state.effective_budget();
     Ok(Json(json!({
         "status": status,
         "dockerVersion": version.version,
@@ -874,9 +964,10 @@ async fn health(
         "provisioningPaused": state.provisioning_paused.load(Ordering::Relaxed),
         "builtinHost": builtin_host,
         "capacity": {
-            "cpuBudget": state.limits.cpu_budget,
-            "memoryBudgetMb": state.limits.memory_budget_mb,
-            "maxRunners": state.limits.max_runners,
+            "cpuBudget": budget.budget.cpu,
+            "memoryBudgetMb": budget.budget.memory_mb,
+            "maxRunners": budget.budget.max_runners,
+            "budgetSource": { "cpu": budget.cpu_source, "memory": budget.memory_source },
             "active": usage.total(),
             "reserved": reserved,
             "agentSandboxes": {
@@ -893,17 +984,41 @@ async fn update_policy(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
     Json(input): Json<ManagerPolicy>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ManagerError> {
+    // Checked before anything is applied, so a refused policy changes nothing.
+    if let Some(budget) = input.builtin_host_budget
+        && (budget.cpu_millis.is_some_and(|millis| millis <= 0)
+            || budget.memory_mib.is_some_and(|mib| mib <= 0))
+    {
+        return Err(ManagerError::BadRequest(
+            "The built-in host's budget must be above zero; leave a figure null to use the manager's own.".into(),
+        ));
+    }
     state
         .provisioning_paused
         .store(input.provisioning_paused, Ordering::Relaxed);
     if let Some(enabled) = input.builtin_host_enabled {
         state.builtin_host.set(enabled);
     }
-    Json(json!({
+    if let Some(budget) = input.builtin_host_budget
+        && budget != state.builtin_host.budget()
+    {
+        state.builtin_host.set_budget(budget);
+        let effective = state.effective_budget();
+        tracing::info!(
+            cpu_budget = effective.budget.cpu,
+            cpu_source = effective.cpu_source,
+            memory_budget_mb = effective.budget.memory_mb,
+            memory_source = effective.memory_source,
+            max_runners = effective.budget.max_runners,
+            "built-in runner host budget changed"
+        );
+    }
+    Ok(Json(json!({
         "provisioningPaused": input.provisioning_paused,
         "builtinHostEnabled": state.builtin_host.setting(),
-    }))
+        "builtinHostBudget": state.effective_budget().to_json(),
+    })))
 }
 
 async fn reserve_capacity(
@@ -932,7 +1047,7 @@ async fn reserve_capacity(
         (budget, active, None)
     } else {
         (
-            state.limits.docker_budget(),
+            state.docker_budget(),
             docker_active_capacity(&state.docker).await?,
             Some(disk_capacity(&state.limits)?),
         )
@@ -1319,7 +1434,7 @@ async fn control_runner(
                 memory_mb: host.memory.unwrap_or_default() / 1_024 / 1_024,
             };
             enforce_capacity(
-                state.limits.docker_budget(),
+                state.docker_budget(),
                 docker_active_capacity(&state.docker).await?,
                 reserved_capacity(&state, "docker").await,
                 requested,
@@ -2127,6 +2242,7 @@ mod tests {
             log_max_files: 5,
             runner_pids_limit: 1_024,
             runner_swap_percent: 100,
+            budget_origin: BudgetOrigin::default(),
         };
         let budget = limits.docker_budget();
         let disk = Some(DiskCapacity {

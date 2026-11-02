@@ -1,4 +1,5 @@
 import type { JobAgentState } from "~/features/agent/agent.functions";
+import type { BudgetSource, BuiltinHostBudget } from "~/features/runner-pools/builtin-host";
 import { api } from "~/lib/api";
 
 type Page<T> = { authenticated: boolean; items: T[] };
@@ -133,6 +134,8 @@ export type SettingsPage = {
       builtinHost?: { enabled: boolean | null; dockerAvailable: boolean };
       capacity?: {
         cpuBudget: number; memoryBudgetMb: number; maxRunners: number;
+        /** Where each figure comes from; absent from a manager that predates the budget setting. */
+        budgetSource?: { cpu: BudgetSource; memory: BudgetSource };
         active: { activeRunners: number; cpu: number; memoryMb: number };
         reserved: { activeRunners: number; cpu: number; memoryMb: number };
       };
@@ -140,7 +143,9 @@ export type SettingsPage = {
     };
     settings: { logRetentionDays: number; logStorageBudgetMb: number; webhookRetentionDays: number; auditRetentionDays: number;
       reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean;
-      builtinRunnerHostEnabled: boolean };
+      builtinRunnerHostEnabled: boolean;
+      /** The built-in host's budget as set in GridOps; absent from an older server. */
+      builtinRunnerHostBudget?: BuiltinHostBudget };
     user: { id: string; login: string; role: "admin" | "member" };
     users: Array<{ id: string; login: string; name: string | null; avatarUrl: string | null;
       role: "admin" | "member"; lastLoginAt: string; canDemote: boolean }>;

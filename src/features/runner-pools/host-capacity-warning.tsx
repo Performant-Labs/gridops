@@ -15,8 +15,9 @@ export function HostCapacityWarning({ warning, host }: { warning: HostResourceWa
     <Callout title={`Target exceeds ${label}’s safe capacity`} tone="warning">
       {warning.runnerCount} runners would request {formatResourceNumber(warning.cpuRequested)} cores and {warning.memoryRequestedMb.toLocaleString()} MB;
       {" "}{label} safely offers {formatResourceNumber(warning.cpuBudget)} cores and {warning.memoryBudgetMb.toLocaleString()} MB. {note}{" "}
-      That budget is set on the runner manager (<code className="font-mono">GRIDOPS_RUNNER_CPU_BUDGET</code> and <code className="font-mono">GRIDOPS_RUNNER_MEMORY_BUDGET_MB</code>);
-      {" "}<Link className="underline underline-offset-2" to="/settings/runner-host">Settings → Runner host</Link> shows it in use. Runners started on a <Link className="underline underline-offset-2" to="/fleet">machine</Link> count
+      An administrator sets that budget under <Link className="underline underline-offset-2" to="/settings/runner-host">Settings → Runner host</Link> (Budget);
+      {" "}a figure not set there comes from the runner manager (<code className="font-mono">GRIDOPS_RUNNER_CPU_BUDGET</code> and <code className="font-mono">GRIDOPS_RUNNER_MEMORY_BUDGET_MB</code>, or 95% of the host).
+      {" "}Runners started on a <Link className="underline underline-offset-2" to="/fleet">machine</Link> count
       against that machine’s own budget instead. You can save, but GridOps won’t start runners beyond the budget.
     </Callout>
   );

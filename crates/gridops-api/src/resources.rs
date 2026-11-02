@@ -3323,6 +3323,7 @@ pub async fn settings(
             "autoUpdateImages": stored.get("autoUpdateImages").and_then(Value::as_bool).unwrap_or(false),
             "provisioningPaused": stored.get("provisioningPaused").and_then(Value::as_bool).unwrap_or(false),
             "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
+            "builtinRunnerHostBudget": gridops_core::builtin_host::budget(&state.database).await,
         }, "user": { "id": user.id, "login": user.login, "role": user.role }, "users": users
     }})))
 }
@@ -3466,6 +3467,171 @@ pub async fn save_builtin_runner_host(
         "managerSynced": manager_synced,
         "cannotRunPools": affected_pools,
         "runnersOnBuiltinHost": runners_on_host,
+    })))
+}
+
+/// The figures of the built-in host's budget that can be set, as the request
+/// names them.
+const BUILTIN_BUDGET_FIELDS: [&str; 2] = ["cpuMillis", "memoryMib"];
+
+/// What a budget request does to one figure.
+#[derive(Clone, Copy)]
+enum BudgetEdit {
+    /// Left out: kept as it is.
+    Keep,
+    /// `null`: back to the runner manager's own figure.
+    Clear,
+    Set(i64),
+}
+
+impl BudgetEdit {
+    fn apply(self, current: Option<i64>) -> Option<i64> {
+        match self {
+            Self::Keep => current,
+            Self::Clear => None,
+            Self::Set(figure) => Some(figure),
+        }
+    }
+
+    const fn set(self) -> Option<i64> {
+        match self {
+            Self::Set(figure) => Some(figure),
+            Self::Keep | Self::Clear => None,
+        }
+    }
+}
+
+fn budget_figure(fields: &serde_json::Map<String, Value>, key: &str) -> ApiResult<BudgetEdit> {
+    match fields.get(key) {
+        None => Ok(BudgetEdit::Keep),
+        Some(Value::Null) => Ok(BudgetEdit::Clear),
+        Some(value) => match value.as_i64() {
+            Some(figure) if figure > 0 => Ok(BudgetEdit::Set(figure)),
+            Some(_) => Err(ApiError::BadRequest(format!(
+                "{key} must be above zero, or null to use the runner manager's own figure."
+            ))),
+            None => Err(ApiError::BadRequest(format!(
+                "{key} must be a whole number or null."
+            ))),
+        },
+    }
+}
+
+/// Changes the built-in runner host's budget: how much of the machine `GridOps`
+/// runs on it may fill with runners, in the units of a fleet machine's
+/// budget. An administrator only. A figure left out is kept; `null` returns it
+/// to the runner manager's own (`GRIDOPS_RUNNER_CPU_BUDGET` /
+/// `GRIDOPS_RUNNER_MEMORY_BUDGET_MB`, or 95% of the host). A figure must be
+/// above zero and no more than the host reports, so one can only be set while
+/// the manager reports its host. The change is stored, pushed to the manager,
+/// and audited with the figures before and after.
+pub async fn save_builtin_runner_host_budget(
+    State(state): State<AppState>,
+    _same_origin: SameOrigin,
+    user: AuthUser,
+    Json(input): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    require_system_admin(&user)?;
+    let Value::Object(fields) = input else {
+        return Err(ApiError::BadRequest(
+            "Send a JSON object with cpuMillis, memoryMib or both.".into(),
+        ));
+    };
+    if fields.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Send cpuMillis, memoryMib or both; nothing was changed.".into(),
+        ));
+    }
+    if let Some(unknown) = fields
+        .keys()
+        .find(|key| !BUILTIN_BUDGET_FIELDS.contains(&key.as_str()))
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Unknown field {unknown}; the built-in host's budget has cpuMillis and memoryMib."
+        )));
+    }
+    let cpu = budget_figure(&fields, "cpuMillis")?;
+    let memory = budget_figure(&fields, "memoryMib")?;
+    if cpu.set().is_some() || memory.set().is_some() {
+        let health = manager_json(&state, Method::GET, "v1/health", None)
+            .await
+            .ok();
+        let reported_cpus = health
+            .as_ref()
+            .and_then(|value| value.get("availableCpus"))
+            .and_then(Value::as_f64)
+            .filter(|cpus| *cpus > 0.0);
+        let reported_memory = health
+            .as_ref()
+            .and_then(|value| value.get("totalMemoryMb"))
+            .and_then(Value::as_i64)
+            .filter(|memory| *memory > 0);
+        let (Some(cpus), Some(memory_mb)) = (reported_cpus, reported_memory) else {
+            return Err(ApiError::ServiceUnavailable(
+                "The runner manager has not reported its host's CPUs and memory, so the built-in host's budget can't be checked or set now. A figure can still be cleared (null).".into(),
+            ));
+        };
+        if let Some(millis) = cpu.set()
+            && millis as f64 > (cpus * 1_000.0).round()
+        {
+            return Err(ApiError::BadRequest(format!(
+                "CPU can't exceed the {cpus} cores the built-in host reports."
+            )));
+        }
+        if let Some(mib) = memory.set()
+            && mib > memory_mb
+        {
+            return Err(ApiError::BadRequest(format!(
+                "Memory can't exceed the {memory_mb} MB the built-in host reports."
+            )));
+        }
+    }
+    let current = gridops_core::builtin_host::budget(&state.database).await;
+    let next = gridops_core::builtin_host::Budget {
+        cpu_millis: cpu.apply(current.cpu_millis),
+        memory_mib: memory.apply(current.memory_mib),
+    };
+    let change = gridops_core::builtin_host::set_budget(&state.database, &user.id, next)
+        .await
+        .map_err(ApiError::Internal)?;
+    let policy = gridops_core::builtin_host::manager_policy(
+        &state.database,
+        setting_bool(&state, "provisioningPaused", false).await,
+    )
+    .await;
+    // The reconciler pushes the same policy every pass, so a manager that is
+    // down now catches up.
+    let synced = manager_json(&state, Method::PUT, "v1/policy", Some(policy))
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "saved the built-in runner host budget but manager synchronization is pending");
+        })
+        .ok();
+    if change.changed() {
+        audit(
+            &state,
+            &user,
+            "settings.builtin_runner_host_budget_changed",
+            "system",
+            Some("gridops"),
+            json!({
+                "setting": gridops_core::builtin_host::BUDGET_KEY,
+                "before": change.before,
+                "after": change.after,
+            }),
+        )
+        .await?;
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "budget": change.after,
+        "changed": change.changed(),
+        "managerSynced": synced.is_some(),
+        "effective": synced
+            .as_ref()
+            .and_then(|value| value.get("builtinHostBudget"))
+            .cloned()
+            .unwrap_or(Value::Null),
     })))
 }
 

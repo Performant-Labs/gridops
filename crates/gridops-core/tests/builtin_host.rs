@@ -298,3 +298,105 @@ async fn pools_that_can_only_run_on_the_host_are_marked_while_it_is_off_and_rele
     let _ = std::fs::remove_dir_all(directory);
     Ok(())
 }
+
+// The built-in host's budget: how much of it GridOps may fill with runners.
+// Stored with the other settings; while none is stored the runner manager's
+// own figures (its environment, or 95% of the host) apply.
+
+#[tokio::test]
+async fn with_no_budget_stored_the_managers_own_figures_apply() -> Result<()> {
+    let (db, _directory) = database().await?;
+    assert_eq!(
+        builtin_host::budget(&db).await,
+        builtin_host::Budget::default()
+    );
+    assert_eq!(builtin_host::budget(&db).await.cpu_millis, None);
+    assert_eq!(builtin_host::budget(&db).await.memory_mib, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_budget_is_stored_read_back_and_cleared_and_each_change_reports_before_and_after()
+-> Result<()> {
+    let (db, _directory) = database().await?;
+    seed_installation(&db).await?;
+    let set = builtin_host::Budget {
+        cpu_millis: Some(12_000),
+        memory_mib: Some(49_152),
+    };
+    let change = builtin_host::set_budget(&db, "admin", set).await?;
+    assert_eq!(change.before, builtin_host::Budget::default());
+    assert_eq!(change.after, set);
+    assert!(change.changed());
+    assert_eq!(builtin_host::budget(&db).await, set);
+    let by: String = sqlx::query_scalar("SELECT updated_by FROM settings WHERE key=?")
+        .bind(builtin_host::BUDGET_KEY)
+        .fetch_one(&db)
+        .await?;
+    assert_eq!(by, "admin");
+
+    // Only memory goes back to the manager's own figure.
+    let partly = builtin_host::Budget {
+        cpu_millis: Some(12_000),
+        memory_mib: None,
+    };
+    let change = builtin_host::set_budget(&db, "admin", partly).await?;
+    assert_eq!((change.before, change.after), (set, partly));
+    assert_eq!(builtin_host::budget(&db).await, partly);
+
+    let same = builtin_host::set_budget(&db, "admin", partly).await?;
+    assert!(!same.changed());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_stored_budget_counts_as_none() -> Result<()> {
+    let (db, _directory) = database().await?;
+    sqlx::query("INSERT INTO settings (key,value,updated_at) VALUES (?,?,1)")
+        .bind(builtin_host::BUDGET_KEY)
+        .bind("\"not a budget\"")
+        .execute(&db)
+        .await?;
+    assert_eq!(
+        builtin_host::budget(&db).await,
+        builtin_host::Budget::default()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_manager_policy_carries_the_setting_and_the_budget() -> Result<()> {
+    let (db, _directory) = database().await?;
+    seed_installation(&db).await?;
+    // Nothing stored: the budget is sent as nulls, which tells the manager to
+    // use its own figures (and undoes an earlier setting).
+    let policy = builtin_host::manager_policy(&db, false).await;
+    assert_eq!(
+        policy,
+        serde_json::json!({
+            "provisioningPaused": false,
+            "builtinHostEnabled": false,
+            "builtinHostBudget": {"cpuMillis": null, "memoryMib": null},
+        })
+    );
+    builtin_host::set_enabled(&db, "admin", true).await?;
+    builtin_host::set_budget(
+        &db,
+        "admin",
+        builtin_host::Budget {
+            cpu_millis: Some(8_000),
+            memory_mib: None,
+        },
+    )
+    .await?;
+    let policy = builtin_host::manager_policy(&db, true).await;
+    assert_eq!(
+        policy,
+        serde_json::json!({
+            "provisioningPaused": true,
+            "builtinHostEnabled": true,
+            "builtinHostBudget": {"cpuMillis": 8000, "memoryMib": null},
+        })
+    );
+    Ok(())
+}

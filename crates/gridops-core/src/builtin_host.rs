@@ -7,6 +7,8 @@
 //! UI. Pools run on enrolled fleet machines instead.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
 use crate::now_millis;
@@ -86,6 +88,87 @@ pub async fn set_enabled(database: &SqlitePool, user_id: &str, enabled: bool) ->
     Ok(Change {
         before,
         after: enabled,
+    })
+}
+
+/// Key in the `settings` table for the built-in host's budget; the value is a
+/// JSON [`Budget`].
+pub const BUDGET_KEY: &str = "builtinRunnerHostBudget";
+
+/// How much of the built-in host `GridOps` may fill with runners, in the same
+/// units as a fleet machine's budget. A figure left `None` falls back to the
+/// runner manager's own: `GRIDOPS_RUNNER_CPU_BUDGET` /
+/// `GRIDOPS_RUNNER_MEMORY_BUDGET_MB` when set there, 95% of the host otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Budget {
+    pub cpu_millis: Option<i64>,
+    pub memory_mib: Option<i64>,
+}
+
+/// The budget before and after a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetChange {
+    pub before: Budget,
+    pub after: Budget,
+}
+
+impl BudgetChange {
+    #[must_use]
+    pub fn changed(self) -> bool {
+        self.before != self.after
+    }
+}
+
+/// The stored budget. Nothing stored, or a value that cannot be read, is
+/// [`Budget::default`]: the manager's own figures apply.
+pub async fn budget(database: &SqlitePool) -> Budget {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key=?")
+        .bind(BUDGET_KEY)
+        .fetch_optional(database)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<Budget>(&value).ok())
+        .unwrap_or_default()
+}
+
+/// Stores the budget and says what it was. Range checks against what the host
+/// reports are the caller's; the manager also never goes above the host.
+///
+/// # Errors
+/// Fails when the database cannot be read or written.
+pub async fn set_budget(
+    database: &SqlitePool,
+    user_id: &str,
+    budget_value: Budget,
+) -> Result<BudgetChange> {
+    let before = budget(database).await;
+    sqlx::query(
+        "INSERT INTO settings (key,value,updated_by,updated_at) VALUES (?,?,?,?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+    )
+    .bind(BUDGET_KEY)
+    .bind(serde_json::to_string(&budget_value)?)
+    .bind(user_id)
+    .bind(now_millis())
+    .execute(database)
+    .await?;
+    Ok(BudgetChange {
+        before,
+        after: budget_value,
+    })
+}
+
+/// The body of the runner manager's `PUT /v1/policy`: whether provisioning is
+/// paused, whether the built-in host may be used, and its budget. The budget
+/// is always sent, with `null` for a figure that is not set, so clearing it
+/// here returns the manager to its own figures.
+pub async fn manager_policy(database: &SqlitePool, provisioning_paused: bool) -> Value {
+    json!({
+        "provisioningPaused": provisioning_paused,
+        "builtinHostEnabled": is_enabled(database).await,
+        "builtinHostBudget": budget(database).await,
     })
 }
 
