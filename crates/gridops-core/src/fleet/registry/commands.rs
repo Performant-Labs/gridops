@@ -16,6 +16,7 @@ use sqlx::{Row as _, Sqlite, Transaction};
 
 use super::{AuthenticatedHost, RegistryError, RegistryService, audit_and_event};
 use crate::fleet::{
+    failure::{PlacementFailure, PlacementFailureReason, fail_placement},
     ids::{AuthoritySessionId, BootstrapReference, HostId},
     protocol::{
         agent::AgentCommandEnvelope,
@@ -335,7 +336,16 @@ async fn apply_to_placement(
         // object: the agent journals ownership only on success.
         (CommandOutcome::Failed { .. }, "prepare_environment" | "start_runner") => {
             release(tx, placement_id, now).await?;
-            "failed"
+            fail_placement(
+                tx,
+                placement_id,
+                None,
+                &agent_reported(kind, &result.outcome),
+                None,
+                now,
+            )
+            .await?;
+            return Ok(());
         }
         (CommandOutcome::Failed { .. }, _) => return Ok(()),
         // A prepare never starts a runner and nothing can start one in an
@@ -345,7 +355,16 @@ async fn apply_to_placement(
         // locked a host for over an hour.
         (CommandOutcome::Uncertain { .. }, "prepare_environment") => {
             release(tx, placement_id, now).await?;
-            "failed"
+            fail_placement(
+                tx,
+                placement_id,
+                None,
+                &agent_reported(kind, &result.outcome),
+                None,
+                now,
+            )
+            .await?;
+            return Ok(());
         }
         // An inspect changes nothing; a later one checks again.
         (CommandOutcome::Uncertain { .. }, "inspect") => return Ok(()),
@@ -358,6 +377,67 @@ async fn apply_to_placement(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// "prepare" or "start", for messages about a command of this kind.
+fn command_noun(kind: &str) -> &str {
+    match kind {
+        "prepare_environment" => "prepare",
+        "start_runner" => "start",
+        other => other,
+    }
+}
+
+/// The stable `snake_case` name an agent code is serialized with.
+fn code_name<T: serde::Serialize>(code: &T) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// The cause recorded when the agent's own answer to a prepare or start
+/// failed the placement: what it said, and nothing it did not.
+fn agent_reported(kind: &str, outcome: &CommandOutcome) -> PlacementFailure {
+    let noun = command_noun(kind);
+    match outcome {
+        CommandOutcome::Failed {
+            code,
+            retryable,
+            diagnostic,
+        } => {
+            let agent_code = code_name(code);
+            let diagnostic_code = diagnostic
+                .as_ref()
+                .map(|reference| code_name(&reference.code));
+            let detail = diagnostic_code
+                .as_ref()
+                .map_or_else(String::new, |code| format!(", diagnostic {code}"));
+            let message = format!(
+                "The agent reported that the {noun} command failed ({agent_code}{detail})."
+            );
+            let failure = PlacementFailure::new(PlacementFailureReason::AgentReported, message)
+                .with("command_kind", kind)
+                .with("agent_code", agent_code)
+                .with("retryable", *retryable);
+            match diagnostic_code {
+                Some(code) => failure.with("diagnostic_code", code),
+                None => failure,
+            }
+        }
+        CommandOutcome::Uncertain { code, .. } => {
+            let agent_code = code_name(code);
+            PlacementFailure::new(
+                PlacementFailureReason::AgentOutcomeUnknown,
+                format!(
+                    "The agent could not say whether the {noun} command ran ({agent_code}); a {noun} that ends unknown fails the placement."
+                ),
+            )
+            .with("command_kind", kind)
+            .with("agent_code", agent_code)
+        }
+        _ => PlacementFailure::unknown().with("command_kind", kind),
+    }
 }
 
 /// Registration material is single-use: once a start resolves it is erased.
@@ -458,7 +538,7 @@ pub(super) async fn settle_unreceived(
     now: i64,
 ) -> Result<(), RegistryError> {
     let rows = sqlx::query(
-        "SELECT c.id,c.kind,c.placement_id FROM host_commands c
+        "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count FROM host_commands c
           WHERE c.host_id=? AND c.host_epoch=? AND c.state IN ('delivered','uncertain')
             AND json_extract(c.payload_json,'$.authority_session_id') IS NOT ?
             AND NOT EXISTS (SELECT 1 FROM host_command_results r WHERE r.command_id=c.id)",
@@ -493,13 +573,30 @@ pub(super) async fn settle_unreceived(
         if kind == "prepare_environment" || kind == "start_runner" {
             erase_bootstrap(tx, &placement_id, now).await?;
             release(tx, &placement_id, now).await?;
-            sqlx::query(
-                "UPDATE workload_placements SET state='failed',updated_at=?
-                  WHERE id=? AND state IN ('preparing','registering','starting','uncertain')",
+            let noun = command_noun(&kind);
+            let cause = PlacementFailure::new(
+                PlacementFailureReason::AgentSessionLost,
+                format!(
+                    "The agent reconnected without having received the {noun} command, which was delivered to an earlier session."
+                ),
+            );
+            fail_placement(
+                tx,
+                &placement_id,
+                Some(&["preparing", "registering", "starting", "uncertain"]),
+                &with_timing(
+                    cause,
+                    &kind,
+                    row.get::<String, _>("state") == "delivered",
+                    row.get("issued_at"),
+                    row.get("deadline_at"),
+                    row.get("attempt_count"),
+                    now,
+                )
+                .with("session", "reconnected"),
+                None,
+                now,
             )
-            .bind(now)
-            .bind(&placement_id)
-            .execute(&mut **tx)
             .await?;
         } else if kind != "inspect" {
             // An unanswered inspect never made its placement uncertain.
@@ -520,6 +617,114 @@ pub(super) async fn settle_unreceived(
     Ok(())
 }
 
+/// Adds what is known about a command's timing to a cause: how long ago it
+/// was issued, how long it was allowed, whether the API ever handed it out.
+fn with_timing(
+    failure: PlacementFailure,
+    kind: &str,
+    delivered: bool,
+    issued_at: i64,
+    deadline_at: i64,
+    attempts: i64,
+    now: i64,
+) -> PlacementFailure {
+    failure
+        .with("command_kind", kind)
+        .with("delivered", delivered)
+        .with("attempts", attempts)
+        .with("elapsed_ms", now - issued_at)
+        .with("allowed_ms", deadline_at - issued_at)
+}
+
+/// Why a prepare or start command that can no longer be delivered failed its
+/// placement, from what the row says: a session that ended or changed, an
+/// epoch that moved, or a deadline that passed, in that order, because the
+/// first three would have stranded the command whatever its deadline.
+fn undeliverable_cause(
+    kind: &str,
+    delivered: bool,
+    row: &sqlx::sqlite::SqliteRow,
+    now: i64,
+) -> PlacementFailure {
+    let noun = command_noun(kind);
+    let (issued_at, deadline_at): (i64, i64) = (row.get("issued_at"), row.get("deadline_at"));
+    let current: Option<String> = row.get("current_session");
+    let command_session: Option<String> = row.get("command_session");
+    let (command_epoch, host_epoch): (i64, i64) = (row.get("command_epoch"), row.get("host_epoch"));
+    let deadline_reason = if kind == "start_runner" {
+        PlacementFailureReason::StartDeadlineExpired
+    } else {
+        PlacementFailureReason::PrepareDeadlineExpired
+    };
+    let allowed = deadline_at - issued_at;
+    let elapsed = now - issued_at;
+    let (cause, session) = if delivered {
+        (
+            PlacementFailure::new(
+                PlacementFailureReason::PrepareDeadlineExpired,
+                format!(
+                    "The {noun} command was delivered but the agent did not answer within {allowed} ms."
+                ),
+            ),
+            None,
+        )
+    } else if current.is_none() {
+        (
+            PlacementFailure::new(
+                PlacementFailureReason::AgentSessionLost,
+                format!("The agent's session ended before the {noun} command could be delivered."),
+            ),
+            Some("ended"),
+        )
+    } else if current != command_session {
+        (
+            PlacementFailure::new(
+                PlacementFailureReason::AgentSessionLost,
+                format!(
+                    "The agent reconnected with a new session before the {noun} command could be delivered."
+                ),
+            ),
+            Some("replaced"),
+        )
+    } else if command_epoch != host_epoch {
+        (
+            PlacementFailure::new(
+                PlacementFailureReason::HostEpochChanged,
+                format!(
+                    "The machine was re-enrolled or recovered before the {noun} command could be delivered."
+                ),
+            ),
+            None,
+        )
+    } else if deadline_at <= now + DELIVERY_MARGIN_MILLIS {
+        (
+            PlacementFailure::new(
+                deadline_reason,
+                format!(
+                    "The {noun} command could not be delivered to the agent before its deadline ({allowed} ms allowed, {elapsed} ms elapsed)."
+                ),
+            )
+            .with("delivery_margin_ms", DELIVERY_MARGIN_MILLIS),
+            None,
+        )
+    } else {
+        (PlacementFailure::unknown(), None)
+    };
+    let cause = with_timing(
+        cause,
+        kind,
+        delivered,
+        issued_at,
+        deadline_at,
+        row.get("attempt_count"),
+        now,
+    );
+    match session {
+        Some(session) => cause.with("session", session),
+        None => cause,
+    }
+}
+
 /// Cancels pending commands that can no longer be delivered: their session
 /// ended or their deadline is within the delivery margin. A delivered command
 /// past its deadline is uncertain, because the agent may have acted on it.
@@ -533,7 +738,10 @@ async fn cancel_undeliverable(
     now: i64,
 ) -> Result<(), RegistryError> {
     let rows = sqlx::query(
-        "SELECT c.id,c.kind,c.state,c.placement_id FROM host_commands c JOIN fleet_hosts h ON h.id=c.host_id
+        "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count,
+                c.host_epoch AS command_epoch,h.epoch AS host_epoch,h.agent_session_id AS current_session,
+                json_extract(c.payload_json,'$.authority_session_id') AS command_session
+           FROM host_commands c JOIN fleet_hosts h ON h.id=c.host_id
           WHERE c.host_id=? AND (
             (c.state='delivered' AND c.deadline_at<=?) OR (c.state='pending' AND (
               c.deadline_at<=?
@@ -570,11 +778,8 @@ async fn cancel_undeliverable(
         } else if kind == "prepare_environment" || kind == "start_runner" {
             erase_bootstrap(tx, &placement_id, now).await?;
             release(tx, &placement_id, now).await?;
-            sqlx::query("UPDATE workload_placements SET state='failed',updated_at=? WHERE id=?")
-                .bind(now)
-                .bind(&placement_id)
-                .execute(&mut **tx)
-                .await?;
+            let cause = undeliverable_cause(&kind, delivered, &row, now);
+            fail_placement(tx, &placement_id, None, &cause, None, now).await?;
         }
     }
     Ok(())

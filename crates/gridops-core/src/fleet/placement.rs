@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::{
     FleetError,
+    failure::{PlacementFailure, fail_placement},
     ids::{
         AuthoritySessionId, BackendId, BootstrapReference, CommandId, ControlPlaneIncarnation,
         Generation, HostEpoch, HostId, OperationId, PlacementId, PreparedEnvironmentId, Revision,
@@ -339,10 +340,12 @@ pub async fn mark_starting(
 
 /// Ends a placement that was never told to start and frees its capacity.
 /// With no start command ever issued, no runner of it can exist on the host,
-/// which is the proof releasing needs. Returns whether anything changed.
+/// which is the proof releasing needs. `cause` is recorded when the placement
+/// first fails. Returns whether anything changed.
 pub async fn abandon_unstarted(
     pool: &SqlitePool,
     placement: PlacementId,
+    cause: &PlacementFailure,
 ) -> Result<bool, FleetError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = crate::now_millis();
@@ -356,6 +359,17 @@ pub async fn abandon_unstarted(
     if started {
         return Ok(false);
     }
+    // Recorded once, when the placement first fails; a failed placement that
+    // is finished again keeps the cause it already has.
+    fail_placement(
+        &mut tx,
+        &id,
+        Some(&["preparing", "registering"]),
+        cause,
+        None,
+        now,
+    )
+    .await?;
     sqlx::query(
         "UPDATE workload_placements SET state='failed',
            local_absence_proven_at=COALESCE(local_absence_proven_at,?),

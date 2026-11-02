@@ -5,6 +5,7 @@ pub mod authorization;
 pub mod capabilities;
 pub mod cursor;
 pub mod domain;
+pub mod failure;
 pub mod ids;
 pub mod placement;
 pub mod protocol;
@@ -15,6 +16,7 @@ pub mod targets;
 pub mod work_folder;
 pub mod workload;
 
+pub use failure::{PlacementFailure, PlacementFailureReason};
 pub use work_folder::{DEFAULT_WORK_FOLDER, SHARED_WORK_ROOT, job_work_folder, shared_work_folder};
 
 pub use service::{

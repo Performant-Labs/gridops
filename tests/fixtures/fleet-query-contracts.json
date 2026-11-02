@@ -60,7 +60,24 @@
         },
         "duplicateHardware": false,
         "credentialGeneration": 1,
-        "enrollmentTargetIds": []
+        "enrollmentTargetIds": [],
+        "failedPlacementsLastHour": 3,
+        "recentPlacementFailures": [
+          {
+            "reason": "agent_session_lost",
+            "message": "The agent reconnected without having received the start command, which was delivered to an earlier session.",
+            "count": 2,
+            "latestAt": "2026-10-09T11:55:00.000Z",
+            "latestPlacementId": "00000009-0000-4000-8000-000000000001"
+          },
+          {
+            "reason": "start_deadline_expired",
+            "message": "The start command could not be delivered to the agent before its deadline (30000 ms allowed, 31200 ms elapsed).",
+            "count": 1,
+            "latestAt": "2026-10-09T10:15:00.000Z",
+            "latestPlacementId": "00000009-0000-4000-8000-000000000002"
+          }
+        ]
       }
     },
     {
@@ -297,6 +314,15 @@
           "kind": "other",
           "occurredAt": "2026-10-09T11:59:30.000Z",
           "cursor": "q1.c2Vjb25kLWV2ZW50"
+        },
+        {
+          "id": "0000000a-0000-4000-8000-000000000001",
+          "hostId": "00000001-0000-4000-8000-000000000001",
+          "targetId": "00000008-0000-4000-8000-000000000001",
+          "placementId": "00000009-0000-4000-8000-000000000002",
+          "kind": "placement_failed",
+          "occurredAt": "2026-10-09T11:59:45.000Z",
+          "cursor": "q1.dGhpcmQtZXZlbnQ"
         }
       ],
       "nextCursor": null

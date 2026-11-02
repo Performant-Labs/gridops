@@ -9,6 +9,7 @@ import { AddMachineButton } from "~/features/fleet/add-machine-sheet";
 import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, lifecycleLabel, platformLabel,
 } from "~/features/fleet/fleet-ui";
+import { failuresLastHourLabel } from "~/features/fleet/placement-failures";
 import { listHosts } from "~/features/fleet/query-api";
 import type { HostReadV1 } from "~/features/fleet/query-contracts";
 import { cn, formatRelativeTime } from "~/lib/utils";
@@ -98,6 +99,11 @@ function MachineRow({ host }: { host: HostReadV1 }) {
             {full.enrollment === "approved" ? null : <EnrollmentBadge value={full.enrollment} />}
             <FreshnessBadge value={full.heartbeatFreshness} />
             {full.duplicateHardware ? <Badge variant="destructive">Duplicate hardware</Badge> : null}
+            {failuresLastHourLabel(full.failedPlacementsLastHour) ? (
+              <Badge title="Placements on this machine failed. Open it to see why." variant="destructive">
+                {failuresLastHourLabel(full.failedPlacementsLastHour)}
+              </Badge>
+            ) : null}
             {full.counts.uncertainPlacementCount > 0 ? (
               <Badge title="Unconfirmed jobs keep this machine from taking new ones. Open it to repair them." variant="destructive">
                 Blocked · {full.counts.uncertainPlacementCount} unconfirmed

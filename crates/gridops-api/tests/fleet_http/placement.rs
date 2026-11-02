@@ -12,6 +12,7 @@ use gridops_core::{
     Vault,
     fleet::{
         FleetService, Principal, SubmitIntent, WorkloadKind,
+        failure::PlacementFailure,
         ids::{Generation, PlacementId, WorkloadId},
         placement,
         protocol::{
@@ -717,7 +718,10 @@ async fn admitted_runner_is_prepared_started_streamed_and_cleaned_on_its_host() 
     assert_eq!(held, 0, "capacity was not released");
     // A placement that was told to start is never released by abandonment;
     // only cleanup can prove its runner gone.
-    assert!(!placement::abandon_unstarted(&f.database, placement_id).await?);
+    assert!(
+        !placement::abandon_unstarted(&f.database, placement_id, &PlacementFailure::unknown())
+            .await?
+    );
     assert_eq!(
         *runtime
             .operations
@@ -1544,5 +1548,68 @@ async fn overview_times_each_phase_of_a_runner_start() -> Result<()> {
     assert_eq!(pass["p50Seconds"], 2, "1.5s, rounded up");
     assert_eq!(pass["p95Seconds"], 90);
     assert_eq!(pass["intervalSeconds"], 30);
+    Ok(())
+}
+
+/// A placement abandoned before any start was issued records why, once, on
+/// the machine and on its runner; a deleted runner keeps no failure reason.
+#[tokio::test]
+async fn abandoning_an_unstarted_placement_records_why_once() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let (kept, deleted) = (Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query(
+        "UPDATE host_resource_domains SET cpu_millis=4000,revision=revision+1
+          WHERE host_id=? AND parent_domain_id IS NULL",
+    )
+    .bind(machine.host.to_string())
+    .execute(&f.database)
+    .await?;
+    let first = prepared_placement(&f, &machine, kept).await?;
+    let second = prepared_placement(&f, &machine, deleted).await?;
+    sqlx::query("UPDATE runners SET status='failed' WHERE id=?")
+        .bind(kept.to_string())
+        .execute(&f.database)
+        .await?;
+    sqlx::query("UPDATE runners SET status='deleted' WHERE id=?")
+        .bind(deleted.to_string())
+        .execute(&f.database)
+        .await?;
+    for (placement_id, status) in [(first, "failed"), (second, "deleted")] {
+        let cause = PlacementFailure::runner_removed_before_start(status);
+        assert!(placement::abandon_unstarted(&f.database, placement_id, &cause).await?);
+        // The reconciler goes on finishing a failed placement every pass.
+        placement::abandon_unstarted(&f.database, placement_id, &PlacementFailure::unknown())
+            .await?;
+        assert_eq!(placement_state(&f, placement_id).await?, "failed");
+        let events: Vec<String> = sqlx::query_scalar(
+            "SELECT detail_json FROM fleet_events WHERE placement_id=? AND kind='placement_failed'",
+        )
+        .bind(placement_id.to_string())
+        .fetch_all(&f.database)
+        .await?;
+        assert_eq!(events.len(), 1, "{events:?}");
+        let detail: Value = serde_json::from_str(&events[0])?;
+        assert_eq!(detail["reason"], "runner_removed_before_start");
+        assert_eq!(detail["runner_status"], status);
+    }
+    let reasons: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT failure_reason FROM runners WHERE id IN (?,?) ORDER BY status")
+            .bind(kept.to_string())
+            .bind(deleted.to_string())
+            .fetch_all(&f.database)
+            .await?;
+    assert_eq!(reasons.len(), 2);
+    // `deleted` sorts before `failed`.
+    assert_eq!(reasons[0], None);
+    assert_eq!(
+        reasons[1].as_deref(),
+        Some("The runner was marked failed before its start command was issued.")
+    );
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
     Ok(())
 }

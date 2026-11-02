@@ -22,6 +22,7 @@ use super::{
 };
 use crate::fleet::{
     Principal,
+    failure::{PlacementFailure, fail_placement},
     ids::{HostId, PlacementId},
 };
 
@@ -166,18 +167,28 @@ impl RegistryService {
             .fetch_all(&mut *tx)
             .await?;
             let repair = if started {
-                Repair::Reinspect
-            } else {
-                erase_bootstrap(&mut tx, &id, now).await?;
-                release(&mut tx, &id, now).await?;
-                Repair::Release
-            };
-            sqlx::query("UPDATE workload_placements SET state=?,updated_at=? WHERE id=?")
-                .bind(if started { "running" } else { "failed" })
+                sqlx::query(
+                    "UPDATE workload_placements SET state='running',updated_at=? WHERE id=?",
+                )
                 .bind(now)
                 .bind(&id)
                 .execute(&mut *tx)
                 .await?;
+                Repair::Reinspect
+            } else {
+                erase_bootstrap(&mut tx, &id, now).await?;
+                release(&mut tx, &id, now).await?;
+                fail_placement(
+                    &mut tx,
+                    &id,
+                    Some(&["uncertain"]),
+                    &PlacementFailure::operator_released(&cancelled),
+                    Some(user_id),
+                    now,
+                )
+                .await?;
+                Repair::Release
+            };
             audit_and_event(
                 &mut tx,
                 Some(principal),
