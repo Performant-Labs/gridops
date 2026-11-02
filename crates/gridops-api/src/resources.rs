@@ -70,17 +70,22 @@ macro_rules! waiting_jobs {
 /// The queued jobs the signed-in user can see, as a `FROM ... WHERE` clause
 /// over `wj` (the job), `wr` (its run) and `repo`; binds the user id. A job of
 /// a finished run doesn't count: GitHub can leave one listed as queued after
-/// its run completes, and it never runs. The Overview's queued count and its
-/// list of queued jobs are both built on this, so they can't disagree.
+/// its run completes, and it never runs. Jobs GitHub lists as `waiting`,
+/// `pending` or `requested` count with `queued` ones, as the run list counts a
+/// run's waiting jobs. The Overview's queued count, its split into waiting and
+/// unmatched, and its list of queued jobs are all built on this, so they can't
+/// disagree.
 macro_rules! visible_queued_jobs {
     () => {
         "FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
           JOIN user_installations visible ON visible.installation_id=repo.installation_id
-          WHERE visible.user_id=? AND wj.status='queued' AND wr.status!='completed'"
+          WHERE visible.user_id=? AND wj.status IN ('queued','waiting','pending','requested') AND wr.status!='completed'"
     };
 }
+
+mod overview_queue;
 
 #[derive(Debug, FromRow)]
 struct PoolAccess {
@@ -285,7 +290,12 @@ pub async fn overview(
         return Ok(Json(json!({
             "authenticated": false,
             "configuration": configuration,
-            "metrics": { "runners": 0, "online": 0, "busy": 0, "queuedJobs": 0, "successRate": null, "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS, "successRateRuns": 0 },
+            "metrics": {
+              "runners": 0, "online": 0, "busy": 0, "idle": 0, "starting": 0, "unavailable": 0,
+              "queuedJobs": 0, "queuedWaiting": 0, "queuedUnmatched": 0, "successRate": null,
+              "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS, "successRateRuns": 0,
+            },
+            "queue": { "unmatched": 0, "otherPools": 0, "missingLabels": [] },
             "slo": {
               "windowHours": 24,
               "queue": { "oldestSeconds": null, "p95Seconds": null },
@@ -307,14 +317,18 @@ pub async fn overview(
     //   conclusion -> left out of both the numerator and the denominator.
     let metrics_window_start =
         now_millis().saturating_sub(SUCCESS_RATE_WINDOW_DAYS * 24 * 60 * 60 * 1_000);
-    let metrics = sqlx::query(concat!(
+    let metrics = sqlx::query(
         r#"SELECT
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL THEN r.id END) AS runners,
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL AND r.status IN ('idle','busy','online') THEN r.id END) AS online,
-          COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN r.id END) AS busy,
-          (SELECT COUNT(*) "#,
-        visible_queued_jobs!(),
-        r#") AS queued_jobs,
+          -- Every runner that is not deleted is in exactly one of the next four.
+          COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL
+            AND (r.status='busy' OR (r.status IN ('idle','online') AND r.busy=1)) THEN r.id END) AS busy,
+          COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL
+            AND r.status IN ('idle','online') AND r.busy=0 THEN r.id END) AS idle,
+          COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL AND r.status='starting' THEN r.id END) AS starting,
+          COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL
+            AND r.status NOT IN ('busy','idle','online','starting') THEN r.id END) AS unavailable,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui3 ON ui3.installation_id=repo.installation_id
             WHERE ui3.user_id=? AND wr.completed_at>=?
@@ -331,8 +345,7 @@ pub async fn overview(
               AND NOT EXISTS (SELECT 1 FROM user_installations access
                 WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
           )"#,
-    ))
-    .bind(&user.id)
+    )
     .bind(&user.id)
     .bind(metrics_window_start)
     .bind(&user.id)
@@ -346,6 +359,7 @@ pub async fn overview(
             / 10.0
     });
     let now = now_millis();
+    let queue = overview_queue::queue_breakdown(&state, &user, now).await?;
     let slo_rows = sqlx::query(
         r#"SELECT wj.status,wr.status AS run_status,wj.conclusion,wj.created_at,wj.started_at
           FROM workflow_jobs wj
@@ -364,8 +378,10 @@ pub async fn overview(
     for row in &slo_rows {
         let created_at = row.get::<i64, _>("created_at");
         // A job still listed as queued in a finished run never runs.
-        if row.get::<String, _>("status") == "queued"
-            && row.get::<String, _>("run_status") != "completed"
+        if matches!(
+            row.get::<String, _>("status").as_str(),
+            "queued" | "waiting" | "pending" | "requested"
+        ) && row.get::<String, _>("run_status") != "completed"
         {
             queue_ages.push(now.saturating_sub(created_at));
         }
@@ -427,10 +443,16 @@ pub async fn overview(
     .fetch_one(&state.database)
     .await?;
     let mut alerts = Vec::new();
-    if oldest_queue_age_ms.is_some_and(|age| age >= 5 * 60 * 1_000) {
+    // Jobs no pool can run are named by their own alerts; this one is for jobs
+    // a pool serves that are waiting for it to have capacity.
+    alerts.extend(queue.alerts());
+    if let Some(age) = queue
+        .oldest_waiting_millis
+        .filter(|age| *age >= 5 * 60 * 1_000)
+    {
         alerts.push(json!({
             "level": "warning", "title": "Jobs have been waiting for over five minutes",
-            "detail": format_duration_millis(oldest_queue_age_ms.unwrap_or_default()),
+            "detail": format_duration_millis(age),
             "href": "/queued-jobs",
         }));
     }
@@ -460,16 +482,7 @@ pub async fn overview(
     let pool_rows = sqlx::query(
         r#"SELECT p.id,p.name,p.scope,p.desired_count,p.mode,p.state,p.paused,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.status IN ('idle','busy','online') THEN 1 END) AS online,
-          COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN 1 END) AS busy,
-          (SELECT COUNT(*) FROM workflow_jobs wj
-            JOIN workflow_runs wr ON wr.id=wj.run_id
-            JOIN repositories queued_repo ON queued_repo.id=wr.repository_id
-            WHERE wj.status='queued' AND wr.status!='completed' AND (
-              EXISTS (SELECT 1 FROM runner_pool_repositories membership
-                WHERE membership.pool_id=p.id AND membership.repository_id=queued_repo.id) OR
-              queued_repo.id=p.repository_id OR
-              (p.scope='organization' AND queued_repo.installation_id=p.installation_id)
-            )) AS queued
+          COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN 1 END) AS busy
         FROM runner_pools p LEFT JOIN runners r ON r.pool_id=p.id
         WHERE EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
           AND NOT EXISTS (
@@ -489,11 +502,16 @@ pub async fn overview(
                 "id": row.get::<String, _>("id"), "name": row.get::<String, _>("name"),
                 "scope": row.get::<String, _>("scope"), "desired": row.get::<i64, _>("desired_count"),
                 "online": row.get::<i64, _>("online"), "busy": row.get::<i64, _>("busy"),
-                "queue": row.get::<i64, _>("queued"),
+                // Only the jobs this pool serves, so rows never share a job.
+                "queue": queue.by_pool.get(&row.get::<String, _>("id")).copied().unwrap_or_default(),
                 "mode": row.get::<String, _>("mode"),
                 "status": if row.get::<bool, _>("paused") { "paused".into() } else { row.get::<String, _>("state") },
             })
         })
+        .collect::<Vec<_>>();
+    let listed_pools = pool_rows
+        .iter()
+        .map(|row| row.get::<String, _>("id"))
         .collect::<Vec<_>>();
     let run_rows = sqlx::query(concat!(
         "SELECT wr.id,repo.full_name,wr.workflow_name,wr.head_branch,",
@@ -563,10 +581,20 @@ pub async fn overview(
         "configuration": configuration,
         "metrics": {
             "runners": metrics.get::<i64, _>("runners"), "online": metrics.get::<i64, _>("online"),
-            "busy": metrics.get::<i64, _>("busy"), "queuedJobs": metrics.get::<i64, _>("queued_jobs"),
+            "busy": metrics.get::<i64, _>("busy"), "idle": metrics.get::<i64, _>("idle"),
+            "starting": metrics.get::<i64, _>("starting"),
+            "unavailable": metrics.get::<i64, _>("unavailable"),
+            "queuedJobs": queue.total(), "queuedWaiting": queue.waiting,
+            "queuedUnmatched": queue.unmatched,
             "successRate": success_rate,
             "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS,
             "successRateRuns": counted_runs,
+        },
+        // The pool rows' `queue` plus `otherPools` plus `unmatched` is the Queued tile.
+        "queue": {
+            "unmatched": queue.unmatched,
+            "otherPools": queue.served_outside(&listed_pools),
+            "missingLabels": queue.missing_labels_json(),
         },
         "slo": {
             "windowHours": 24,
@@ -622,7 +650,7 @@ pub async fn queued_jobs(
         (HashMap::new(), HashMap::new())
     } else {
         // The same ownership the scaler counts a pool's queue by.
-        let owners = gridops_core::queued_job_ownership(&state.database)
+        let owners = gridops_core::waiting_job_ownership(&state.database)
             .await?
             .into_iter()
             .map(|owner| (owner.job_id, owner))

@@ -15,8 +15,8 @@ import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview, getQueuedJobsPage } from "~/features/dashboard/dashboard.functions";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
-import { successRateTile } from "~/features/dashboard/success-rate";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
+import { metricTiles } from "~/features/dashboard/metric-tiles";
 import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
@@ -75,7 +75,7 @@ function OverviewPage() {
               <CapacitySection installations={data.installations} />
               {data.authenticated ? <QueuedJobsSection queued={data.metrics.queuedJobs} /> : null}
               {data.authenticated ? <FleetWorkloadSection /> : null}
-              <PoolsSection pools={data.pools} />
+              <PoolsSection pools={data.pools} unmatched={data.queue.unmatched} />
               {data.machines?.items.length ? <MachinesSection machines={data.machines} /> : null}
               <RunsSection runs={data.runs} />
               {data.agentRuns ? <AgentRunsSection runs={data.agentRuns} /> : null}
@@ -111,14 +111,9 @@ function ConfigurationCallout({ data }: { data: DashboardOverview }) {
 }
 
 function MetricStrip({ data }: { data: DashboardOverview }) {
-  const metrics = [
-    { label: "Runners", value: data.metrics.runners, hint: `${data.metrics.online} online`, to: "/runners", tone: data.metrics.online > 0 ? "success" : "neutral" },
-    { label: "Busy", value: data.metrics.busy, hint: "Running jobs now", to: "/runners", tone: data.metrics.busy > 0 ? "progress" : "neutral" },
-    { label: "Queued jobs", value: data.metrics.queuedJobs, hint: data.metrics.queuedJobs > 0 ? "Waiting for a runner" : "Queue is clear", to: "/queued-jobs", tone: data.metrics.queuedJobs > 0 ? "warning" : "success" },
-    { label: "Success rate", ...successRateTile(data.metrics), to: "/workflow-runs", tone: successTone(data.metrics.successRate) },
-  ] as const;
+  const metrics = metricTiles(data.metrics);
   return (
-    <section aria-label="Runner metrics" className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border xl:grid-cols-4">
+    <section aria-label="Runner metrics" className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border xl:grid-cols-5">
       {metrics.map((metric) => (
         <Link className="group flex flex-col gap-1 bg-panel px-4 py-3.5 transition-colors hover:bg-hover" key={metric.label} to={metric.to}>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -127,16 +122,11 @@ function MetricStrip({ data }: { data: DashboardOverview }) {
             <ArrowUpRight className="ml-auto size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
           </span>
           <span className="tabular text-2xl font-semibold tracking-tight text-foreground">{metric.value}</span>
-          <span className="truncate text-xs text-faint">{metric.hint}</span>
+          <span className={cn("text-xs", metric.tone === "danger" ? "text-danger" : "text-faint")}>{metric.hint}</span>
         </Link>
       ))}
     </section>
   );
-}
-
-function successTone(rate: number | null) {
-  if (rate === null) return "neutral";
-  return rate >= 90 ? "success" : rate >= 70 ? "warning" : "danger";
 }
 
 function ViewAll({ to, label = "View all" }: { to: string; label?: string }) {
@@ -263,7 +253,7 @@ function Legend({ color, label, value }: { color: string; label: string; value?:
   return <span className="flex items-center gap-1.5"><span className="size-2 rounded-full" style={{ backgroundColor: color }} />{label}<span className="tabular font-medium text-foreground">{value ?? "—"}</span></span>;
 }
 
-function PoolsSection({ pools }: { pools: DashboardOverview["pools"] }) {
+function PoolsSection({ pools, unmatched }: { pools: DashboardOverview["pools"]; unmatched: number }) {
   return (
     <section className="space-y-3">
       <SectionHeading actions={<ViewAll to="/runner-pools" />}>Runner pools</SectionHeading>
@@ -281,6 +271,14 @@ function PoolsSection({ pools }: { pools: DashboardOverview["pools"] }) {
             <span className={cn("tabular w-20 text-right text-xs", pool.queue > 0 ? "text-warning" : "text-faint")}>{pool.queue} queued</span>
           </Link>
         ))}
+        {unmatched > 0 ? (
+          <Link className={cn(listRowClassName, "last:border-b-0")} data-list-row="" to="/queued-jobs">
+            <span className="inline-flex size-3.5 items-center justify-center"><StatusDot tone="danger" /></span>
+            <span className="min-w-0 flex-1 truncate font-medium">No matching pool</span>
+            <span className="hidden text-xs text-muted-foreground sm:inline">Jobs no available pool can run</span>
+            <span className="tabular w-20 text-right text-xs text-danger">{unmatched} queued</span>
+          </Link>
+        ) : null}
       </div>
     </section>
   );

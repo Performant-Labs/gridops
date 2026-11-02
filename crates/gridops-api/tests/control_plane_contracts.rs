@@ -1298,3 +1298,413 @@ async fn a_queued_jobs_pool_the_viewer_cannot_fully_see_is_not_named() -> Result
     assert_eq!(page["items"][0]["waitingReason"], "pool_not_visible");
     Ok(())
 }
+
+/// What the Overview tiles are built from; see [`partitions`].
+async fn overview_of(fixture: &ApiFixture) -> Result<Value> {
+    let response = fixture
+        .client
+        .get(format!("{}/api/v1/overview", fixture.base_url))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(response.json().await?)
+}
+
+fn count(value: &Value) -> i64 {
+    value.as_i64().unwrap_or(-1_000_000)
+}
+
+/// The invariants the Overview tiles hold for any data: the runner states
+/// add up to the Runners headline, waiting plus unmatched add up to the Queued
+/// headline, and the pool rows plus the unmatched line add up to it too.
+fn assert_tiles_partition(body: &Value) {
+    let metrics = &body["metrics"];
+    assert_eq!(
+        count(&metrics["runners"]),
+        count(&metrics["busy"])
+            + count(&metrics["idle"])
+            + count(&metrics["starting"])
+            + count(&metrics["unavailable"]),
+        "runners = busy + idle + starting + unavailable: {metrics}"
+    );
+    assert_eq!(
+        count(&metrics["online"]),
+        count(&metrics["busy"]) + count(&metrics["idle"]),
+        "online keeps meaning busy + idle: {metrics}"
+    );
+    assert_eq!(
+        count(&metrics["queuedJobs"]),
+        count(&metrics["queuedWaiting"]) + count(&metrics["queuedUnmatched"]),
+        "queued = waiting + unmatched: {metrics}"
+    );
+    let in_pool_rows: i64 = body["pools"]
+        .as_array()
+        .map(|pools| pools.iter().map(|pool| count(&pool["queue"])).sum())
+        .unwrap_or(-1_000_000);
+    assert_eq!(
+        in_pool_rows + count(&body["queue"]["otherPools"]),
+        count(&metrics["queuedWaiting"]),
+        "pool rows serve every waiting job: {body}"
+    );
+    assert_eq!(
+        count(&body["queue"]["unmatched"]),
+        count(&metrics["queuedUnmatched"]),
+        "the unmatched line is the unmatched hint"
+    );
+    assert_eq!(
+        in_pool_rows + count(&body["queue"]["otherPools"]) + count(&body["queue"]["unmatched"]),
+        count(&metrics["queuedJobs"]),
+        "served + unmatched = the Queued tile"
+    );
+}
+
+const DASHBOARD_REPOSITORIES: &str = r#"
+    INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+      VALUES (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',1,1,1);
+"#;
+
+/// An organization-scoped Docker pool of installation 42.
+fn org_pool(id: &str, labels: &str, extra_columns: &str) -> String {
+    format!(
+        "INSERT INTO runner_pools (id,installation_id,name,scope,provider,providers,labels,image,docker_image,tart_image,autoscaling_enabled,max_count,created_at,updated_at{columns_header})
+           VALUES ('{id}',42,'{id}','organization','docker','[\"docker\"]','{labels}','runner:latest','runner:latest','base',1,10,1,1{values});",
+        columns_header = if extra_columns.is_empty() { "" } else { ",paused,provision_circuit_open" },
+        values = if extra_columns.is_empty() { String::new() } else { format!(",{extra_columns}") },
+    )
+}
+
+fn runner(id: &str, pool: &str, status: &str, busy: i64, deleted: bool) -> String {
+    format!(
+        "INSERT INTO runners (id,pool_id,name,provider,status,busy,deleted_at,created_at,updated_at)
+           VALUES ('{id}','{pool}','{id}','docker','{status}',{busy},{deleted},1,1);",
+        deleted = if deleted { "5" } else { "NULL" },
+    )
+}
+
+fn job(id: i64, run: i64, status: &str, labels: &str, created_at: i64) -> String {
+    format!(
+        "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+           VALUES ({id},{run},'job-{id}','{status}','{labels}','https://github.com/fixture/app/actions/runs/{run}/job/{id}',{created_at},{created_at});"
+    )
+}
+
+const QUEUED_RUN: &str = "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+  VALUES (100,7,'CI',1,'push','queued','abc','https://github.com/fixture/app/actions/runs/100',2,2,2,2);";
+
+async fn seed(database: &SqlitePool, statements: &[String]) -> Result<()> {
+    let sql = statements.join("\n");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn overview_tiles_split_a_live_shaped_fleet_into_parts_that_add_up() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // Nine runners that count: four busy, one idle, one starting, and three
+    // that cannot take a job. A tenth was deleted and counts nowhere.
+    // Eight queued jobs: four ask for a label no pool has, four for the
+    // platform label every Linux runner takes.
+    let mut statements = vec![
+        DASHBOARD_REPOSITORIES.to_owned(),
+        org_pool("linux", "[\"linux-pool\"]", ""),
+        QUEUED_RUN.to_owned(),
+    ];
+    for index in 0..4 {
+        statements.push(runner(&format!("busy-{index}"), "linux", "busy", 1, false));
+    }
+    statements.push(runner("idle", "linux", "online", 0, false));
+    statements.push(runner("starting", "linux", "starting", 0, false));
+    statements.push(runner("paused", "linux", "paused", 0, false));
+    statements.push(runner("stopped", "linux", "stopped", 0, false));
+    statements.push(runner("failed", "linux", "failed", 0, false));
+    statements.push(runner("gone", "linux", "deleted", 0, true));
+    for index in 0..4 {
+        statements.push(job(
+            1000 + index,
+            100,
+            "queued",
+            "[\"self-hosted\",\"linux\",\"gridops-ci\"]",
+            10 + index,
+        ));
+        statements.push(job(
+            2000 + index,
+            100,
+            "queued",
+            "[\"self-hosted-linux\"]",
+            100 + index,
+        ));
+    }
+    seed(&database, &statements).await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["runners"], 9);
+    assert_eq!(metrics["busy"], 4);
+    assert_eq!(metrics["idle"], 1);
+    assert_eq!(metrics["starting"], 1);
+    assert_eq!(metrics["unavailable"], 3);
+    assert_eq!(metrics["online"], 5);
+    assert_eq!(metrics["queuedJobs"], 8);
+    assert_eq!(metrics["queuedWaiting"], 4);
+    assert_eq!(metrics["queuedUnmatched"], 4);
+    assert_eq!(body["pools"][0]["queue"], 4);
+    assert_eq!(body["queue"]["unmatched"], 4);
+    assert_eq!(
+        body["queue"]["missingLabels"],
+        json!([{ "labels": ["gridops-ci"], "jobs": 4 }])
+    );
+    let alerts = body["slo"]["alerts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let titles = alerts
+        .iter()
+        .map(|alert| alert["title"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        titles.contains(&"4 jobs need `gridops-ci`; no pool has it".to_owned()),
+        "{titles:?}"
+    );
+    let unmatched = alerts
+        .iter()
+        .find(|alert| {
+            alert["title"]
+                .as_str()
+                .is_some_and(|title| title.contains("gridops-ci"))
+        })
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(unmatched["level"], "error");
+    assert_eq!(unmatched["href"], "/queued-jobs");
+
+    // The Queued jobs page splits the same way: as many rows as the headline,
+    // of which as many have no matching pool as the hint says.
+    let list: Value = fixture
+        .client
+        .get(format!(
+            "{}/api/v1/overview/queued-jobs?perPage=100",
+            fixture.base_url
+        ))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let rows = list["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(count(&list["total"]), count(&metrics["queuedJobs"]));
+    assert_eq!(
+        count(&Value::from(rows.len())),
+        count(&metrics["queuedJobs"])
+    );
+    let without_pool = rows
+        .iter()
+        .filter(|row| row["waitingReason"] == "no_matching_pool")
+        .count();
+    assert_eq!(
+        count(&Value::from(without_pool)),
+        count(&metrics["queuedUnmatched"])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn busy_follows_the_runner_status_not_the_busy_flag() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            org_pool("linux", "[]", ""),
+            // A paused runner that still carries the busy flag is unavailable.
+            runner("paused-busy", "linux", "paused", 1, false),
+            runner("failed-busy", "linux", "failed", 1, false),
+            runner("busy", "linux", "busy", 1, false),
+            // The two online spellings split by the busy flag.
+            runner("online-working", "linux", "online", 1, false),
+            runner("online-free", "linux", "online", 0, false),
+            runner("idle-free", "linux", "idle", 0, false),
+            runner("starting", "linux", "starting", 0, false),
+            runner("odd", "linux", "something-new", 0, false),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["runners"], 8);
+    assert_eq!(metrics["busy"], 2);
+    assert_eq!(metrics["idle"], 2);
+    assert_eq!(metrics["starting"], 1);
+    assert_eq!(metrics["unavailable"], 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_org_pools_share_the_queue_instead_of_each_counting_all_of_it() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    let mut statements = vec![
+        DASHBOARD_REPOSITORIES.to_owned(),
+        org_pool("alpha", "[\"shared\"]", ""),
+        org_pool("beta", "[\"shared\"]", ""),
+        QUEUED_RUN.to_owned(),
+    ];
+    for index in 0..3 {
+        statements.push(job(1000 + index, 100, "queued", "[\"shared\"]", 10 + index));
+    }
+    seed(&database, &statements).await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    assert_eq!(body["metrics"]["queuedJobs"], 3);
+    assert_eq!(body["metrics"]["queuedWaiting"], 3);
+    assert_eq!(body["metrics"]["queuedUnmatched"], 0);
+    let per_pool = body["pools"]
+        .as_array()
+        .map(|pools| pools.iter().map(|pool| count(&pool["queue"])).sum::<i64>());
+    assert_eq!(per_pool, Some(3), "{}", body["pools"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn jobs_whose_only_matching_pools_are_paused_or_tripped_have_no_matching_pool() -> Result<()>
+{
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("paused-pool", "[\"needs-paused\"]", "1,0"),
+            org_pool("tripped-pool", "[\"needs-tripped\"]", "0,1"),
+            org_pool("live-pool", "[\"needs-live\"]", "0,0"),
+            QUEUED_RUN.to_owned(),
+            job(1000, 100, "queued", "[\"needs-paused\"]", 10),
+            job(1001, 100, "queued", "[\"needs-paused\"]", 11),
+            job(1002, 100, "queued", "[\"needs-tripped\"]", 12),
+            job(1003, 100, "queued", "[\"needs-live\"]", 13),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["queuedJobs"], 4);
+    assert_eq!(metrics["queuedWaiting"], 1);
+    assert_eq!(metrics["queuedUnmatched"], 3);
+    let live = body["pools"]
+        .as_array()
+        .and_then(|pools| pools.iter().find(|pool| pool["id"] == "live-pool"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(live["queue"], 1);
+    // Every label exists on some pool, so none is reported as missing; the
+    // alert says the jobs have no available pool instead.
+    assert_eq!(body["queue"]["missingLabels"], json!([]));
+    let titles = body["slo"]["alerts"]
+        .as_array()
+        .map(|alerts| {
+            alerts
+                .iter()
+                .filter_map(|alert| alert["title"].as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_default();
+    assert!(titles.contains("3 jobs have no available pool"), "{titles}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_queued_tile_counts_every_waiting_status_and_skips_finished_runs() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("linux", "[\"shared\"]", ""),
+            QUEUED_RUN.to_owned(),
+            "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+               VALUES (101,7,'Release',2,'push','completed','success','abd','https://github.com/fixture/app/actions/runs/101',1,1,1,1);".to_owned(),
+            job(1000, 100, "queued", "[\"shared\"]", 10),
+            job(1001, 100, "waiting", "[\"shared\"]", 11),
+            job(1002, 100, "pending", "[\"shared\"]", 12),
+            job(1003, 100, "requested", "[\"shared\"]", 13),
+            job(1004, 100, "in_progress", "[\"shared\"]", 14),
+            job(1005, 100, "completed", "[\"shared\"]", 15),
+            // A job still listed as queued in a finished run never runs.
+            job(1010, 101, "queued", "[\"shared\"]", 16),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    assert_eq!(body["metrics"]["queuedJobs"], 4);
+    assert_eq!(body["metrics"]["queuedWaiting"], 4);
+    assert_eq!(body["metrics"]["queuedUnmatched"], 0);
+    assert_eq!(body["pools"][0]["queue"], 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_tiles_only_count_what_the_viewer_has_access_to() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // Installation 43 belongs to someone else: its pool, runners and jobs
+    // must stay out of every number.
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("mine", "[\"shared\"]", ""),
+            runner("mine-idle", "mine", "online", 0, false),
+            QUEUED_RUN.to_owned(),
+            job(1000, 100, "queued", "[\"shared\"]", 10),
+            "INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+               VALUES (43,43,'other','Organization','Organization','selected',1,1);
+             INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+               VALUES (8,43,'other','app','other/app',0,'main','https://github.com/other/app',1,1,1);
+             INSERT INTO runner_pools (id,installation_id,name,scope,provider,providers,labels,image,docker_image,tart_image,autoscaling_enabled,max_count,created_at,updated_at)
+               VALUES ('theirs',43,'theirs','organization','docker','[\"docker\"]','[\"shared\"]','runner:latest','runner:latest','base',1,10,1,1);
+             INSERT INTO runners (id,pool_id,name,provider,status,busy,created_at,updated_at)
+               VALUES ('theirs-busy','theirs','theirs-busy','docker','busy',1,1,1);
+             INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+               VALUES (200,8,'CI',1,'push','queued','abc','https://github.com/other/app/actions/runs/200',2,2,2,2);".to_owned(),
+            job(2000, 200, "queued", "[\"shared\"]", 10),
+            job(2001, 200, "queued", "[\"nobody-has-this\"]", 11),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["runners"], 1);
+    assert_eq!(metrics["idle"], 1);
+    assert_eq!(metrics["busy"], 0);
+    assert_eq!(metrics["queuedJobs"], 1);
+    assert_eq!(metrics["queuedWaiting"], 1);
+    assert_eq!(metrics["queuedUnmatched"], 0);
+    assert_eq!(body["pools"].as_array().map(Vec::len), Some(1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_empty_instance_partitions_into_zeros() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    assert_eq!(body["metrics"]["runners"], 0);
+    assert_eq!(body["metrics"]["queuedJobs"], 0);
+    assert_eq!(body["queue"]["missingLabels"], json!([]));
+    Ok(())
+}
