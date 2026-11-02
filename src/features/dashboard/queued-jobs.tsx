@@ -11,10 +11,11 @@ import type { QueuedJob } from "./types";
 type Reason = { label: string; hint: string; tone: "danger" | "warning" | "muted" };
 
 /** A job no pool serves, from a server that doesn't say which labels are missing. */
-const NO_MATCHING_POOL: Reason = { label: "No pool offers these labels", hint: "No unpaused autoscaling pool serving this repository can run every requested label, so no runner will be started for it.", tone: "danger" };
+const NO_MATCHING_POOL: Reason = { label: "No pool offers these labels", hint: "No pool serving this repository that can run every requested label will run it: there is none, or each is paused or has an open provisioning circuit.", tone: "danger" };
 
 const REASONS: Record<string, Reason> = {
   no_matching_pool: NO_MATCHING_POOL,
+  manual_pool: { label: "Manual pool, no runner started", hint: "Only a pool in manual mode can run this job. GridOps doesn't start runners for queued jobs in manual mode, so it waits for one of that pool's own runners to be free.", tone: "warning" },
   pool_at_capacity: { label: "Pool is at its runner limit", hint: "Every pool that can run this job is using all of its runners, so it waits for one to finish.", tone: "warning" },
   runner_starting: { label: "Runner starting", hint: "Its pool is starting a runner.", tone: "muted" },
   waiting_for_runner: { label: "Waiting for a runner", hint: "Its pool has room and will start or free a runner for it.", tone: "muted" },
@@ -33,7 +34,7 @@ function unmatchedReason(missingLabels: string[] | undefined): Reason {
   }
   return {
     label: "No available pool",
-    hint: "Pools offer each of these labels, but every one that could run this job is paused, has an open provisioning circuit, has autoscaling off or doesn't offer them all together.",
+    hint: "Pools offer each of these labels, but every one that could run this job is paused, has an open provisioning circuit or doesn't offer them all together.",
     tone: "danger",
   };
 }

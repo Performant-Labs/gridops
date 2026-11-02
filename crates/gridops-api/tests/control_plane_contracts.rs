@@ -1316,8 +1316,10 @@ fn count(value: &Value) -> i64 {
 }
 
 /// The invariants the Overview tiles hold for any data: the runner states
-/// add up to the Runners headline, waiting plus unmatched add up to the Queued
-/// headline, and the pool rows plus the unmatched line add up to it too.
+/// add up to the Runners headline, waiting plus manual plus unmatched add up
+/// to the Queued headline, and the pool rows plus the unmatched line add up to
+/// it too. A job only a manual-mode pool can run is in that pool's row, as the
+/// Queued jobs list names that pool for it.
 fn assert_tiles_partition(body: &Value) {
     let metrics = &body["metrics"];
     assert_eq!(
@@ -1335,8 +1337,10 @@ fn assert_tiles_partition(body: &Value) {
     );
     assert_eq!(
         count(&metrics["queuedJobs"]),
-        count(&metrics["queuedWaiting"]) + count(&metrics["queuedUnmatched"]),
-        "queued = waiting + unmatched: {metrics}"
+        count(&metrics["queuedWaiting"])
+            + count(&metrics["queuedManual"])
+            + count(&metrics["queuedUnmatched"]),
+        "queued = waiting + manual + unmatched: {metrics}"
     );
     let in_pool_rows: i64 = body["pools"]
         .as_array()
@@ -1344,8 +1348,8 @@ fn assert_tiles_partition(body: &Value) {
         .unwrap_or(-1_000_000);
     assert_eq!(
         in_pool_rows + count(&body["queue"]["otherPools"]),
-        count(&metrics["queuedWaiting"]),
-        "pool rows serve every waiting job: {body}"
+        count(&metrics["queuedWaiting"]) + count(&metrics["queuedManual"]),
+        "pool rows hold every job some pool can run: {body}"
     );
     assert_eq!(
         count(&body["queue"]["unmatched"]),
@@ -1715,6 +1719,181 @@ async fn jobs_whose_only_matching_pools_are_paused_or_tripped_have_no_matching_p
         })
         .unwrap_or_default();
     assert!(titles.contains("3 jobs have no available pool"), "{titles}");
+    Ok(())
+}
+
+/// The run page's word on each pool for a queued job, by pool id: its status
+/// and whether it is the pool the job is counted for.
+fn run_page_pools(run: &Value, job_id: i64) -> std::collections::BTreeMap<String, (String, bool)> {
+    run["jobs"]
+        .as_array()
+        .and_then(|jobs| jobs.iter().find(|job| job["id"] == job_id))
+        .and_then(|job| job["diagnosis"]["candidates"].as_array())
+        .map(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate["id"].as_str().unwrap_or_default().to_owned(),
+                        (
+                            candidate["status"].as_str().unwrap_or_default().to_owned(),
+                            candidate["owner"].as_bool().unwrap_or(false),
+                        ),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The run page and the Queued jobs list name the same pool for every queued
+/// job (or both name none), and the run page never calls a pool that doesn't
+/// count the job ready.
+fn assert_run_page_agrees_with_queue(run: &Value, list: &Value) {
+    for item in list["items"].as_array().cloned().unwrap_or_default() {
+        let id = item["id"].as_i64().unwrap_or_default();
+        let pools = run_page_pools(run, id);
+        let owners = pools
+            .iter()
+            .filter(|(_, (_, owner))| *owner)
+            .map(|(pool, _)| pool.clone())
+            .collect::<Vec<_>>();
+        let listed = item["matchedPool"]["id"]
+            .as_str()
+            .map(ToOwned::to_owned)
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(owners, listed, "job {id}: run page {pools:?}, list {item}");
+        for (pool, (status, owner)) in &pools {
+            assert!(
+                *owner || status != "ready",
+                "job {id}: {pool} is called ready but doesn't count the job: {pools:?}"
+            );
+        }
+    }
+}
+
+async fn run_detail(fixture: &ApiFixture, run_id: i64) -> Result<Value> {
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/api/v1/workflow-runs/{run_id}",
+            fixture.base_url
+        ))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(response.json().await?)
+}
+
+/// #63: a manual-mode pool's labels match a job, but nothing starts a runner
+/// for it. The run page said the pool matched and had headroom; the Overview
+/// counted the job as having no matching pool. Both now say what happens: the
+/// job is the manual pool's, and it waits for one of that pool's own runners.
+#[tokio::test]
+async fn a_job_only_a_manual_pool_can_run_is_neither_unmatched_nor_promised_a_runner() -> Result<()>
+{
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("manual-pool", "[\"needs-manual\",\"shared\"]", ""),
+            org_pool("live-pool", "[\"needs-live\",\"shared\"]", ""),
+            org_pool("paused-pool", "[\"needs-paused\"]", "1,0"),
+            org_pool("tripped-pool", "[\"needs-tripped\"]", "0,1"),
+            "UPDATE runner_pools SET autoscaling_enabled=0 WHERE id='manual-pool';".to_owned(),
+            QUEUED_RUN.to_owned(),
+            job(
+                1000,
+                100,
+                "queued",
+                "[\"self-hosted\",\"needs-manual\"]",
+                10,
+            ),
+            job(1001, 100, "queued", "[\"needs-live\"]", 11),
+            job(1002, 100, "queued", "[\"nobody-has-this\"]", 12),
+            job(1003, 100, "queued", "[\"needs-paused\"]", 13),
+            job(1004, 100, "queued", "[\"needs-tripped\"]", 14),
+            // Both a manual and an autoscaling pool can run it: the
+            // autoscaling one starts a runner, so it is that pool's.
+            job(1005, 100, "queued", "[\"shared\"]", 15),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["queuedJobs"], 6);
+    assert_eq!(metrics["queuedWaiting"], 2);
+    assert_eq!(metrics["queuedManual"], 1);
+    assert_eq!(metrics["queuedUnmatched"], 3);
+    let row = |id: &str| {
+        body["pools"]
+            .as_array()
+            .and_then(|pools| pools.iter().find(|pool| pool["id"] == id))
+            .map(|pool| pool["queue"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(row("manual-pool"), 1);
+    assert_eq!(row("live-pool"), 2);
+    let titles = body["slo"]["alerts"]
+        .as_array()
+        .map(|alerts| {
+            alerts
+                .iter()
+                .filter_map(|alert| alert["title"].as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_default();
+    // The paused and tripped pools' jobs; the manual pool's job is not one.
+    assert!(titles.contains("2 jobs have no available pool"), "{titles}");
+
+    let list = queued_jobs_page(&fixture, "?perPage=100").await?;
+    let item = |id: i64| {
+        list["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(item(1000)["matchedPool"]["id"], "manual-pool");
+    assert_eq!(item(1000)["waitingReason"], "manual_pool");
+    assert_eq!(item(1005)["matchedPool"]["id"], "live-pool");
+    assert_eq!(item(1002)["waitingReason"], "no_matching_pool");
+
+    let run = run_detail(&fixture, 100).await?;
+    assert_run_page_agrees_with_queue(&run, &list);
+    let status = |job: i64, pool: &str| {
+        run_page_pools(&run, job)
+            .get(pool)
+            .map(|(status, _)| status.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(status(1000, "manual-pool"), "manual");
+    assert_eq!(status(1000, "live-pool"), "incompatible");
+    assert_eq!(status(1001, "live-pool"), "ready");
+    assert_eq!(status(1001, "manual-pool"), "incompatible");
+    assert_eq!(status(1003, "paused-pool"), "paused");
+    assert_eq!(status(1004, "tripped-pool"), "circuit_open");
+    assert_eq!(status(1005, "live-pool"), "ready");
+    assert_eq!(status(1005, "manual-pool"), "manual");
+    let summary = |job: i64| {
+        run["jobs"]
+            .as_array()
+            .and_then(|jobs| jobs.iter().find(|item| item["id"] == job))
+            .and_then(|item| item["diagnosis"]["summary"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let manual = summary(1000);
+    assert!(manual.contains("manual"), "{manual}");
+    assert!(manual.contains("does not start"), "{manual}");
+    assert!(!manual.contains("headroom"), "{manual}");
     Ok(())
 }
 

@@ -63,14 +63,32 @@ export type WorkflowRun = {
   prioritised?: boolean;
 };
 
+/**
+ * A pool assigned to a queued job's repository, as the run page shows it. Which pool runs the job
+ * comes from the same rule as the Overview's queue counts, so they agree.
+ * - `ready`: it owns the job and will start or free a runner for it.
+ * - `manual`: it can run the job but is in manual mode, so no runner is started for it; the job
+ *   waits for one of the pool's own runners.
+ * - `standby`: it can run the job and has room, but an earlier pool owns it.
+ * - `at_capacity`, `circuit_open`, `paused`, `incompatible`: it won't start a runner for the job.
+ * Newer servers may send other statuses.
+ */
+export type QueuedJobCandidate = {
+  id: string; name: string;
+  status: "paused" | "circuit_open" | "incompatible" | "manual" | "at_capacity" | "standby" | "ready" | (string & {});
+  provider: string | null;
+  /** The pool the Overview counts the job under; older servers omit it. */
+  owner?: boolean;
+  activeRunners: number; busyRunners: number; maximumRunners: number; availableCapacity: number;
+};
+
 export type WorkflowRunDetail = Omit<WorkflowRun, "jobCount" | "activeJobs" | "failedJobs" | "runsOn"> & {
   jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; runnerName: string | null;
     runnerGroupName: string | null; labels: string[]; htmlUrl: string; startedAt: string | null; completedAt: string | null;
     liveRunnerId: string | null; archivedLogId: string | null; machine: RunnerMachine | null;
     diagnosis: null | {
       summary: string; requestedLabels: string[];
-      candidates: Array<{ id: string; name: string; status: "paused" | "circuit_open" | "incompatible" | "at_capacity" | "ready"; provider: string | null;
-        activeRunners: number; busyRunners: number; maximumRunners: number; availableCapacity: number }>;
+      candidates: Array<QueuedJobCandidate>;
     } }>;
 };
 

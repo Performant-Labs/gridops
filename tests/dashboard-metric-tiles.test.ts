@@ -51,10 +51,10 @@ describe("overview metric tiles", () => {
     for (let seed = 0; seed < 200; seed += 1) {
       const pick = (salt: number) => ((seed * 2654435761 + salt * 40503) >>> 0) % 7;
       const [busy, idle, starting, unavailable] = [pick(1), pick(2), pick(3), pick(4)];
-      const [queuedWaiting, queuedUnmatched] = [pick(5), pick(6)];
+      const [queuedWaiting, queuedUnmatched, queuedManual] = [pick(5), pick(6), pick(7)];
       const data = metrics({
         runners: busy + idle + starting + unavailable, online: busy + idle, busy, idle, starting, unavailable,
-        queuedJobs: queuedWaiting + queuedUnmatched, queuedWaiting, queuedUnmatched,
+        queuedJobs: queuedWaiting + queuedManual + queuedUnmatched, queuedWaiting, queuedManual, queuedUnmatched,
       });
       expect(sum(runnerParts(data).map((part) => part.count))).toBe(data.runners);
       expect(sum(queueParts(data).map((part) => part.count))).toBe(data.queuedJobs);
@@ -63,6 +63,18 @@ describe("overview metric tiles", () => {
       const queuedHint = tile(data, "Queued jobs").hint;
       if (data.queuedJobs > 0) expect(sum(hintNumbers(queuedHint))).toBe(data.queuedJobs);
     }
+  });
+
+  it("counts jobs only a manual-mode pool can run as their own part: a warning, not unmatched", () => {
+    const data = metrics({ queuedJobs: 6, queuedWaiting: 2, queuedManual: 3, queuedUnmatched: 1 });
+    const queued = tile(data, "Queued jobs");
+    expect(queued.hint).toBe("2 waiting for capacity · 3 on a manual pool · 1 no matching pool");
+    expect(sum(hintNumbers(queued.hint))).toBe(6);
+    expect(sum(queueParts(data).map((part) => part.count))).toBe(6);
+    expect(queuedTone(metrics({ queuedManual: 1 }))).toBe("warning");
+    expect(queuedTone(metrics({ queuedManual: 1, queuedUnmatched: 1 }))).toBe("danger");
+    // Older servers send no manual count; the hint is as it was.
+    expect(tile(metrics({ queuedJobs: 1, queuedWaiting: 1 }), "Queued jobs").hint).toBe("1 waiting for capacity · 0 no matching pool");
   });
 
   it("goes red only for jobs no pool can serve, and says the queue is clear when it is", () => {

@@ -292,7 +292,8 @@ pub async fn overview(
             "configuration": configuration,
             "metrics": {
               "runners": 0, "online": 0, "busy": 0, "idle": 0, "starting": 0, "unavailable": 0,
-              "queuedJobs": 0, "queuedWaiting": 0, "queuedUnmatched": 0, "successRate": null,
+              "queuedJobs": 0, "queuedWaiting": 0, "queuedManual": 0, "queuedUnmatched": 0,
+              "successRate": null,
               "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS, "successRateRuns": 0,
             },
             "queue": { "unmatched": 0, "otherPools": 0, "missingLabels": [] },
@@ -502,7 +503,8 @@ pub async fn overview(
                 "id": row.get::<String, _>("id"), "name": row.get::<String, _>("name"),
                 "scope": row.get::<String, _>("scope"), "desired": row.get::<i64, _>("desired_count"),
                 "online": row.get::<i64, _>("online"), "busy": row.get::<i64, _>("busy"),
-                // Only the jobs this pool serves, so rows never share a job.
+                // Only the jobs under this pool (autoscaling or manual), so
+                // rows never share a job.
                 "queue": queue.by_pool.get(&row.get::<String, _>("id")).copied().unwrap_or_default(),
                 "mode": row.get::<String, _>("mode"),
                 "status": if row.get::<bool, _>("paused") { "paused".into() } else { row.get::<String, _>("state") },
@@ -585,7 +587,7 @@ pub async fn overview(
             "starting": metrics.get::<i64, _>("starting"),
             "unavailable": metrics.get::<i64, _>("unavailable"),
             "queuedJobs": queue.total(), "queuedWaiting": queue.waiting,
-            "queuedUnmatched": queue.unmatched,
+            "queuedManual": queue.manual, "queuedUnmatched": queue.unmatched,
             "successRate": success_rate,
             "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS,
             "successRateRuns": counted_runs,
@@ -618,11 +620,12 @@ pub async fn overview(
 }
 
 /// One page of the jobs counted as queued in the Overview, the ones that have
-/// waited longest first, each with the pool the scaler counts it for. Scoped
-/// to the signed-in user's installations, as the count is. A job no pool
-/// serves lists the labels it asked for that no pool the viewer can see
-/// offers (`missingLabels`), as the Overview's alerts do; for every other job
-/// that list is empty.
+/// waited longest first, each with the pool it is under (the one the scaler
+/// counts it for, or the manual-mode pool that can run it). Scoped to the
+/// signed-in user's installations, as the count is. A job no pool serves
+/// lists the labels it asked for that no pool the viewer can see offers
+/// (`missingLabels`), as the Overview's alerts do; for every other job that
+/// list is empty.
 pub async fn queued_jobs(
     State(state): State<AppState>,
     Query(query): Query<PaginationQuery>,
@@ -656,16 +659,18 @@ pub async fn queued_jobs(
             overview_queue::OfferedLabels::default(),
         )
     } else {
-        // The same ownership the scaler counts a pool's queue by.
-        let owners = gridops_core::waiting_job_ownership(&state.database)
+        // The same ownership the scaler counts a pool's queue by, and the
+        // Overview and a run's page show.
+        let owners = gridops_core::waiting_job_pools(&state.database)
             .await?
             .into_iter()
-            .map(|owner| (owner.job_id, owner))
+            .filter_map(|job| job.owner)
+            .map(|owner| (owner.job_id(), owner))
             .collect::<HashMap<_, _>>();
         let page_pools = rows
             .iter()
             .filter_map(|row| owners.get(&row.get::<i64, _>("id")))
-            .map(|owner| owner.pool_id.clone())
+            .map(|owner| owner.pool_id().to_owned())
             .collect::<Vec<_>>();
         let pools = queued_job_pools(&state, &user.id, &page_pools).await?;
         let offered = overview_queue::OfferedLabels::new(
@@ -678,7 +683,7 @@ pub async fn queued_jobs(
         .map(|row| {
             let id = row.get::<i64, _>("id");
             let owner = owners.get(&id);
-            let pool = owner.and_then(|owner| pools.get(&owner.pool_id));
+            let pool = owner.and_then(|owner| pools.get(owner.pool_id()));
             let created_at = row.get::<i64, _>("created_at");
             let labels = json_array(row.get::<&str, _>("labels"));
             let missing_labels = if owner.is_none() {
@@ -753,26 +758,30 @@ async fn queued_job_pools(
 /// Why a queued job is still waiting, from what the scaler and the pool's
 /// runners say. Only reasons the data shows are given:
 ///
-/// - `no_matching_pool`: no unpaused autoscaling pool serving the job's
-///   repository can run its labels, so the scaler owns it nowhere. Its
-///   `missingLabels` say which labels no pool offers at all; when that is
-///   empty, pools offering them exist but are paused, tripped, on manual
-///   scaling or don't offer them all together.
+/// - `no_matching_pool`: no pool serving the job's repository that can run
+///   its labels will run it: there is none, or each is paused or has an open
+///   provisioning circuit. Its `missingLabels` say which labels no pool
+///   offers at all; when that is empty, pools offering them exist but are
+///   paused, tripped or don't offer them all together.
 /// - `pool_not_visible`: its pool also covers installations the viewer can't
 ///   see, so the pool isn't named.
+/// - `manual_pool`: only a manual-mode pool can run it. Nothing starts a
+///   runner for it; it runs when one of that pool's own runners is free.
 /// - `pool_at_capacity`: every pool that could run it had used up its room
 ///   (`max_count` less busy runners) before this job's turn.
 /// - `runner_starting`: its pool is starting a runner.
 /// - `waiting_for_runner`: its pool has room and nothing starting, so the
 ///   job waits for the next scaling pass or an idle runner.
 fn queued_job_waiting_reason(
-    owner: Option<&gridops_core::QueuedJobOwner>,
+    owner: Option<&gridops_core::WaitingJobOwner>,
     pool: Option<&QueuedJobPool>,
 ) -> &'static str {
+    use gridops_core::WaitingJobOwner::{Manual, Scaling};
     match (owner, pool) {
         (None, _) => "no_matching_pool",
         (Some(_), None) => "pool_not_visible",
-        (Some(owner), _) if owner.over_capacity => "pool_at_capacity",
+        (Some(Manual { .. }), _) => "manual_pool",
+        (Some(Scaling(owner)), _) if owner.over_capacity => "pool_at_capacity",
         (Some(_), Some(pool)) if pool.starting_runners > 0 => "runner_starting",
         _ => "waiting_for_runner",
     }
@@ -1983,11 +1992,28 @@ pub async fn workflow_run(
     .bind(run_id)
     .fetch_all(&state.database)
     .await?;
+    // A job GitHub still lists as queued in a finished run never starts, and
+    // no pool counts it, so it gets no diagnosis.
+    let diagnosed = run.get::<String, _>("status") != "completed";
+    let waiting = if diagnosed
+        && jobs
+            .iter()
+            .any(|row| row.get::<String, _>("status") == "queued")
+    {
+        // The rule the Overview and the scaler use for which pool runs a job.
+        gridops_core::waiting_job_pools(&state.database)
+            .await?
+            .into_iter()
+            .map(|job| (job.job_id, job))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
     let mut job_items = Vec::with_capacity(jobs.len());
     for row in &jobs {
         let status = row.get::<String, _>("status");
         let labels = json_array(row.get::<&str, _>("labels"));
-        let diagnosis = if status == "queued" {
+        let diagnosis = if diagnosed && status == "queued" {
             Some(
                 diagnose_queued_job(
                     &state,
@@ -1995,6 +2021,7 @@ pub async fn workflow_run(
                     run.get::<i64, _>("repository_id"),
                     run.get::<i64, _>("installation_id"),
                     &labels,
+                    waiting.get(&row.get::<i64, _>("id")),
                 )
                 .await?,
             )
@@ -5021,13 +5048,33 @@ fn workflow_run_json(row: &sqlx::sqlite::SqliteRow, system_admin: bool) -> Value
     })
 }
 
+/// What a run's page says about a queued job: each pool assigned to its
+/// repository that the viewer can see, and whether it will run the job. Which
+/// pool runs it is not decided here: `waiting` is the job's entry in
+/// [`gridops_core::waiting_job_pools`], the rule the Overview and the scaler
+/// use, so the run page can't call a pool ready while the Overview counts the
+/// job as unmatched. A pool's status is one of:
+///
+/// - `paused`: the pool is paused.
+/// - `incompatible`: it can't run the job's labels.
+/// - `manual`: it can run the job but is in manual mode, so nothing starts a
+///   runner for it; the job waits for one of the pool's own runners.
+/// - `circuit_open`: its provisioning circuit is open.
+/// - `ready`: it owns the job and has room to start or free a runner for it.
+/// - `at_capacity`: it can run the job but has used up its room (`max_count`
+///   less busy runners) on older jobs.
+/// - `standby`: it can run the job and has room, but an earlier pool owns it.
+///
+/// `owner` marks the pool the Overview counts the job under.
 async fn diagnose_queued_job(
     state: &AppState,
     user: &AuthUser,
     repository_id: i64,
     installation_id: i64,
     requested_labels: &[String],
+    waiting: Option<&gridops_core::WaitingJobPools>,
 ) -> ApiResult<Value> {
+    use gridops_core::{PoolStanding, WaitingJobOwner};
     let rows = sqlx::query(
         r#"SELECT p.id,p.name,p.labels,p.providers,p.paused,p.provision_circuit_open,p.max_count,
           (SELECT json_group_array(json_array(fp.execution_os,fp.architecture,fp.placement))
@@ -5057,11 +5104,20 @@ async fn diagnose_queued_job(
     .bind(&user.id)
     .fetch_all(&state.database)
     .await?;
-    let mut compatible = 0_i64;
-    let mut ready = 0_i64;
+    let owner = waiting.and_then(|job| job.owner.as_ref());
+    let standing = |pool: &str| {
+        waiting.and_then(|job| {
+            job.matching
+                .iter()
+                .position(|(id, _)| id == pool)
+                .map(|index| (index, job.matching[index].1))
+        })
+    };
+    let owner_index = owner.and_then(|owner| standing(owner.pool_id()).map(|(index, _)| index));
     let candidates = rows
         .iter()
         .map(|row| {
+            let pool_id = row.get::<String, _>("id");
             let pool_name = row.get::<String, _>("name");
             let mut configured_labels = json_array(row.get::<&str, _>("labels"));
             if !configured_labels
@@ -5104,48 +5160,94 @@ async fn diagnose_queued_job(
             let paused = row.get::<bool, _>("paused");
             let status = if paused {
                 "paused"
-            } else if matching_provider.is_none() {
-                "incompatible"
-            } else if row.get::<bool, _>("provision_circuit_open") {
-                "circuit_open"
-            } else if active >= maximum {
-                "at_capacity"
             } else {
-                "ready"
-            };
-            if matching_provider.is_some() && !paused && status != "circuit_open" {
-                compatible += 1;
-                if status == "ready" {
-                    ready += 1;
+                match standing(&pool_id) {
+                    None => "incompatible",
+                    Some((_, PoolStanding::Paused)) => "paused",
+                    Some((_, PoolStanding::Manual)) => "manual",
+                    Some((_, PoolStanding::CircuitOpen)) => "circuit_open",
+                    Some((index, PoolStanding::Scales)) => match owner {
+                        Some(WaitingJobOwner::Scaling(owner)) if owner.over_capacity => {
+                            "at_capacity"
+                        }
+                        Some(WaitingJobOwner::Scaling(owner)) if owner.pool_id == pool_id => {
+                            "ready"
+                        }
+                        // Jobs go to the first pool with room, so a pool ahead
+                        // of the owner had none left.
+                        _ if owner_index.is_some_and(|owner| index < owner) => "at_capacity",
+                        _ => "standby",
+                    },
                 }
-            }
+            };
             let available_capacity = maximum.saturating_sub(active);
             json!({
-                "id": row.get::<String, _>("id"), "name": pool_name,
+                "id": pool_id, "name": pool_name,
                 "status": status, "provider": matching_provider,
+                "owner": owner.is_some_and(|owner| owner.pool_id() == pool_id),
                 "activeRunners": active, "busyRunners": row.get::<i64, _>("busy_runners"),
                 "maximumRunners": maximum, "availableCapacity": available_capacity,
             })
         })
         .collect::<Vec<_>>();
-    let summary = if candidates.is_empty() {
-        "No accessible runner pool is assigned to this repository.".to_owned()
-    } else if compatible == 0 {
-        if candidates
+    let shown = owner.and_then(|owner| {
+        candidates
             .iter()
-            .any(|candidate| candidate["status"] == "circuit_open")
-        {
+            .find(|candidate| candidate["id"] == owner.pool_id())
+    });
+    let any = |status: &str| {
+        candidates
+            .iter()
+            .any(|candidate| candidate["status"] == status)
+    };
+    let summary = match (owner, shown) {
+        _ if candidates.is_empty() => {
+            "No accessible runner pool is assigned to this repository.".to_owned()
+        }
+        (Some(WaitingJobOwner::Scaling(owner)), Some(_)) if owner.over_capacity => {
+            "A matching pool exists, but every compatible pool is currently at its configured limit."
+                .to_owned()
+        }
+        (Some(WaitingJobOwner::Scaling(_)), Some(_)) => {
+            "A matching pool has configured headroom; GridOps will attempt capacity admission on its next reconcile."
+                .to_owned()
+        }
+        (Some(WaitingJobOwner::Scaling(_)), None) => {
+            "A pool that also covers repositories you can't access will start a runner for this job."
+                .to_owned()
+        }
+        (Some(WaitingJobOwner::Manual { .. }), Some(pool)) => {
+            let name = pool["name"].as_str().unwrap_or_default();
+            match pool["activeRunners"].as_i64().unwrap_or_default() {
+                0 => format!(
+                    "No autoscaling pool can start a runner for this job. {name} matches it but is in manual mode with no runners: GridOps does not start runners for queued jobs in manual mode, so the job will not start until the pool's desired count is raised or autoscaling is turned on."
+                ),
+                active => format!(
+                    "No autoscaling pool can start a runner for this job. {name} matches it but is in manual mode: GridOps does not start runners for queued jobs in manual mode, so the job waits for one of the pool's {active} {} to be free. Turn autoscaling on for GridOps to add runners for it.",
+                    if active == 1 { "runner" } else { "runners" }
+                ),
+            }
+        }
+        (Some(WaitingJobOwner::Manual { .. }), None) => {
+            "No autoscaling pool can start a runner for this job. A manual-mode pool that also covers repositories you can't access matches it, but GridOps does not start runners for queued jobs in manual mode."
+                .to_owned()
+        }
+        (None, _) if any("circuit_open") => {
             "A matching pool needs a provisioning retry before GridOps can start another runner."
                 .to_owned()
-        } else {
-            "No assigned pool matches every requested runner label.".to_owned()
         }
-    } else if ready == 0 {
-        "A matching pool exists, but every compatible pool is currently at its configured limit."
-            .to_owned()
-    } else {
-        "A matching pool has configured headroom; GridOps will attempt capacity admission on its next reconcile."
-            .to_owned()
+        (None, _)
+            if candidates.iter().any(|candidate| {
+                candidate["id"]
+                    .as_str()
+                    .and_then(standing)
+                    .is_some_and(|(_, standing)| standing == PoolStanding::Paused)
+            }) =>
+        {
+            "A pool that matches this job is paused, so GridOps will not start a runner for it."
+                .to_owned()
+        }
+        (None, _) => "No assigned pool matches every requested runner label.".to_owned(),
     };
     Ok(json!({
         "summary": summary,

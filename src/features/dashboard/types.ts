@@ -22,10 +22,15 @@ export type DashboardOverview = {
     starting: number;
     /** Paused, stopped, failed or any other state that cannot take a job. */
     unavailable: number;
-    /** Every job waiting to start: queuedWaiting + queuedUnmatched. */
+    /** Every job waiting to start: queuedWaiting + queuedManual + queuedUnmatched. */
     queuedJobs: number;
-    /** Queued jobs a pool could run once it has capacity. */
+    /** Queued jobs an autoscaling pool will start or free a runner for once it has capacity. */
     queuedWaiting: number;
+    /**
+     * Queued jobs only a manual-mode pool can run: they match its labels, but nothing starts a
+     * runner for them, so they wait for one of that pool's own runners. Older servers omit it.
+     */
+    queuedManual?: number;
     /** Queued jobs no available pool can ever run (no label match, or the matching pools are paused or tripped). */
     queuedUnmatched: number;
     successRate: number | null;
@@ -36,11 +41,12 @@ export type DashboardOverview = {
   };
   /**
    * How the queue splits over the pool rows: the rows' `queue` plus
-   * `otherPools` plus `unmatched` is `metrics.queuedJobs`.
+   * `otherPools` plus `unmatched` is `metrics.queuedJobs`. A manual-mode
+   * pool's row counts the jobs only it can run.
    */
   queue: {
     unmatched: number;
-    /** Waiting jobs owned by pools that are not among the listed rows. */
+    /** Waiting and manual-pool jobs under pools that are not among the listed rows. */
     otherPools: number;
     /** Labels no pool has, with the jobs that ask for them. */
     missingLabels: Array<{ labels: string[]; jobs: number }>;
@@ -66,7 +72,7 @@ export type DashboardOverview = {
     desired: number;
     online: number;
     busy: number;
-    /** Queued jobs this pool serves; a job is counted by one pool only. */
+    /** Queued jobs under this pool (it scales for them, or it is a manual pool only it can run them on); a job is counted by one pool only. */
     queue: number;
     mode: string;
     status: string;
@@ -135,6 +141,7 @@ export type RunnerStartPhase = "room" | "preparing" | "waitingToStart" | "starti
  */
 export type QueuedJobWaitingReason =
   | "no_matching_pool"
+  | "manual_pool"
   | "pool_at_capacity"
   | "runner_starting"
   | "waiting_for_runner"
@@ -154,10 +161,13 @@ export type QueuedJob = {
    * For a job no pool serves: the labels it asked for that no pool you can see offers
    * (a platform label such as `self-hosted-macos` counts as offered only by a pool running
    * that platform). Empty when each label is offered but no available pool offers them all,
-   * and for every job a pool serves. Missing from older servers.
+   * and for every job a pool serves (including `manual_pool`). Missing from older servers.
    */
   missingLabels?: string[];
-  /** The pool the scaler counts the job for; null when no pool can run it (or you can't see the pool, see `waitingReason`). */
+  /**
+   * The pool the scaler counts the job for, or with `manual_pool` the manual-mode pool that can run it;
+   * null when no pool will run it (or you can't see the pool, see `waitingReason`).
+   */
   matchedPool: { id: string; name: string } | null;
   waitingReason: QueuedJobWaitingReason | (string & {});
   queuedAt: string;

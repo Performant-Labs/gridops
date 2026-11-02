@@ -1,17 +1,18 @@
-//! How the Overview splits the queue: every job waiting to start is either
-//! waiting for capacity (some pool the viewer can see serves it) or has no
-//! matching pool (none does), so the two always add up to the Queued tile, and
-//! the pool rows add up to the first part.
+//! How the Overview splits the queue: every job waiting to start is waiting
+//! for capacity (an autoscaling pool will start or free a runner for it), on a
+//! manual pool (only a manual-mode pool can run it, and nothing starts a
+//! runner for it), or has no matching pool (none will run it). The three
+//! always add up to the Queued tile, and the pool rows add up to the first two.
 //!
-//! Which pool serves a job is decided once, by the same ownership the
-//! reconciler scales from ([`waiting_job_ownership`]); nothing here
+//! Which pool a job is under is decided once, by the same rule the reconciler
+//! scales from and a run's page uses ([`waiting_job_pools`]); nothing here
 //! matches labels itself.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gridops_core::{
-    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, is_runner_system_label, pool_platform_labels,
-    waiting_job_ownership,
+    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, WaitingJobOwner, is_runner_system_label,
+    pool_platform_labels, waiting_job_pools,
 };
 use serde_json::{Value, json};
 use sqlx::Row as _;
@@ -108,24 +109,27 @@ pub(super) struct MissingLabels {
 
 #[derive(Debug, Default)]
 pub(super) struct QueueBreakdown {
+    /// Jobs an autoscaling pool will start or free a runner for.
     pub waiting: i64,
+    /// Jobs only a manual-mode pool can run: nothing starts a runner for them.
+    pub manual: i64,
     pub unmatched: i64,
-    /// Waiting jobs by the pool that serves them.
+    /// Waiting and manual jobs by the pool they are under.
     pub by_pool: HashMap<String, i64>,
     pub oldest_waiting_millis: Option<i64>,
     /// Unmatched jobs asking for labels no pool has, most jobs first.
     pub missing_labels: Vec<MissingLabels>,
     /// Unmatched jobs that ask for no missing label: every pool that could run
-    /// them is paused, tripped, on manual scaling or on another platform.
+    /// them is paused, tripped or on another platform.
     pub unavailable: i64,
 }
 
 impl QueueBreakdown {
     pub fn total(&self) -> i64 {
-        self.waiting + self.unmatched
+        self.waiting + self.manual + self.unmatched
     }
 
-    /// Waiting jobs served by pools other than the listed ones.
+    /// Waiting and manual jobs under pools other than the listed ones.
     pub fn served_outside(&self, listed: &[String]) -> i64 {
         let listed = listed.iter().collect::<HashSet<_>>();
         self.by_pool
@@ -173,7 +177,7 @@ impl QueueBreakdown {
                     self.unavailable,
                     if self.unavailable == 1 { "job has" } else { "jobs have" },
                 ),
-                "detail": "Every pool that could run them is paused, has an open provisioning circuit, has autoscaling off or runs another platform.",
+                "detail": "Every pool that could run them is paused, has an open provisioning circuit or runs another platform.",
                 "href": "/queued-jobs",
             }));
         }
@@ -190,15 +194,17 @@ impl QueueBreakdown {
     }
 }
 
-/// Splits `jobs` by whether a pool serves them. `serving` says which pool
-/// serves each job; a job it has no pool for has no matching pool. A job
-/// served by a pool the viewer can't see is waiting for capacity all the same
-/// (the pool exists; it is just not one of the viewer's rows), so it is in
+/// Splits `jobs` by whether a pool serves them. `serving` says which
+/// autoscaling pool serves each job and `manual` which manual-mode pool a job
+/// no autoscaling pool serves is under; a job in neither has no matching
+/// pool. A job under a pool the viewer can't see counts all the same (the
+/// pool exists; it is just not one of the viewer's rows), so it is in
 /// [`QueueBreakdown::served_outside`]. `pools` are the pools the viewer can
 /// see, whose labels tell which labels exist.
 pub(super) fn split_queue(
     jobs: &[WaitingJob],
     serving: &HashMap<i64, String>,
+    manual: &HashMap<i64, String>,
     pools: &[VisiblePool],
     now: i64,
 ) -> QueueBreakdown {
@@ -211,6 +217,11 @@ pub(super) fn split_queue(
             *breakdown.by_pool.entry(pool.clone()).or_default() += 1;
             let age = now.saturating_sub(job.created_at);
             breakdown.oldest_waiting_millis = breakdown.oldest_waiting_millis.max(Some(age));
+            continue;
+        }
+        if let Some(pool) = manual.get(&job.id) {
+            breakdown.manual += 1;
+            *breakdown.by_pool.entry(pool.clone()).or_default() += 1;
             continue;
         }
         breakdown.unmatched += 1;
@@ -274,8 +285,7 @@ pub(super) async fn visible_pools(state: &AppState, user_id: &str) -> ApiResult<
 }
 
 /// The queue as `user` may see it: the jobs of their installations waiting to
-/// start in a run that hasn't finished, split by whether a pool they can see
-/// serves them.
+/// start in a run that hasn't finished, split by whether a pool serves them.
 pub(super) async fn queue_breakdown(
     state: &AppState,
     user: &AuthUser,
@@ -297,16 +307,21 @@ pub(super) async fn queue_breakdown(
         })
         .collect::<Vec<_>>();
     let pools = visible_pools(state, &user.id).await?;
-    let serving = if jobs.is_empty() {
-        HashMap::new()
-    } else {
-        waiting_job_ownership(&state.database)
+    let mut serving = HashMap::new();
+    let mut manual = HashMap::new();
+    if !jobs.is_empty() {
+        for owner in waiting_job_pools(&state.database)
             .await?
             .into_iter()
-            .map(|owner| (owner.job_id, owner.pool_id))
-            .collect()
-    };
-    Ok(split_queue(&jobs, &serving, &pools, now))
+            .filter_map(|job| job.owner)
+        {
+            match owner {
+                WaitingJobOwner::Scaling(owner) => serving.insert(owner.job_id, owner.pool_id),
+                WaitingJobOwner::Manual { job_id, pool_id } => manual.insert(job_id, pool_id),
+            };
+        }
+    }
+    Ok(split_queue(&jobs, &serving, &manual, &pools, now))
 }
 
 #[cfg(test)]
@@ -355,7 +370,7 @@ mod tests {
             platform_pool(&["mac-only"], &[]),
         ];
 
-        let breakdown = split_queue(&jobs, &HashMap::new(), &pools, 100);
+        let breakdown = split_queue(&jobs, &HashMap::new(), &HashMap::new(), &pools, 100);
 
         assert_eq!(breakdown.unmatched, 4);
         assert_eq!(
@@ -398,7 +413,7 @@ mod tests {
         let serving = HashMap::from([(3, "linux".to_owned()), (5, "hidden".to_owned())]);
         let pools = [pool(&["linux"]), pool(&["paused-only"])];
 
-        let breakdown = split_queue(&jobs, &serving, &pools, 100);
+        let breakdown = split_queue(&jobs, &serving, &HashMap::new(), &pools, 100);
 
         // Job 5 is served by a pool the viewer can't see: still waiting.
         assert_eq!((breakdown.waiting, breakdown.unmatched), (2, 3));
@@ -425,6 +440,41 @@ mod tests {
                 + breakdown.unavailable,
             breakdown.unmatched
         );
+    }
+
+    #[test]
+    fn a_job_only_a_manual_pool_can_run_is_its_own_part_and_in_that_pools_row() {
+        let jobs = [
+            job(1, &["fast"], 10),
+            job(2, &["manual-only"], 20),
+            job(3, &["manual-only"], 30),
+            job(4, &["nowhere"], 40),
+        ];
+        let serving = HashMap::from([(1, "auto".to_owned())]);
+        let manual = HashMap::from([(2, "fixed".to_owned()), (3, "hidden".to_owned())]);
+        let pools = [pool(&["fast"]), pool(&["manual-only"])];
+
+        let breakdown = split_queue(&jobs, &serving, &manual, &pools, 100);
+
+        assert_eq!(
+            (breakdown.waiting, breakdown.manual, breakdown.unmatched),
+            (1, 2, 1)
+        );
+        assert_eq!(breakdown.total(), 4);
+        assert_eq!(breakdown.by_pool.get("fixed"), Some(&1));
+        assert_eq!(
+            breakdown.served_outside(&["auto".into(), "fixed".into()]),
+            1
+        );
+        assert_eq!(
+            breakdown.by_pool.values().sum::<i64>(),
+            breakdown.waiting + breakdown.manual
+        );
+        // Manual jobs are not waiting for capacity, so they don't age the queue.
+        assert_eq!(breakdown.oldest_waiting_millis, Some(90));
+        // The manual pool's label exists, so nothing is reported missing.
+        assert_eq!(breakdown.missing_labels.len(), 1);
+        assert_eq!(breakdown.unavailable, 0);
     }
 
     #[test]
