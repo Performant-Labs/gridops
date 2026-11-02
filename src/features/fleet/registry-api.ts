@@ -18,6 +18,8 @@ export class FleetRequestError extends Error {
   readonly status: number;
   readonly code: FleetError["code"] | "invalid_response";
   readonly requestId: string | undefined;
+  /** Bounded, secret-free detail such as the invalid field's name. */
+  readonly details: FleetError["details"];
 
   constructor(status: number, error?: FleetError) {
     super(error?.message ?? "Fleet returned an invalid response.");
@@ -25,6 +27,7 @@ export class FleetRequestError extends Error {
     this.status = status;
     this.code = error?.code ?? "invalid_response";
     this.requestId = error?.requestId;
+    this.details = error?.details;
   }
 }
 

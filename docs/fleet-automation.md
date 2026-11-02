@@ -6,9 +6,30 @@ no browser session, no direct database writes. The
 
 ## Create a token
 
-An administrator creates a token once, in **Settings → API tokens**
-(or `POST /api/v1/fleet/api-tokens` with a cookie session). The plaintext
-`gat_...` is shown exactly once; only its SHA-256 verifier is stored.
+An administrator creates a token in the web app under
+**Settings → API tokens** (in the Account group of the settings sidebar, or
+"Manage API tokens" in the command menu). The form takes a name, one or more
+scopes and a lifetime in days (default 90, at most 365). The plaintext
+`gat_...` is then shown exactly once, in a dialog with a copy button that
+closes only when you confirm you have stored it; the page forgets it as soon
+as the dialog closes, and only its SHA-256 verifier is stored on the server.
+If the create request fails (for example the network drops), submitting the
+same form again reuses the same `Idempotency-Key`, so it can never mint a
+second token; if the first attempt had in fact succeeded, the page says so
+and asks you to revoke that token and create a new one, because the secret
+cannot be shown twice.
+
+The same page lists your own tokens, newest first: name, the first eight
+characters of the token (`gat_AbCdEfGh…`, for recognising it, not a
+secret), scopes, when it was created and last used, when it expires, and
+whether it is active, expired or revoked. **Revoke** asks for confirmation
+and takes effect immediately. Members who are not administrators see an
+explanation instead of the form.
+
+Scripts that already hold a cookie session can still call the API directly:
+`POST /api/v1/fleet/api-tokens` with an `Idempotency-Key` header, `GET` the
+same path to list, and `POST /api/v1/fleet/api-tokens/{token_id}/revoke`
+(see [the API contract](fleet-api.md#api-tokens)).
 
 For full host onboarding a bot needs all four v1 scopes:
 
@@ -34,7 +55,8 @@ export GRIDOPS_API_TOKEN
 ```
 
 In CI, load it from a masked secret. Revoke it the moment it is no longer
-needed: `POST /api/v1/fleet/api-tokens/{token_id}/revoke`.
+needed, under **Settings → API tokens** or with
+`POST /api/v1/fleet/api-tokens/{token_id}/revoke` from a cookie session.
 
 ## Onboard a machine
 

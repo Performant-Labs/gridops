@@ -1,5 +1,5 @@
 import { Link, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
-import { ChevronLeft, CloudCog, Github, Palette, Server, Settings, Settings2, Sparkles, UsersRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, CloudCog, Github, KeyRound, Palette, Server, Settings, Settings2, Sparkles, UsersRound, type LucideIcon } from "lucide-react";
 
 import { AppShell } from "~/components/app-shell";
 import { LoadingRows, PageBody, PageHeader } from "~/components/page";
@@ -20,7 +20,13 @@ export const Route = createFileRoute("/settings")({
 type SettingsNavItem = { label: string; to: string; icon: LucideIcon };
 
 const sections: Array<{ label: string; items: SettingsNavItem[] }> = [
-  { label: "Account", items: [{ label: "Preferences", to: "/settings/preferences", icon: Palette }] },
+  {
+    label: "Account",
+    items: [
+      { label: "Preferences", to: "/settings/preferences", icon: Palette },
+      { label: "API tokens", to: "/settings/api-tokens", icon: KeyRound },
+    ],
+  },
   {
     label: "Workspace",
     items: [
