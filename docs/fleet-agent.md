@@ -35,22 +35,35 @@ for this GridOps. On Linux or macOS:
 curl -fsSL https://gridops.example.com/install.sh | sh
 ```
 
-On Windows, in PowerShell:
-
-```powershell
-irm https://gridops.example.com/install.ps1 | iex
-```
+Windows is not supported as a fleet machine.
 
 The installer downloads the agent for the machine's OS and architecture from
 the GitHub release matching your GridOps version, and checks its SHA-256. It
 then asks for the enrollment code and runs the agent as a user service: a
-LaunchAgent on macOS, a systemd user unit on Linux, or a scheduled task at
-logon on Windows. Docker runners use the image each platform names in
+LaunchAgent on macOS or a systemd user unit on Linux. Docker runners use the image each platform names in
 GridOps, so a machine needs no image setup. Other settings are listed at the
 top of each script.
 Running the installer again upgrades the agent and keeps its settings.
 
-Release binaries (`gridops-host-agent-<linux|macos|windows>-<x64|arm64>`) can
+### Upgrade an agent that runs as a system service
+
+A Linux machine set up with the system unit (see [Run as a service](#run-as-a-service))
+keeps its binary in `/usr/local/bin` and runs as the `gridops-agent` user. The
+installer recognises it: it replaces the binary at the path the unit runs,
+keeps the previous one as `gridops-host-agent.previous`, and restarts the
+service. It needs root, and it never adds a second per-user agent beside the
+system one:
+
+```sh
+curl -fsSL https://gridops.example.com/install.sh | sudo sh
+```
+
+Run as an ordinary user on such a machine, it stops and tells you to use `sudo`.
+If the service doesn't come back, the installer says so and prints the rename
+that restores the previous binary. Your drop-ins (such as the Docker socket
+setting) and the agent's enrollment are not touched.
+
+Release binaries (`gridops-host-agent-<linux|macos>-<x64|arm64>`) can
 also be downloaded directly from the
 [releases page](https://github.com/iamngoni/gridops/releases). To build from
 source instead:
@@ -66,10 +79,8 @@ gridops-host-agent probe
 ```
 
 Docker appears when the agent's user can run `docker`; if it doesn't, `probe`
-shows why under `docker_problem`. On Windows, Docker Desktop must be running in
-Linux-containers mode. Native runners appear on macOS, Linux and Windows and
-download the current GitHub `actions-runner` release on first use. A Windows
-native runner runs as the agent's user, without a console window.
+shows why under `docker_problem`. Native runners appear on macOS and Linux and
+download the current GitHub `actions-runner` release on first use.
 
 ## Enroll
 
@@ -84,8 +95,7 @@ machine**, enrolls the machine, and starts it. The code works once and expires
 after 10 minutes. The address is saved, so later runs need no settings. Then
 approve the machine in GridOps.
 
-The agent keeps its state in `~/.gridops/host-agent` (`%USERPROFILE%\.gridops\host-agent`
-on Windows): the journal with its credential, the saved address, and native
+The agent keeps its state in `~/.gridops/host-agent`: the journal with its credential, the saved address, and native
 runner files. Only its user can read the journal.
 
 For scripted installs, set `GRIDOPS_FLEET_URL` and `GRIDOPS_ENROLLMENT_CODE`
@@ -104,16 +114,6 @@ URL, state directory, a `PATH` that includes your Docker CLI, log file), then:
 
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.gridops.host-agent.plist
-```
-
-**Windows** (a logon task, so Docker Desktop is available): in PowerShell,
-
-```powershell
-$exe = (Resolve-Path .\gridops-host-agent.exe).Path
-$action = New-ScheduledTaskAction -Execute $exe -Argument "run"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName "GridOps host agent" -Action $action -Trigger $trigger -Settings $settings
 ```
 
 **Linux**: install `deploy/systemd/gridops-host-agent.service` to

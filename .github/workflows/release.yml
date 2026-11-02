@@ -1,6 +1,8 @@
 # Builds a GridOps release on the project's own runners. A `vX.Y.Z` tag that
-# matches the workspace version publishes it: control plane images on GHCR, and
-# host agent binaries, installers and compose file on the GitHub release.
+# matches the workspace version publishes it: the Linux host agents and the
+# installer on the GitHub release, plus, where a macOS runner exists
+# (repository variable RELEASE_MACOS=true), the macOS agents, the control plane
+# images on GHCR and the compose file. Windows is not a deployment target.
 # Running it by hand builds everything without publishing.
 name: Release
 
@@ -24,11 +26,12 @@ env:
 jobs:
   version:
     name: Version
-    runs-on: [self-hosted, linux, gridops-ci]
+    runs-on: [self-hosted-linux]
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
+      linux_agents: ${{ steps.version.outputs.linux_agents }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -45,6 +48,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          # The Linux agents to build. The pools run on x86 machines, so arm64
+          # is built only where an ARM64 runner exists: set the repository
+          # variable RELEASE_LINUX_ARM64 to true.
+          agents='[{"arch":"x64","target":"x86_64-unknown-linux-musl","runner":"X64"}]'
+          if [ "${{ vars.RELEASE_LINUX_ARM64 }}" = true ]; then
+            agents='[{"arch":"x64","target":"x86_64-unknown-linux-musl","runner":"X64"},{"arch":"arm64","target":"aarch64-unknown-linux-musl","runner":"ARM64"}]'
+          fi
+          echo "linux_agents=$agents" >> "$GITHUB_OUTPUT"
           echo "Version $version, publish: $publish"
 
   agent-linux:
@@ -53,26 +64,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x64
-            target: x86_64-unknown-linux-musl
-          - arch: arm64
-            target: aarch64-unknown-linux-musl
-    # The CI image has the musl toolchain, so the binary runs on any distro.
-    runs-on: [self-hosted, linux, "${{ matrix.arch }}", gridops-ci]
+        include: ${{ fromJSON(needs.version.outputs.linux_agents) }}
+    # Static musl binaries run on any distro. The runner image is the shared
+    # one, which has no musl toolchain, so the job installs it (below).
+    runs-on: [self-hosted-linux, "${{ matrix.runner }}"]
     timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
 
-      # Machines pull the CI image only when they don't have it, so one may
-      # still hold a build from before musl was added.
-      - name: Check the musl toolchain
+      # The job runs as root in a throwaway container, so this changes nothing
+      # on the machine.
+      - name: Install the musl toolchain
         run: |
-          command -v musl-gcc >/dev/null && rustup target list --installed | grep -qx ${{ matrix.target }} || {
-            echo "::error::This machine's gridops-ci image has no musl toolchain. Run 'docker pull' for the image on the machine and retry."
-            exit 1
-          }
+          if ! command -v musl-gcc >/dev/null; then
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq musl-tools
+          fi
+          rustup target add ${{ matrix.target }}
+          musl-gcc --version 2>&1 | head -1 || true
 
       - name: Build
         run: cargo build --release --locked -p gridops-host-agent --target ${{ matrix.target }}
@@ -97,6 +108,10 @@ jobs:
   agent-macos:
     name: Agent (macOS)
     needs: version
+    # Needs a self-hosted macOS ARM64 runner. Set the repository variable
+    # RELEASE_MACOS to true where one exists; without it the release has no
+    # macOS binaries.
+    if: vars.RELEASE_MACOS == 'true'
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 60
     steps:
@@ -135,54 +150,11 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  agent-windows:
-    name: Agent (Windows x64)
-    needs: version
-    runs-on: [self-hosted, windows, x64]
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      # A toolchain of the job's own. Linking needs the MSVC build tools on
-      # the machine (Visual Studio Build Tools, "Desktop development with C++").
-      - name: Install Rust
-        run: |
-          $env:RUSTUP_HOME = Join-Path $env:RUNNER_TEMP 'rustup'
-          $env:CARGO_HOME = Join-Path $env:RUNNER_TEMP 'cargo'
-          $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
-          Invoke-WebRequest -UseBasicParsing -Uri 'https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe' -OutFile $init
-          & $init -y --no-modify-path --profile minimal --default-toolchain $env:RUST_VERSION
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_HOME=$env:RUSTUP_HOME"
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$env:CARGO_HOME"
-          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:CARGO_HOME 'bin')
-
-      - name: Build
-        run: |
-          cargo build --release --locked -p gridops-host-agent --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Check and stage
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\x86_64-pc-windows-msvc\release\gridops-host-agent.exe dist\gridops-host-agent-windows-x64.exe
-          & dist\gridops-host-agent-windows-x64.exe --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-windows
-          path: dist/*
-          if-no-files-found: error
-
   images:
     name: Control plane images
     needs: version
+    # Built through Docker on the Mac runner; see agent-macos.
+    if: vars.RELEASE_MACOS == 'true'
     # Docker on the Mac builds both platforms (amd64 through Rosetta).
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 150
@@ -233,9 +205,14 @@ jobs:
 
   release:
     name: Publish release
-    needs: [version, agent-linux, agent-macos, agent-windows, images]
-    if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, linux, gridops-ci]
+    needs: [version, agent-linux, agent-macos, images]
+    # The macOS jobs are skipped where there is no Mac runner. A skipped job
+    # is fine; a failed or cancelled one is not.
+    if: >-
+      !cancelled() && !failure()
+      && needs.version.outputs.publish == 'true'
+      && needs.agent-linux.result == 'success'
+    runs-on: [self-hosted-linux]
     timeout-minutes: 15
     permissions:
       contents: write
@@ -254,11 +231,14 @@ jobs:
       - name: Assemble
         run: |
           sed "s/__GRIDOPS_VERSION__/$VERSION/" scripts/install.sh > dist/install.sh
-          sed "s/__GRIDOPS_VERSION__/$VERSION/" scripts/install.ps1 > dist/install.ps1
-          node scripts/release-compose.mjs "$VERSION" > dist/compose.release.yaml
-          cp .env.example dist/env.example
+          # compose.release.yaml names the published images, so it ships only
+          # when this run built them.
+          if [ "${{ needs.images.result }}" = success ]; then
+            node scripts/release-compose.mjs "$VERSION" > dist/compose.release.yaml
+            cp .env.example dist/env.example
+          fi
           cd dist
-          sha256sum gridops-* install.sh install.ps1 compose.release.yaml env.example > SHA256SUMS
+          sha256sum gridops-* install.sh $(ls compose.release.yaml env.example 2>/dev/null) > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create the release
@@ -268,10 +248,6 @@ jobs:
           name: GridOps ${{ env.VERSION }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/gridops-*
-            dist/install.sh
-            dist/install.ps1
-            dist/compose.release.yaml
-            dist/env.example
-            dist/SHA256SUMS
+          # Everything the Assemble step staged; compose.release.yaml and
+          # env.example are there only when the images were built.
+          files: dist/*

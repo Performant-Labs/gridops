@@ -14,7 +14,14 @@
 #   GRIDOPS_INSTALL_DIR       where the binary goes (default: ~/.local/bin)
 #   GRIDOPS_ENROLLMENT_CODE   enroll without a prompt
 #   GRIDOPS_NO_ENROLL=1       install only
-#   GRIDOPS_NO_SERVICE=1      don't install or start the user service
+#   GRIDOPS_NO_SERVICE=1      don't install or start the user service (on a
+#                             system install, replace the binary, don't restart)
+#
+# A machine that already runs the agent as a system service (the unit from
+# deploy/systemd, installed under /etc/systemd/system) is upgraded in place:
+# the binary at the unit's path is replaced and the service restarted. That
+# needs root, so run it as `curl -fsSL <address>/install.sh | sudo sh`. It never
+# adds a second, per-user agent beside it.
 set -eu
 
 # Where release binaries come from: this repository by default, overridable
@@ -38,7 +45,7 @@ fail() { printf 'gridops: %s\n' "$*" >&2; exit 1; }
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) fail "unsupported system $(uname -s); on Windows use install.ps1" ;;
+  *) fail "unsupported system $(uname -s); the agent supports Linux and macOS" ;;
 esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x64 ;;
@@ -48,6 +55,22 @@ esac
 # A shell under Rosetta reports x86_64 on Apple silicon.
 if [ "$os" = macos ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
   arch=arm64
+fi
+
+# An agent already installed as a system service is upgraded where it is.
+system_bin=""
+if [ "$os" = linux ] && command -v systemctl >/dev/null 2>&1; then
+  unit_path="$(systemctl show gridops-host-agent -p FragmentPath --value 2>/dev/null || true)"
+  case "$unit_path" in
+    /etc/systemd/system/* | /usr/lib/systemd/system/* | /lib/systemd/system/*)
+      system_bin="$(systemctl show gridops-host-agent -p ExecStart --value 2>/dev/null \
+        | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)"
+      [ -n "$system_bin" ] || fail "found the system service $unit_path but not the agent binary it runs"
+      if [ "$(id -u)" != 0 ]; then
+        fail "this machine runs the agent as the system service $unit_path; run again as root: curl -fsSL ${URL:+$URL/}install.sh | sudo sh"
+      fi
+      ;;
+  esac
 fi
 
 if command -v curl >/dev/null 2>&1; then
@@ -78,6 +101,26 @@ fetch "$base/SHA256SUMS" "$work/SHA256SUMS" || fail "couldn't download $base/SHA
 expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$work/SHA256SUMS")"
 [ -n "$expected" ] || fail "SHA256SUMS has no entry for $asset"
 [ "$(sha256 "$work/$asset")" = "$expected" ] || fail "checksum mismatch for $asset"
+
+if [ -n "$system_bin" ]; then
+  # Keep the previous binary beside the new one, to roll back with a rename.
+  [ ! -f "$system_bin" ] || cp -p "$system_bin" "$system_bin.previous"
+  cp "$work/$asset" "$system_bin.new"
+  chmod 755 "$system_bin.new"
+  mv -f "$system_bin.new" "$system_bin"
+  say "Installed $system_bin ($("$system_bin" --version 2>/dev/null || echo "$asset"))."
+  if [ "${GRIDOPS_NO_SERVICE:-}" = 1 ]; then
+    say "Restart the agent to use it: systemctl restart gridops-host-agent"
+    exit 0
+  fi
+  systemctl restart gridops-host-agent
+  sleep 3
+  if [ "$(systemctl is-active gridops-host-agent 2>/dev/null)" != active ]; then
+    fail "the agent did not come back after the upgrade; roll back with: mv $system_bin.previous $system_bin && systemctl restart gridops-host-agent"
+  fi
+  say "The system service gridops-host-agent is running the new binary. Logs: journalctl -u gridops-host-agent"
+  exit 0
+fi
 
 mkdir -p "$INSTALL_DIR"
 bin="$INSTALL_DIR/gridops-host-agent"
