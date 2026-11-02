@@ -21,6 +21,7 @@ import {
 } from "./ui/dropdown-menu";
 import { Tooltip } from "./ui/tooltip";
 import { api, type Viewer } from "~/lib/api";
+import { APP_VERSION_LABEL } from "~/lib/app-version";
 import { allNavItems, isActivePath, navigation, settingsNavItem, type NavGroup, type NavItem } from "~/lib/navigation";
 import { useGlobalHotkeys } from "~/lib/use-hotkeys";
 import { cn } from "~/lib/utils";
@@ -80,7 +81,7 @@ export function AppShell({ children, sidebar }: { children: React.ReactNode; sid
 
   return (
     <ShellContext.Provider value={shell}>
-      <div className="fixed inset-0 flex overflow-hidden bg-background text-foreground">
+      <div className="fixed inset-x-0 bottom-0 top-[var(--version-bar-height)] flex overflow-hidden bg-background text-foreground">
         <a className="sr-only z-[100] rounded-md bg-popover px-3 py-2 text-sm font-medium shadow-popover focus:not-sr-only focus:fixed focus:left-3 focus:top-3" href="#main">Skip to content</a>
         <div className="hidden lg:flex">{sidebar ?? <Sidebar onSearch={openCommandMenu} viewer={viewer} />}</div>
         {/* A modal drawer on narrow screens: Escape and the backdrop close it, and focus stays inside while open. */}
@@ -262,7 +263,7 @@ function WorkspaceMenu({ viewer }: { viewer: Viewer | null }) {
         <DropdownMenuItem icon={<Settings />} onSelect={() => void navigate({ to: "/settings" })} shortcut={["G", "S"]}>Settings</DropdownMenuItem>
         <DropdownMenuItem icon={theme === "dark" ? <Sun /> : <Moon />} onSelect={toggleTheme}>Switch to {theme === "dark" ? "light" : "dark"} theme</DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuLabel>GridOps v0.1.0</DropdownMenuLabel>
+        <DropdownMenuLabel>GridOps {APP_VERSION_LABEL}</DropdownMenuLabel>
         {viewer ? (
           <DropdownMenuItem icon={<LogOut />} onSelect={() => void api("/auth/logout", { method: "POST" }).then(() => { window.location.href = "/login"; })}>Sign out</DropdownMenuItem>
         ) : (

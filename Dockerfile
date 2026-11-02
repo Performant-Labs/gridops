@@ -6,7 +6,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 FROM ui-dependencies AS ui-build
-COPY index.html tsconfig.json vite.config.ts ./
+# Cargo.toml: the version bar reads the workspace version. GRIDOPS_COMMIT: this stage has no .git (pass --build-arg GRIDOPS_COMMIT=<sha>).
+ARG GRIDOPS_COMMIT=""
+ENV GRIDOPS_COMMIT=$GRIDOPS_COMMIT
+COPY index.html tsconfig.json vite.config.ts Cargo.toml ./
 COPY src ./src
 RUN npm run build
 

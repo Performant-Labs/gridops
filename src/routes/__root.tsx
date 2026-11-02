@@ -10,6 +10,7 @@ import { GridMark } from "~/components/grid-logo";
 import { ThemeProvider, useTheme } from "~/components/theme-provider";
 import { buttonVariants } from "~/components/ui/button";
 import { TooltipProvider } from "~/components/ui/tooltip";
+import { VersionBar } from "~/components/version-bar";
 import { getViewer } from "~/lib/api";
 import { safeReturnTo } from "~/lib/auth-navigation";
 
@@ -46,7 +47,10 @@ function RootComponent() {
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider delayDuration={450} skipDelayDuration={400}>
-          <Outlet />
+          <VersionBar />
+          <div className="pt-[var(--version-bar-height)]">
+            <Outlet />
+          </div>
           <ConfirmHost />
           <ThemeToaster />
         </TooltipProvider>
