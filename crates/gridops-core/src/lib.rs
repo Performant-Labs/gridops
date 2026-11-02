@@ -19,7 +19,7 @@ pub use autoscaling::{
     is_runner_system_label, next_runner_provider, next_runner_repository, provider_capacities,
     provider_capacity_deficit, provider_supports_labels, queued_job_assignments,
     queued_job_ownership, repository_capacities, repository_capacity_deficit, runner_arch_label,
-    runner_supports_system_label, runner_system_labels, scale_up_target,
+    runner_supports_system_label, runner_system_labels, scale_up_target, waiting_job_ownership,
 };
 pub use bitbucket::{
     BitbucketClient, BitbucketRunner, BitbucketRunnerOAuthClient, BitbucketRunnerState,

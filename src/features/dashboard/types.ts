@@ -11,15 +11,39 @@ export type DashboardOverview = {
     webhookUrl: string;
   };
   metrics: {
+    /** Every runner that is not deleted: busy + idle + starting + unavailable. */
     runners: number;
+    /** Busy + idle, as before the runner states were split. */
     online: number;
+    /** Working on a job (by status, not by the busy flag). */
     busy: number;
+    /** Online and not busy: capacity free for the queue. */
+    idle: number;
+    starting: number;
+    /** Paused, stopped, failed or any other state that cannot take a job. */
+    unavailable: number;
+    /** Every job waiting to start: queuedWaiting + queuedUnmatched. */
     queuedJobs: number;
+    /** Queued jobs a pool could run once it has capacity. */
+    queuedWaiting: number;
+    /** Queued jobs no available pool can ever run (no label match, or the matching pools are paused or tripped). */
+    queuedUnmatched: number;
     successRate: number | null;
     /** Days of completed runs the rate covers; older servers omit it. */
     successRateWindowDays?: number;
     /** Runs counted in the rate (skipped and cancelled excluded); older servers omit it. */
     successRateRuns?: number;
+  };
+  /**
+   * How the queue splits over the pool rows: the rows' `queue` plus
+   * `otherPools` plus `unmatched` is `metrics.queuedJobs`.
+   */
+  queue: {
+    unmatched: number;
+    /** Waiting jobs owned by pools that are not among the listed rows. */
+    otherPools: number;
+    /** Labels no pool has, with the jobs that ask for them. */
+    missingLabels: Array<{ labels: string[]; jobs: number }>;
   };
   slo: {
     windowHours: number;
@@ -42,6 +66,7 @@ export type DashboardOverview = {
     desired: number;
     online: number;
     busy: number;
+    /** Queued jobs this pool serves; a job is counted by one pool only. */
     queue: number;
     mode: string;
     status: string;

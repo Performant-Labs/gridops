@@ -227,8 +227,51 @@ pub async fn queued_job_ownership(
 /// busy count, the queue or a pool's settings change, so ownership can't
 /// alternate between ticks on its own.
 async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
+    let candidates = queued_job_candidates(database, false).await?;
+    Ok(assign_queued_jobs(candidates.into_iter().map(
+        |candidate| (candidate.job, candidate.pool, candidate.room),
+    )))
+}
+
+/// The owner of every job waiting to start that has one, for showing the queue
+/// to people: [`queued_job_ownership`] with two differences. Jobs GitHub lists
+/// as `waiting`, `pending` or `requested` count as well as `queued` ones, so
+/// the Overview counts the same statuses as the run list, and a pool whose
+/// provisioning circuit is open is passed over, since it can't start a runner
+/// until it is retried. The pools that did the scaling are not changed by
+/// either difference. A job with no entry has no pool that can serve it: none
+/// has its labels, or every one that does is paused, has autoscaling off or
+/// has an open circuit.
+pub async fn waiting_job_ownership(
+    database: &SqlitePool,
+) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
+    let candidates = queued_job_candidates(database, true).await?;
+    Ok(assign_queued_jobs(
+        candidates
+            .into_iter()
+            .filter(|candidate| !candidate.circuit_open)
+            .map(|candidate| (candidate.job, candidate.pool, candidate.room)),
+    ))
+}
+
+/// A pool that could run a queued job, with the room it has left.
+struct QueuedJobCandidate {
+    job: i64,
+    pool: String,
+    room: i64,
+    circuit_open: bool,
+}
+
+/// Every (job, pool) pair where the pool could run the job, each job's pools
+/// together in the order [`queued_job_owners`] prefers them. With
+/// `every_waiting_status`, jobs that are `waiting`, `pending` or `requested`
+/// are included as well as `queued` ones.
+async fn queued_job_candidates(
+    database: &SqlitePool,
+    every_waiting_status: bool,
+) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT wj.id AS job_id,candidate.id AS pool_id,
+        r#"SELECT wj.id AS job_id,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
           candidate.max_count-(SELECT COUNT(*) FROM runners runner
             WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
               AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS room
@@ -270,21 +313,25 @@ async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<QueuedJobOwner>,
                 )
               )
             )
-          WHERE wj.status='queued' AND wr.status!='completed'
+          WHERE (wj.status='queued' OR (? AND wj.status IN ('waiting','pending','requested')))
+            AND wr.status!='completed'
           ORDER BY wj.created_at,wj.id,
             CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
             candidate.created_at,candidate.id"#,
     )
     .bind(runner_arch_label())
+    .bind(every_waiting_status)
     .fetch_all(database)
     .await?;
-    Ok(assign_queued_jobs(rows.into_iter().map(|row| {
-        (
-            row.get::<i64, _>("job_id"),
-            row.get::<String, _>("pool_id"),
-            row.get::<i64, _>("room"),
-        )
-    })))
+    Ok(rows
+        .into_iter()
+        .map(|row| QueuedJobCandidate {
+            job: row.get::<i64, _>("job_id"),
+            pool: row.get::<String, _>("pool_id"),
+            room: row.get::<i64, _>("room"),
+            circuit_open: row.get::<bool, _>("circuit_open"),
+        })
+        .collect())
 }
 
 /// Gives each job to its first candidate with room; see [`queued_job_owners`].
@@ -1108,6 +1155,46 @@ mod tests {
 
         assert_eq!(owned(&database, "older").await?, vec![100, 101]);
         assert_eq!(owned(&database, "newer").await?, vec![102, 103]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_jobs_are_served_by_one_pool_that_can_start_a_runner() -> anyhow::Result<()> {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("tripped", 1, 10),
+            org_pool("open", 2, 10),
+            shared_jobs(100..101),
+            // Waiting, pending and requested jobs are waiting to start too.
+            "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (101,20,'approval','waiting','[\"shared\"]','https://github.com/octo-org/gridops/actions/runs/20/job/101',2,2),
+              (102,20,'later','requested','[\"shared\"]','https://github.com/octo-org/gridops/actions/runs/20/job/102',3,3),
+              (103,20,'running','in_progress','[\"shared\"]','https://github.com/octo-org/gridops/actions/runs/20/job/103',4,4);"
+        ))
+        .await?;
+        sqlx::raw_sql("UPDATE runner_pools SET provision_circuit_open=1 WHERE id='tripped';")
+            .execute(&database)
+            .await?;
+
+        // The pool with an open circuit is passed over for display, and
+        // scaling still sees only the plainly queued job, as it always did.
+        let serving = waiting_job_ownership(&database).await?;
+        assert_eq!(serving.len(), 3);
+        assert!(
+            serving.iter().all(|owner| owner.pool_id == "open"),
+            "{serving:?}"
+        );
+        assert_eq!(assigned_queued_jobs(&database, "tripped").await?, 1);
+        assert_eq!(assigned_queued_jobs(&database, "open").await?, 0);
+
+        // With the only other pool tripped too, nobody serves the jobs.
+        sqlx::raw_sql("UPDATE runner_pools SET provision_circuit_open=1 WHERE id='open';")
+            .execute(&database)
+            .await?;
+        assert!(waiting_job_ownership(&database).await?.is_empty());
 
         database.close().await;
         fs::remove_dir_all(directory)?;
