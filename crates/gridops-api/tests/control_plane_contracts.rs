@@ -755,3 +755,51 @@ async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecti
 
     Ok(())
 }
+
+#[tokio::test]
+async fn success_rate_covers_seven_days_and_excludes_skipped_runs() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    let now = gridops_core::now_millis();
+    let day = 24 * 60 * 60 * 1_000_i64;
+    sqlx::query("INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at) VALUES (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',?,?,?)")
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&database)
+        .await?;
+    // In-window: one success, one failure, one cancelled, one skipped.
+    // Outside the window: successes and failures that must not move the
+    // number, proving the metric is a current-health signal, not history.
+    let mut statements = Vec::new();
+    for (id, conclusion, completed_ago_days) in [
+        (100_i64, "success", 1_i64),
+        (101, "failure", 2),
+        (102, "skipped", 1),
+        (103, "cancelled", 1),
+        (104, "success", 20),
+        (105, "failure", 20),
+    ] {
+        statements.push(format!(
+            "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at,completed_at) VALUES ({id},7,'CI',{id},'push','completed','{conclusion}','abc','u',{ts},{ts},{ts},{ts},{completed});",
+            ts = now,
+            completed = now - completed_ago_days * day,
+        ));
+    }
+    let seed = statements.join("\n");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(seed))
+        .execute(&database)
+        .await?;
+
+    let response = fixture
+        .client
+        .get(format!("{}/api/v1/overview", fixture.base_url))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    // Skipped leaves the denominator: 1 success in 3 decisive runs.
+    assert_eq!(body["metrics"]["successRate"], Value::from(33.3));
+    Ok(())
+}

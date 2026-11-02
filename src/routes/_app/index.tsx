@@ -112,7 +112,7 @@ function MetricStrip({ data }: { data: DashboardOverview }) {
     { label: "Runners", value: data.metrics.runners, hint: `${data.metrics.online} online`, to: "/runners", tone: data.metrics.online > 0 ? "success" : "neutral" },
     { label: "Busy", value: data.metrics.busy, hint: "Running jobs now", to: "/runners", tone: data.metrics.busy > 0 ? "progress" : "neutral" },
     { label: "Queued jobs", value: data.metrics.queuedJobs, hint: data.metrics.queuedJobs > 0 ? "Waiting for a runner" : "Queue is clear", to: "/workflow-runs", tone: data.metrics.queuedJobs > 0 ? "warning" : "success" },
-    { label: "Success rate", value: data.metrics.successRate === null ? "—" : `${data.metrics.successRate}%`, hint: "Completed runs", to: "/workflow-runs", tone: successTone(data.metrics.successRate) },
+    { label: "Success rate", value: data.metrics.successRate === null ? "—" : `${data.metrics.successRate}%`, hint: "Last 7 days, excluding skipped", to: "/workflow-runs", tone: successTone(data.metrics.successRate) },
   ] as const;
   return (
     <section aria-label="Runner metrics" className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border xl:grid-cols-4">

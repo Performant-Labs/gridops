@@ -277,6 +277,10 @@ pub async fn overview(
             "pools": [], "runs": [], "activity": [], "installations": 0,
         })));
     };
+    // Success rate is a current-health signal, not history: it covers the
+    // last seven days, and neutral outcomes (skipped) leave the denominator
+    // so they stop reading as failures.
+    let metrics_window_start = now_millis().saturating_sub(7 * 24 * 60 * 60 * 1_000);
     let metrics = sqlx::query(
         r#"SELECT
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL THEN r.id END) AS runners,
@@ -288,10 +292,12 @@ pub async fn overview(
             WHERE ui2.user_id=? AND wj.status='queued' AND wr.status!='completed') AS queued_jobs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui3 ON ui3.installation_id=repo.installation_id
-            WHERE ui3.user_id=? AND wr.completed_at IS NOT NULL) AS completed_runs,
+            WHERE ui3.user_id=? AND wr.completed_at IS NOT NULL
+              AND wr.completed_at>=? AND wr.conclusion<>'skipped') AS completed_runs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui4 ON ui4.installation_id=repo.installation_id
-            WHERE ui4.user_id=? AND wr.conclusion='success') AS successful_runs
+            WHERE ui4.user_id=? AND wr.conclusion='success'
+              AND wr.completed_at>=?) AS successful_runs
         FROM runner_pools p
         LEFT JOIN runners r ON r.pool_id=p.id
         WHERE EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
@@ -303,7 +309,9 @@ pub async fn overview(
     )
     .bind(&user.id)
     .bind(&user.id)
+    .bind(metrics_window_start)
     .bind(&user.id)
+    .bind(metrics_window_start)
     .bind(&user.id)
     .fetch_one(&state.database)
     .await?;
