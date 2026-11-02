@@ -250,3 +250,13 @@ offline, and the start grant can't exceed local authority.
   only for the live session and when received less than 45 s ago.
 - **Events** are append-only. Host retirement and credential rotation keep
   history and foreign keys intact.
+- A placement that fails records a `placement_failed` event on its host. Its
+  detail holds a stable `reason`, a short `message` and the numbers behind it
+  (such as `elapsed_ms` and `allowed_ms`), and its runner's `failure_reason`
+  carries the same message. The reasons are `agent_reported`,
+  `agent_outcome_unknown`, `prepare_deadline_expired`, `start_deadline_expired`,
+  `agent_session_lost`, `host_epoch_changed`, `runner_removed_before_start`,
+  `operator_released` and `unknown`. The host detail read summarises them as
+  `failedPlacementsLastHour` and `recentPlacementFailures` (the last 24 hours,
+  grouped by reason). Only failures after the release that added this are
+  recorded; earlier failed placements have no event.

@@ -126,6 +126,28 @@ export const fleetApprovalEvidenceSchema = z.discriminatedUnion("state", [
   }),
 ]);
 
+export const placementFailureReasons = [
+  "agent_reported",
+  "agent_outcome_unknown",
+  "prepare_deadline_expired",
+  "start_deadline_expired",
+  "agent_session_lost",
+  "host_epoch_changed",
+  "runner_removed_before_start",
+  "operator_released",
+  "unknown",
+] as const;
+
+/** Failed placements of one reason on a machine, with the newest one's message. */
+export const placementFailureGroupSchema = z.strictObject({
+  reason: z.enum(placementFailureReasons),
+  message: z.string().max(240),
+  count: safeInteger,
+  latestAt: fleetTimestampSchema,
+  latestPlacementId: fleetIdSchema,
+});
+export type PlacementFailureGroup = z.infer<typeof placementFailureGroupSchema>;
+
 const hostReadV1HostSchema = z.strictObject({
   projection: z.literal("host"),
   id: fleetIdSchema,
@@ -152,6 +174,8 @@ const hostReadV1HostSchema = z.strictObject({
   duplicateHardware: z.boolean(),
   credentialGeneration: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   enrollmentTargetIds: z.array(fleetIdSchema).max(64),
+  failedPlacementsLastHour: safeInteger,
+  recentPlacementFailures: z.array(placementFailureGroupSchema).max(10),
 });
 
 const hostReadV1TargetSchema = z.strictObject({
@@ -266,6 +290,7 @@ export const hostEventReadV1Schema = z.strictObject({
     "backend_changed",
     "placement_queued",
     "placement_admitted",
+    "placement_failed",
     "placement_changed",
     "command_changed",
     "other",

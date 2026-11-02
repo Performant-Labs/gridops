@@ -17,7 +17,7 @@ use super::{
 };
 use crate::fleet::{
     Architecture, BackendReadiness, EnrollmentState, ExecutionOs, Freshness, HostIntent,
-    IntegrityState, PressureState, RuntimeKind,
+    IntegrityState, PlacementFailureReason, PressureState, RuntimeKind,
     ids::{
         BackendId, CiTargetId, EventId, HostId, PlacementId, ResourceDomainId, Revision,
         UpstreamText,
@@ -159,6 +159,12 @@ pub enum HostReadV1 {
         /// Targets the host's enrollment was issued for; approval may grant
         /// only these.
         enrollment_target_ids: Vec<crate::fleet::ids::CiTargetId>,
+        /// Placements on this host that failed in the last hour, from the
+        /// failures recorded for them.
+        failed_placements_last_hour: BrowserUint53,
+        /// The last day's recorded failures, grouped by reason, newest group
+        /// first.
+        recent_placement_failures: Vec<PlacementFailureReadV1>,
     },
     Target {
         id: HostId,
@@ -167,6 +173,18 @@ pub enum HostReadV1 {
         architecture: Architecture,
         counts: TargetFleetRecordCounts,
     },
+}
+
+/// Failed placements of one reason on a host, with the newest one's message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlacementFailureReadV1 {
+    pub reason: PlacementFailureReason,
+    /// The newest failure's message.
+    pub message: String,
+    pub count: BrowserUint53,
+    pub latest_at: WireTimestamp,
+    pub latest_placement_id: PlacementId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +475,7 @@ pub enum HostEventKindV1 {
     BackendChanged,
     PlacementQueued,
     PlacementAdmitted,
+    PlacementFailed,
     PlacementChanged,
     CommandChanged,
     Other,

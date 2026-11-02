@@ -17,6 +17,7 @@ use gridops_core::{
     JitRequest, RunnerTarget,
     fleet::{
         CiTarget, ExternalId, FleetService, Principal, SubmitIntent, WorkloadKind,
+        failure::PlacementFailure,
         ids::{Generation, ProfileId, WorkloadId},
         placement::{self, Placement},
         protocol::{
@@ -349,7 +350,13 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
     .context("runner row is missing")?;
     if runner.get::<String, _>("status") != "starting" {
         // Deleted before it started: abandon the placement and free its room.
-        placement::abandon_unstarted(&app.database, placement.id).await?;
+        let status: String = runner.get("status");
+        placement::abandon_unstarted(
+            &app.database,
+            placement.id,
+            &PlacementFailure::runner_removed_before_start(&status),
+        )
+        .await?;
         return Ok(());
     }
     let name: String = runner.get("name");
@@ -550,7 +557,10 @@ async fn follow(app: &Reconciler, placement: &Placement) -> Result<()> {
 /// proves it gone and frees its capacity.
 async fn finish(app: &Reconciler, placement: &Placement) -> Result<()> {
     if placement.state == "failed" {
-        placement::abandon_unstarted(&app.database, placement.id).await?;
+        // Already failed, and its cause recorded when it did; this only frees
+        // what it still holds.
+        placement::abandon_unstarted(&app.database, placement.id, &PlacementFailure::unknown())
+            .await?;
     }
     if placement.state == "uncertain"
         && let Some(SuccessEvidence::RunnerStarted { local_identity, .. }) =

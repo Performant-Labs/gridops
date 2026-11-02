@@ -25,6 +25,7 @@ import {
   lifecycleLabel, newIdempotencyKey, osLabel, platformLabel, runtimeLabel,
 } from "~/features/fleet/fleet-ui";
 import { MachineBudgetSection } from "~/features/fleet/machine-budget-section";
+import { failureReasonLabel, failuresLastHourLabel } from "~/features/fleet/placement-failures";
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
 import type { BackendReadV1, HostEventReadV1, HostReadV1 } from "~/features/fleet/query-contracts";
 import { FleetRequestError, approveHost, recoverHost, rotateHostCredential } from "~/features/fleet/registry-api";
@@ -144,6 +145,7 @@ function MachineDetail({ host }: { host: HostItem }) {
           <MachineBudgetSection budget={host.physicalBudget} hostId={host.id} onSaved={() => queryClient.invalidateQueries({ queryKey: ["fleet"] })} />
         ) : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
+        {approved ? <PlacementFailuresSection host={host} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
         <EventsSection items={events.data?.items} query={events} />
       </div>
@@ -706,6 +708,41 @@ function BackendsSection({ hostId, items, query }: { hostId: string; items?: Bac
   );
 }
 
+/** Why jobs failed to start on this machine in the last day, grouped by reason. */
+function PlacementFailuresSection({ host }: { host: HostItem }) {
+  const groups = host.recentPlacementFailures;
+  const lastHour = failuresLastHourLabel(host.failedPlacementsLastHour);
+  return (
+    <section className="space-y-3">
+      <SectionHeading>Recent placement failures</SectionHeading>
+      {groups.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No failed placements recorded in the last 24 hours.</p>
+      ) : (
+        <>
+          {lastHour ? <p className="text-sm text-danger">{lastHour}</p> : null}
+          <ul className="divide-y divide-border rounded-lg border border-border bg-panel">
+            {groups.map((group) => (
+              <li className="flex items-start justify-between gap-3 px-4 py-2.5 text-sm" key={group.reason}>
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{failureReasonLabel(group.reason)}</span>
+                    <code className="font-mono text-xs text-muted-foreground">{group.reason}</code>
+                  </div>
+                  {group.message ? <p className="text-xs text-muted-foreground">{group.message}</p> : null}
+                </div>
+                <div className="shrink-0 text-right text-xs text-muted-foreground">
+                  <div className="tabular">{group.count === 1 ? "1 time" : `${group.count} times`}</div>
+                  <time dateTime={group.latestAt} title={formatDateTime(group.latestAt)}>{formatRelativeTime(group.latestAt)}</time>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
 const eventLabel: Record<HostEventReadV1["kind"], string> = {
   enrollment_issued: "Enrollment code issued",
   enrollment_consumed: "Agent enrolled",
@@ -719,6 +756,7 @@ const eventLabel: Record<HostEventReadV1["kind"], string> = {
   backend_changed: "Backend changed",
   placement_queued: "Job queued",
   placement_admitted: "Job started",
+  placement_failed: "Job failed",
   placement_changed: "Job changed",
   command_changed: "Command changed",
   other: "Machine updated",

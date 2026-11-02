@@ -159,6 +159,23 @@
         "required": ["id", "name", "hostOs", "architecture", "enrollment", "lifecycle", "integrity", "freshness", "pressure", "revision", "backendCount", "runnerCount"],
         "additionalProperties": false
       },
+      "PlacementFailureGroup": {
+        "type": "object",
+        "description": "Placements on one host that failed for the same reason in the last 24 hours.",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why the placement failed. Derived from facts the server had when it failed; `unknown` when no cause was available or the code is not recognised.",
+            "enum": ["agent_reported", "agent_outcome_unknown", "prepare_deadline_expired", "start_deadline_expired", "agent_session_lost", "host_epoch_changed", "runner_removed_before_start", "operator_released", "unknown"]
+          },
+          "message": { "type": "string", "maxLength": 240, "description": "The newest failure's message." },
+          "count": { "type": "integer", "minimum": 1 },
+          "latestAt": { "type": "string", "format": "date-time" },
+          "latestPlacementId": { "$ref": "#/components/schemas/Uuid" }
+        },
+        "required": ["reason", "message", "count", "latestAt", "latestPlacementId"],
+        "additionalProperties": false
+      },
       "HostPage": {
         "type": "object",
         "properties": {
@@ -340,7 +357,7 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
-          "200": { "description": "Host detail (projection `host`)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "200": { "description": "Host detail (projection `host`). The `host` projection also carries `failedPlacementsLastHour` (integer) and `recentPlacementFailures`, the last 24 hours of recorded placement failures grouped by reason, newest group first (see `PlacementFailureGroup`).", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "type": "object", "properties": { "failedPlacementsLastHour": { "type": "integer", "minimum": 0 }, "recentPlacementFailures": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/PlacementFailureGroup" } } } } } } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }
@@ -412,7 +429,7 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
-          "200": { "description": "Event page", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "200": { "description": "Event page. A placement that failed has an event of kind `placement_failed`; its cause is on the host detail's `recentPlacementFailures`.", "content": { "application/json": { "schema": { "type": "object" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

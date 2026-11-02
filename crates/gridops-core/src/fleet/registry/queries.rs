@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::RegistryService;
 use crate::fleet::{
     Architecture, BackendReadiness, EnrollmentState, ExecutionOs, Freshness, HostIntent,
-    IntegrityState, PressureState, RuntimeKind,
+    IntegrityState, PlacementFailureReason, PressureState, RuntimeKind,
     authorization::Principal,
     cursor::{CursorCodec, CursorError, CursorPosition, CursorScope, CursorStream, RetainedFrom},
     ids::{BackendId, CiTargetId, ControlPlaneIncarnation, EventId, HostId, ResourceDomainId},
@@ -28,7 +28,8 @@ use crate::fleet::{
             BackendSafeReasonV1, CatalogQuery, CheckedTags, CountScope, CoverageV1, DomainReadV1,
             EventQuery, FleetRecordCounts, HostEventKindV1, HostEventReadV1, HostReadV1,
             InventoryEvidenceV1, MeasurementReadV1, ObservedCapacityV1, ObservedDomainKindV1,
-            QueryPage, QueryResult, SampleProvenanceV1, SampleQuery, SampleReadV1,
+            PlacementFailureReadV1, QueryPage, QueryResult, SampleProvenanceV1, SampleQuery,
+            SampleReadV1,
         },
     },
 };
@@ -1745,6 +1746,7 @@ fn event_kind(value: &str) -> HostEventKindV1 {
         }
         "fleet.inventory.received" => HostEventKindV1::InventoryReceived,
         "fleet.inventory.conflict" => HostEventKindV1::InventoryConflict,
+        crate::fleet::failure::PLACEMENT_FAILED_EVENT => HostEventKindV1::PlacementFailed,
         value if value.starts_with("fleet.backend.") => HostEventKindV1::BackendChanged,
         value if value.starts_with("fleet.placement.queued") => HostEventKindV1::PlacementQueued,
         value if value.starts_with("fleet.placement.admitted") => {
@@ -1754,6 +1756,70 @@ fn event_kind(value: &str) -> HostEventKindV1 {
         value if value.starts_with("fleet.command.") => HostEventKindV1::CommandChanged,
         _ => HostEventKindV1::Other,
     }
+}
+
+/// The host's recorded placement failures: how many placements failed in the
+/// last hour, and the last day's failures grouped by reason, newest first.
+/// Codes this build does not know read as `unknown` and group together.
+async fn placement_failures(
+    tx: &mut Transaction<'_, Sqlite>,
+    host_id: HostId,
+    now: i64,
+) -> Result<(BrowserUint53, Vec<PlacementFailureReadV1>), QueryError> {
+    let last_hour: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fleet_events
+          WHERE host_id=? AND kind=? AND created_at>=?",
+    )
+    .bind(host_id.to_string())
+    .bind(crate::fleet::failure::PLACEMENT_FAILED_EVENT)
+    .bind(now - 3_600_000)
+    .fetch_one(&mut **tx)
+    .await?;
+    let rows = sqlx::query(
+        "SELECT e.placement_id,e.created_at,e.cursor,
+                json_extract(e.detail_json,'$.reason') AS reason,
+                json_extract(e.detail_json,'$.message') AS message
+           FROM fleet_events e
+          WHERE e.host_id=? AND e.kind=? AND e.created_at>=? AND e.placement_id IS NOT NULL
+          ORDER BY e.created_at DESC,e.cursor DESC",
+    )
+    .bind(host_id.to_string())
+    .bind(crate::fleet::failure::PLACEMENT_FAILED_EVENT)
+    .bind(now - 86_400_000)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut groups: Vec<PlacementFailureReadV1> = Vec::new();
+    for row in rows {
+        let reason = PlacementFailureReason::from_code(
+            row.get::<Option<String>, _>("reason")
+                .unwrap_or_default()
+                .as_str(),
+        );
+        if let Some(group) = groups.iter_mut().find(|group| group.reason == reason) {
+            group.count = BrowserUint53::new(group.count.get() + 1)?;
+            continue;
+        }
+        groups.push(PlacementFailureReadV1 {
+            reason,
+            message: row
+                .get::<Option<String>, _>("message")
+                .unwrap_or_default()
+                .chars()
+                .take(240)
+                .collect(),
+            count: BrowserUint53::new(1)?,
+            latest_at: wire_timestamp(row.get("created_at"))?,
+            latest_placement_id: row
+                .get::<String, _>("placement_id")
+                .parse()
+                .map_err(|_| QueryError::MalformedData)?,
+        });
+    }
+    groups.truncate(10);
+    Ok((
+        BrowserUint53::new(u64::try_from(last_hour).map_err(|_| QueryError::MalformedData)?)?,
+        groups,
+    ))
 }
 
 async fn inventory_evidence(
@@ -1993,6 +2059,8 @@ impl RegistryService {
             .and_then(|scope| scope.get("target_ids").cloned())
             .and_then(|ids| serde_json::from_value(ids).ok())
             .unwrap_or_default();
+        let (failed_placements_last_hour, recent_placement_failures) =
+            placement_failures(tx, host_id, snapshot.now).await?;
         Ok(HostReadV1::Host {
             id,
             name,
@@ -2023,6 +2091,8 @@ impl RegistryService {
                 u64::try_from(generation).map_err(|_| QueryError::MalformedData)?,
             )?,
             enrollment_target_ids,
+            failed_placements_last_hour,
+            recent_placement_failures,
         })
     }
 

@@ -165,6 +165,41 @@ fn starts(runtime: &FakeDocker) -> Result<usize> {
         .count())
 }
 
+/// The `placement_failed` events recorded for the placement, oldest first,
+/// as their detail objects.
+async fn failure_events(f: &Fixture, placement: PlacementId) -> Result<Vec<Value>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT detail_json FROM fleet_events WHERE placement_id=? AND kind='placement_failed'
+          ORDER BY cursor",
+    )
+    .bind(placement.to_string())
+    .fetch_all(&f.database)
+    .await?;
+    rows.iter()
+        .map(|row| Ok(serde_json::from_str(row)?))
+        .collect()
+}
+
+/// The one recorded failure of the placement, checked to carry the reason
+/// and a message, and mirrored on its runner row.
+async fn the_failure(f: &Fixture, placement: PlacementId, reason: &str) -> Result<Value> {
+    let mut events = failure_events(f, placement).await?;
+    assert_eq!(events.len(), 1, "one placement_failed event: {events:?}");
+    let detail = events.remove(0);
+    assert_eq!(detail["reason"], reason, "{detail}");
+    let message = detail["message"].as_str().context("message")?;
+    assert!(!message.is_empty());
+    let runner: Option<String> = sqlx::query_scalar(
+        "SELECT r.failure_reason FROM runners r JOIN workload_placements p ON p.workload_id=r.id
+          WHERE p.id=?",
+    )
+    .bind(placement.to_string())
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(runner.as_deref(), Some(message));
+    Ok(detail)
+}
+
 async fn allocation_states(f: &Fixture, placement: PlacementId) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT DISTINCT state FROM capacity_allocations WHERE placement_id=? ORDER BY state",
@@ -310,6 +345,18 @@ async fn restart_mid_prepare(older_agent: bool) -> Result<()> {
     .fetch_one(&f.database)
     .await?;
     assert_eq!(reported, if older_agent { "uncertain" } else { "failed" });
+    let failure = the_failure(
+        &f,
+        placement_id,
+        if older_agent {
+            "agent_outcome_unknown"
+        } else {
+            "agent_reported"
+        },
+    )
+    .await?;
+    assert_eq!(failure["command_kind"], "prepare_environment");
+    assert!(failure["agent_code"].is_string(), "{failure}");
     within("a new session", || async {
         Ok((agent_session(&f, &host).await? != session).then_some(()))
     })
@@ -369,6 +416,9 @@ async fn host_recovers_when_a_delivered_command_never_reaches_it() -> Result<()>
     .fetch_one(&f.database)
     .await?;
     assert_eq!(command, "cancelled");
+    let failure = the_failure(&f, placement_id, "agent_session_lost").await?;
+    assert_eq!(failure["command_kind"], "start_runner");
+    assert_eq!(failure["session"], "reconnected");
     assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
     assert!(
         !runtime
@@ -429,6 +479,41 @@ async fn a_start_queued_behind_a_slow_one_expires_before_reaching_the_machine() 
         ("cancelled".to_owned(), 0)
     );
     assert_eq!(starts(&runtime)?, 1);
+    let failure = the_failure(&f, queued, "start_deadline_expired").await?;
+    assert_eq!(failure["command_kind"], "start_runner");
+    assert_eq!(failure["allowed_ms"], 6_000);
+    assert_eq!(failure["delivered"], false);
+    assert!(failure["elapsed_ms"].as_i64().is_some_and(|ms| ms > 0));
+    assert!(failure_events(&f, slow).await?.is_empty());
+    // The machine's own read says what failed.
+    let read = |path: String| f.client.get(f.url(&path)).header(header::COOKIE, &f.cookie);
+    let detail: Value = read(format!("/hosts/{host}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["item"]["failedPlacementsLastHour"], 1);
+    let recent = &detail["item"]["recentPlacementFailures"];
+    assert_eq!(recent.as_array().map(Vec::len), Some(1), "{recent}");
+    assert_eq!(recent[0]["reason"], "start_deadline_expired");
+    assert_eq!(recent[0]["count"], 1);
+    assert_eq!(recent[0]["latestPlacementId"], queued.to_string());
+    assert_eq!(recent[0]["message"], failure["message"]);
+    assert!(recent[0]["latestAt"].is_string());
+    let events: Value = read(format!("/hosts/{host}/events?limit=100"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let kinds: Vec<&str> = events["items"]
+        .as_array()
+        .context("events")?
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"placement_failed"), "{kinds:?}");
     assert_eq!(allocation_states(&f, queued).await?, ["released"]);
     assert_eq!(allocation_states(&f, slow).await?, ["committed"]);
     within("work authority", || has_authority(&f, &host)).await?;
@@ -482,6 +567,9 @@ async fn host_recovers_when_its_agent_gets_a_start_too_late_to_run() -> Result<(
     })
     .await?;
     assert_eq!(start_command(&f, placement_id).await?.0, "failed");
+    let failure = the_failure(&f, placement_id, "agent_reported").await?;
+    assert_eq!(failure["command_kind"], "start_runner");
+    assert_eq!(failure["agent_code"], "deadline");
     assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
     assert_eq!(starts(&runtime)?, 0);
     within("work authority", || has_authority(&f, &host)).await?;
@@ -772,6 +860,8 @@ async fn an_administrator_repairs_a_placement_the_agent_cannot_confirm() -> Resu
     let repaired: Value = repair().send().await?.error_for_status()?.json().await?;
     assert_eq!(repaired["repaired"], json!([placement_id]));
     assert_eq!(placement_state(&f, placement_id).await?, "failed");
+    let failure = the_failure(&f, placement_id, "operator_released").await?;
+    assert_eq!(failure["cancelled_commands"], json!(["start_runner"]));
     assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
     let audit: String = sqlx::query_scalar(
         "SELECT metadata FROM audit_events WHERE action='fleet.placement.repaired' AND target_id=?",
@@ -786,11 +876,155 @@ async fn an_administrator_repairs_a_placement_the_agent_cannot_confirm() -> Resu
     // Repeating it changes nothing.
     let again: Value = repair().send().await?.error_for_status()?.json().await?;
     assert_eq!(again["repaired"], json!([]));
+    assert_eq!(failure_events(&f, placement_id).await?.len(), 1);
 
     // The agent's late answer can't undo the repair, and the machine works.
     proxy.faults.refuse_results.store(false, Ordering::SeqCst);
     within("work authority", || has_authority(&f, &host)).await?;
     assert_eq!(placement_state(&f, placement_id).await?, "failed");
+
+    let _ = machine.stop.send(());
+    assert_eq!(machine.running.await??, Stop::Shutdown);
+    Ok(())
+}
+
+/// A start that was queued for one agent session can't be delivered once that
+/// session is gone. Each way of losing it fails the placement with the reason
+/// it actually happened, so an operator can tell a dropped session from a
+/// re-enrolled machine.
+async fn start_stranded(change: &str, reason: &str, session: Option<&str>) -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    // The agent goes away before it can take the start.
+    machine.running.abort();
+    issue_start(&f, placement_id, workload, 30_000).await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE fleet_hosts SET {change} WHERE id=?"
+    )))
+    .bind(&host)
+    .execute(&f.database)
+    .await?;
+    // The next poll for the host sweeps the commands that can't be delivered.
+    let identity = machine.journal.identity().await?.context("identity")?;
+    inventory::agent_post(
+        &f,
+        &host,
+        identity.credential.expose_secret(),
+        "commands/poll",
+    )
+    .json(&json!({"authority_session_id":Uuid::new_v4(),"wait_ms":0,"limit":1}))
+    .send()
+    .await?;
+    assert_eq!(placement_state(&f, placement_id).await?, "failed");
+    let failure = the_failure(&f, placement_id, reason).await?;
+    assert_eq!(failure["command_kind"], "start_runner");
+    assert_eq!(failure["delivered"], false);
+    if let Some(session) = session {
+        assert_eq!(failure["session"], session);
+    }
+    assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_start_for_an_ended_session_fails_as_a_lost_session() -> Result<()> {
+    start_stranded("agent_session_id=NULL", "agent_session_lost", Some("ended")).await
+}
+
+#[tokio::test]
+async fn a_start_for_a_replaced_session_fails_as_a_lost_session() -> Result<()> {
+    start_stranded(
+        "agent_session_id='11111111-1111-4111-8111-111111111111'",
+        "agent_session_lost",
+        Some("replaced"),
+    )
+    .await
+}
+
+/// The machine's read groups the last day's failures by reason, newest group
+/// first, and counts the last hour on its own.
+#[tokio::test]
+async fn a_machines_read_groups_recent_failures_and_counts_the_last_hour() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let placement_id = admitted_placement(&f, &machine, Uuid::new_v4()).await?;
+    let now = gridops_core::now_millis();
+    let minute = 60_000;
+    let events = [
+        ("agent_reported", "Image missing.", now - 90 * minute),
+        ("agent_reported", "Image still missing.", now - 30 * minute),
+        ("agent_reported", "Image missing again.", now - 10 * minute),
+        ("agent_session_lost", "Session dropped.", now - 5 * minute),
+        (
+            "start_deadline_expired",
+            "Too old to list.",
+            now - 25 * 60 * minute,
+        ),
+        (
+            "a_reason_from_the_future",
+            "Unknown code.",
+            now - 20 * minute,
+        ),
+    ];
+    for (reason, message, at) in events {
+        sqlx::query(
+            "INSERT INTO fleet_events (id,host_id,placement_id,target_id,kind,detail_json,created_at)
+             SELECT ?,host_id,id,target_id,'placement_failed',?,? FROM workload_placements WHERE id=?",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(json!({"reason": reason, "message": message}).to_string())
+        .bind(at)
+        .bind(placement_id.to_string())
+        .execute(&f.database)
+        .await?;
+    }
+    let detail: Value = f
+        .client
+        .get(f.url(&format!("/hosts/{host}")))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    // Four events fall inside the hour: those 30, 20, 10 and 5 minutes old.
+    assert_eq!(detail["item"]["failedPlacementsLastHour"], 4);
+    let recent: Vec<(String, i64, String)> = detail["item"]["recentPlacementFailures"]
+        .as_array()
+        .context("failures")?
+        .iter()
+        .map(|group| {
+            Ok((
+                group["reason"].as_str().context("reason")?.to_owned(),
+                group["count"].as_i64().context("count")?,
+                group["message"].as_str().context("message")?.to_owned(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        recent,
+        [
+            (
+                "agent_session_lost".to_owned(),
+                1,
+                "Session dropped.".to_owned()
+            ),
+            (
+                "agent_reported".to_owned(),
+                3,
+                "Image missing again.".to_owned()
+            ),
+            ("unknown".to_owned(), 1, "Unknown code.".to_owned()),
+        ]
+    );
 
     let _ = machine.stop.send(());
     assert_eq!(machine.running.await??, Stop::Shutdown);
