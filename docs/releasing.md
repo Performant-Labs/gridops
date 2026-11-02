@@ -47,9 +47,12 @@ repository, anyone can pull them without logging in.
 
 ## Runner requirements
 
-- **Linux:** the `gridops-ci` image (`.github/runner/Dockerfile`) has the musl
-  toolchain for the host's architecture. Both Linux Docker platforms must run
-  it.
+- **Linux:** any runner with the `self-hosted-linux` label, which every Linux
+  pool takes. The job runs as root in the runner container and installs
+  `musl-tools` and the musl Rust target itself, so the image needs only Rust,
+  `gcc` and `apt-get`. The x64 agent always builds. The arm64 agent builds only
+  when the repository variable `RELEASE_LINUX_ARM64` is `true`, which needs an
+  `ARM64` runner in a pool.
 - **macOS:** Xcode command line tools and Docker (OrbStack or Docker Desktop)
   with buildx on the Mac. The job installs its own Rust toolchain under the
   job's temporary directory.
