@@ -11,6 +11,11 @@ SupplementaryGroups=docker
 Environment=GRIDOPS_FLEET_URL=https://gridops.example.com
 Environment=GRIDOPS_AGENT_STATE_DIR=/var/lib/gridops-agent
 Environment=RUST_LOG=gridops_host_agent=info
+# Uncomment to let profiles that need Docker-in-job run here. Without it the
+# agent reports the Docker socket as unsupported and GridOps queues those
+# placements as capability_unverified. The machine's grant in GridOps must
+# also allow the Docker socket.
+#Environment=GRIDOPS_AGENT_DOCKER_SOCKET=/var/run/docker.sock
 ExecStart=/usr/local/bin/gridops-host-agent run
 Restart=always
 RestartSec=10
