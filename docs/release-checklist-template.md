@@ -18,6 +18,76 @@ Placeholders:
 This repository is public: write no private hostnames, internal URLs or machine
 names into the issue. Say `<deployment>` and keep the real address elsewhere.
 
+## Prerequisites
+
+Check these before step 1. Whoever cuts the release, a person or an agent,
+needs all of them. With them in place an agent can run steps 1 to 23 itself;
+what still needs a person is listed in [`docs/releasing.md`](https://github.com/Performant-Labs/gridops/blob/master/docs/releasing.md#running-a-release-with-an-agent).
+Keep the real addresses, user names, machine names and the token out of this
+issue: write the placeholders, and a result such as "all passed".
+
+- [ ] P1. **GitHub rights on `Performant-Labs/gridops`**: push a tag, run workflows, create and edit releases, create, edit and close issues (the Write role does all of it)
+  - `gh auth status` names the account, and `gh api repos/Performant-Labs/gridops --jq .permissions.push` prints `true`
+  - A fine-grained token needs Contents, Actions and Issues read and write, plus Variables read (step 4); a classic token needs `repo`
+  - If a ruleset protects `v*` tags, the account is on its bypass list
+- [ ] P2. **A release operator token for `<deployment>`** with the scopes `fleet:read` and `fleet:operate` and a short expiry (one to three days); [how to create it, keep it and what it can do](https://github.com/Performant-Labs/gridops/blob/master/docs/fleet-automation.md#the-release-operator-token)
+  - An administrator creates it under **Settings → API tokens**. The secret is shown once: put it in a secrets manager or the agent's secret store, never in the repository, an issue, a pull request or a chat
+  - The preflight (P8) proves both scopes. The API does not let a token read its own expiry, so read it on the Settings page and pass it as `PREFLIGHT_TOKEN_EXPIRES_AT`
+  - Revoke it in step 23
+- [ ] P3. **A way to reach the deploy host**: a login on `<deploy host>` that can run `docker` (root, or a member of the `docker` group, which is equivalent to root), in the deployment's compose project directory with its `.env`, and that can read the data volume for the backup of step 14
+  - `ssh <deploy host> docker compose ls` lists the project, and `docker compose -p <project> ps` in its directory shows `api`, `manager` and `reconciler`
+  - `docker volume inspect <data volume>` finds the volume that holds the SQLite database
+- [ ] P4. **Free disk on the deploy host**, for the new images and a database backup: at least 10 GB free where Docker keeps its data
+  - `ssh <deploy host> 'df -h "$(docker info --format "{{.DockerRootDir}}")"'`, or the preflight's `disk` check with `PREFLIGHT_DEPLOY_HOST` and `PREFLIGHT_DATA_PATH`
+- [ ] P5. **Root on each machine that runs the agent as a system service** (step 18), given as a narrow sudo rule that lets only the upgrade command run without a password. An agent cannot type a sudo password and must not look for one. Someone with root sets it up once per machine:
+  - A root-owned wrapper, `/usr/local/sbin/gridops-agent-upgrade`, mode `0755`, that downloads `/install.sh` from the deployment and runs it. Write the deployment's real address in place of `<deployment>` on the machine (not here): it is fixed in the wrapper, so the caller cannot point it elsewhere. The wrapper refuses to run on a machine without the system service, where the installer would otherwise set up a second, per-user agent for root:
+
+    ```sh
+    #!/bin/sh
+    # Upgrades the GridOps agent that runs as this machine's system service, from
+    # the deployment that serves it. Owned by root, mode 0755, takes no arguments.
+    set -eu
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    case "$(systemctl show gridops-host-agent -p FragmentPath --value 2>/dev/null)" in
+      /etc/systemd/system/* | /usr/lib/systemd/system/* | /lib/systemd/system/*) ;;
+      *) echo "gridops-agent-upgrade: no gridops-host-agent system service on this machine" >&2; exit 1 ;;
+    esac
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    curl -fsSL --retry 5 --connect-timeout 15 --max-time 300 -o "$tmp" https://<deployment>/install.sh
+    GRIDOPS_NO_ENROLL=1 sh "$tmp"
+    ```
+
+  - A sudoers file that allows exactly that command, with no arguments (`""`), for the releaser's login, checked with `visudo -cf` before it is installed. The file name in `/etc/sudoers.d` must have no `.` in it, or sudo ignores it:
+
+    ```sh
+    sudo install -o root -g root -m 0755 gridops-agent-upgrade /usr/local/sbin/gridops-agent-upgrade
+    printf '%s\n' '<releaser> ALL=(root) NOPASSWD: /usr/local/sbin/gridops-agent-upgrade ""' > gridops-agent-upgrade.sudoers
+    sudo visudo -cf gridops-agent-upgrade.sudoers &&
+      sudo install -o root -g root -m 0440 gridops-agent-upgrade.sudoers /etc/sudoers.d/gridops-agent-upgrade
+    sudo visudo -c
+    ```
+
+  - Give the rule no `SETENV` and no `env_keep` for `GRIDOPS_*`: sudo then drops the caller's environment, so the installer always installs the version the deployment pins. Anyone who can change what `https://<deployment>/install.sh` serves can run code as root on these machines through this rule, exactly as with the manual `curl | sudo sh`
+  - Check: `ssh <machine> sudo -n -l /usr/local/sbin/gridops-agent-upgrade` prints the path, and `sudo -n -l` shows it under `NOPASSWD:`. The preflight checks both for every machine in `PREFLIGHT_UPGRADE_HOSTS`
+  - Machines with a per-user agent (step 19) need only an ssh login as the user the agent runs as
+- [ ] P6. **Machines healthy**: every approved machine that is not retired has a fresh heartbeat, none is set aside for failing runner starts (the machine read's `startGate`), and none had failed placements in the last hour. Fix a machine, or pause it, before the dry run of step 9, which otherwise can land on it
+  - The preflight's `heartbeats`, `start-gate` and `placement-failures` checks. A machine left out on purpose goes in `PREFLIGHT_IGNORE_HOSTS` and is named in step 20
+- [ ] P7. **Expect to share runners with CI.** Release and dry-run jobs run on the same pools as CI, so they can queue behind it for minutes. Start the dry run when `gh run list --repo Performant-Labs/gridops --status queued` is short, and do not cancel other people's CI to make room. A job that hangs on one machine is cancelled and re-run after that machine is paused
+- [ ] P8. **Run the preflight** from a checkout of the repository, and fix every `FAIL` before step 1. It needs `curl` and `jq`, and `ssh` for the machine and deploy host checks
+
+  ```sh
+  read -r GRIDOPS_TOKEN && export GRIDOPS_TOKEN   # paste it; an agent loads it from its secret store
+  GRIDOPS_URL=https://<deployment> \
+  PREFLIGHT_TOKEN_EXPIRES_AT=<expiry from Settings, YYYY-MM-DDTHH:MM:SSZ in UTC> \
+  PREFLIGHT_UPGRADE_HOSTS="<machine> <machine>" \
+  PREFLIGHT_DEPLOY_HOST=<deploy host> PREFLIGHT_DATA_PATH=<Docker root directory> \
+    sh scripts/release-preflight.sh
+  ```
+
+  - One `PASS`, `FAIL` or `SKIP` line per check; it runs them all, then exits non-zero with the list of failures. `SKIP` means a check was not configured, not that it passed. The settings are described at the top of the script
+  - Its output names machines and the deployment, so record only the summary here: `___`
+
 ## Pre-flight
 
 - [ ] 1. **Identify the release commit** (the tip of `master` once the version bump is merged)
@@ -115,7 +185,7 @@ Only after step 13. Do this per deployment, and name it as `<deployment>`.
 ## Upgrade the host agents
 
 - [ ] 18. **Linux machines that run the agent as a system service**
-  - `curl -fsSL https://<deployment>/install.sh | sudo sh` on each. It replaces the binary, keeps the old one as `gridops-host-agent.previous`, restarts the service and checks that it is active
+  - With the sudo rule of P5: `ssh <machine> sudo -n /usr/local/sbin/gridops-agent-upgrade` on each, which an agent can run. Without it, a person runs `curl -fsSL https://<deployment>/install.sh | sudo sh` there. Either replaces the binary, keeps the old one as `gridops-host-agent.previous`, restarts the service and checks that it is active
   - If the service does not come back, the installer prints the rename that restores the previous binary; use it, and record it in this issue
 - [ ] 19. **Machines with a per-user agent** (macOS LaunchAgent, Linux systemd user unit)
   - Run the same installer without `sudo`: `curl -fsSL https://<deployment>/install.sh | sh`. It upgrades in place and keeps the settings
@@ -133,6 +203,7 @@ Only after step 13. Do this per deployment, and name it as `<deployment>`.
   - Did anything have to be rolled back? `___`
 - [ ] 23. **Close out**
   - Close the issues this release fixed, and the milestone if one was used
+  - Revoke the release operator token of P2 under **Settings → API tokens**
   - Link this checklist from the GitHub release (edit its notes)
   - A problem found after the release goes into the README's `## Known issues` (with an issue link) in a pull request, and is noted below. Put a fix in the next release's changelog
   - Tick every box above, then close this issue

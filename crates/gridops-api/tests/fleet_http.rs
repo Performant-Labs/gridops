@@ -48,6 +48,8 @@ mod pool_capacity;
 mod query;
 #[path = "fleet_http/recovery.rs"]
 mod recovery;
+#[path = "fleet_http/release_preflight.rs"]
+mod release_preflight;
 #[path = "fleet_http/start_retry.rs"]
 mod start_retry;
 

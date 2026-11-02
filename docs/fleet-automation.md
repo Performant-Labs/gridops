@@ -58,6 +58,63 @@ In CI, load it from a masked secret. Revoke it the moment it is no longer
 needed, under **Settings → API tokens** or with
 `POST /api/v1/fleet/api-tokens/{token_id}/revoke` from a cookie session.
 
+## The release operator token
+
+A release can need machines paused, drained or activated through the API: a
+machine that keeps failing starts is paused before the dry run, and a
+machine may be drained and activated again around its upgrade. Whoever cuts the
+release, a person or an agent, holds a token made for that release alone
+(prerequisite P2 of the
+[release checklist](release-checklist-template.md#prerequisites)):
+
+| | |
+|---|---|
+| **Scopes** | `fleet:read` and `fleet:operate`, nothing else |
+| **Lifetime** | one to three days: long enough for one release, gone soon after. `scripts/release-preflight.sh` fails a token that expires within 6 hours or lives longer than 7 days |
+| **Owner** | an administrator; the token can do only what its owner may do, checked on every request |
+| **Name** | the release it is for, for example `release-v0.2.0`, so the audit trail says why a machine changed |
+
+**Create it** as an administrator under **Settings → API tokens**: the name,
+the two scopes and a lifetime of 1 to 3 days. Copy the `gat_...` secret from
+the dialog; it is never shown again.
+
+**Keep it** in a secrets manager, or the secret store of the agent or CI job
+that runs the release, and hand it over through the environment
+(`GRIDOPS_TOKEN`, or `GRIDOPS_API_TOKEN` as above). Never put it in the
+repository, an issue (the checklist issue included), a pull request, a chat,
+a log or a command line. If it leaks, revoke it at once and create another.
+Revoke it when the release is closed out (checklist step 23).
+
+**What it can do:** every `fleet:read` route (machines, backends, events,
+grants, targets, queues, pool profiles and capacity, operations) and every
+`fleet:operate` route: set a machine's lifecycle (active, paused, draining,
+maintenance), turn runtimes on or off, set target grants and budgets, save a
+pool's fleet profile and runner counts, and delete a retired machine.
+`fleet:operate` is broad, which is why the token lives for days, not months.
+
+**What it cannot do:** enroll or approve machines (`fleet:enroll`,
+`fleet:approve`), retire or recover a machine, rotate its credentials, read
+agent logs, or create, list or revoke tokens (so it cannot extend itself),
+all of which stay cookie-only. It works only on the routes
+[the API contract](fleet-api.md#routes) marks with a scope, and it cannot
+upgrade an agent: GridOps has no command
+that makes an agent update itself yet, so system-service machines are
+upgraded through the narrow sudo rule in the checklist's prerequisites. It
+grants nothing on GitHub or on the deploy host.
+
+**What can be checked with the token itself.** `scripts/release-preflight.sh`
+proves both scopes: it lists the machines (`fleet:read`), and it sends a
+`POST /api/v1/fleet/hosts/{host_id}/lifecycle` with an empty body for a host
+id that matches no machine. The scope is checked before the body is read, so
+a token with `fleet:operate` gets `400 invalid_request` and one without it
+`403` naming `fleet:operate`; nothing changes either way (the refusal is
+audited as `api_token.denied`, as any scope miss is). The token's expiry
+and scopes are not readable with the token: the list of tokens is
+cookie-only. Read the expiry on the Settings page and pass it to the
+preflight as `PREFLIGHT_TOKEN_EXPIRES_AT`. Nor can a request that changes
+nothing tell whether the owner is still an administrator: that shows up as a
+`403 forbidden` without a scope on the first real change.
+
 ## Onboard a machine
 
 1. **Issue a code** for the repositories the machine may serve:
