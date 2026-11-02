@@ -17,7 +17,9 @@
 #   GRIDOPS_NO_SERVICE=1      don't install or start the user service
 set -eu
 
-REPOSITORY="iamngoni/gridops"
+# Where release binaries come from: this repository by default, overridable
+# for mirrors or a private release channel.
+REPOSITORY="${GRIDOPS_REPOSITORY:-Performant-Labs/gridops}"
 SERVED_URL="__GRIDOPS_URL__"
 SERVED_VERSION="__GRIDOPS_VERSION__"
 case "$SERVED_URL" in __*) SERVED_URL="" ;; esac

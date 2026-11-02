@@ -71,6 +71,17 @@ pub struct Measurement {
     /// One-minute load average as CPU demand, in thousandths of a CPU.
     pub cpu_used_millis: Option<u64>,
     pub uptime_seconds: Option<u64>,
+    /// Total and free bytes of the root filesystem: the disk runners and
+    /// their logs share with the host.
+    pub disk_total_bytes: Option<u64>,
+    pub disk_free_bytes: Option<u64>,
+}
+
+/// Reads the root filesystem's total and free bytes: the disk runners and
+/// their logs share with the host.
+#[cfg(unix)]
+fn disk_bytes() -> Option<(u64, u64)> {
+    gridops_core::disk::filesystem_bytes(std::path::Path::new("/"))
 }
 
 /// Reads memory and load without privileges.
@@ -94,6 +105,7 @@ pub fn measure() -> Measurement {
         let uptime = std::fs::read_to_string("/proc/uptime")
             .ok()
             .and_then(|value| value.split_whitespace().next().map(str::to_owned));
+        let (disk_total_bytes, disk_free_bytes) = disk_bytes().unzip();
         return Measurement {
             memory_total_mib: total,
             memory_used_mib: total
@@ -103,6 +115,8 @@ pub fn measure() -> Measurement {
             uptime_seconds: uptime
                 .as_deref()
                 .and_then(|value| value.split('.').next()?.parse().ok()),
+            disk_total_bytes,
+            disk_free_bytes,
         };
     }
     #[cfg(target_os = "macos")]
@@ -129,24 +143,29 @@ pub fn measure() -> Measurement {
                 .next()
                 .and_then(millis)
         });
+        let (disk_total_bytes, disk_free_bytes) = disk_bytes().unzip();
         return Measurement {
             memory_total_mib: total,
             memory_used_mib: used,
             cpu_used_millis: load,
             uptime_seconds: None,
+            disk_total_bytes,
+            disk_free_bytes,
         };
     }
     #[cfg(target_os = "windows")]
     {
         // Total/free physical memory in KiB and average CPU load percent.
         let reading = powershell(
-            "$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; '{0} {1} {2}' -f $o.TotalVisibleMemorySize,$o.FreePhysicalMemory,$c",
+            "$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $d=Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='$env:SystemDrive'\"; '{0} {1} {2} {3} {4}' -f $o.TotalVisibleMemorySize,$o.FreePhysicalMemory,$c,$d.Size,$d.FreeSpace",
         )
         .unwrap_or_default();
         let mut fields = reading
             .split_whitespace()
             .map(|value| value.parse::<f64>().ok());
-        let (total, free, load) = (
+        let (total, free, load, disk_total, disk_free) = (
+            fields.next().flatten(),
+            fields.next().flatten(),
             fields.next().flatten(),
             fields.next().flatten(),
             fields.next().flatten(),
@@ -159,6 +178,8 @@ pub fn measure() -> Measurement {
                 .map(|(total, free)| ((total - free).max(0.0) / 1024.0) as u64),
             cpu_used_millis: load.map(|percent| (percent / 100.0 * cores * 1000.0) as u64),
             uptime_seconds: None,
+            disk_total_bytes: disk_total.map(|bytes| bytes as u64),
+            disk_free_bytes: disk_free.map(|bytes| bytes as u64),
         };
     }
     #[allow(unreachable_code)]
@@ -229,7 +250,10 @@ pub fn root_domain(name: &str, measurement: Measurement) -> anyhow::Result<Obser
                 .memory_total_mib
                 .map(BrowserUint53::new)
                 .transpose()?,
-            disk_bytes: None,
+            disk_bytes: measurement
+                .disk_total_bytes
+                .map(BrowserUint53::new)
+                .transpose()?,
         },
     })
 }
@@ -238,7 +262,9 @@ pub fn root_sample(
     observed_at: WireTimestamp,
     measurement: Measurement,
 ) -> anyhow::Result<ObservedSample> {
-    let known = measurement.memory_used_mib.is_some() || measurement.cpu_used_millis.is_some();
+    let known = measurement.memory_used_mib.is_some()
+        || measurement.cpu_used_millis.is_some()
+        || measurement.disk_free_bytes.is_some();
     Ok(ObservedSample {
         domain_local_key: UpstreamText::new(ROOT_DOMAIN)?,
         observed_at,
@@ -255,10 +281,46 @@ pub fn root_sample(
             .memory_used_mib
             .map(BrowserUint53::new)
             .transpose()?,
-        disk_free_bytes: None,
+        disk_free_bytes: measurement
+            .disk_free_bytes
+            .map(BrowserUint53::new)
+            .transpose()?,
         uptime_seconds: measurement
             .uptime_seconds
             .map(BrowserUint53::new)
             .transpose()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_reaches_the_domain_budget_and_the_sample() -> anyhow::Result<()> {
+        use gridops_core::fleet::protocol::primitives::WireTimestamp as Timestamp;
+        let measurement = Measurement {
+            memory_total_mib: Some(1024),
+            memory_used_mib: Some(512),
+            cpu_used_millis: Some(1000),
+            uptime_seconds: Some(60),
+            disk_total_bytes: Some(1_000_000_000_000),
+            disk_free_bytes: Some(400_000_000_000),
+        };
+        let domain = root_domain("io", measurement)?;
+        assert_eq!(
+            domain.capacity.disk_bytes.map(|value| value.get()),
+            Some(1_000_000_000_000)
+        );
+        let sample = root_sample(
+            Timestamp::from_millis(1).map_err(|_| anyhow::anyhow!("timestamp out of range"))?,
+            measurement,
+        )?;
+        assert_eq!(
+            sample.disk_free_bytes.map(|value| value.get()),
+            Some(400_000_000_000)
+        );
+        assert_eq!(sample.coverage, SampleCoverage::Partial);
+        Ok(())
+    }
 }

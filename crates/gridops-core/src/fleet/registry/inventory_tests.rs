@@ -269,6 +269,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_budget_backfills_for_hosts_enrolled_before_disk_probing() -> Result<()> {
+        let fixture = Fixture::new().await?;
+        let (authenticated, _) = fixture.host().await?;
+        let incarnation = fixture.incarnation().await?;
+        let session_id = AuthoritySessionId::try_new(uuid::Uuid::new_v4())?;
+        let boot_id = text("inventory-boot")?;
+        let handshake = HandshakeRequest::new(
+            request_id()?,
+            session_id,
+            boot_id.clone(),
+            ProtocolRange::new(1, 1)?,
+            text("agent-1")?,
+            Some(HostEpoch::new(1)?),
+        );
+        fixture.service.handshake(&authenticated, handshake).await?;
+        let host = authenticated.host_id.to_string();
+
+        // The first report predates disk probing: cpu and memory only.
+        let mut without_disk = report()?;
+        without_disk.control_plane_incarnation = incarnation;
+        without_disk.authority_session_id = session_id;
+        without_disk.boot_id = boot_id.clone();
+        without_disk.domains[0].capacity.cpu_millis = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(4_000),
+            "cpu",
+        )?);
+        without_disk.domains[0].capacity.memory_mib = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(1_024),
+            "memory",
+        )?);
+        fixture
+            .service
+            .submit_inventory(
+                &authenticated,
+                InventoryRequest::new(request_id()?, without_disk)?,
+            )
+            .await?;
+        let initial: (i64, i64, i64) = sqlx::query_as(
+            "SELECT cpu_millis,memory_mib,disk_bytes FROM host_resource_domains WHERE host_id=?",
+        )
+        .bind(&host)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(initial, (3_200, 816, 0));
+
+        // The upgraded agent adds disk: the missing budget backfills at the
+        // same 80% share without touching the budgets already set.
+        let mut with_disk = report()?;
+        with_disk.control_plane_incarnation = incarnation;
+        with_disk.authority_session_id = session_id;
+        with_disk.boot_id = boot_id;
+        with_disk.inventory_sequence = must(BrowserCounter::new(2), "sequence")?;
+        with_disk.observed_at = must(WireTimestamp::from_millis(2_000), "time")?;
+        with_disk.domains[0].capacity.cpu_millis = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(4_000),
+            "cpu",
+        )?);
+        with_disk.domains[0].capacity.memory_mib = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(1_024),
+            "memory",
+        )?);
+        with_disk.domains[0].capacity.disk_bytes = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(1_000_000_000_000),
+            "disk",
+        )?);
+        with_disk.samples[0].disk_free_bytes = Some(must(
+            crate::fleet::protocol::primitives::BrowserUint53::new(400_000_000_000),
+            "free",
+        )?);
+        with_disk.samples[0].observed_at = must(WireTimestamp::from_millis(2_000), "time")?;
+        fixture
+            .service
+            .submit_inventory(
+                &authenticated,
+                InventoryRequest::new(request_id()?, with_disk)?,
+            )
+            .await?;
+
+        let backfilled: (i64, i64, i64) = sqlx::query_as(
+            "SELECT cpu_millis,memory_mib,disk_bytes FROM host_resource_domains WHERE host_id=?",
+        )
+        .bind(&host)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(backfilled, (3_200, 816, 800_000_000_000));
+        let free: Option<i64> = sqlx::query_scalar(
+            "SELECT disk_free_bytes FROM host_samples WHERE host_id=? ORDER BY observed_at DESC LIMIT 1",
+        )
+        .bind(&host)
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(free, Some(400_000_000_000));
+        fixture.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn service_reconciles_and_replays_complete_inventory_without_refreshing_receipt()
     -> Result<()> {
         let fixture = Fixture::new().await?;

@@ -4,6 +4,7 @@ pub mod bitbucket;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod disk;
 pub mod fix_agent;
 pub mod fleet;
 pub mod github;

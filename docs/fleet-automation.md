@@ -140,6 +140,72 @@ needed, under **Settings → API tokens** or with
 6. **Verify** the host reads `enrollment: "approved"`, `lifecycle:
    "active"` and `heartbeatFreshness: "fresh"` — then run a workflow.
 
+## New-host checklist: the three layers that make a host take work
+
+Approving a host is not the end. A freshly enrolled machine receives **no jobs**
+until three independent switches line up, and a placement that cannot find them
+fails with a different queue reason for each one still missing. Work through
+this list for every new host (all of it is API-driven, with a `fleet:operate`
+token):
+
+1. **Enable a runtime backend.** New hosts report their backends (docker,
+   native) but they start **disabled**. Pick the runtimes the machine should
+   run and enable them:
+
+   ```sh
+   curl -sS -X POST "$GRIDOPS_URL/api/v1/fleet/hosts/$HOST_ID/backends/$BACKEND_ID/enabled" \
+     -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+     -H 'Content-Type: application/json' -d '{"enabled":true}'
+   ```
+
+2. **Set the target grant's socket flag when the pool shares the host Docker
+   socket.** Approval grants `allowSchedule` for the enrollment targets, but
+   `allowDockerSocket` starts `false` — by design, it hands jobs root-equivalent
+   access to the host's Docker daemon. If the pool's fleet profile has
+   `requiresDockerSocket: true` (any pool whose jobs run `docker` inside the
+   job — starting databases, containers, builds), grant it explicitly:
+
+   ```sh
+   curl -sS -X POST "$GRIDOPS_URL/api/v1/fleet/hosts/$HOST_ID/grants/$TARGET_ID" \
+     -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"allowSchedule":true,"allowNative":false,"allowDockerSocket":true}'
+   ```
+
+3. **Point the agent at the socket it should share.** The agent only
+   advertises the Docker-socket capability when `GRIDOPS_AGENT_DOCKER_SOCKET`
+   is set in its environment — Linux systems use
+   `/var/run/docker.sock`, OrbStack on macOS uses
+   `~/.orbstack/run/docker.sock`. Add it to the service unit
+   (`Environment=GRIDOPS_AGENT_DOCKER_SOCKET=/var/run/docker.sock` in the
+   systemd unit, or the launchd plist's `EnvironmentVariables`), reload, and
+   restart the agent. A host missing this layer reports its backend as ready
+   but cannot back a socket-requiring platform.
+
+4. **Activate the host** (`activate` in the enrollment script, or
+   `POST /hosts/{id}/lifecycle` with `active`).
+
+5. **Verify with a job that uses Docker**, not just a placement: dispatch a
+   workflow whose steps run `docker version` and a throwaway container, and
+   confirm the runner container on the new host carries the socket mount:
+
+   ```sh
+   docker inspect <runner-container> --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}'
+   ```
+
+### Reading the queue when a host will not take work
+
+The pool queue (`GET /api/v1/fleet/pools/{pool_id}/queue`) names the exact
+reason a runner is waiting; each maps to one missing layer:
+
+| `reason` | Missing layer |
+|---|---|
+| `backend_disabled` | Layer 1 — the backend is disabled, or the host is paused/draining |
+| `no_eligible_host` | Layer 2 — no host's grant satisfies the platform (usually `allowDockerSocket`) |
+| `capability_unverified` | Layer 3 — the agent does not advertise the socket capability (`GRIDOPS_AGENT_DOCKER_SOCKET` unset) |
+| `forbidden` | Not a host layer: the intent is pinned to a replaced fleet profile (known issue; cancel and re-dispatch the run) |
+| `physical_resource_exhausted` | The platform reservation exceeds every host's budget — check disk/cpu/memory reservations against reported budgets |
+
 ## The script
 
 [`scripts/fleet-enroll-bot.sh`](../scripts/fleet-enroll-bot.sh) does the

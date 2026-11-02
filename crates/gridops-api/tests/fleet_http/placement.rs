@@ -360,6 +360,8 @@ pub(super) fn supervisor(
                 memory_used_mib: Some(4_096),
                 cpu_used_millis: Some(500),
                 uptime_seconds: Some(60),
+                disk_total_bytes: Some(500_u64 * 1024 * 1024 * 1024),
+                disk_free_bytes: Some(250_u64 * 1024 * 1024 * 1024),
             })
             .with_runtime(runtime, Trust::default()),
     )

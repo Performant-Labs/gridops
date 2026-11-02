@@ -90,7 +90,7 @@ pub(super) fn inventory_body(handshake: &Value, incarnation: &str) -> Value {
     })
 }
 
-fn heartbeat_body(handshake: &Value, incarnation: &str) -> Value {
+pub(super) fn heartbeat_body(handshake: &Value, incarnation: &str) -> Value {
     json!({
         "request_id":Uuid::new_v4(),"host_epoch":1,"control_plane_incarnation":incarnation,
         "authority_session_id":handshake["agent_session_id"],"boot_id":handshake["boot_id"],
