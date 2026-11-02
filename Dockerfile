@@ -21,6 +21,8 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
+# The API embeds the OpenAPI spec at compile time (include_str!).
+COPY docs/openapi ./docs/openapi
 COPY scripts/install.sh ./scripts/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
