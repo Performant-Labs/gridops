@@ -172,6 +172,19 @@
         "required": ["id", "name", "hostOs", "architecture", "enrollment", "lifecycle", "integrity", "freshness", "pressure", "revision", "backendCount", "runnerCount"],
         "additionalProperties": false
       },
+      "StartGate": {
+        "type": "object",
+        "description": "Why a machine takes no new runners: it failed `failures` runner starts in the last `windowMinutes` minutes with no successful start since. It is reconsidered at `until`, or sooner if a start on it succeeds. Only new placements skip it; its lifecycle and running jobs are unchanged.",
+        "properties": {
+          "failures": { "type": "integer", "minimum": 1 },
+          "windowMinutes": { "type": "integer", "minimum": 1 },
+          "since": { "type": "string", "format": "date-time", "description": "The oldest failure counted." },
+          "until": { "type": "string", "format": "date-time" },
+          "message": { "type": "string", "maxLength": 240, "description": "For example \"Not accepting new runners: 3 start failures in the last 15 minutes.\"" }
+        },
+        "required": ["failures", "windowMinutes", "since", "until", "message"],
+        "additionalProperties": false
+      },
       "PlacementFailureGroup": {
         "type": "object",
         "description": "Placements on one host that failed for the same reason in the last 24 hours.",
@@ -378,7 +391,7 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
-          "200": { "description": "Host detail (projection `host`). The `host` projection also carries `failedPlacementsLastHour` (integer) and `recentPlacementFailures`, the last 24 hours of recorded placement failures grouped by reason, newest group first (see `PlacementFailureGroup`).", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "type": "object", "properties": { "failedPlacementsLastHour": { "type": "integer", "minimum": 0 }, "recentPlacementFailures": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/PlacementFailureGroup" } }, "duplicateHardwareOf": { "type": "array", "maxItems": 5, "description": "Other approved, unretired machines reporting the same hardware that the reader may see, so the stale record is easy to tell from the live one.", "items": { "type": "object", "properties": { "id": { "$ref": "#/components/schemas/Uuid" }, "name": { "type": "string" } }, "required": ["id", "name"], "additionalProperties": false } } } } } } } } },
+          "200": { "description": "Host detail (projection `host`). The `host` projection also carries `failedPlacementsLastHour` (integer), `recentPlacementFailures`, the last 24 hours of recorded placement failures grouped by reason, newest group first (see `PlacementFailureGroup`), and `startGate`, set while the machine takes no new runners because it keeps failing to start them and `null` otherwise (see `StartGate`).", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "type": "object", "properties": { "failedPlacementsLastHour": { "type": "integer", "minimum": 0 }, "recentPlacementFailures": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/PlacementFailureGroup" } }, "startGate": { "oneOf": [{ "$ref": "#/components/schemas/StartGate" }, { "type": "null" }] }, "duplicateHardwareOf": { "type": "array", "maxItems": 5, "description": "Other approved, unretired machines reporting the same hardware that the reader may see, so the stale record is easy to tell from the live one.", "items": { "type": "object", "properties": { "id": { "$ref": "#/components/schemas/Uuid" }, "name": { "type": "string" } }, "required": ["id", "name"], "additionalProperties": false } } } } } } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       },
@@ -468,7 +481,7 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
-          "200": { "description": "Event page. A placement that failed has an event of kind `placement_failed`; its cause is on the host detail's `recentPlacementFailures`.", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "200": { "description": "Event page. A placement that failed has an event of kind `placement_failed`; its cause is on the host detail's `recentPlacementFailures`. A failed start that was retried as a new runner, other machines first, has an event of kind `placement_retried` on the machine where it failed.", "content": { "application/json": { "schema": { "type": "object" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

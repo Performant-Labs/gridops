@@ -25,6 +25,7 @@ use gridops_core::{
             outcomes::SuccessEvidence,
             primitives::WireTimestamp,
         },
+        retry::{self, RetryOutcome},
         targets::{self, Profile},
     },
     next_runner_repository, now_millis,
@@ -259,10 +260,15 @@ pub(super) async fn tick(app: &Reconciler) -> Result<()> {
             tracing::warn!(placement = %placement.id, error = ?error, "could not follow fleet runner");
         }
     }
+    let mut retried = false;
     for placement in
         placement::placements(&app.database, &["failed", "cleaned", "uncertain"]).await?
     {
-        finish(app, &placement).await?;
+        retried |= finish(app, &placement).await?;
+    }
+    if retried {
+        // Place the replacements now rather than on the next pass.
+        service.admit_queued(&Principal::Reconciler, 100).await?;
     }
     Ok(())
 }
@@ -553,14 +559,35 @@ async fn follow(app: &Reconciler, placement: &Placement) -> Result<()> {
 }
 
 /// A placement that ended: retire its runner row so the pool can replace it.
+/// A runner whose start failed on its machine is first replaced by one placed
+/// on another machine where possible (see [`retry::retry_failed_start`]).
 /// An uncertain placement whose runtime object is known is cleaned up, which
-/// proves it gone and frees its capacity.
-async fn finish(app: &Reconciler, placement: &Placement) -> Result<()> {
+/// proves it gone and frees its capacity. Returns whether a failed start was
+/// retried.
+async fn finish(app: &Reconciler, placement: &Placement) -> Result<bool> {
+    let mut retried = false;
     if placement.state == "failed" {
         // Already failed, and its cause recorded when it did; this only frees
         // what it still holds.
         placement::abandon_unstarted(&app.database, placement.id, &PlacementFailure::unknown())
             .await?;
+        // A failed retry must not keep the runner from being retired below.
+        match retry::retry_failed_start(&app.database, placement.id).await {
+            Ok(RetryOutcome::Retried(retry)) => {
+                tracing::info!(
+                    placement = %placement.id,
+                    host = %placement.host_id,
+                    runner = %retry.runner_id,
+                    attempt = retry.attempt,
+                    "fleet runner failed to start; retrying it, other machines first"
+                );
+                retried = true;
+            }
+            Ok(RetryOutcome::NotRetried(_)) => {}
+            Err(error) => {
+                tracing::warn!(placement = %placement.id, error = ?error, "could not retry fleet runner");
+            }
+        }
     }
     if placement.state == "uncertain"
         && let Some(SuccessEvidence::RunnerStarted { local_identity, .. }) =
@@ -584,7 +611,7 @@ async fn finish(app: &Reconciler, placement: &Placement) -> Result<()> {
     .bind(&placement.workload_id)
     .execute(&app.database)
     .await?;
-    Ok(())
+    Ok(retried)
 }
 
 /// GitHub's system labels for where the runner actually runs, then the

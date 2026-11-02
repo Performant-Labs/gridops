@@ -249,8 +249,10 @@ pub(crate) async fn admit_operation(
         persist_rejection(tx, &intent.id, reason, now).await?;
         return Ok(AdmissionOutcome::Queued);
     }
-    let candidates = candidates(tx, &intent, now).await?;
-    let mut last_reason = None;
+    let (candidates, set_aside) = candidates(tx, &intent, now).await?;
+    // When the only machines that could take it are failing their starts,
+    // say so rather than "no eligible host".
+    let mut last_reason = set_aside.then_some("machines_failing_starts");
     for candidate in candidates {
         if let Some(reason) = candidate_compatible(tx, &intent, &candidate).await? {
             last_reason = Some(reason);
@@ -577,12 +579,15 @@ async fn candidate_compatible(
     }
 }
 
-/// Machines that could take `intent`, in the order to try them.
+/// Machines that could take `intent`, in the order to try them, and whether
+/// any was left out because it keeps failing starts (see
+/// [`super::start_health`]). Machines this runner's earlier attempts failed on
+/// come last, so a retry lands there only when no other machine can take it.
 async fn candidates(
     tx: &mut Transaction<'_, Sqlite>,
     intent: &store::IntentRow,
     now: i64,
-) -> Result<Vec<Candidate>, FleetError> {
+) -> Result<(Vec<Candidate>, bool), FleetError> {
     let rows = sqlx::query(
         "SELECT h.id AS host_id,b.id AS backend_id,b.domain_id,h.epoch,
                 h.agent_session_id,h.boot_id,h.authority_incarnation,h.authority_expires_at,
@@ -732,7 +737,23 @@ async fn candidates(
     .fetch_all(&mut **tx)
     .await?;
     let mut result = Vec::with_capacity(rows.len());
+    let mut gates = std::collections::HashMap::<String, bool>::new();
+    let mut set_aside = false;
     for row in rows {
+        let host_id: String = row.get("host_id");
+        let gated = if let Some(gated) = gates.get(&host_id) {
+            *gated
+        } else {
+            let gated = super::start_health::start_gate(tx, &host_id, now)
+                .await?
+                .is_some();
+            gates.insert(host_id, gated);
+            gated
+        };
+        if gated {
+            set_aside = true;
+            continue;
+        }
         let candidate = Candidate {
             host_id: row.get("host_id"),
             backend_id: row.get("backend_id"),
@@ -779,7 +800,17 @@ async fn candidates(
         }
         result.push(candidate);
     }
-    Ok(result)
+    let avoided: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT avoid_host_ids_json FROM workload_intents WHERE id=?",
+    )
+    .bind(&intent.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .and_then(|json| serde_json::from_str(&json).ok())
+    .unwrap_or_default();
+    // A stable sort keeps the query's order within each group.
+    result.sort_by_key(|candidate| avoided.contains(&candidate.host_id));
+    Ok((result, set_aside))
 }
 
 async fn available_session(

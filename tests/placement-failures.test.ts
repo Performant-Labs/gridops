@@ -6,6 +6,7 @@ import {
   failureReasonLabel,
   failureSummary,
   failuresLastHourLabel,
+  startGateLabel,
 } from "../src/features/fleet/placement-failures";
 
 describe("placement failures on a machine", () => {
@@ -44,5 +45,28 @@ describe("placement failures on a machine", () => {
     expect(failuresLastHourLabel(0)).toBeNull();
     expect(failuresLastHourLabel(1)).toBe("1 failed in the last hour");
     expect(failuresLastHourLabel(17)).toBe("17 failed in the last hour");
+  });
+
+  it("reads why a machine takes no new runners, and when it is reconsidered", () => {
+    if (host.projection !== "host") throw new Error("fixture is not a host");
+    expect(host.startGate).toEqual({
+      failures: 3,
+      windowMinutes: 15,
+      since: "2026-10-09T11:50:00.000Z",
+      until: "2026-10-09T12:05:00.000Z",
+      message: "Not accepting new runners: 3 start failures in the last 15 minutes.",
+    });
+    expect(startGateLabel(host.startGate, (iso) => `<${iso}>`)).toBe(
+      "Not accepting new runners: 3 start failures in the last 15 minutes. Reconsidered at <2026-10-09T12:05:00.000Z>, or sooner if a start on it succeeds.",
+    );
+    expect(startGateLabel(null, (iso) => iso)).toBeNull();
+  });
+
+  it("requires the gate field, which is null when the machine takes new runners", () => {
+    const body = structuredClone(fixture.hostResults[0]) as unknown as { item: Record<string, unknown> };
+    body.item.startGate = null;
+    expect(hostQueryResultSchema.parse(body).item).toMatchObject({ startGate: null });
+    delete body.item.startGate;
+    expect(() => hostQueryResultSchema.parse(body)).toThrow();
   });
 });

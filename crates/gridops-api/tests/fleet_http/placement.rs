@@ -46,6 +46,9 @@ pub(super) struct FakeDocker {
     pub(super) start_millis: AtomicU64,
     /// Prepares never finish while this is set.
     pub(super) hold_prepare: AtomicBool,
+    /// Starts fail, as they do on a machine that can't reach the network,
+    /// while this is set.
+    pub(super) fail_starts: AtomicBool,
     /// The started container's console, written by the test.
     console: Mutex<Option<tokio::io::DuplexStream>>,
 }
@@ -59,6 +62,12 @@ impl RuntimeHelper for FakeDocker {
         if matches!(request.operation, AgentOperation::StartRunner(_)) {
             let millis = self.start_millis.load(Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(millis)).await;
+            if self.fail_starts.load(Ordering::SeqCst) {
+                return HelperResponse::Failed {
+                    code: FailureCode::Dependency,
+                    retryable: false,
+                };
+            }
         }
         if matches!(request.operation, AgentOperation::PrepareEnvironment(_))
             && self.hold_prepare.load(Ordering::SeqCst)
