@@ -5,6 +5,7 @@ import { Callout, EmptyState } from "~/components/page";
 import { SettingsLayout, SettingsSection, SettingsValue } from "~/components/settings-ui";
 import { StatusBadge } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
+import { BuiltinHostBudgetSection } from "~/features/runner-pools/builtin-host-budget-section";
 import { BuiltinHostSection } from "~/features/runner-pools/builtin-host-section";
 import { showsBuiltinGuardrails } from "~/features/runner-pools/builtin-host";
 import { cn } from "~/lib/utils";
@@ -58,6 +59,17 @@ function RunnerHostSettings() {
         )}
         <SettingsValue label="Provisioning" value={<StatusBadge status={manager.provisioningPaused ? "paused" : "active"} />} />
       </SettingsSection>
+
+      {hostOn && capacity ? (
+        <BuiltinHostBudgetSection
+          inForce={{ cpuBudget: capacity.cpuBudget, memoryBudgetMb: capacity.memoryBudgetMb }}
+          isAdmin={user.role === "admin"}
+          onSaved={() => router.invalidate()}
+          reported={manager.availableCpus && manager.totalMemoryMb ? { cpus: manager.availableCpus, memoryMb: manager.totalMemoryMb } : null}
+          setting={settings.builtinRunnerHostBudget ?? { cpuMillis: null, memoryMib: null }}
+          source={capacity.budgetSource}
+        />
+      ) : null}
 
       {hostOn && capacity && used ? (
         <SettingsSection description="Includes short-lived reservations for runners that are starting." title="Capacity">

@@ -267,16 +267,11 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Err(error) = gridops_core::builtin_host::sync_pool_states(&app.database).await {
         tracing::warn!(error = ?error, "could not update pools that depend on the built-in runner host");
     }
-    if let Err(error) = manager_request::<Value>(
-        app,
-        Method::PUT,
-        "v1/policy",
-        Some(json!({
-            "provisioningPaused": provisioning_paused,
-            "builtinHostEnabled": builtin_enabled,
-        })),
-    )
-    .await
+    // Whether the built-in host may be used and its budget, every pass, so a
+    // manager that restarted or missed a change catches up.
+    let policy =
+        gridops_core::builtin_host::manager_policy(&app.database, provisioning_paused).await;
+    if let Err(error) = manager_request::<Value>(app, Method::PUT, "v1/policy", Some(policy)).await
     {
         tracing::warn!(error = ?error, "could not synchronize runner provisioning policy");
     }

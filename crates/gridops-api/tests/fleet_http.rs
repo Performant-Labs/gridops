@@ -32,6 +32,8 @@ mod api_tokens;
 mod budget;
 #[path = "fleet_http/builtin_host.rs"]
 mod builtin_host;
+#[path = "fleet_http/builtin_host_budget.rs"]
+mod builtin_host_budget;
 #[path = "fleet_http/disk_alerts.rs"]
 mod disk_alerts;
 #[path = "fleet_http/host_delete.rs"]
@@ -54,7 +56,13 @@ struct Fixture {
     client: Client,
     origin: String,
     cookie: String,
+    /// A runner manager the API talks to, when a test runs one; otherwise
+    /// the manager is unreachable and not configured.
+    manager: Option<String>,
 }
+
+/// The token the API presents to a test's runner manager.
+const MANAGER_TOKEN: &str = "fleet-http-test-manager-token";
 
 struct ApiProcess(Child);
 
@@ -65,13 +73,25 @@ impl Drop for ApiProcess {
     }
 }
 
-fn start_api(directory: &std::path::Path, origin: &str) -> Result<ApiProcess> {
+fn start_api(
+    directory: &std::path::Path,
+    origin: &str,
+    manager: Option<&str>,
+) -> Result<ApiProcess> {
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(directory.join("api.log"))?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gridops-api"));
+    if let Some(manager) = manager {
+        command
+            .env("GRIDOPS_MANAGER_URL", manager)
+            .env("GRIDOPS_MANAGER_TOKEN", MANAGER_TOKEN);
+    } else {
+        command.env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9");
+    }
     Ok(ApiProcess(
-        Command::new(env!("CARGO_BIN_EXE_gridops-api"))
+        command
             .env("GRIDOPS_BASE_URL", origin)
             .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
             .env("GRIDOPS_API_BIND", origin.trim_start_matches("http://"))
@@ -84,7 +104,6 @@ fn start_api(directory: &std::path::Path, origin: &str) -> Result<ApiProcess> {
                 "GRIDOPS_ENCRYPTION_KEY",
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             )
-            .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
             .env("GITHUB_CLIENT_ID", "fleet-http-client")
             .env("GITHUB_CLIENT_SECRET", "fleet-http-synthetic-secret")
             .env("GRIDOPS_GITHUB_WEBHOOK_ACTIVE", "false")
@@ -118,11 +137,20 @@ async fn wait_until_healthy(
 
 impl Fixture {
     async fn new() -> Result<Self> {
+        Self::start(None).await
+    }
+
+    /// An API that talks to the runner manager at `manager`.
+    async fn with_manager(manager: &str) -> Result<Self> {
+        Self::start(Some(manager.to_owned())).await
+    }
+
+    async fn start(manager: Option<String>) -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let directory = std::env::temp_dir().join(format!("gridops-fleet-http-{}", Uuid::new_v4()));
         fs::create_dir(&directory)?;
         let origin = format!("http://127.0.0.1:{port}");
-        let process = start_api(&directory, &origin)?;
+        let process = start_api(&directory, &origin, manager.as_deref())?;
         let mut mac = Hmac::<Sha256>::new_from_slice(SESSION_SECRET.as_bytes())?;
         mac.update(SESSION_TOKEN.as_bytes());
         let cookie = format!(
@@ -138,6 +166,7 @@ impl Fixture {
             client,
             origin,
             cookie,
+            manager,
         };
         fixture.seed().await?;
         Ok(fixture)
@@ -149,7 +178,7 @@ impl Fixture {
         self.process.0.kill()?;
         self.process.0.wait()?;
         tokio::time::sleep(downtime).await;
-        self.process = start_api(&self.directory, &self.origin)?;
+        self.process = start_api(&self.directory, &self.origin, self.manager.as_deref())?;
         wait_until_healthy(&self.client, &self.origin, &self.directory).await
     }
 

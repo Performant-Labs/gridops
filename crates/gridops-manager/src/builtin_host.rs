@@ -10,7 +10,7 @@
 //! the setting.
 
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicU8, Ordering},
 };
 
@@ -22,7 +22,7 @@ const UNKNOWN: u8 = 0;
 const ENABLED: u8 = 1;
 const DISABLED: u8 = 2;
 
-pub(super) use gridops_core::builtin_host::DISABLED_CODE;
+pub(super) use gridops_core::builtin_host::{Budget, DISABLED_CODE};
 
 #[derive(Clone, Debug)]
 pub(super) struct BuiltinHost {
@@ -31,6 +31,9 @@ pub(super) struct BuiltinHost {
     /// this host whatever `GridOps` says.
     docker: bool,
     state: Arc<AtomicU8>,
+    /// The budget `GridOps` last sent; a figure it leaves out falls back to
+    /// the manager's own (see [`crate::ManagerLimits::effective_budget`]).
+    budget: Arc<RwLock<Budget>>,
 }
 
 impl BuiltinHost {
@@ -43,6 +46,7 @@ impl BuiltinHost {
         Self {
             docker,
             state: Arc::new(AtomicU8::new(state)),
+            budget: Arc::new(RwLock::new(Budget::default())),
         }
     }
 
@@ -53,6 +57,21 @@ impl BuiltinHost {
     pub(super) fn set(&self, enabled: bool) {
         self.state
             .store(if enabled { ENABLED } else { DISABLED }, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_budget(&self, budget: Budget) {
+        *self
+            .budget
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = budget;
+    }
+
+    /// The budget `GridOps` last sent; all `None` before it has sent one.
+    pub(super) fn budget(&self) -> Budget {
+        *self
+            .budget
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// What `GridOps` last said, or `None` before it has said.
@@ -125,6 +144,7 @@ mod tests {
             log_max_files: 5,
             runner_pids_limit: 1_024,
             runner_swap_percent: 100,
+            budget_origin: crate::BudgetOrigin::default(),
         }
     }
 
@@ -399,6 +419,177 @@ mod tests {
                 .json::<Value>()
                 .await?;
             assert_eq!(health["builtinHost"]["enabled"], expected);
+        }
+        Ok(())
+    }
+
+    // The built-in host's budget: GridOps sends it with the policy; the
+    // manager's own figures (environment or 95% of the host) are the fallback.
+
+    fn origin(cpu: bool, memory: bool, max_runners: bool) -> crate::BudgetOrigin {
+        crate::BudgetOrigin {
+            cpu_from_env: cpu,
+            memory_from_env: memory,
+            max_runners_from_env: max_runners,
+        }
+    }
+
+    /// CPU in thousandths, so figures compare exactly.
+    fn millis(cpu: f64) -> i64 {
+        (cpu * 1_000.0).round() as i64
+    }
+
+    fn setting(cpu_millis: Option<i64>, memory_mib: Option<i64>) -> Budget {
+        Budget {
+            cpu_millis,
+            memory_mib,
+        }
+    }
+
+    #[test]
+    fn with_no_setting_the_managers_own_figures_apply_and_say_where_they_come_from() {
+        let effective = limits().effective_budget(Budget::default());
+        assert_eq!(millis(effective.budget.cpu), 8000);
+        assert_eq!(effective.budget.memory_mb, 16_384);
+        assert_eq!(effective.budget.max_runners, 4);
+        assert_eq!(
+            (effective.cpu_source, effective.memory_source),
+            ("default", "default")
+        );
+
+        let from_env = ManagerLimits {
+            budget_origin: origin(true, false, false),
+            ..limits()
+        };
+        let effective = from_env.effective_budget(Budget::default());
+        assert_eq!(
+            (effective.cpu_source, effective.memory_source),
+            ("environment", "default")
+        );
+    }
+
+    #[test]
+    fn a_setting_replaces_the_managers_figures_and_the_runner_count_follows_it() {
+        let effective = limits().effective_budget(setting(Some(4_000), Some(8_192)));
+        assert_eq!(millis(effective.budget.cpu), 4000);
+        assert_eq!(effective.budget.memory_mb, 8_192);
+        // Two cores and 2 GB per runner, as when the manager derives it itself.
+        assert_eq!(effective.budget.max_runners, 2);
+        assert_eq!(
+            (effective.cpu_source, effective.memory_source),
+            ("setting", "setting")
+        );
+
+        // One figure set, the other falls back.
+        let effective = limits().effective_budget(setting(None, Some(4_096)));
+        assert_eq!(millis(effective.budget.cpu), 8000);
+        assert_eq!(effective.budget.memory_mb, 4_096);
+        assert_eq!(effective.budget.max_runners, 2);
+        assert_eq!(
+            (effective.cpu_source, effective.memory_source),
+            ("default", "setting")
+        );
+    }
+
+    #[test]
+    fn a_setting_never_goes_above_the_host_and_a_fixed_runner_count_stays_fixed() {
+        // The manager may have moved to a smaller host since it was set.
+        let effective = limits().effective_budget(setting(Some(64_000), Some(1_000_000)));
+        assert_eq!(millis(effective.budget.cpu), 8000);
+        assert_eq!(effective.budget.memory_mb, 16_384);
+
+        let fixed = ManagerLimits {
+            max_runners: 3,
+            budget_origin: origin(false, false, true),
+            ..limits()
+        };
+        let effective = fixed.effective_budget(setting(Some(2_000), Some(2_048)));
+        assert_eq!(
+            effective.budget.max_runners, 3,
+            "GRIDOPS_MAX_MANAGED_RUNNERS wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_policy_carries_the_budget_and_answers_with_the_one_in_force() -> anyhow::Result<()>
+    {
+        let manager = TestManager::start(true, Some(true)).await?;
+        let put = |body: Value| {
+            manager
+                .request(reqwest::Method::PUT, "/v1/policy")
+                .json(&body)
+                .send()
+        };
+        let response = put(json!({
+            "provisioningPaused": false, "builtinHostEnabled": true,
+            "builtinHostBudget": {"cpuMillis": 4000, "memoryMib": 8192},
+        }))
+        .await?;
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            response.json::<Value>().await?["builtinHostBudget"],
+            json!({
+                "cpuBudget": 4.0, "memoryBudgetMb": 8192, "maxRunners": 2,
+                "source": {"cpu": "setting", "memory": "setting"},
+            })
+        );
+        let budget = manager.state.docker_budget();
+        assert_eq!(
+            (budget.cpu, budget.memory_mb, budget.max_runners),
+            (4.0, 8_192, 2)
+        );
+
+        // A caller that predates the budget leaves it alone.
+        put(json!({"provisioningPaused": false, "builtinHostEnabled": true})).await?;
+        assert_eq!(
+            millis(manager.state.docker_budget().cpu),
+            4_000,
+            "left alone"
+        );
+
+        // Nulls go back to the manager's own figures.
+        let response = put(json!({
+            "provisioningPaused": false, "builtinHostEnabled": true,
+            "builtinHostBudget": {"cpuMillis": null, "memoryMib": null},
+        }))
+        .await?;
+        assert_eq!(
+            response.json::<Value>().await?["builtinHostBudget"]["source"],
+            json!({"cpu": "default", "memory": "default"})
+        );
+        let budget = manager.state.docker_budget();
+        assert_eq!(
+            (budget.cpu, budget.memory_mb, budget.max_runners),
+            (8.0, 16_384, 4)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_policy_with_an_impossible_budget_is_refused_and_changes_nothing()
+    -> anyhow::Result<()> {
+        let manager = TestManager::start(true, Some(true)).await?;
+        for budget in [
+            json!({"cpuMillis": 0, "memoryMib": 8192}),
+            json!({"cpuMillis": 4000, "memoryMib": -1}),
+        ] {
+            let response = manager
+                .request(reqwest::Method::PUT, "/v1/policy")
+                .json(&json!({
+                    "provisioningPaused": true, "builtinHostEnabled": false,
+                    "builtinHostBudget": budget,
+                }))
+                .send()
+                .await?;
+            assert_eq!(response.status().as_u16(), 400, "{budget}");
+            assert_eq!(manager.state.builtin_host.setting(), Some(true));
+            assert!(
+                !manager
+                    .state
+                    .provisioning_paused
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            assert_eq!(millis(manager.state.docker_budget().cpu), 8_000);
         }
         Ok(())
     }

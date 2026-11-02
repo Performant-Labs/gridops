@@ -43,12 +43,51 @@ The machine GridOps itself runs on can start runners two ways, and they are
 accounted separately:
 
 - **Built-in runner host.** The runner manager starts runners through Docker on
-  its own host. This host is not listed under Machines. Its budget is set on
-  the manager (`GRIDOPS_RUNNER_CPU_BUDGET` and `GRIDOPS_RUNNER_MEMORY_BUDGET_MB`,
-  95% of the host by default) and shown under **Settings → Runner host**.
+  its own host. This host is not listed under Machines. Its budget is set under
+  **Settings → Runner host → Budget** (see below).
 - **As a fleet machine.** Install the agent on that same host like any other
   machine, then approve and activate it. It then has a budget of its own on
   its machine page.
+
+#### The built-in host's budget
+
+Like a machine's budget, it is the most of the host GridOps may fill with
+runners, in CPU and memory. An administrator changes it under **Settings →
+Runner host → Budget**, or with `PUT /api/v1/settings/runner-host/budget` as a
+signed-in administrator (cookie, same origin):
+
+```json
+{"cpuMillis": 12000, "memoryMib": 49152}
+```
+
+- A figure left out of the request is kept. `null` clears it, and the runner
+  manager's own figure applies again.
+- A figure must be above zero and no more than the host reports (the manager's
+  `availableCpus` and `totalMemoryMb`). So a figure can only be set while the
+  manager is reachable and reports its host; clearing one always works.
+- The answer carries the stored `budget`, whether it `changed`, whether the
+  manager confirmed it (`managerSynced`), and the budget now in force
+  (`effective`: `cpuBudget`, `memoryBudgetMb`, `maxRunners`, and `source` per
+  figure).
+- Each change is recorded in the audit log as
+  `settings.builtin_runner_host_budget_changed` with the figures before and
+  after. `GET /api/v1/settings` reports it as `settings.builtinRunnerHostBudget`.
+- Lowering it below what runners already use never stops a running job. No new
+  runner starts on the host until there is room.
+
+The manager's environment is only the fallback for a figure that is not set:
+`GRIDOPS_RUNNER_CPU_BUDGET` and `GRIDOPS_RUNNER_MEMORY_BUDGET_MB` if they are
+set there, otherwise 95% of the host. Settings → Runner host says where each
+figure in force comes from. The runner count follows the budget (one runner per
+2 cores and 2 GB) unless `GRIDOPS_MAX_MANAGED_RUNNERS` fixes it. The reconciler
+sends the budget to the manager on every pass, as it does the on/off setting.
+After a manager restart its own figures apply until then (at most one reconcile
+interval), and no built-in runner starts in that time anyway.
+
+If you also enroll this host as a fleet machine, the two budgets are counted
+separately. Keep their sum within what you want runners to use. To move the
+host's runners onto the fleet path without a gap, lower this budget as you
+raise the machine's, then turn the built-in host off.
 
 If the host that runs GridOps should do no CI work (it is usually the slowest
 machine and also serves other things), turn the built-in runner host **off**.

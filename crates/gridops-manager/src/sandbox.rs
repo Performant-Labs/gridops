@@ -981,6 +981,7 @@ mod tests {
             log_max_files: 5,
             runner_pids_limit: 1_024,
             runner_swap_percent: 100,
+            budget_origin: crate::BudgetOrigin::default(),
         }
     }
 
