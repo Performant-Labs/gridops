@@ -2972,4 +2972,57 @@ mod tests {
         fs::remove_dir_all(directory)?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn an_idle_pool_scales_for_jobs_a_full_pool_cannot_take() -> Result<()> {
+        // Issue #42: the older pool is at its maximum of 4 with every runner
+        // busy, and the newer pool, which carries the same label, sits idle.
+        let directory =
+            std::env::temp_dir().join(format!("gridops-reconciler-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+            INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,desired_count,max_count,autoscaling_enabled,created_at,updated_at)
+              VALUES
+              ('older',1,NULL,'older','organization','["shared"]','runner:latest',4,4,1,1,1),
+              ('newer',1,NULL,'newer','organization','["shared"]','runner:latest',0,10,1,2,2);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (30,20,'waiting','queued','["self-hosted","shared"]','https://github.com/octo-org/gridops/actions/runs/20/job/30',1,1);
+            INSERT INTO runners (id,pool_id,name,status,busy,created_at,updated_at)
+              VALUES
+              ('older-1','older','older-1','busy',1,1,1),
+              ('older-2','older','older-2','busy',1,1,1),
+              ('older-3','older','older-3','busy',1,1,1),
+              ('older-4','older','older-4','busy',1,1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        assert_eq!(assigned_queued_jobs(&database, "older").await?, 0);
+        let queued = assigned_queued_jobs(&database, "newer").await?;
+        assert_eq!(queued, 1);
+        // What maybe_scale_up asks of the newer pool: desired 0, nothing busy.
+        assert_eq!(scale_up_target(0, 0, queued, 1, 10), 1);
+        let providers = vec!["docker".to_owned()];
+        let labels = vec!["shared".to_owned()];
+        let capacity = provider_capacities(&database, "newer", &providers, &labels).await?;
+        assert_eq!(
+            capacity
+                .iter()
+                .map(|capacity| provider_capacity_deficit(capacity, 1))
+                .sum::<i64>(),
+            1
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
 }
