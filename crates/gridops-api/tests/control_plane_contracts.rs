@@ -214,10 +214,10 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
 }
 
 #[tokio::test]
-async fn installers_are_public_and_point_at_this_deployment() -> Result<()> {
+async fn installer_is_public_and_points_at_this_deployment() -> Result<()> {
     let fixture = ApiFixture::start().await?;
 
-    for path in ["install.sh", "install.ps1"] {
+    for path in ["install.sh"] {
         let response = fixture
             .client
             .get(format!("{}/{path}", fixture.base_url))
@@ -243,6 +243,13 @@ async fn installers_are_public_and_point_at_this_deployment() -> Result<()> {
             "{path} doesn't carry the version"
         );
     }
+    // Windows is not a deployment target.
+    let windows = fixture
+        .client
+        .get(format!("{}/install.ps1", fixture.base_url))
+        .send()
+        .await?;
+    assert_eq!(windows.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
 

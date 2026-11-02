@@ -114,7 +114,6 @@ function EnrollmentInstructions({ issued, onDone }: { issued: Issued; onDone: ()
       <div className="space-y-1.5">
         <div className="text-sm font-medium text-foreground">On the machine, run</div>
         <CopyField label="Linux or macOS" value={`curl -fsSL ${address}/install.sh | sh`} />
-        <CopyField label="Windows (PowerShell)" value={`irm ${address}/install.ps1 | iex`} />
         <p className="text-xs leading-5 text-muted-foreground">
           It installs the agent that matches this GridOps, asks for the code below, and keeps the agent running as a user service.
         </p>
