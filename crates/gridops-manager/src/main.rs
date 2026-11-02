@@ -74,6 +74,8 @@ struct TartAgent {
 
 #[derive(Clone, Debug)]
 struct ManagerLimits {
+    /// The Docker host's own name, so the UI can say which machine a budget is about.
+    host_name: String,
     available_cpus: f64,
     total_memory_mb: i64,
     cpu_budget: f64,
@@ -467,7 +469,11 @@ struct LogsQuery {
 }
 
 impl ManagerLimits {
-    fn from_environment(available_cpus: i64, total_memory_bytes: i64) -> Result<Self> {
+    fn from_environment(
+        host_name: String,
+        available_cpus: i64,
+        total_memory_bytes: i64,
+    ) -> Result<Self> {
         let available_cpus = available_cpus.max(1) as f64;
         let total_memory_mb = (total_memory_bytes / 1_024 / 1_024).max(512);
         let default_cpu_budget = (available_cpus * 0.95).max(1.0);
@@ -529,6 +535,7 @@ impl ManagerLimits {
             "GRIDOPS_RUNNER_NETWORK is invalid"
         );
         Ok(Self {
+            host_name,
             available_cpus,
             total_memory_mb,
             cpu_budget,
@@ -707,6 +714,7 @@ async fn main() -> Result<()> {
         .await
         .context("could not inspect Docker capacity")?;
     let limits = ManagerLimits::from_environment(
+        info.name.clone().unwrap_or_default(),
         info.ncpu.unwrap_or(1),
         info.mem_total.unwrap_or(512 * 1_024 * 1_024),
     )?;
@@ -823,6 +831,7 @@ async fn health(
         "dockerVersion": version.version,
         "apiVersion": version.api_version,
         "providers": { "docker": { "available": true }, "tart": tart },
+        "hostName": state.limits.host_name,
         "availableCpus": state.limits.available_cpus,
         "totalMemoryMb": state.limits.total_memory_mb,
         "provisioningPaused": state.provisioning_paused.load(Ordering::Relaxed),
@@ -2037,6 +2046,7 @@ mod tests {
     #[test]
     fn enforces_aggregate_runner_budgets() {
         let limits = ManagerLimits {
+            host_name: "docker-host".into(),
             available_cpus: 10.0,
             total_memory_mb: 8_192,
             cpu_budget: 6.0,

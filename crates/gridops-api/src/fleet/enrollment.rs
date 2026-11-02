@@ -441,6 +441,42 @@ pub(super) async fn backend_enabled(
     Ok(StatusCode::OK.into_response())
 }
 
+/// The room that may be filled on a machine. Each figure left out is kept.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct BudgetBody {
+    cpu_millis: Option<gridops_core::fleet::protocol::primitives::BrowserUint53>,
+    memory_mib: Option<gridops_core::fleet::protocol::primitives::BrowserUint53>,
+    disk_bytes: Option<gridops_core::fleet::protocol::primitives::BrowserUint53>,
+}
+
+#[derive(Serialize)]
+pub(super) struct BudgetReceipt {
+    budget: gridops_core::fleet::registry::BudgetFigures,
+}
+
+pub(super) async fn set_budget(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser<Operate>,
+    FleetPath(host_id): FleetPath<HostId>,
+    FleetJson(body): FleetJson<BudgetBody>,
+) -> Result<Json<BudgetReceipt>, FleetApiError> {
+    let budget = RegistryService::new(state.database, state.vault)
+        .set_host_budget(
+            user.principal(),
+            host_id,
+            gridops_core::fleet::registry::BudgetChange {
+                cpu_millis: body.cpu_millis.map(|value| value.get()),
+                memory_mib: body.memory_mib.map(|value| value.get()),
+                disk_bytes: body.disk_bytes.map(|value| value.get()),
+            },
+        )
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(BudgetReceipt { budget }))
+}
+
 #[derive(Serialize)]
 pub(super) struct GrantList {
     items: Vec<gridops_core::fleet::registry::HostGrant>,

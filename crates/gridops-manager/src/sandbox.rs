@@ -967,6 +967,7 @@ mod tests {
 
     fn limits() -> ManagerLimits {
         ManagerLimits {
+            host_name: "docker-host".into(),
             available_cpus: 8.0,
             total_memory_mb: 16_384,
             cpu_budget: 6.0,

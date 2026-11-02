@@ -5,6 +5,7 @@ import {
   parseUpdateRunnerPoolInput,
 } from "./schemas";
 import { api } from "~/lib/api";
+import type { RunnerHost } from "./resource-risk";
 
 type BaseOptions = {
   installations: Array<{ id: number; accountLogin: string; accountType: string }>;
@@ -41,6 +42,7 @@ export type RunnerPoolOptions = (BaseOptions & {
     desiredCount: number; minCount: number; maxCount: number; autoscalingEnabled: boolean;
     queueScaleFactor: number; idleTimeoutMinutes: number; runnerGroupId: number;
     maxCpuLimit: number; maxMemoryLimitMb: number;
+    runnerHost?: RunnerHost;
   };
 });
 
@@ -73,6 +75,8 @@ export type RunnerPoolDetail = {
   memoryLimitMb: number;
   maxCpuLimit?: number;
   maxMemoryLimitMb?: number;
+  /** The built-in runner host those limits belong to. */
+  runnerHost?: RunnerHost;
   runnerGroupId: number;
   paused: boolean;
   state: string;

@@ -125,7 +125,7 @@ export type SettingsPage = {
       poolCount: number; manageUrl: string;
     }>;
     manager: {
-      ok: boolean; dockerVersion?: string; apiVersion?: string; availableCpus?: number;
+      ok: boolean; dockerVersion?: string; apiVersion?: string; hostName?: string; availableCpus?: number;
       totalMemoryMb?: number; provisioningPaused?: boolean; error?: string;
       capacity?: {
         cpuBudget: number; memoryBudgetMb: number; maxRunners: number;

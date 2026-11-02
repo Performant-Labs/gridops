@@ -38,7 +38,7 @@ For full host onboarding a bot needs all four v1 scopes:
 | `fleet:read` | Read hosts, backends, grants, events, targets, queues, operations |
 | `fleet:enroll` | Issue, check and revoke enrollment codes |
 | `fleet:approve` | Approve a pending host |
-| `fleet:operate` | Turn runtimes on/off, set lifecycle intent, set grants, save a pool's fleet execution profile, set a pool's runner counts |
+| `fleet:operate` | Turn runtimes on/off, set lifecycle intent, set grants, set a machine's budget, save a pool's fleet execution profile, set a pool's runner counts |
 
 Recovering, retiring or rotating a host's credentials, reading agent logs,
 and managing tokens stay cookie-only. A token belongs to its creator: their
@@ -204,7 +204,7 @@ reason a runner is waiting; each maps to one missing layer:
 | `no_eligible_host` | Layer 2 — no host's grant satisfies the platform (usually `allowDockerSocket`) |
 | `capability_unverified` | Layer 3 — the agent does not advertise the socket capability (`GRIDOPS_AGENT_DOCKER_SOCKET` unset) |
 | `forbidden` | Not a host layer: the intent is pinned to a replaced fleet profile (known issue; cancel and re-dispatch the run) |
-| `physical_resource_exhausted` | The platform reservation exceeds every host's budget — check disk/cpu/memory reservations against reported budgets |
+| `physical_resource_exhausted` | The platform reservation exceeds every host's budget — check disk/cpu/memory reservations against reported budgets, and raise a budget with `PUT /api/v1/fleet/hosts/{id}/budget` (`{"cpuMillis":…,"memoryMib":…,"diskBytes":…}`, any subset, never above what the machine reports) |
 
 ## The script
 

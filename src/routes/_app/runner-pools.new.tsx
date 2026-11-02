@@ -19,7 +19,8 @@ import {
   getInstallationRunnerGroups,
   getRunnerPoolRepositories,
 } from "~/features/runner-pools/runner-pools.functions";
-import { formatResourceNumber, hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
+import { type RunnerHost, hostResourceWarning } from "~/features/runner-pools/resource-risk";
 
 export const Route = createFileRoute("/_app/runner-pools/new")({
   loader: () => getCreateRunnerPoolOptions(),
@@ -117,6 +118,7 @@ type RunnerPoolFormOptions = {
     runnerGroupId: number;
     maxCpuLimit: number;
     maxMemoryLimitMb: number;
+    runnerHost?: RunnerHost;
   };
   installUrl: string;
 };
@@ -454,9 +456,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
           </SettingsRow>
           {resourceWarning ? (
             <div className="px-4 py-3">
-              <Callout title="Target exceeds this host’s safe capacity" tone="warning">
-                {resourceWarning.runnerCount} runners would request {formatResourceNumber(resourceWarning.cpuRequested)} cores and {resourceWarning.memoryRequestedMb.toLocaleString()} MB; the host safely offers {formatResourceNumber(resourceWarning.cpuBudget)} cores and {resourceWarning.memoryBudgetMb.toLocaleString()} MB. You can save, but GridOps won’t start runners beyond the budget.
-              </Callout>
+              <HostCapacityWarning host={options.defaults.runnerHost} warning={resourceWarning} />
             </div>
           ) : null}
           <div className="px-4 py-3.5">

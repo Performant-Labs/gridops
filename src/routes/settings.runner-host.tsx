@@ -37,6 +37,7 @@ function RunnerHostSettings() {
         <SettingsValue label="Manager" value={<StatusBadge status={manager.ok ? "healthy" : "offline"} />} />
         <SettingsValue label="Docker Engine" mono={Boolean(manager.dockerVersion)} value={manager.dockerVersion ?? "—"} />
         <SettingsValue label="Docker API" mono={Boolean(manager.apiVersion)} value={manager.apiVersion ?? "—"} />
+        <SettingsValue label="Machine" value={manager.hostName || "—"} />
         <SettingsValue label="Host" value={manager.availableCpus ? `${manager.availableCpus} CPUs · ${manager.totalMemoryMb ? `${Math.round(manager.totalMemoryMb / 1024)} GB memory` : "memory unknown"}` : "—"} />
         <SettingsValue label="Provisioning" value={<StatusBadge status={manager.provisioningPaused ? "paused" : "active"} />} />
       </SettingsSection>

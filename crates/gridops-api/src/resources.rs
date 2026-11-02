@@ -1352,7 +1352,8 @@ pub async fn runner_pool(
         .iter()
         .filter_map(|connection| connection.get("id").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    let (max_cpu_limit, max_memory_limit_mb) = manager_resource_capacity(&state).await;
+    let runner_host = manager_resource_capacity(&state).await;
+    let (max_cpu_limit, max_memory_limit_mb) = (runner_host.cpu, runner_host.memory_mb);
     Ok(Json(json!({
         "id": pool_id,
         "installationId": pool.installation_id,
@@ -1388,6 +1389,7 @@ pub async fn runner_pool(
         "priorityWaitMinutes": priority_wait_minutes,
         "maxCpuLimit": max_cpu_limit,
         "maxMemoryLimitMb": max_memory_limit_mb,
+        "runnerHost": runner_host.host,
         "configurationVersion": pool.configuration_version,
         "provisionFailureCount": pool.provision_failure_count,
         "provisionRetryAt": iso_optional(pool.provision_retry_at),
@@ -2279,11 +2281,11 @@ pub async fn runner_pool_options(
         })
     })
     .collect::<Vec<_>>();
-    let (max_cpu_limit, max_memory_limit_mb) = manager_resource_capacity(&state).await;
+    let runner_host = manager_resource_capacity(&state).await;
     Ok(Json(json!({
         "authenticated": true, "installations": installations, "repositories": [], "runnerGroups": [], "bitbucketConnections": bitbucket_connections,
         "installUrl": format!("https://github.com/apps/{app_slug}/installations/new"),
-        "defaults": runner_pool_defaults(state.config.runner_image(), max_cpu_limit, max_memory_limit_mb)
+        "defaults": runner_pool_defaults(state.config.runner_image(), &runner_host)
     })))
 }
 
@@ -3197,6 +3199,7 @@ pub async fn settings(
                 "ok": true,
                 "dockerVersion": value.get("dockerVersion"),
                 "apiVersion": value.get("apiVersion"),
+                "hostName": value.get("hostName"),
                 "availableCpus": value.get("availableCpus"),
                 "totalMemoryMb": value.get("totalMemoryMb"),
                 "provisioningPaused": value.get("provisioningPaused"),
@@ -4906,7 +4909,7 @@ fn normalized_pool_labels(name: &str, additional: &[String]) -> ApiResult<Vec<St
     Ok(labels)
 }
 
-fn runner_pool_defaults(image: &str, max_cpu_limit: i64, max_memory_limit_mb: i64) -> Value {
+fn runner_pool_defaults(image: &str, runner_host: &ManagerCapacity) -> Value {
     let tart_image = default_tart_image();
     json!({
         "provider": "docker", "providers": ["docker"], "image": image,
@@ -4914,7 +4917,8 @@ fn runner_pool_defaults(image: &str, max_cpu_limit: i64, max_memory_limit_mb: i6
         "labels": ["gridops"], "cpuLimit": 2,
         "memoryLimitMb": 2048, "desiredCount": 1, "minCount": 0, "maxCount": 10,
         "autoscalingEnabled": true, "queueScaleFactor": 1, "idleTimeoutMinutes": 5,
-        "runnerGroupId": 1, "maxCpuLimit": max_cpu_limit, "maxMemoryLimitMb": max_memory_limit_mb,
+        "runnerGroupId": 1, "maxCpuLimit": runner_host.cpu, "maxMemoryLimitMb": runner_host.memory_mb,
+        "runnerHost": runner_host.host,
     })
 }
 
@@ -4922,7 +4926,16 @@ fn default_tart_image() -> String {
     std::env::var("GRIDOPS_TART_RUNNER_IMAGE").unwrap_or_else(|_| "gridops-macos-tahoe-base".into())
 }
 
-async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
+/// What the built-in runner host allows a pool: its safe CPU and memory
+/// budget, and which machine that is.
+struct ManagerCapacity {
+    cpu: i64,
+    memory_mb: i64,
+    /// Which host the budget is about, for the capacity warning.
+    host: Value,
+}
+
+async fn manager_resource_capacity(state: &AppState) -> ManagerCapacity {
     let manager = manager_json(state, Method::GET, "v1/health", None)
         .await
         .ok();
@@ -4949,7 +4962,18 @@ async fn manager_resource_capacity(state: &AppState) -> (i64, i64) {
         })
         .unwrap_or(FALLBACK_MANAGER_MEMORY_LIMIT_MB)
         .max(256);
-    (cpu, memory)
+    let host = manager.as_ref().map_or(Value::Null, |value| {
+        json!({
+            "name": value.get("hostName").and_then(Value::as_str).filter(|name| !name.is_empty()),
+            "cpus": value.get("availableCpus"),
+            "memoryMb": value.get("totalMemoryMb"),
+        })
+    });
+    ManagerCapacity {
+        cpu,
+        memory_mb: memory,
+        host,
+    }
 }
 
 fn capacity_window(window: &str) -> Option<(i64, i64)> {
@@ -5396,10 +5420,20 @@ mod tests {
 
     #[test]
     fn new_runner_pools_start_with_one_runner_but_can_scale_to_zero() {
-        let defaults = runner_pool_defaults("runner:latest", 64, 262_144);
+        let defaults = runner_pool_defaults(
+            "runner:latest",
+            &ManagerCapacity {
+                cpu: 64,
+                memory_mb: 262_144,
+                host: json!({"name": "docker-host", "cpus": 68, "memoryMb": 276_480}),
+            },
+        );
 
         assert_eq!(defaults["desiredCount"], 1);
         assert_eq!(defaults["minCount"], 0);
+        // The capacity warning names the host its limits come from.
+        assert_eq!(defaults["runnerHost"]["name"], "docker-host");
+        assert_eq!(defaults["maxCpuLimit"], 64);
     }
 
     #[test]
