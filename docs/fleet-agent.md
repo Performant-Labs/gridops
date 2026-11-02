@@ -195,6 +195,10 @@ curl -fsSL https://gridops.example.com/install.sh | sudo sh
 ```
 
 Run as an ordinary user on such a machine, it stops and tells you to use `sudo`.
+To let a releaser, or an agent cutting a release, run the upgrade without a
+password, give their login the narrow sudo rule in the release checklist's
+[prerequisites](release-checklist-template.md#prerequisites): a root-owned
+wrapper that runs this installer from the deployment, and nothing else.
 If the service doesn't come back, the installer says so and prints the rename
 that restores the previous binary. Your drop-ins (such as the Docker socket
 setting) and the agent's enrollment are not touched.

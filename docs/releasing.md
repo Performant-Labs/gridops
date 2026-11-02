@@ -26,7 +26,12 @@ upgrade Linux fleet machines. Deployments that build their images from source
 
 Start by creating the release's checklist issue from the template (see
 [Release checklist](#release-checklist)); it holds the record of the steps
-below, the dry run and the deployment.
+below, the dry run and the deployment. Its
+[Prerequisites](release-checklist-template.md#prerequisites) list what the
+person or agent cutting the release needs (GitHub rights, the
+[release operator token](fleet-automation.md#the-release-operator-token),
+the deploy host, root on system-service machines through a narrow sudo rule),
+and `scripts/release-preflight.sh` checks them before step 1.
 
 1. Set the version in `Cargo.toml` (`[workspace.package] version`), refresh
    `Cargo.lock` with `cargo check`, and merge that to `master`.
@@ -88,6 +93,53 @@ version, with no labels.
 
 If a step in the template is wrong or missing, fix the template in a pull
 request as part of the release, so the next copy has it.
+
+## Running a release with an agent
+
+A release can be cut end to end by an agent, once the
+[prerequisites](release-checklist-template.md#prerequisites) at the top of
+the checklist are in place: GitHub rights on the repository, the
+[release operator token](fleet-automation.md#the-release-operator-token),
+a login on the deploy host, the narrow sudo rule on each machine that runs
+the agent as a system service, and a healthy fleet.
+`scripts/release-preflight.sh` checks the ones it can reach and fails, with
+a list, before step 1 if any is missing. With them, the agent:
+
+- creates the checklist issue and works through it with `gh` (steps 1 to 13
+  and 23): the version bump, the changelog, the dry run, the tag, the
+  published assets, the close-out;
+- pauses, drains or activates a machine with the token
+  (`POST /api/v1/fleet/hosts/{host_id}/lifecycle`), for example one the
+  preflight or the dry run shows failing starts;
+- deploys over ssh on the deploy host (steps 14 to 17): backup, rollback
+  tags, `docker compose`, health;
+- upgrades each system-service machine with
+  `ssh <machine> sudo -n /usr/local/sbin/gridops-agent-upgrade` (step 18),
+  and each per-user agent with the installer as that user (step 19);
+- checks the fleet and smoke-tests (steps 20 to 22).
+
+What still needs a person:
+
+- **Setting up the prerequisites.** Only an administrator can create the
+  token (the token routes are cookie-only), and only someone with root can
+  install the sudo rule on a machine. Both are done before the release, and
+  the sudo rule only once per machine.
+- **Reviews the repository requires.** If a branch rule requires an approving
+  review, merging the version bump of step 5 waits for one.
+- **Anything the preflight cannot see.** It cannot read the token's expiry or
+  tell whether its owner is still an administrator (see
+  [the release operator token](fleet-automation.md#the-release-operator-token)),
+  it only checks the machines listed in `PREFLIGHT_UPGRADE_HOSTS`, and it
+  checks the deploy host's disk but not its Docker or compose access.
+- **Decisions.** Whether to roll back (step 22), and which machines stay on
+  the old version (step 20), are the release owner's call.
+
+Not built yet: **agent self-update**, a control-plane command that has an
+agent download the pinned release, check its SHA-256, swap its binary and
+restart itself, so upgrading a system-service machine would need no root at
+all. Until it exists, the sudo rule is the supported way to let a releaser
+upgrade those machines, and without it step 18 needs a person at each
+machine.
 
 ## Changelog and known issues
 
