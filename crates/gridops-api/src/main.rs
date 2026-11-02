@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
             "/api/v1/overview/capacity",
             get(resources::capacity_history),
         )
+        .route("/api/v1/overview/queued-jobs", get(resources::queued_jobs))
         .route("/api/v1/search", get(resources::search))
         .route("/api/v1/repositories", get(resources::repositories))
         .route("/api/v1/repositories/sync", post(oauth::sync))

@@ -29,7 +29,7 @@ export type DashboardOverview = {
     /** How long reconciler passes take; older servers omit it. */
     reconcilerPass?: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null; intervalSeconds: number } | null;
     failures: Array<{ reason: string; count: number }>;
-    alerts: Array<{ level: "warning" | "error"; title: string; detail: string; href: "/workflow-runs" | "/runner-pools" | "/webhooks" }>;
+    alerts: Array<{ level: "warning" | "error"; title: string; detail: string; href: "/queued-jobs" | "/workflow-runs" | "/runner-pools" | "/webhooks" }>;
   };
   pools: Array<{
     id: string;
@@ -99,3 +99,40 @@ export type CapacityHistory = {
 };
 
 export type RunnerStartPhase = "room" | "preparing" | "waitingToStart" | "starting";
+
+/**
+ * Why a queued job is still waiting, from what the scaler and the pool's runners say.
+ * Newer servers may send other values; show those as plain text.
+ */
+export type QueuedJobWaitingReason =
+  | "no_matching_pool"
+  | "pool_at_capacity"
+  | "runner_starting"
+  | "waiting_for_runner"
+  | "pool_not_visible";
+
+/** One job counted in the Overview's queued total. */
+export type QueuedJob = {
+  id: number;
+  name: string;
+  repository: string;
+  workflow: string;
+  runId: number;
+  runUrl: string;
+  htmlUrl: string;
+  labels: string[];
+  /** The pool the scaler counts the job for; null when no pool can run it (or you can't see the pool, see `waitingReason`). */
+  matchedPool: { id: string; name: string } | null;
+  waitingReason: QueuedJobWaitingReason | (string & {});
+  queuedAt: string;
+  ageSeconds: number;
+};
+
+/** Queued jobs, the longest-waiting first. */
+export type QueuedJobsPage = {
+  authenticated: boolean;
+  items: QueuedJob[];
+  total: number;
+  page: number;
+  perPage: number;
+};
