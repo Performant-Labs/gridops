@@ -19,7 +19,7 @@ use axum::{
     extract::DefaultBodyLimit,
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, get, post, put},
 };
 use gridops_core::fleet::protocol::{browser::ErrorCode, primitives::DEFAULT_JSON_BYTES};
 
@@ -92,6 +92,11 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     (
         "POST",
         "/api/v1/fleet/hosts/{host_id}/lifecycle",
+        "fleet:operate",
+    ),
+    (
+        "PUT",
+        "/api/v1/fleet/hosts/{host_id}/budget",
         "fleet:operate",
     ),
     (
@@ -206,6 +211,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v1/fleet/hosts/{host_id}/grants/{target_id}",
             post(enrollment::set_grant),
+        )
+        .route(
+            "/api/v1/fleet/hosts/{host_id}/budget",
+            put(enrollment::set_budget),
         )
         .route(
             "/api/v1/fleet/hosts/{host_id}/retire",

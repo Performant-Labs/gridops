@@ -12,7 +12,8 @@ import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import { SearchableSelect } from "~/components/ui/searchable-select";
 import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
-import { formatResourceNumber, hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
+import { hostResourceWarning } from "~/features/runner-pools/resource-risk";
 import {
   type RepositoryOption,
   type RunnerGroupOption,
@@ -288,9 +289,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           </SettingsRow>
           {resourceWarning ? (
             <div className="px-4 py-3">
-              <Callout title="Target exceeds this host’s safe capacity" tone="warning">
-                {resourceWarning.runnerCount} runners would request {formatResourceNumber(resourceWarning.cpuRequested)} cores and {resourceWarning.memoryRequestedMb.toLocaleString()} MB; the host safely offers {formatResourceNumber(resourceWarning.cpuBudget)} cores and {resourceWarning.memoryBudgetMb.toLocaleString()} MB. You can save, but GridOps won’t start runners beyond the budget.
-              </Callout>
+              <HostCapacityWarning host={pool.runnerHost} warning={resourceWarning} />
             </div>
           ) : null}
           <div className="px-4 py-3.5">

@@ -223,6 +223,23 @@ impl From<super::ids::FleetIdParseError> for RegistryError {
 }
 
 /// Clone-cheap database/vault handles for registry workflows.
+/// The physical budget figures of a machine, as stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetFigures {
+    pub cpu_millis: i64,
+    pub memory_mib: i64,
+    pub disk_bytes: i64,
+}
+
+/// A change to a machine's physical budget; a figure left `None` is kept.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BudgetChange {
+    pub cpu_millis: Option<u64>,
+    pub memory_mib: Option<u64>,
+    pub disk_bytes: Option<u64>,
+}
+
 /// What one host may run for one CI target.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1029,6 +1046,117 @@ impl RegistryService {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Sets how much of the machine may be filled with runners: the physical budget of
+    /// its root resource domain. Each figure left `None` stays as it is. A
+    /// budget can be lowered below what runners already hold; those runners
+    /// finish, and nothing new is placed until they free enough room. It can
+    /// never exceed what the machine itself reports, so a figure the machine
+    /// has not reported cannot be set.
+    pub async fn set_host_budget(
+        &self,
+        principal: &Principal,
+        host_id: HostId,
+        change: BudgetChange,
+    ) -> Result<BudgetFigures, RegistryError> {
+        let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
+        if change.cpu_millis.is_none() && change.memory_mib.is_none() && change.disk_bytes.is_none()
+        {
+            return Err(RegistryError::InvalidRequest("a budget figure is required"));
+        }
+        let mut tx = self.begin().await?;
+        let now = self.clock.now_millis();
+        ensure_system_admin(&mut tx, user_id).await?;
+        let Some(row) = sqlx::query(
+            "SELECT d.id,d.cpu_millis,d.memory_mib,d.disk_bytes,
+                    o.cpu_millis AS reported_cpu,o.memory_mib AS reported_memory,
+                    o.disk_bytes AS reported_disk
+               FROM fleet_hosts h
+               JOIN host_resource_domains d ON d.host_id=h.id AND d.parent_domain_id IS NULL
+               LEFT JOIN fleet_observed_domains o ON o.domain_id=d.id AND o.host_id=h.id
+              WHERE h.id=? AND h.lifecycle_state!='retired'",
+        )
+        .bind(host_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Err(RegistryError::NotFound);
+        };
+        let stored = |name: &str| row.get::<i64, _>(name);
+        let reported = |name: &str| row.get::<Option<i64>, _>(name).unwrap_or(0);
+        let before = BudgetFigures {
+            cpu_millis: stored("cpu_millis"),
+            memory_mib: stored("memory_mib"),
+            disk_bytes: stored("disk_bytes"),
+        };
+        let choose = |wanted: Option<u64>, current: i64, reported: i64, what: &'static str| {
+            let Some(wanted) = wanted else {
+                return Ok(current);
+            };
+            let wanted = i64::try_from(wanted)
+                .map_err(|_| RegistryError::InvalidRequest("budget exceeds integer bounds"))?;
+            if wanted <= 0 {
+                return Err(RegistryError::InvalidRequest(
+                    "a budget figure must be greater than zero",
+                ));
+            }
+            if reported <= 0 {
+                return Err(RegistryError::InvalidRequest(what));
+            }
+            if wanted > reported {
+                return Err(RegistryError::InvalidRequest(
+                    "a budget cannot exceed what the machine reports",
+                ));
+            }
+            Ok(wanted)
+        };
+        let after = BudgetFigures {
+            cpu_millis: choose(
+                change.cpu_millis,
+                before.cpu_millis,
+                reported("reported_cpu"),
+                "the machine has not reported its CPU",
+            )?,
+            memory_mib: choose(
+                change.memory_mib,
+                before.memory_mib,
+                reported("reported_memory"),
+                "the machine has not reported its memory",
+            )?,
+            disk_bytes: choose(
+                change.disk_bytes,
+                before.disk_bytes,
+                reported("reported_disk"),
+                "the machine has not reported its disk",
+            )?,
+        };
+        if after != before {
+            sqlx::query(
+                "UPDATE host_resource_domains SET cpu_millis=?,memory_mib=?,disk_bytes=?,
+                   revision=revision+1 WHERE id=? AND host_id=?",
+            )
+            .bind(after.cpu_millis)
+            .bind(after.memory_mib)
+            .bind(after.disk_bytes)
+            .bind(row.get::<String, _>("id"))
+            .bind(host_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+            audit_and_event(
+                &mut tx,
+                Some(principal),
+                Some(host_id),
+                "fleet.host.budget_changed",
+                "host",
+                &host_id.to_string(),
+                json!({"before": before, "after": after}),
+                now,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(after)
     }
 
     /// The host's target grants with readable labels.

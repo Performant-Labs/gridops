@@ -228,6 +228,31 @@
         "required": ["enabled"],
         "additionalProperties": false
       },
+      "BudgetRequest": {
+        "type": "object",
+        "minProperties": 1,
+        "properties": {
+          "cpuMillis": { "type": "integer", "minimum": 1, "description": "CPU in thousandths of a core, at most what the machine reports." },
+          "memoryMib": { "type": "integer", "minimum": 1, "description": "Memory in MiB, at most what the machine reports." },
+          "diskBytes": { "type": "integer", "minimum": 1, "description": "Disk in bytes, at most what the machine reports." }
+        },
+        "additionalProperties": false
+      },
+      "BudgetResponse": {
+        "type": "object",
+        "properties": {
+          "budget": {
+            "type": "object",
+            "properties": {
+              "cpuMillis": { "type": "integer", "minimum": 0 },
+              "memoryMib": { "type": "integer", "minimum": 0 },
+              "diskBytes": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["cpuMillis", "memoryMib", "diskBytes"]
+          }
+        },
+        "required": ["budget"]
+      },
       "GrantRequest": {
         "type": "object",
         "properties": {
@@ -582,6 +607,23 @@
         },
         "responses": {
           "200": { "description": "Intent set", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/budget": {
+      "put": {
+        "tags": ["fleet-operate"],
+        "summary": "Set a machine's physical budget",
+        "description": "The room GridOps may fill on the machine. Send any of `cpuMillis`, `memoryMib`, `diskBytes`; a figure left out is kept. Each must be greater than zero and no more than the machine reports, so a figure the machine has not reported cannot be set. A budget below what runners already hold is accepted: those runners finish, and nothing new is placed until enough room is free. Returns the budget now in force.",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BudgetRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Budget set", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BudgetResponse" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

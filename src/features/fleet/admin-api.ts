@@ -7,7 +7,7 @@ import { fleetErrorSchema, fleetIdSchema } from "./contracts";
 import { FleetRequestError } from "./registry-api";
 import { fleetIdempotencyKeySchema } from "./registry-contracts";
 import {
-  backendEnabledRequestSchema, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
+  backendEnabledRequestSchema, budgetRequestSchema, budgetResultSchema, type BudgetRequest, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
   type GrantPolicy, type HostLifecycle, type ProfileInput, type WorkloadWindow, fleetWorkloadSchema, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema,
   apiTokenListSchema, apiTokenResultSchema, createApiTokenRequestSchema, createApiTokenResultSchema, type CreateApiTokenRequest } from "./admin-contracts";
@@ -40,6 +40,11 @@ const profilePath = (poolId: string) => `/api/v1/fleet/pools/${encodeURIComponen
 export const setHostLifecycle = (hostId: string, expectedRevision: number, lifecycle: HostLifecycle, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/lifecycle`, emptyResponse, {
     method: "POST", body: lifecycleRequestSchema.parse({ expectedRevision, lifecycle }), signal,
+  });
+/** Sets how much of the machine GridOps may fill; a figure left out is kept. Returns the budget now in force. */
+export const setHostBudget = (hostId: string, budget: BudgetRequest, signal?: AbortSignal) =>
+  request(`${hostPath(hostId)}/budget`, budgetResultSchema, {
+    method: "PUT", body: budgetRequestSchema.parse(budget), signal,
   });
 export const listAgentLogs = (hostId: string, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/logs`, agentLogListSchema, { signal });

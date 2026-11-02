@@ -36,6 +36,7 @@ bot-driven enrollment.
 | POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | browser, `fleet:enroll` | Revoke an unused code |
 | POST | `/api/v1/fleet/hosts/{host_id}/approve` | browser, `fleet:approve` | Approve a pending host |
 | POST | `/api/v1/fleet/hosts/{host_id}/lifecycle` | browser, `fleet:operate` | Set host intent (active, paused, draining, maintenance) |
+| PUT | `/api/v1/fleet/hosts/{host_id}/budget` | browser, `fleet:operate` | Set the machine's physical budget (CPU, memory, disk), up to what it reports |
 | POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | browser, `fleet:operate` | Turn a runtime on or off |
 | POST | `/api/v1/fleet/hosts/{host_id}/grants/{target_id}` | browser, `fleet:operate` | Set a target grant |
 | PUT | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:operate` | Save the pool's fleet execution profile |
@@ -165,6 +166,7 @@ Mutating browser routes protect replays in one of two ways:
 | `POST /fleet/hosts/{id}/approve` | `expectedRevision` | `revision_conflict` with `details.currentRevision`; if the host reads back `enrollment: "approved"`, the call already succeeded |
 | `POST /fleet/hosts/{id}/lifecycle` | `expectedRevision` | as above, with `lifecycle` as the readback |
 | `POST /fleet/hosts/{id}/backends/{backend_id}/enabled` | last-write-wins | the new state |
+| `PUT /fleet/hosts/{id}/budget` | last-write-wins | the budget in force, returned in the response |
 | `POST /fleet/hosts/{id}/grants/{target_id}` | last-write-wins | the new state |
 | `POST /fleet/enrollments/{id}/revoke` | idempotent by state | `200` again |
 | `POST /fleet/api-tokens/{id}/revoke` | idempotent by state | `200` again |

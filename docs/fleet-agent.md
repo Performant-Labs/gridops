@@ -26,6 +26,36 @@ A machine only gets work while it heartbeats: if it goes quiet for 90 seconds
 it stops receiving new runners, and work that was never delivered is
 cancelled and placed elsewhere.
 
+## Capacity: each machine's budget
+
+A machine's **budget** is the most of it GridOps may fill with runners: CPU,
+memory and disk. A new machine starts at 80% of what it reports, which leaves
+room for the machine itself. An administrator can change it on the machine's
+page (**Budget**) or with `PUT /api/v1/fleet/hosts/{host_id}/budget` (see
+[the API guide](fleet-api.md)). It can be set anywhere from just above zero up
+to exactly what the machine reports, never above. Lowering it below what
+runners already use never stops a running job; nothing new is placed until
+there is room again.
+
+### The host GridOps runs on
+
+The machine running GridOps itself can start runners two ways, and they are
+accounted separately:
+
+- **Built-in runner host.** The runner manager starts runners through Docker on
+  its own host. This host is not listed under Machines. Its budget is set on
+  the manager (`GRIDOPS_RUNNER_CPU_BUDGET` and `GRIDOPS_RUNNER_MEMORY_BUDGET_MB`,
+  95% of the host by default) and shown under **Settings → Runner host**. The
+  capacity warning on pool settings names this host and links there.
+- **As a fleet machine.** Install the agent on that same host like any other
+  machine, then approve and activate it. It then has a budget of its own on
+  its machine page.
+
+Until the built-in runner host is retired, the two budgets draw on the same
+CPU and memory, so keep their sum within what you want GridOps to use on that
+host: lower the manager's budgets and set the machine's. A pool set to run
+**Only on machines** never starts runners on the built-in host.
+
 ## Install the agent
 
 **Machines → Add machine** issues the enrollment code and shows the installer

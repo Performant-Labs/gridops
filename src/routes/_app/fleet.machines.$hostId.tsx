@@ -24,6 +24,7 @@ import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden,
   lifecycleLabel, newIdempotencyKey, osLabel, platformLabel, runtimeLabel,
 } from "~/features/fleet/fleet-ui";
+import { MachineBudgetSection } from "~/features/fleet/machine-budget-section";
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
 import type { BackendReadV1, HostEventReadV1, HostReadV1 } from "~/features/fleet/query-contracts";
 import { FleetRequestError, approveHost, recoverHost, rotateHostCredential } from "~/features/fleet/registry-api";
@@ -129,6 +130,7 @@ function MachineDetail({ host }: { host: HostItem }) {
     refetchInterval: REFRESH,
   });
   const approved = host.enrollment === "approved";
+  const queryClient = useQueryClient();
 
   return (
     <div className="flex flex-col lg:flex-row">
@@ -138,6 +140,9 @@ function MachineDetail({ host }: { host: HostItem }) {
         {approved && host.lifecycle !== "retired" ? <LifecycleSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
         {host.counts.uncertainPlacementCount > 0 ? <UnconfirmedSection hostId={host.id} /> : null}
+        {approved && host.lifecycle !== "retired" ? (
+          <MachineBudgetSection budget={host.physicalBudget} hostId={host.id} onSaved={() => queryClient.invalidateQueries({ queryKey: ["fleet"] })} />
+        ) : null}
         {approved ? <GrantsSection hostId={host.id} /> : null}
         <BackendsSection hostId={host.id} items={backends.data?.items} query={backends} />
         <EventsSection items={events.data?.items} query={events} />

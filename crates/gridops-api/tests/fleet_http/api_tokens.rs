@@ -8,14 +8,14 @@ use gridops_core::api_tokens::{ApiTokenScope, ApiTokenService};
 
 const DAY: i64 = 86_400_000;
 
-async fn mint(f: &Fixture, name: &str, scopes: &[ApiTokenScope]) -> Result<String> {
+pub(super) async fn mint(f: &Fixture, name: &str, scopes: &[ApiTokenScope]) -> Result<String> {
     let receipt = ApiTokenService::new(f.database.clone())
         .create("fleet-user", name, scopes, gridops_core::now_millis() + DAY)
         .await?;
     Ok(receipt.expose().to_owned())
 }
 
-fn token_get(f: &Fixture, path: &str, token: &str) -> reqwest::RequestBuilder {
+pub(super) fn token_get(f: &Fixture, path: &str, token: &str) -> reqwest::RequestBuilder {
     f.client.get(f.url(path)).bearer_auth(token)
 }
 
@@ -23,7 +23,7 @@ fn token_post(f: &Fixture, path: &str, token: &str) -> reqwest::RequestBuilder {
     f.client.post(f.url(path)).bearer_auth(token)
 }
 
-async fn member_fixture() -> Result<Fixture> {
+pub(super) async fn member_fixture() -> Result<Fixture> {
     let f = Fixture::new().await?;
     let now = gridops_core::now_millis();
     sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('fleet-member',2,'fleet-member','member','',?,?,?)")
@@ -33,7 +33,7 @@ async fn member_fixture() -> Result<Fixture> {
 
 /// Logs the member in by reusing the seeded session machinery: their cookie
 /// is a second valid session row for the member user.
-async fn member_cookie(f: &Fixture) -> Result<String> {
+pub(super) async fn member_cookie(f: &Fixture) -> Result<String> {
     let now = gridops_core::now_millis();
     let token = format!("member-{}", Uuid::new_v4());
     sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES (?,?,'fleet-member',?,?,?)")

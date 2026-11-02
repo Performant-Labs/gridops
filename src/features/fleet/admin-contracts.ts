@@ -14,6 +14,17 @@ export const lifecycleRequestSchema = z.strictObject({
 });
 export const backendEnabledRequestSchema = z.strictObject({ enabled: z.boolean() });
 
+/** Any of the three figures, each at least 1; the server also bounds them by what the machine reports. */
+export const budgetRequestSchema = z.strictObject({
+  cpuMillis: safeInteger.min(1).optional(),
+  memoryMib: safeInteger.min(1).optional(),
+  diskBytes: safeInteger.min(1).optional(),
+}).refine((value) => Object.keys(value).length > 0, { message: "Set at least one budget figure." });
+export const budgetResultSchema = z.strictObject({
+  budget: z.strictObject({ cpuMillis: safeInteger, memoryMib: safeInteger, diskBytes: safeInteger }),
+});
+export type BudgetRequest = z.infer<typeof budgetRequestSchema>;
+
 export const fleetTargetSchema = z.strictObject({
   id: fleetIdSchema,
   kind: z.enum(["github_repository", "github_organization"]),
