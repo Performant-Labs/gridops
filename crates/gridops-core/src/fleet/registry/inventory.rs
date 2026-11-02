@@ -696,6 +696,23 @@ async fn reconcile_inventory(
         .bind(share(domain.capacity.memory_mib))
         .execute(&mut **tx)
         .await?;
+        // Hosts enrolled before the agent probed disk already carry cpu and
+        // memory budgets, so the all-three guard above never fires again.
+        // Backfill only the missing disk budget, at the same 80% share;
+        // budgets an operator has set stay theirs.
+        let disk_share = share(domain.capacity.disk_bytes);
+        if disk_share > 0 {
+            sqlx::query(
+                "UPDATE host_resource_domains SET disk_bytes=?,revision=revision+1
+                  WHERE id=? AND host_id=? AND disk_bytes=0 AND ?>0",
+            )
+            .bind(disk_share)
+            .bind(id.to_string())
+            .bind(session.host_id.to_string())
+            .bind(disk_share)
+            .execute(&mut **tx)
+            .await?;
+        }
         domain_map.insert(domain.local_key.as_str().to_owned(), id);
     }
     sqlx::query("UPDATE host_backends SET readiness='unknown',reason_code='stale_inventory',last_probed_at=NULL,probe_epoch=NULL,probe_session_id=NULL,probe_boot_id=NULL,probe_incarnation=NULL,updated_at=? WHERE host_id=?")

@@ -422,6 +422,7 @@ pub async fn overview(
             "href": "/webhooks",
         }));
     }
+    alerts.extend(disk_alerts(&state, &user.role, now).await);
 
     let pool_rows = sqlx::query(
         r#"SELECT p.id,p.name,p.scope,p.desired_count,p.mode,p.state,p.paused,
@@ -4823,6 +4824,89 @@ const MIN_COMPARED_JOBS: usize = 3;
 /// like with like: each successful job against the typical time of the same
 /// job (repository, workflow and job name) on every machine that ran it, so a
 /// machine doesn't look fast just because it got short jobs.
+/// Disk alarms for the server's own volume and every fresh fleet host.
+/// Infrastructure-level, so like the fleet pages they are for system
+/// admins; a host that stops reporting never raises a disk alarm.
+async fn disk_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
+    if role != "admin" {
+        return Vec::new();
+    }
+    let level = |alarm: gridops_core::disk::DiskAlarm| match alarm {
+        gridops_core::disk::DiskAlarm::Critical => "error",
+        gridops_core::disk::DiskAlarm::Warning => "warning",
+    };
+    let detail = |total: u64, free: u64| {
+        format!(
+            "{:.1} GiB free of {:.0} GiB ({:.0}% free)",
+            gridops_core::disk::gib(free),
+            gridops_core::disk::gib(total),
+            free as f64 / total as f64 * 100.0
+        )
+    };
+    let mut alerts = Vec::new();
+    // The server's own filesystem: the SQLite database, retained logs and
+    // the Docker root all share it, and once it fills GridOps stops.
+    let database = state.config.database_path();
+    let volume = database
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("/"));
+    if let Some((total, free)) = gridops_core::disk::filesystem_bytes(volume) {
+        if let Some(alarm) = gridops_core::disk::alarm_for(total, free) {
+            alerts.push(json!({
+                "level": level(alarm),
+                "title": "GridOps server disk is running out of space",
+                "detail": format!(
+                    "{} — the manager also stops admitting runners below its free-disk watermark",
+                    detail(total, free)
+                ),
+                "href": "/settings/runner-host",
+            }));
+        }
+    }
+    // Fleet hosts: latest free space from each fresh host's samples against
+    // the root domain's observed capacity.
+    let rows = sqlx::query(
+        r#"SELECT fh.name AS host_name,
+                  (SELECT s.disk_free_bytes FROM host_samples s
+                    WHERE s.host_id=fh.id AND s.disk_free_bytes IS NOT NULL
+                    ORDER BY s.observed_at DESC LIMIT 1) AS free_bytes,
+                  d.disk_bytes AS total_bytes
+             FROM fleet_hosts fh
+             JOIN fleet_observed_domains d
+               ON d.host_id=fh.id AND d.local_key='root'
+            WHERE fh.enrollment_state='approved'
+              AND fh.lifecycle_state NOT IN ('retired')
+              AND fh.last_heartbeat_at>=?"#,
+    )
+    .bind(now - 120_000)
+    .fetch_all(&state.database)
+    .await;
+    if let Ok(rows) = rows {
+        for row in rows {
+            let Ok((Some(free), Some(total))) = TryInto::<(Option<i64>, Option<i64>)>::try_into((
+                row.get::<Option<i64>, _>("free_bytes"),
+                row.get::<Option<i64>, _>("total_bytes"),
+            )) else {
+                continue;
+            };
+            let (free, total) = (u64::try_from(free), u64::try_from(total));
+            if let (Ok(free), Ok(total)) = (free, total) {
+                if let Some(alarm) = gridops_core::disk::alarm_for(total, free) {
+                    let name: String = row.get("host_name");
+                    alerts.push(json!({
+                        "level": level(alarm),
+                        "title": format!("Fleet machine {name} is running out of disk"),
+                        "detail": detail(total, free),
+                        "href": "/fleet",
+                    }));
+                }
+            }
+        }
+    }
+    alerts
+}
+
 async fn machine_performance(state: &AppState, user_id: &str, since: i64) -> ApiResult<Value> {
     #[derive(Default)]
     struct Machine {
