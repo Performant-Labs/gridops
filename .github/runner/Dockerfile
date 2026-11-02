@@ -3,7 +3,7 @@
 FROM node:22.13.0-bookworm-slim AS node-toolchain
 FROM rust:1.96-slim-bookworm AS rust-toolchain
 
-FROM ghcr.io/actions/actions-runner:2.336.0
+FROM ghcr.io/actions/actions-runner:2.338.2
 
 LABEL org.opencontainers.image.source="https://github.com/iamngoni/gridops"
 
