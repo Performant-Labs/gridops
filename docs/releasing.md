@@ -89,6 +89,27 @@ version, with no labels.
 If a step in the template is wrong or missing, fix the template in a pull
 request as part of the release, so the next copy has it.
 
+## Changelog and known issues
+
+Two files in the repository tell operators what a release changed and what is
+still wrong. Both are updated in the pull request that bumps the version, so
+the commit the tag points at contains them.
+
+- **`CHANGELOG.md`** has one section per release, newest first, headed
+  `## X.Y.Z - <date of the tag>`. Under it, **Upgrading** (what an operator
+  must do or will notice), **Added**, **Changed** and **Fixed**, one line per
+  change with its pull request number. Write it from the merged pull requests
+  since the previous tag and from what was checked, not from titles alone. It
+  complements GitHub's generated release notes, which are only the list of
+  merged pull requests.
+- **README `## Known issues`** lists problems an operator can run into in the
+  current release, each linked to its issue (file one first if there is none).
+  At each release remove what was fixed, add what is new, and update the "Last
+  reviewed for" line. A problem found after a release is added in a pull
+  request and noted on that release's checklist issue.
+
+Checklist steps 5, 7 and 8 cover both.
+
 ## Version and build number
 
 Two numbers name a GridOps build, and they change for different reasons.

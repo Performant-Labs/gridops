@@ -108,6 +108,35 @@ The manager is the authoritative capacity boundary. Before GitHub runner credent
 
 Apple Silicon hosts may additionally run ephemeral macOS pools through Tart. The provider is optional and remains disabled unless both its URL and bearer token are configured. See [docs/macos-runners.md](docs/macos-runners.md) for image preparation, native-agent installation, isolation, and capacity limits.
 
+## Known issues
+
+Last reviewed for v0.1.4. What changed in each release is in the
+[changelog](CHANGELOG.md).
+
+- A workflow re-run can leave the previous attempt's jobs shown as queued or in
+  progress, so queue alerts stay up until they are cleared
+  ([#33](https://github.com/Performant-Labs/gridops/issues/33)).
+- The "waiting for over five minutes" alert is not checked against GitHub, so
+  it can name a job that GitHub no longer has queued
+  ([#34](https://github.com/Performant-Labs/gridops/issues/34)).
+- The run page can say a pool with autoscaling off matches a queued job, while
+  the Overview counts that job as having no matching pool
+  ([#63](https://github.com/Performant-Labs/gridops/issues/63)).
+- The runner host built into GridOps and fleet machines have separate budgets
+  that draw on the same hardware if the host is both. Keep the sum within what
+  you want GridOps to use
+  ([#60](https://github.com/Performant-Labs/gridops/issues/60)).
+- A retired or duplicate machine cannot be deleted from the Fleet page
+  ([#55](https://github.com/Performant-Labs/gridops/issues/55)).
+- API tokens are not rate limited
+  ([#19](https://github.com/Performant-Labs/gridops/issues/19)).
+- Releases from this repository publish the Linux x64 agent and `install.sh`
+  only. The macOS and Linux arm64 agents, the container images and
+  `compose.release.yaml` are built only when the repository variables
+  `RELEASE_MACOS` and `RELEASE_LINUX_ARM64` are `true`, so the download links in
+  [Install](#install), which point at the upstream project, do not give you
+  this repository's build.
+
 ## Develop
 
 Requirements: Node.js 22+, Rust 1.96+, Docker, and the values from `.env.example`.
