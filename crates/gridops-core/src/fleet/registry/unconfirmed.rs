@@ -180,7 +180,7 @@ impl RegistryService {
                 .await?;
             audit_and_event(
                 &mut tx,
-                Some(user_id),
+                Some(principal),
                 Some(host_id),
                 "fleet.placement.repaired",
                 "placement",

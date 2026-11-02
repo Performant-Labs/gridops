@@ -117,7 +117,20 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
         match tag.trim() {
             "fleet-error" => {
                 let error: FleetErrorResponse = serde_json::from_str(body)?;
-                assert_eq!(error.code.status(), 409);
+                match error.code {
+                    ErrorCode::RevisionConflict => {
+                        assert_eq!(error.code.status(), 409);
+                        assert!(matches!(error.details, Some(ErrorDetails::Revision { .. })));
+                    }
+                    ErrorCode::Forbidden => {
+                        assert_eq!(error.code.status(), 403);
+                        let Some(ErrorDetails::Scope { required_scope }) = error.details else {
+                            anyhow::bail!("forbidden fixture must carry a scope detail");
+                        };
+                        assert!(required_scope.as_str().starts_with("fleet:"));
+                    }
+                    other => anyhow::bail!("untested error fixture: {other:?}"),
+                }
             }
             "fleet-limits" => {
                 let limits: ProtocolLimits = serde_json::from_str(body)?;
@@ -127,6 +140,6 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
         }
         checked += 1;
     }
-    assert_eq!(checked, 2);
+    assert_eq!(checked, 3);
     Ok(())
 }

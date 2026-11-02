@@ -17,7 +17,7 @@ use gridops_core::fleet::{
 use serde::Deserialize;
 
 use super::{
-    boundary::{FleetPath, FleetReadUser},
+    boundary::{FleetPath, FleetReadUser, Read},
     error::{FleetApiError, RequestContext},
     query_boundary::FleetQuery,
 };
@@ -139,7 +139,7 @@ fn query_error(context: RequestContext, error: &QueryError) -> FleetApiError {
 pub(super) async fn hosts(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetQuery(params): FleetQuery<CatalogParams>,
 ) -> Result<Json<QueryPage<HostReadV1>>, FleetApiError> {
     registry(&state)
@@ -152,7 +152,7 @@ pub(super) async fn hosts(
 pub(super) async fn host(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetQuery(_): FleetQuery<NoParams>,
 ) -> Result<Json<QueryResult<HostReadV1>>, FleetApiError> {
@@ -166,7 +166,7 @@ pub(super) async fn host(
 pub(super) async fn backends(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetQuery(params): FleetQuery<CatalogParams>,
 ) -> Result<Json<QueryPage<BackendReadV1>>, FleetApiError> {
@@ -180,7 +180,7 @@ pub(super) async fn backends(
 pub(super) async fn backend(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath((host_id, backend_id)): FleetPath<(HostId, BackendId)>,
     FleetQuery(_): FleetQuery<NoParams>,
 ) -> Result<Json<QueryResult<BackendReadV1>>, FleetApiError> {
@@ -194,7 +194,7 @@ pub(super) async fn backend(
 pub(super) async fn domains(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetQuery(params): FleetQuery<CatalogParams>,
 ) -> Result<Json<QueryPage<DomainReadV1>>, FleetApiError> {
@@ -208,7 +208,7 @@ pub(super) async fn domains(
 pub(super) async fn domain(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath((host_id, domain_id)): FleetPath<(HostId, ResourceDomainId)>,
     FleetQuery(_): FleetQuery<NoParams>,
 ) -> Result<Json<QueryResult<DomainReadV1>>, FleetApiError> {
@@ -222,7 +222,7 @@ pub(super) async fn domain(
 pub(super) async fn samples(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetQuery(params): FleetQuery<SampleParams>,
 ) -> Result<Json<QueryPage<SampleReadV1>>, FleetApiError> {
@@ -236,7 +236,7 @@ pub(super) async fn samples(
 pub(super) async fn events(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetReadUser,
+    user: FleetReadUser<Read>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetQuery(params): FleetQuery<EventParams>,
 ) -> Result<Json<QueryPage<HostEventReadV1>>, FleetApiError> {

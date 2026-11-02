@@ -8,26 +8,43 @@ tagged `fleet-error` and `fleet-limits` are parsed by
 
 ## Routes
 
-Browser routes use the normal session cookie and reject an `Authorization`
-header. Agent routes (`/api/v1/fleet/agent/...`) use exactly one
+Browser routes authenticate with the normal session cookie, or — where the
+table says so — with a scoped API token: `Authorization: Bearer gat_...`.
+A request carrying both a cookie and a bearer token is refused. Agent
+routes (`/api/v1/fleet/agent/...`) use exactly one
 `Authorization: Bearer <host credential>` header and cannot reach browser
-routes.
+routes; a token is never a host credential and vice versa. See
+[the automation guide](fleet-automation.md) for tokens, scopes and
+bot-driven enrollment.
 
 | Method | Path | Caller | Purpose |
 |---|---|---|---|
-| GET | `/api/v1/fleet/hosts` | browser | Paginated host list |
-| GET | `/api/v1/fleet/hosts/{host_id}` | browser | One host |
-| GET | `/api/v1/fleet/hosts/{host_id}/backends[/{backend_id}]` | browser | Execution backends |
-| GET | `/api/v1/fleet/hosts/{host_id}/domains[/{domain_id}]` | browser | Resource domains (physical access only) |
-| GET | `/api/v1/fleet/hosts/{host_id}/samples` | browser | Resource samples (physical access only) |
-| GET | `/api/v1/fleet/hosts/{host_id}/events` | browser | Host event history |
-| POST | `/api/v1/fleet/enrollments` | browser | Issue a single-use enrollment code |
-| GET | `/api/v1/fleet/enrollments/{enrollment_id}` | browser | Enrollment status |
-| POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | browser | Revoke an unused code |
-| POST | `/api/v1/fleet/hosts/{host_id}/approve` | browser | Approve a pending host |
-| POST | `/api/v1/fleet/hosts/{host_id}/recover` | browser | Approve explicit host recovery |
-| POST | `/api/v1/fleet/hosts/{host_id}/credentials/rotate` | browser | Request credential rotation |
-| GET | `/api/v1/operations/{operation_id}` | browser | Durable operation status |
+| GET | `/api/v1/fleet/hosts` | browser, `fleet:read` | Paginated host list |
+| GET | `/api/v1/fleet/hosts/{host_id}` | browser, `fleet:read` | One host |
+| GET | `/api/v1/fleet/hosts/{host_id}/backends[/{backend_id}]` | browser, `fleet:read` | Execution backends |
+| GET | `/api/v1/fleet/hosts/{host_id}/domains[/{domain_id}]` | browser, `fleet:read` | Resource domains (physical access only) |
+| GET | `/api/v1/fleet/hosts/{host_id}/samples` | browser, `fleet:read` | Resource samples (physical access only) |
+| GET | `/api/v1/fleet/hosts/{host_id}/events` | browser, `fleet:read` | Host event history |
+| GET | `/api/v1/fleet/hosts/{host_id}/grants` | browser, `fleet:read` | Target grants |
+| GET | `/api/v1/fleet/targets` | browser, `fleet:read` | CI targets |
+| GET | `/api/v1/fleet/workload` | browser, `fleet:read` | Workload overview |
+| GET | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:read` | Pool fleet execution profile |
+| GET | `/api/v1/fleet/pools/{pool_id}/queue` | browser, `fleet:read` | Queued runners and blocked hosts |
+| POST | `/api/v1/fleet/enrollments` | browser, `fleet:enroll` | Issue a single-use enrollment code |
+| GET | `/api/v1/fleet/enrollments/{enrollment_id}` | browser, `fleet:enroll` | Enrollment status |
+| POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | browser, `fleet:enroll` | Revoke an unused code |
+| POST | `/api/v1/fleet/hosts/{host_id}/approve` | browser, `fleet:approve` | Approve a pending host |
+| POST | `/api/v1/fleet/hosts/{host_id}/lifecycle` | browser, `fleet:operate` | Set host intent (active, paused, draining, maintenance) |
+| POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | browser, `fleet:operate` | Turn a runtime on or off |
+| POST | `/api/v1/fleet/hosts/{host_id}/grants/{target_id}` | browser, `fleet:operate` | Set a target grant |
+| PUT | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:operate` | Save the pool's fleet execution profile |
+| POST | `/api/v1/fleet/api-tokens` | browser (admin, cookie only) | Create an API token |
+| GET | `/api/v1/fleet/api-tokens` | browser (cookie only) | List own API tokens |
+| POST | `/api/v1/fleet/api-tokens/{token_id}/revoke` | browser (cookie only) | Revoke an API token |
+| POST | `/api/v1/fleet/hosts/{host_id}/recover` | browser (cookie only) | Approve explicit host recovery |
+| POST | `/api/v1/fleet/hosts/{host_id}/retire` | browser (cookie only) | Retire a host |
+| POST | `/api/v1/fleet/hosts/{host_id}/credentials/rotate` | browser (cookie only) | Request credential rotation |
+| GET | `/api/v1/operations/{operation_id}` | browser, `fleet:read` | Durable operation status |
 | POST | `/api/v1/fleet/agent/enroll` | agent | Consume an enrollment code |
 | POST | `/api/v1/fleet/agent/hosts/{host_id}/handshake` | agent | Open a session and negotiate protocol |
 | POST | `/api/v1/fleet/agent/hosts/{host_id}/inventory` | agent | Submit inventory |
@@ -38,7 +55,10 @@ routes.
 Any other path under `/api/v1/fleet` or `/api/v1/operations` returns the
 fleet `not_found` error, not the SPA.
 
-Mutating browser requests take an `Idempotency-Key` header. Replaying a key
+Mutating browser requests are replay-safe, either through an
+`Idempotency-Key` header or through `expectedRevision` compare-and-swap;
+the table under "Idempotency and retries" says which route uses which.
+Replaying a key
 with the same body returns the original result; a different body returns
 `idempotency_conflict`. Writes that change an existing record carry the
 expected revision and fail with `revision_conflict` when it has moved.
@@ -72,22 +92,58 @@ Every fleet error has the same shape:
 }
 ```
 
-| Code | HTTP |
-|---|---|
-| `invalid_request`, `contract_range` | 400 |
-| `unauthenticated` | 401 |
-| `forbidden` | 403 |
-| `not_found` | 404 |
-| `revision_conflict`, `idempotency_conflict` | 409 |
-| `enrollment_expired`, `grant_expired`, `cursor_expired`, `cursor_gap` | 410 |
-| `payload_too_large` | 413 |
-| `rate_limited` | 429 |
-| `dependency_unavailable`, `not_ready` | 503 |
+A token that authenticated but lacks the route's scope is refused with the
+missing scope named, and nothing else is revealed:
 
-`details` is optional and is one of `revision`, `invalid_field`, `limit`
-(with `maximum`), `retry` (with `retryAfterMs`), `cursor_gap`, or `readiness`
-(with a placement rejection reason). A host with no compatible capacity is a
-queued placement with an explanation, not an error.
+```json fleet-error
+{
+  "code": "forbidden",
+  "message": "Fleet action is not authorized",
+  "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e70",
+  "details": { "kind": "scope", "requiredScope": "fleet:approve" }
+}
+```
+
+| Code | HTTP | Retryable | A bot should |
+|---|---|---|---|
+| `invalid_request`, `contract_range` | 400 | No | Fix the request; a resend will not improve on its own. |
+| `unauthenticated` | 401 | No | Check the token. Unknown, expired, revoked and malformed tokens are deliberately indistinguishable. Mint a new token if the old one expired or was revoked. |
+| `forbidden` | 403 | No | The token lacks the route's scope (`details.kind = "scope"` names it), or the owner's role no longer permits the action. Cannot be fixed by retrying. |
+| `not_found` | 404 | No | The id is wrong or the record was retired. |
+| `revision_conflict` | 409 | Yes | Re-read the resource, recompute from the fresh `revision` (or approval evidence), resend. On approve, `enrollment: "approved"` means the call already succeeded. |
+| `idempotency_conflict` | 409 | No | The same `Idempotency-Key` was used with a different body. Do not retry with that key. |
+| `enrollment_expired`, `grant_expired`, `cursor_expired`, `cursor_gap` | 410 | Re-issue | The one-time artifact is gone. Issue a new code (or re-read page one for cursors). |
+| `payload_too_large` | 413 | No | Send a smaller body. |
+| `rate_limited` | 429 | Yes | Wait `details.retryAfterMs`, then resend the same request. |
+| `dependency_unavailable`, `not_ready` | 503 | Yes | Back off and retry; the control plane is busy or starting. |
+
+`details` is optional and is one of `revision`, `invalid_field` (with
+`field`), `limit` (with `maximum`), `retry` (with `retryAfterMs`),
+`cursor_gap`, `readiness` (with a placement rejection reason), or `scope`
+(with `requiredScope`, returned only when a bearer token authenticated but
+lacks the route's scope). A host with no compatible capacity is a queued
+placement with an explanation, not an error.
+
+## Idempotency and retries
+
+Mutating browser routes protect replays in one of two ways:
+
+| Route | Mechanism | A replay returns |
+|---|---|---|
+| `POST /fleet/enrollments` | `Idempotency-Key` (required) | The original result body (`created` once, then `replay` metadata without a second code) |
+| `POST /fleet/api-tokens` | `Idempotency-Key` (required) | `201` with the plaintext once, then the token metadata without the secret; a different body with the same key is `idempotency_conflict` |
+| `POST /fleet/hosts/{id}/recover` | `Idempotency-Key` (required) | The original result |
+| `POST /fleet/hosts/{id}/credentials/rotate` | `Idempotency-Key` (required) | The original result |
+| `POST /fleet/hosts/{id}/approve` | `expectedRevision` | `revision_conflict` with `details.currentRevision`; if the host reads back `enrollment: "approved"`, the call already succeeded |
+| `POST /fleet/hosts/{id}/lifecycle` | `expectedRevision` | as above, with `lifecycle` as the readback |
+| `POST /fleet/hosts/{id}/backends/{backend_id}/enabled` | last-write-wins | the new state |
+| `POST /fleet/hosts/{id}/grants/{target_id}` | last-write-wins | the new state |
+| `POST /fleet/enrollments/{id}/revoke` | idempotent by state | `200` again |
+| `POST /fleet/api-tokens/{id}/revoke` | idempotent by state | `200` again |
+| `PUT /fleet/pools/{id}/profile` | last-write-wins | the saved profile |
+
+Routes not listed (`retire`, `repair_unconfirmed`) take `expectedRevision`
+in their body and fail replays with `revision_conflict`.
 
 ## Protocol versions
 

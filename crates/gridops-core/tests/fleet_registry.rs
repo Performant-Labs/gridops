@@ -40,12 +40,14 @@ async fn registry_migration_is_additive_and_verifier_only() -> Result<()> {
         .collect::<Vec<_>>();
     assert!(names.iter().any(|name| name == "proposed_verifier"));
     assert!(names.iter().any(|name| name == "next_generation"));
-    assert!(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='host_credentials_verifier_format_insert'",
-    )
-    .fetch_one(&pool)
-    .await?
-        == 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='host_credentials_verifier_format_insert'",
+        )
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='host_enrollments_issued_identity_immutable'",

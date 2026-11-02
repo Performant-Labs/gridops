@@ -21,12 +21,12 @@ const SECRET_TEXT_LENGTH: usize = 43;
 pub struct OneTimeSecret(SecretString);
 
 impl OneTimeSecret {
-    pub(crate) fn generate() -> Self {
+    pub fn generate() -> Self {
         let bytes = rand::random::<[u8; SECRET_BYTES]>();
         Self(SecretString::from(URL_SAFE_NO_PAD.encode(bytes)))
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self, CredentialError> {
+    pub fn parse(value: &str) -> Result<Self, CredentialError> {
         validate_secret_text(value)?;
         Ok(Self(SecretString::from(value.to_owned())))
     }
@@ -50,22 +50,22 @@ impl fmt::Debug for OneTimeSecret {
 
 /// A SHA-256 verifier stored in the registry.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Verifier(String);
+pub struct Verifier(String);
 
 impl Verifier {
-    pub(crate) fn from_secret(secret: &str) -> Self {
+    pub fn from_secret(secret: &str) -> Self {
         Self(URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes())))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn from_hash(value: String) -> Self {
+    pub fn from_hash(value: String) -> Self {
         Self(value)
     }
 
-    pub(crate) fn matches_verifier(&self, other: &Self) -> bool {
+    pub fn matches_verifier(&self, other: &Self) -> bool {
         self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
     }
 }

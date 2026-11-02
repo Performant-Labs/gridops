@@ -12,7 +12,7 @@ use gridops_core::fleet::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser},
+    boundary::{FleetJson, FleetPath, FleetUser, FleetWriteUser, Operate, Read},
     error::{FleetApiError, RequestContext},
     query_boundary::FleetQuery,
 };
@@ -36,7 +36,7 @@ pub(super) struct PoolPath {
 pub(super) async fn targets(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
 ) -> Result<Json<Targets>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
     let items = targets::list_targets(&state.database)
@@ -48,7 +48,7 @@ pub(super) async fn targets(
 pub(super) async fn profile(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(path): FleetPath<PoolPath>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
@@ -68,7 +68,7 @@ pub(super) struct QueueResponse {
 pub(super) async fn queue(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetPath(path): FleetPath<PoolPath>,
 ) -> Result<Json<QueueResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
@@ -87,7 +87,7 @@ pub(super) async fn queue(
 pub(super) async fn save_profile(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser,
+    user: FleetWriteUser<Operate>,
     FleetPath(path): FleetPath<PoolPath>,
     FleetJson(body): FleetJson<FleetSettingsInput>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
@@ -110,7 +110,7 @@ async fn record_profile_saved(
     pool_id: &str,
     body: &FleetSettingsInput,
 ) -> Result<(), FleetApiError> {
-    let Principal::AuthenticatedUser { user_id } = principal else {
+    let Some(user_id) = principal.user_id() else {
         return Ok(());
     };
     let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id=?")
@@ -124,7 +124,7 @@ async fn record_profile_saved(
     )
     .bind(uuid::Uuid::new_v4().to_string())
     .bind(user_id)
-    .bind(login.unwrap_or_else(|| user_id.clone()))
+    .bind(login.unwrap_or_else(|| user_id.to_owned()))
     .bind(pool_id)
     .bind(
         serde_json::json!({
@@ -153,7 +153,7 @@ pub(super) struct WorkloadParams {
 pub(super) async fn workload(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetUser,
+    user: FleetUser<Read>,
     FleetQuery(params): FleetQuery<WorkloadParams>,
 ) -> Result<Json<FleetWorkload>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
@@ -174,7 +174,7 @@ async fn require_admin(
     context: &RequestContext,
     principal: &Principal,
 ) -> Result<(), FleetApiError> {
-    let Principal::AuthenticatedUser { user_id } = principal else {
+    let Some(user_id) = principal.user_id() else {
         return Err(context.error(ErrorCode::Forbidden));
     };
     let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id=?")

@@ -181,7 +181,7 @@ mod tests {
         );
         assert_eq!(plan("tart", false).platform, "github");
         assert_eq!(plan("tart", false).runtime, "native");
-        assert!(plan("tart", false).image.is_empty());
+        assert_eq!(plan("tart", false).image, "");
     }
 
     #[test]

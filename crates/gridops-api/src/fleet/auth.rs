@@ -105,3 +105,67 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod token_bearer_tests {
+    use crate::fleet::boundary::token_bearer;
+    use axum::http::{HeaderMap, header};
+
+    #[test]
+    fn token_bearer_accepts_only_the_documented_shape() -> anyhow::Result<()> {
+        let body = "A".repeat(43);
+        let token = format!("gat_{body}");
+        let mut headers = HeaderMap::new();
+        assert!(token_bearer(&headers).is_none(), "no header");
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        assert_eq!(token_bearer(&headers), Some(token.as_str()));
+        headers.insert(header::AUTHORIZATION, format!("bEaReR {token}").parse()?);
+        assert_eq!(token_bearer(&headers), Some(token.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn token_bearer_rejects_malformed_and_foreign_values() -> anyhow::Result<()> {
+        let body = "A".repeat(43);
+        for value in [
+            // A 43-character host credential: the wrong secret entirely.
+            format!("Bearer {body}"),
+            // Prefix without the body, or the prefix inside the length.
+            "Bearer gat_".to_owned(),
+            // Truncated and padded bodies.
+            format!("Bearer gat_{}", &body[..42]),
+            format!("Bearer gat_{body}="),
+            format!("Bearer gat_{body} "),
+            // Double spaces and a non-bearer scheme.
+            format!("Bearer  gat_{body}"),
+            format!("Basic gat_{body}"),
+            // Character outside base64url.
+            format!("Bearer gat_{}", body.replace('A', "!")),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse()?);
+            assert!(
+                token_bearer(&headers).is_none(),
+                "{value} must not parse as a token"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn token_bearer_rejects_cookies_and_duplicate_headers() -> anyhow::Result<()> {
+        let token = format!("gat_{}", "A".repeat(43));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        headers.insert(header::COOKIE, "gridops_session=sentinel".parse()?);
+        assert!(
+            token_bearer(&headers).is_none(),
+            "cookie plus bearer is ambiguous"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        headers.append(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        assert!(token_bearer(&headers).is_none(), "duplicate headers");
+        Ok(())
+    }
+}

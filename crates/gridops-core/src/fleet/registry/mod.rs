@@ -42,7 +42,7 @@ use super::{
     protocol::primitives::IdempotencyKey,
 };
 
-pub use credentials::{CredentialError, OneTimeSecret};
+pub use credentials::{CredentialError, OneTimeSecret, Verifier};
 pub use enrollment::{
     ApproveHost, EnrollmentInputError, EnrollmentIssue, EnrollmentMetadata, EnrollmentReceipt,
     EnrollmentScope, HostRegistration, IssueEnrollment, IssuedEnrollment, IssuedRecoveryEnrollment,
@@ -51,7 +51,7 @@ pub use enrollment::{
 pub use inventory::InventoryError;
 pub use queries::QueryError;
 
-use credentials::{Verifier, validate_secret_for_authentication};
+use credentials::validate_secret_for_authentication;
 use enrollment::{ROTATION_OVERLAP_MILLIS, ROTATION_TTL_MILLIS, require_user};
 
 /// Trusted server time source. It is intentionally not constructible from a
@@ -67,6 +67,12 @@ impl RegistryClock for SystemClock {
     fn now_millis(&self) -> i64 {
         now_millis()
     }
+}
+
+/// The real-time clock shared by services that need trusted server time.
+#[must_use]
+pub fn system_clock() -> std::sync::Arc<dyn RegistryClock> {
+    std::sync::Arc::new(SystemClock)
 }
 
 /// A host authenticated against a current verifier and epoch.
@@ -345,7 +351,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             None,
             "fleet.enrollment.issued",
             "enrollment",
@@ -398,7 +404,7 @@ impl RegistryService {
         }
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             None,
             "fleet.enrollment.revoked",
             "enrollment",
@@ -819,7 +825,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(request.host_id),
             "fleet.host.recovery_issued",
             "host",
@@ -901,7 +907,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(host_id),
             "fleet.host.lifecycle_changed",
             "host",
@@ -973,7 +979,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(host_id),
             "fleet.host.retired",
             "host",
@@ -1012,7 +1018,7 @@ impl RegistryService {
         }
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(host_id),
             "fleet.backend.enabled_changed",
             "backend",
@@ -1103,7 +1109,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(host_id),
             "fleet.grant.changed",
             "host",
@@ -1338,7 +1344,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(request.host_id),
             "fleet.host.approved",
             "host",
@@ -1551,7 +1557,7 @@ impl RegistryService {
         .await?;
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(request.host_id),
             "fleet.credential.rotation_requested",
             "host",
@@ -1935,7 +1941,7 @@ impl RegistryService {
         }
         audit_and_event(
             &mut tx,
-            Some(user_id),
+            Some(principal),
             Some(host_id),
             "fleet.credential.revoked",
             "host",
@@ -2109,16 +2115,54 @@ async fn ensure_authenticated_generation(
 // The event envelope deliberately keeps actor, host, action, target, typed
 // metadata, and server time explicit so every caller supplies the audit scope.
 #[allow(clippy::too_many_arguments)]
+/// The actor an audit row names: the user, plus the token when the request
+/// authenticated with one.
 async fn audit_and_event(
     tx: &mut Transaction<'_, Sqlite>,
-    actor_user_id: Option<&str>,
+    principal: Option<&Principal>,
     host_id: Option<HostId>,
     action: &str,
     target_type: &str,
     target_id: &str,
-    metadata: serde_json::Value,
+    mut metadata: serde_json::Value,
     now: i64,
 ) -> Result<(), RegistryError> {
+    let (actor_user_id, via_token, metadata) = match principal {
+        None => (None, None, metadata),
+        Some(Principal::ApiToken {
+            user_id,
+            token_id,
+            token_name,
+        }) => {
+            let token = serde_json::json!({"id": token_id, "name": token_name});
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("viaApiToken".to_owned(), token);
+            }
+            (
+                Some(user_id.as_str()),
+                Some((token_id.as_str(), token_name.as_str())),
+                metadata,
+            )
+        }
+        Some(Principal::AuthenticatedUser { user_id }) => (Some(user_id.as_str()), None, metadata),
+        Some(_) => (None, None, metadata),
+    };
+    // The label is the login when available, `token: <name>` marking a
+    // token-authenticated action.
+    let actor_label = match (actor_user_id, via_token) {
+        (Some(user_id), Some((_token_id, token_name))) => {
+            let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id=?")
+                .bind(user_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+            format!(
+                "{} (token: {token_name})",
+                login.as_deref().unwrap_or(user_id)
+            )
+        }
+        (Some(user_id), None) => user_id.to_owned(),
+        _ => "fleet-agent".to_owned(),
+    };
     let metadata = serde_json::to_string(&metadata)?;
     sqlx::query(
         "INSERT INTO audit_events
@@ -2127,7 +2171,7 @@ async fn audit_and_event(
     )
     .bind(Uuid::new_v4().to_string())
     .bind(actor_user_id)
-    .bind(actor_user_id.unwrap_or("fleet-agent"))
+    .bind(actor_label)
     .bind(action)
     .bind(target_type)
     .bind(target_id)
@@ -2178,7 +2222,9 @@ async fn revoke_expired_rotations(
         if changed == 1 {
             audit_and_event(
                 tx,
-                Some(actor_user_id),
+                Some(&Principal::AuthenticatedUser {
+                    user_id: actor_user_id.to_owned(),
+                }),
                 Some(host_id),
                 "fleet.credential.rotation_expired",
                 "rotation",
@@ -2220,7 +2266,11 @@ async fn revoke_open_rotations(
         if changed == 1 {
             audit_and_event(
                 tx,
-                actor_user_id,
+                actor_user_id
+                    .map(|user_id| Principal::AuthenticatedUser {
+                        user_id: user_id.to_owned(),
+                    })
+                    .as_ref(),
                 Some(host_id),
                 action,
                 "rotation",

@@ -1,0 +1,66 @@
+{
+  "testCommands": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "cargo test --workspace --locked",
+    "npm ci --no-audit --no-fund",
+    "npm run lint",
+    "npm test"
+  ],
+  "testSuites": {
+    "fmt": {
+      "filter": "none",
+      "script": [
+        "cargo fmt --all -- --check"
+      ]
+    },
+    "clippy": {
+      "filter": "none",
+      "script": [
+        "cargo clippy --workspace --all-targets --locked -- -D warnings"
+      ]
+    },
+    "unit": {
+      "filter": "none",
+      "timeoutMs": 1800000,
+      "script": [
+        "cargo test --workspace --locked"
+      ]
+    },
+    "web": {
+      "filter": "none",
+      "timeoutMs": 900000,
+      "script": [
+        "npm ci --no-audit --no-fund",
+        "npm run lint",
+        "npm test"
+      ]
+    }
+  },
+  "pathSets": {
+    "tests": [
+      "crates/*/tests/**",
+      "crates/*/src/*tests.rs",
+      "tests/**"
+    ],
+    "production": [
+      "crates/**",
+      "migrations/**",
+      "src/**",
+      "public/**",
+      "scripts/**",
+      "docs/**",
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "package-lock.json",
+      "openapi/**"
+    ],
+    "handoffs": [
+      "docs/handoffs/**"
+    ]
+  },
+  "toolchain": "cargo",
+  "handoffDirectory": "docs/handoffs",
+  "defaultIsolationLevel": "worktree"
+}

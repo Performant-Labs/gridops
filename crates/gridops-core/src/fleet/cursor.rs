@@ -55,7 +55,7 @@ impl CursorScope {
         resource_key: &str,
         normalized_query: &str,
     ) -> Result<Self, CursorError> {
-        let super::authorization::Principal::AuthenticatedUser { user_id } = principal else {
+        let Some(user_id) = principal.user_id() else {
             return Err(CursorError::Invalid);
         };
         Self::new(&format!("user:{user_id}"), resource_key, normalized_query)

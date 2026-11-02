@@ -30,6 +30,21 @@ impl RequestContext {
         FleetApiError {
             code,
             context: self,
+            details: None,
+        }
+    }
+
+    /// An error carrying structured details, such as the scope a token
+    /// denial names.
+    pub(super) fn error_with_details(
+        self,
+        code: ErrorCode,
+        details: gridops_core::fleet::protocol::browser::ErrorDetails,
+    ) -> FleetApiError {
+        FleetApiError {
+            code,
+            context: self,
+            details: Some(details),
         }
     }
 
@@ -87,6 +102,7 @@ fn dependency_class(error: &RegistryError) -> (&'static str, String) {
 pub(super) struct FleetApiError {
     code: ErrorCode,
     context: RequestContext,
+    details: Option<gridops_core::fleet::protocol::browser::ErrorDetails>,
 }
 
 #[derive(Serialize)]
@@ -136,7 +152,7 @@ impl IntoResponse for FleetApiError {
                 code: self.code,
                 message,
                 request_id: self.context.id,
-                details: None,
+                details: self.details,
             }),
         )
             .into_response()

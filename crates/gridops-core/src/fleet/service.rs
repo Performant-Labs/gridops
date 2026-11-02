@@ -382,7 +382,7 @@ pub(crate) async fn ensure_operation_access(
         return Err(FleetError::Forbidden);
     }
     ensure_target_identity_for_pool(tx, &intent.pool_id, &intent.target_id).await?;
-    if let Principal::AuthenticatedUser { user_id } = principal {
+    if let Some(user_id) = principal.user_id() {
         let user_grant: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM host_user_grants
               WHERE host_id=? AND user_id=? AND permission IN ('read','operator','admin')
@@ -458,6 +458,11 @@ impl PrincipalIdentity {
                 scope: format!("user:{user_id}"),
                 user_id: Some(user_id.clone()),
             }),
+            Principal::ApiToken { user_id, .. } if !user_id.is_empty() => Ok(Self {
+                kind: "user",
+                scope: format!("user:{user_id}"),
+                user_id: Some(user_id.clone()),
+            }),
             Principal::Reconciler => Ok(Self {
                 kind: "reconciler",
                 scope: "controller:reconciler".to_owned(),
@@ -473,9 +478,9 @@ impl PrincipalIdentity {
                 scope: "controller:fix_agent".to_owned(),
                 user_id: None,
             }),
-            Principal::AuthenticatedUser { .. } => Err(FleetError::InvalidRequest(
-                "user identity must not be empty",
-            )),
+            Principal::AuthenticatedUser { .. } | Principal::ApiToken { .. } => Err(
+                FleetError::InvalidRequest("user identity must not be empty"),
+            ),
         }
     }
 }
@@ -622,7 +627,7 @@ async fn ensure_fix_run_row_policy(
     if Some(run_repository) != target_repository {
         return Err(FleetError::Forbidden);
     }
-    if let Principal::AuthenticatedUser { user_id } = principal {
+    if let Some(user_id) = principal.user_id() {
         if requested_by != *user_id {
             return Err(FleetError::Forbidden);
         }
@@ -777,10 +782,7 @@ async fn ensure_pool_access(
     principal: &Principal,
     pool_id: &str,
 ) -> Result<(), FleetError> {
-    let Some(user_id) = (match principal {
-        Principal::AuthenticatedUser { user_id } => Some(user_id.as_str()),
-        Principal::Reconciler | Principal::Autoscaler | Principal::FixAgent => None,
-    }) else {
+    let Some(user_id) = principal.user_id() else {
         return Ok(());
     };
     let Some(role) = sqlx::query_scalar::<_, String>("SELECT role FROM users WHERE id=?")
@@ -839,7 +841,9 @@ async fn ensure_target_access(
     target_id: &str,
 ) -> Result<(), FleetError> {
     let user_id = match principal {
-        Principal::AuthenticatedUser { user_id } => Some(user_id.as_str()),
+        Principal::AuthenticatedUser { user_id } | Principal::ApiToken { user_id, .. } => {
+            Some(user_id.as_str())
+        }
         Principal::Reconciler | Principal::Autoscaler | Principal::FixAgent => None,
     };
     let role = if let Some(user_id) = user_id {

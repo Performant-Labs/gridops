@@ -1010,7 +1010,10 @@ async fn sync_installation_repositories(
         .await?;
     let expected_total = first_page.total_count;
     let mut repositories = first_page.repositories;
-    let last_page = expected_total.saturating_add(99).div_euclid(100).clamp(1, 100);
+    let last_page = expected_total
+        .saturating_add(99)
+        .div_euclid(100)
+        .clamp(1, 100);
     for page in 2..=last_page {
         let page_data: gridops_core::github::RepositoryPage = app
             .github
