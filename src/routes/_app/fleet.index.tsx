@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { RefreshCw, Server } from "lucide-react";
 
+import { LiveRefreshNotice } from "~/components/live-refresh-notice";
 import { Callout, EmptyState, LoadingRows, PageBody, PageHeader } from "~/components/page";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -12,6 +13,7 @@ import {
 import { failuresLastHourLabel } from "~/features/fleet/placement-failures";
 import { listHosts } from "~/features/fleet/query-api";
 import type { HostReadV1 } from "~/features/fleet/query-contracts";
+import { useRefreshInterval } from "~/lib/use-refresh-interval";
 import { cn, formatRelativeTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/fleet/")({
@@ -19,10 +21,11 @@ export const Route = createFileRoute("/_app/fleet/")({
 });
 
 function MachinesPage() {
+  const interval = useRefreshInterval(10_000);
   const hosts = useQuery({
     queryKey: ["fleet", "hosts"],
     queryFn: ({ signal }) => listHosts({ limit: 100 }, signal),
-    refetchInterval: 10_000,
+    refetchInterval: interval ?? false,
   });
   const items = hosts.data?.items ?? [];
 
@@ -40,6 +43,12 @@ function MachinesPage() {
         count={items.length || undefined}
         icon={Server}
         title="Machines"
+      />
+      <LiveRefreshNotice
+        lastUpdatedAt={hosts.dataUpdatedAt || null}
+        off={interval === null}
+        onRefresh={() => hosts.refetch()}
+        refreshing={hosts.isFetching}
       />
       <PageBody>
         {hosts.isPending ? (

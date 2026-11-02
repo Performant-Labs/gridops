@@ -4,25 +4,31 @@ import { useEffect, useState } from "react";
 import { type RunnerPoolEvent, getRunnerPoolEvents } from "./runner-pools.functions";
 import { StatusDot } from "~/components/status-icon";
 import { Tooltip } from "~/components/ui/tooltip";
+import { useRefreshInterval, useRefreshSignal } from "~/lib/use-refresh-interval";
 import { cn, formatAge } from "~/lib/utils";
 
 type EventPage = { items: RunnerPoolEvent[]; total: number; page: number; perPage: number };
 
 export type PoolEventsState =
   | { status: "loading"; data: null; error: null }
-  | { status: "ready"; data: EventPage; error: null }
+  | { status: "ready"; data: EventPage; error: null; updatedAt: number }
   | { status: "error"; data: null; error: string };
 
-/** Pool events for one page, refreshed every five seconds while mounted. */
+/**
+ * Pool events for one page, refreshed every five seconds while mounted at the
+ * default Refresh setting, and whenever someone presses Refresh.
+ */
 export function usePoolEvents(poolId: string, page: number) {
   const [state, setState] = useState<PoolEventsState>({ status: "loading", data: null, error: null });
+  const interval = useRefreshInterval(5_000);
+  const refreshSignal = useRefreshSignal();
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
     const load = async () => {
       try {
         const data = await getRunnerPoolEvents(poolId, page, controller.signal);
-        if (!cancelled) setState({ status: "ready", data, error: null });
+        if (!cancelled) setState({ status: "ready", data, error: null, updatedAt: Date.now() });
       } catch (cause) {
         if (!cancelled && !(cause instanceof DOMException && cause.name === "AbortError")) {
           setState({ status: "error", data: null, error: cause instanceof Error ? cause.message : "Pool activity could not be loaded." });
@@ -30,13 +36,13 @@ export function usePoolEvents(poolId: string, page: number) {
       }
     };
     void load();
-    const interval = window.setInterval(() => void load(), 5_000);
+    const timer = interval === null ? undefined : window.setInterval(() => void load(), interval);
     return () => {
       cancelled = true;
       controller.abort();
-      window.clearInterval(interval);
+      if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [page, poolId]);
+  }, [interval, page, poolId, refreshSignal]);
   return state;
 }
 

@@ -6,6 +6,7 @@ import { EmptyState, ListGroup, PageBody, PageHeader } from "~/components/page";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { RunStatusIcon } from "~/components/status-icon";
 import { Badge } from "~/components/ui/badge";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type RunPlatform, type WorkflowRun, getWorkflowRunsPage } from "~/features/operations/operations.functions";
 import { RunActionsMenu, isActiveRun } from "~/features/workflow-runs/run-actions";
 import { RunRow } from "~/features/workflow-runs/run-row";
@@ -37,12 +38,13 @@ function runGroup(run: WorkflowRun): (typeof GROUPS)[number]["key"] {
 function WorkflowRunsPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
-  useLiveRouteRefresh(5_000, data.authenticated);
+  const live = useLiveRouteRefresh(5_000, data.authenticated);
   const groups = GROUPS.map((group) => ({ ...group, runs: data.items.filter((run) => runGroup(run) === group.key) })).filter((group) => group.runs.length);
 
   return (
     <>
       <PageHeader count={data.total || undefined} icon={GitPullRequestArrow} title="Workflow runs" />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         {data.items.length === 0 ? (
           <EmptyState description="Run history fills in from connected repositories through GitHub webhooks and polling." icon={GitPullRequestArrow} title="No workflow runs yet" />

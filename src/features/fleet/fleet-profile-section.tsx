@@ -11,6 +11,7 @@ import { SettingsRow, SettingsSection, Switch, UnitField } from "~/components/se
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { SearchableSelect } from "~/components/ui/searchable-select";
+import { useRefreshInterval } from "~/lib/use-refresh-interval";
 import { formatRelativeTime } from "~/lib/utils";
 import { getPoolProfile, getPoolQueue, savePoolProfile } from "./admin-api";
 import type { PlatformInput, Profile, ProfileInput } from "./admin-contracts";
@@ -113,10 +114,11 @@ const waitingReason: Record<string, string> = {
 
 /** Runners this pool queued that no machine has taken yet, and why. */
 function WaitingRunners({ poolId }: { poolId: string }) {
+  const refetchInterval = useRefreshInterval(10_000);
   const queue = useQuery({
     queryKey: ["fleet", "queue", poolId],
     queryFn: ({ signal }) => getPoolQueue(poolId, signal),
-    refetchInterval: 10_000,
+    refetchInterval: refetchInterval ?? false,
   });
   const items = queue.data?.items ?? [];
   const blocked = queue.data?.blockedHosts ?? [];

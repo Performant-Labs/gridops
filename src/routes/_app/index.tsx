@@ -10,6 +10,7 @@ import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusDot } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
 import { Tooltip } from "~/components/ui/tooltip";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { AgentRunRow } from "~/features/agent/agent-run-row";
 import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
@@ -22,6 +23,7 @@ import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
 import { RunRow } from "~/features/workflow-runs/run-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
+import { useRefreshInterval, useRefreshSignal } from "~/lib/use-refresh-interval";
 import { cn, formatAge, formatDateTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/")({
@@ -39,7 +41,7 @@ export const Route = createFileRoute("/_app/")({
 
 function OverviewPage() {
   const data = Route.useLoaderData();
-  useLiveRouteRefresh(10_000, data.authenticated);
+  const live = useLiveRouteRefresh(10_000, data.authenticated);
   const configurationComplete =
     data.configuration.githubOAuth &&
     data.configuration.githubAppControl &&
@@ -65,6 +67,7 @@ function OverviewPage() {
         icon={CircleGauge}
         title="Overview"
       />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         <div className="w-full space-y-8 px-4 py-6 sm:px-6 lg:px-8">
           {!configurationComplete ? <ConfigurationCallout data={data} /> : null}
@@ -142,6 +145,9 @@ function CapacitySection({ installations }: { installations: number }) {
   // and otherwise shows the most recent sample.
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const current = (hoverIndex === null ? undefined : history[hoverIndex]) ?? history.at(-1);
+  // The 24-hour chart reloads every 30 seconds at the default Refresh setting.
+  const chartInterval = useRefreshInterval(30_000);
+  const refreshSignal = useRefreshSignal();
 
   useEffect(() => {
     if (installations === 0) return undefined;
@@ -160,12 +166,12 @@ function CapacitySection({ installations }: { installations: number }) {
       }
     }
     void load();
-    const interval = capacityWindow === "24h" ? window.setInterval(() => void load(), 30_000) : undefined;
+    const interval = capacityWindow === "24h" && chartInterval !== null ? window.setInterval(() => void load(), chartInterval) : undefined;
     return () => {
       cancelled = true;
       if (interval !== undefined) window.clearInterval(interval);
     };
-  }, [capacityWindow, installations]);
+  }, [capacityWindow, chartInterval, installations, refreshSignal]);
 
   return (
     <section className="space-y-3">

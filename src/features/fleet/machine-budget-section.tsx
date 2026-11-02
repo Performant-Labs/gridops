@@ -8,6 +8,7 @@ import { Callout, InlineLoading, SectionHeading } from "~/components/page";
 import { UnitField } from "~/components/settings-ui";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { useRefreshInterval } from "~/lib/use-refresh-interval";
 import { setHostBudget } from "./admin-api";
 import { fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden } from "./fleet-ui";
 import { type BudgetDraft, type BudgetFigures, type ReportedFigures, budgetDraft, budgetRequest } from "./machine-budget";
@@ -20,10 +21,11 @@ function reportedFigures(capacity: { state: string; cpuMillis?: number | null; m
 }
 
 export function MachineBudgetSection({ hostId, budget, onSaved }: { hostId: string; budget: BudgetFigures; onSaved: () => Promise<unknown> | void }) {
+  const refetchInterval = useRefreshInterval(30_000);
   const domains = useQuery({
     queryKey: ["fleet", "domains", hostId],
     queryFn: ({ signal }) => listDomains(hostId, { limit: 100 }, signal),
-    refetchInterval: 30_000,
+    refetchInterval: refetchInterval ?? false,
   });
   if (domains.isError && isForbidden(domains.error)) return null;
   const root = domains.data?.items.find((domain) => domain.parentId === null);

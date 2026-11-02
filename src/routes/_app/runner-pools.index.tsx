@@ -11,6 +11,7 @@ import { Avatar, githubAvatar } from "~/components/ui/avatar";
 import { Badge } from "~/components/ui/badge";
 import { buttonVariants } from "~/components/ui/button";
 import { Tooltip } from "~/components/ui/tooltip";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type RunnerPool, getRunnerPoolsPage } from "~/features/operations/operations.functions";
 import { PoolActionsMenu, providerLabel } from "~/features/runner-pools/pool-actions";
 import { validatePageSearch } from "~/lib/pagination";
@@ -44,7 +45,7 @@ function poolGroup(pool: RunnerPool): (typeof GROUPS)[number]["key"] {
 function RunnerPoolsPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
-  useLiveRouteRefresh(5_000, data.authenticated);
+  const live = useLiveRouteRefresh(5_000, data.authenticated);
   const grouped = GROUPS.map((group) => ({ ...group, pools: data.items.filter((pool) => poolGroup(pool) === group.key) })).filter((group) => group.pools.length);
 
   return (
@@ -55,6 +56,7 @@ function RunnerPoolsPage() {
         icon={Boxes}
         title="Runner pools"
       />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         {data.items.length === 0 ? (
           <EmptyState
