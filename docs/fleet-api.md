@@ -174,6 +174,15 @@ Mutating browser routes protect replays in one of two ways:
 Routes not listed (`retire`, `repair_unconfirmed`) take `expectedRevision`
 in their body and fail replays with `revision_conflict`.
 
+## Machine-readable contract
+
+The same routes, scopes and error shapes are published as an OpenAPI 3.1
+document, served unauthenticated at
+[`GET /api/v1/openapi.json`](/api/v1/openapi.json) and checked into the
+repository at `docs/openapi/gridops-v1.json`. A drift test fails the build
+when the spec and the token-scope table disagree, and the examples in the
+spec are parsed by the same wire types as the fixtures in this document.
+
 ## Protocol versions
 
 The server and agent negotiate during the handshake. Version 1 is the only

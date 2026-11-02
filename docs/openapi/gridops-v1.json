@@ -1,0 +1,839 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GridOps Fleet and Operations API",
+    "version": "1.0.0",
+    "description": "Machine-readable contract for `/api/v1/fleet` and `/api/v1/operations`.\n\nBrowser routes authenticate with the dashboard session cookie or, where marked, a scoped API token (`Authorization: Bearer gat_...`). A request carrying both a cookie and a bearer token is refused. Agent routes are the host-agent protocol and use a host credential, never an API token.\n\nSee docs/fleet-api.md for the human contract and docs/fleet-automation.md for bot-driven enrollment."
+  },
+  "servers": [{ "url": "/" }],
+  "tags": [
+    { "name": "fleet-read", "description": "Read fleet state (token scope `fleet:read` or cookie)" },
+    { "name": "fleet-enroll", "description": "Issue and manage enrollment codes (token scope `fleet:enroll` or cookie)" },
+    { "name": "fleet-approve", "description": "Approve pending hosts (token scope `fleet:approve` or cookie)" },
+    { "name": "fleet-operate", "description": "Run-time levers: runtimes, lifecycle, grants, pool profiles (token scope `fleet:operate` or cookie)" },
+    { "name": "fleet-admin", "description": "Cookie-only administration (API tokens, recovery, retirement, rotation)" },
+    { "name": "operations", "description": "Durable operation status (token scope `fleet:read` or cookie)" },
+    { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" }
+  ],
+  "security": [{ "cookieAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Scoped API token: `gat_` followed by 43 base64url characters. Created by an administrator; scopes are fleet:read, fleet:enroll, fleet:approve, fleet:operate."
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "gridops_session",
+        "description": "Dashboard session cookie from GitHub OAuth sign-in."
+      },
+      "hostCredential": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A 43-character host credential issued at enrollment. Never valid on browser routes."
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Replaying a key with the same body returns the original result; a different body is an idempotency_conflict.",
+        "schema": { "type": "string", "minLength": 8, "maxLength": 128 }
+      },
+      "HostId": {
+        "name": "host_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "BackendId": {
+        "name": "backend_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "TargetId": {
+        "name": "target_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "PoolId": {
+        "name": "pool_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "EnrollmentId": {
+        "name": "enrollment_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "TokenId": {
+        "name": "token_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "OperationId": {
+        "name": "operation_id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      }
+    },
+    "schemas": {
+      "Uuid": { "type": "string", "format": "uuid" },
+      "Cursor": { "type": ["string", "null"], "maxLength": 4096 },
+      "ErrorDetails": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "revision" }, "currentRevision": { "type": "integer", "minimum": 1 } },
+            "required": ["kind", "currentRevision"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "invalid_field" }, "field": { "type": "string" } },
+            "required": ["kind", "field"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "limit" }, "maximum": { "type": "integer", "minimum": 0 } },
+            "required": ["kind", "maximum"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "retry" }, "retryAfterMs": { "type": "integer", "minimum": 0 } },
+            "required": ["kind", "retryAfterMs"], "additionalProperties": false
+          },
+          { "type": "object", "properties": { "kind": { "const": "cursor_gap" } }, "required": ["kind"], "additionalProperties": false },
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "readiness" }, "reason": { "type": "string" } },
+            "required": ["kind", "reason"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": { "kind": { "const": "scope" }, "requiredScope": { "type": "string", "enum": ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate"] } },
+            "required": ["kind", "requiredScope"], "additionalProperties": false
+          }
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range"]
+          },
+          "message": { "type": "string" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" },
+          "details": { "oneOf": [{ "$ref": "#/components/schemas/ErrorDetails" }, { "type": "null" }] }
+        },
+        "required": ["code", "message", "requestId"],
+        "additionalProperties": false
+      },
+      "HostSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string" },
+          "hostOs": { "type": "string", "enum": ["linux", "macos", "windows"] },
+          "architecture": { "type": "string", "enum": ["x64", "arm64"] },
+          "enrollment": { "type": "string", "enum": ["pending", "approved", "revoked"] },
+          "lifecycle": { "type": "string", "enum": ["active", "paused", "draining", "maintenance", "retired"] },
+          "integrity": { "type": "string" },
+          "freshness": { "type": "string" },
+          "pressure": { "type": "string" },
+          "revision": { "type": "integer", "minimum": 1 },
+          "agentVersion": { "type": ["string", "null"] },
+          "lastHeartbeatAt": { "type": ["string", "null"], "format": "date-time" },
+          "backendCount": { "type": "integer", "minimum": 0 },
+          "runnerCount": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["id", "name", "hostOs", "architecture", "enrollment", "lifecycle", "integrity", "freshness", "pressure", "revision", "backendCount", "runnerCount"],
+        "additionalProperties": false
+      },
+      "HostPage": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "type": "integer", "const": 1 },
+          "readAt": { "type": "string", "format": "date-time" },
+          "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/HostSummary" } },
+          "nextCursor": { "$ref": "#/components/schemas/Cursor" }
+        },
+        "required": ["schemaVersion", "readAt", "items", "nextCursor"],
+        "additionalProperties": false
+      },
+      "EnrollmentIssueRequest": {
+        "type": "object",
+        "properties": {
+          "targetIds": { "type": "array", "maxItems": 64, "items": { "$ref": "#/components/schemas/Uuid" } },
+          "intendedHostId": { "type": ["string", "null"] },
+          "lifetimeMinutes": { "type": "integer", "minimum": 1, "maximum": 60 }
+        },
+        "required": ["targetIds"],
+        "additionalProperties": false
+      },
+      "EnrollmentIssueCreated": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "minLength": 43, "maxLength": 43, "description": "The one-time enrollment code; shown exactly once." },
+          "enrollmentId": { "$ref": "#/components/schemas/Uuid" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["code", "enrollmentId", "expiresAt"],
+        "additionalProperties": false
+      },
+      "EnrollmentStatus": {
+        "type": "object",
+        "properties": {
+          "enrollmentId": { "$ref": "#/components/schemas/Uuid" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "consumedAt": { "type": ["string", "null"], "format": "date-time" },
+          "revokedAt": { "type": ["string", "null"], "format": "date-time" },
+          "consumedHostId": { "type": ["string", "null"], "description": "Correlates the code with its host; poll until set." }
+        },
+        "required": ["enrollmentId", "expiresAt"],
+        "additionalProperties": false
+      },
+      "ApproveRequest": {
+        "type": "object",
+        "properties": {
+          "expectedRevision": { "type": "integer", "minimum": 1 },
+          "expectedInventoryRevision": { "type": "integer", "minimum": 1 },
+          "expectedInventoryDigest": { "type": "string" },
+          "targetIds": { "type": "array", "maxItems": 64, "items": { "$ref": "#/components/schemas/Uuid" } }
+        },
+        "required": ["expectedRevision", "expectedInventoryRevision", "expectedInventoryDigest", "targetIds"],
+        "additionalProperties": false
+      },
+      "LifecycleRequest": {
+        "type": "object",
+        "properties": {
+          "lifecycle": { "type": "string", "enum": ["active", "paused", "draining", "maintenance"] },
+          "expectedRevision": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["lifecycle", "expectedRevision"],
+        "additionalProperties": false
+      },
+      "BackendEnabledRequest": {
+        "type": "object",
+        "properties": { "enabled": { "type": "boolean" } },
+        "required": ["enabled"],
+        "additionalProperties": false
+      },
+      "GrantRequest": {
+        "type": "object",
+        "properties": {
+          "allowSchedule": { "type": "boolean" },
+          "allowNative": { "type": "boolean" },
+          "allowDockerSocket": { "type": "boolean", "description": "Hands jobs root-equivalent host access through the Docker socket; deliberate opt-in." }
+        },
+        "required": ["allowSchedule", "allowNative", "allowDockerSocket"],
+        "additionalProperties": false
+      },
+      "OperationStatus": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": { "type": "integer", "const": 1 },
+          "operationId": { "$ref": "#/components/schemas/Uuid" },
+          "state": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "blocked"] }
+        },
+        "required": ["schemaVersion", "operationId", "state"],
+        "additionalProperties": true
+      }
+    },
+    "examples": {
+      "fleetErrorRevisionConflict": {
+        "value": {
+          "code": "revision_conflict",
+          "message": "The host changed since it was read.",
+          "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e6f",
+          "details": { "kind": "revision", "currentRevision": 7 }
+        }
+      },
+      "fleetErrorScopeDenied": {
+        "value": {
+          "code": "forbidden",
+          "message": "Fleet action is not authorized",
+          "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e70",
+          "details": { "kind": "scope", "requiredScope": "fleet:approve" }
+        }
+      },
+      "enrollmentIssueCreated": {
+        "value": {
+          "code": "7MFBNUWH2DWCLSPZR4XZJRMNFBWKMPRLIQZKBEXYKV4",
+          "enrollmentId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e80",
+          "expiresAt": "2026-10-31T23:00:00.000Z"
+        }
+      }
+    },
+    "responses": {
+      "ErrorResponse": {
+        "description": "Fleet error envelope; see the code table in docs/fleet-api.md.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+            "examples": {
+              "revisionConflict": { "$ref": "#/components/examples/fleetErrorRevisionConflict" },
+              "scopeDenied": { "$ref": "#/components/examples/fleetErrorScopeDenied" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/fleet/hosts": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Paginated host list",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },
+          { "name": "cursor", "in": "query", "schema": { "$ref": "#/components/schemas/Cursor" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Host page",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HostPage" } } }
+          },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "One host with approval evidence",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Host detail (projection `host`)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/backends": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Execution backends of a host",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Backend page", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "One execution backend",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }, { "$ref": "#/components/parameters/BackendId" }],
+        "responses": {
+          "200": { "description": "Backend detail", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/domains": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Resource domains (physical access only)",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Domain page", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/domains/{domain_id}": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "One resource domain (physical access only)",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }, { "name": "domain_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } }],
+        "responses": {
+          "200": { "description": "Domain detail", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/samples": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Resource samples (physical access only)",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Sample page", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/events": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Host event history",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Event page", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/grants": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Target grants of a host",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Grant list", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/unconfirmed": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Unconfirmed host observations",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Unconfirmed observations", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/targets": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "CI targets",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "Target list", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/workload": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Workload overview",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "Workload overview", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/pools/{pool_id}/profile": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Pool fleet execution profile",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
+        "responses": {
+          "200": { "description": "Profile or null item", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "put": {
+        "tags": ["fleet-operate"],
+        "summary": "Save the pool's fleet execution profile",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Saved profile", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/pools/{pool_id}/capacity": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Pool runner counts (desired, min, max)",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
+        "responses": {
+          "200": { "description": "Pool capacity", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "put": {
+        "tags": ["fleet-operate"],
+        "summary": "Set pool runner counts",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated capacity", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/pools/{pool_id}/queue": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Queued runners and blocked hosts of a pool",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
+        "responses": {
+          "200": { "description": "Queue view", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/enrollments": {
+      "post": {
+        "tags": ["fleet-enroll"],
+        "summary": "Issue a single-use enrollment code",
+        "security": [{ "bearerAuth": ["fleet:enroll"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EnrollmentIssueRequest" },
+              "examples": { "created": { "$ref": "#/components/examples/enrollmentIssueCreated" } }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Code issued; the plaintext code appears exactly once.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentIssueCreated" } } }
+          },
+          "200": {
+            "description": "Idempotent replay: enrollment metadata only, no second code.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/enrollments/{enrollment_id}": {
+      "get": {
+        "tags": ["fleet-enroll"],
+        "summary": "Enrollment status; consumedHostId correlates code and host",
+        "security": [{ "bearerAuth": ["fleet:enroll"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
+        "responses": {
+          "200": { "description": "Enrollment status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EnrollmentStatus" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/enrollments/{enrollment_id}/revoke": {
+      "post": {
+        "tags": ["fleet-enroll"],
+        "summary": "Revoke an unused code",
+        "security": [{ "bearerAuth": ["fleet:enroll"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
+        "responses": {
+          "200": { "description": "Revoked (idempotent)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/approve": {
+      "post": {
+        "tags": ["fleet-approve"],
+        "summary": "Approve a pending host with fresh approval evidence",
+        "security": [{ "bearerAuth": ["fleet:approve"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApproveRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Approved; the host starts paused with no runtimes", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/lifecycle": {
+      "post": {
+        "tags": ["fleet-operate"],
+        "summary": "Set host intent (active, paused, draining, maintenance)",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LifecycleRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Intent set", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled": {
+      "post": {
+        "tags": ["fleet-operate"],
+        "summary": "Turn a runtime backend on or off",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }, { "$ref": "#/components/parameters/BackendId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BackendEnabledRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Backend state changed", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/grants/{target_id}": {
+      "post": {
+        "tags": ["fleet-operate"],
+        "summary": "Set a target grant",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }, { "$ref": "#/components/parameters/TargetId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GrantRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Grant set", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/operations/{operation_id}": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "Durable operation status",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OperationId" }],
+        "responses": {
+          "200": { "description": "Operation status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationStatus" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/api-tokens": {
+      "get": {
+        "tags": ["fleet-admin"],
+        "summary": "List the caller's API tokens (cookie only; never the verifier or plaintext)",
+        "security": [{ "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "Token metadata list", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "post": {
+        "tags": ["fleet-admin"],
+        "summary": "Create an API token (cookie only; the plaintext appears exactly once)",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "201": { "description": "Created; includes tokenSecret exactly once", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "200": { "description": "Idempotent replay; metadata only", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/api-tokens/{token_id}/revoke": {
+      "post": {
+        "tags": ["fleet-admin"],
+        "summary": "Revoke an API token (owner or system admin; idempotent)",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/TokenId" }],
+        "responses": {
+          "200": { "description": "Revoked", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/recover": {
+      "post": {
+        "tags": ["fleet-admin"],
+        "summary": "Approve explicit host recovery (cookie only)",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Recovery issued", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/retire": {
+      "post": {
+        "tags": ["fleet-admin"],
+        "summary": "Retire a host (cookie only)",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Retired", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/hosts/{host_id}/credentials/rotate": {
+      "post": {
+        "tags": ["fleet-admin"],
+        "summary": "Request host credential rotation (cookie only)",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Rotation requested", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/enroll": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Consume an enrollment code (host credential auth after issuance)",
+        "security": [],
+        "responses": {
+          "201": { "description": "Host enrolled; one-time credential issued", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/handshake": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Open a session and negotiate the protocol version",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Session opened", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/inventory": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Submit inventory (capacity, backends, samples)",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Inventory accepted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/heartbeat": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Heartbeat and samples",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Heartbeat accepted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/commands/poll": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Poll for the next host command",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Next command or idle", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/commands/result": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Report a command result",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Result accepted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/logs": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Ship host agent logs",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Logs accepted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/output": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Stream runner output chunks",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Chunk accepted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/bootstrap": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Bootstrap a runner environment",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Bootstrap outcome", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/credentials/rotate": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Exchange a rotated credential",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "New credential issued", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/agent/hosts/{host_id}/credentials/ack": {
+      "post": {
+        "tags": ["agent-protocol"],
+        "summary": "Acknowledge the rotated credential",
+        "security": [{ "hostCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": { "description": "Acknowledged", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    }
+  }
+}

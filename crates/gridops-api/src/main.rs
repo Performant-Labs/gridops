@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         .merge(fleet::router())
         .merge(fleet::operation_router())
         .route("/api/health", get(resources::health))
+        .route("/api/v1/openapi.json", get(fleet::openapi::get))
         .route("/install.sh", get(install::shell))
         .route("/install.ps1", get(install::powershell))
         .route("/api/v1/auth/session", get(auth::session))

@@ -5,7 +5,8 @@
     "cargo test --workspace --locked",
     "npm ci --no-audit --no-fund",
     "npm run lint",
-    "npm test"
+    "npm test",
+    "npm run validate:openapi"
   ],
   "testSuites": {
     "fmt": {
