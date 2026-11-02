@@ -306,7 +306,12 @@ async fn main() -> Result<()> {
         );
 
     let listener = tokio::net::TcpListener::bind(config.api_bind()).await?;
-    tracing::info!(address = %config.api_bind(), "GridOps Rust API listening");
+    tracing::info!(
+        address = %config.api_bind(),
+        version = gridops_core::build_info::FULL_VERSION,
+        commit = gridops_core::build_info::COMMIT,
+        "GridOps Rust API listening"
+    );
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }

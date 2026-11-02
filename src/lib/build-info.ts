@@ -10,10 +10,25 @@ export function parseWorkspaceVersion(manifest: string): string {
   return line?.[1] ?? "";
 }
 
-/** The text of the version bar: "v0.1.3 · 9d92a33", "v0.1.3" without a commit, or "version unknown" without a version. */
-export function formatAppVersion(version: string, commit: string): string {
+/** A build number: a positive integer without leading zeros, as `git rev-list --count HEAD` prints it. Anything else is "" (missing). */
+export function normalizeBuildNumber(raw: string | undefined): string {
+  const value = (raw ?? "").trim();
+  return /^[1-9]\d*$/.test(value) ? value : "";
+}
+
+/** A commit id of 7 to 40 hex digits cut to the 7-character short form, in lower case. Anything else is "" (missing). */
+export function normalizeCommit(raw: string | undefined): string {
+  const value = (raw ?? "").trim();
+  return /^[0-9a-fA-F]{7,40}$/.test(value) ? value.slice(0, 7).toLowerCase() : "";
+}
+
+/**
+ * The text of the version bar: "v0.1.3 · build 412 · 9d92a33". A part that is missing says so ("build unknown",
+ * "commit unknown", "version unknown") rather than being left out, so a build that lost its number is visible.
+ */
+export function formatAppVersion(version: string, buildNumber: string, commit: string): string {
   const v = version.trim();
+  const b = buildNumber.trim();
   const c = commit.trim();
-  if (v === "") return "version unknown";
-  return c === "" ? `v${v}` : `v${v} · ${c}`;
+  return [v === "" ? "version unknown" : `v${v}`, b === "" ? "build unknown" : `build ${b}`, c === "" ? "commit unknown" : c].join(" · ");
 }

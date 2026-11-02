@@ -16,7 +16,7 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use gridops_core::{
     ConfigurationState, CreateRunnerPool, GitHubRepository, GitHubWorkflowJob, GitHubWorkflowStep,
-    JitRequest, RepositoryCapacity, RepositoryPage, RunnerTarget, UpdateRunnerPool,
+    JitRequest, RepositoryCapacity, RepositoryPage, RunnerTarget, UpdateRunnerPool, build_info,
     compatible_runner_provider, effective_runner_labels,
     job_log::{LogAnnotation, StructuredLogStep, structure_job_log},
     next_runner_provider, next_runner_repository, now_millis,
@@ -252,6 +252,9 @@ pub async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         "status": "ok",
         "service": "gridops-api",
         "database": "sqlite",
+        "version": build_info::VERSION,
+        "buildNumber": build_info::build_number(),
+        "commit": build_info::commit(),
         "time": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
     })))
 }

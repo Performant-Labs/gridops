@@ -43,6 +43,9 @@ jobs:
       - name: Run application tests
         run: npm test
 
+      - name: Test the build number script
+        run: sh scripts/test-build-info.sh
+
   rust:
     name: Rust format, lint, and tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -75,3 +78,10 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --workspace --locked
+
+      # The Rust tests build without a number. This checks the path a numbered build takes: the environment reaches the binary.
+      - name: Check the build number reaches the agent
+        run: |
+          out="$(GRIDOPS_BUILD_NUMBER=4242 GRIDOPS_COMMIT=abcdef0 cargo run --quiet --locked -p gridops-host-agent -- --version)"
+          echo "$out"
+          case "$out" in *"+build.4242 (abcdef0)") ;; *) echo "the agent does not report the build number"; exit 1 ;; esac

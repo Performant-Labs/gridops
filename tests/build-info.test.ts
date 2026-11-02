@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { formatAppVersion, parseWorkspaceVersion } from "~/lib/build-info";
+import { formatAppVersion, normalizeBuildNumber, normalizeCommit, parseWorkspaceVersion } from "~/lib/build-info";
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
@@ -27,19 +27,48 @@ describe("parseWorkspaceVersion", () => {
   });
 });
 
+describe("normalizeBuildNumber", () => {
+  it("accepts a positive integer, as `git rev-list --count` prints it", () => {
+    expect(normalizeBuildNumber("412")).toBe("412");
+    expect(normalizeBuildNumber(" 7\n")).toBe("7");
+  });
+
+  it("rejects anything else, so a bad value reads as missing instead of being shown", () => {
+    for (const bad of ["", "  ", "0", "012", "-3", "4.1", "dev", "12a", undefined]) {
+      expect(normalizeBuildNumber(bad), String(bad)).toBe("");
+    }
+  });
+});
+
+describe("normalizeCommit", () => {
+  it("cuts a commit to seven lower-case hex digits", () => {
+    expect(normalizeCommit("9D92A33ffe0123")).toBe("9d92a33");
+    expect(normalizeCommit(" 9d92a33 ")).toBe("9d92a33");
+  });
+
+  it("rejects what is not a commit id", () => {
+    for (const bad of ["", "9d92a3", "xyz1234", "a".repeat(41), undefined]) {
+      expect(normalizeCommit(bad), String(bad)).toBe("");
+    }
+  });
+});
+
 describe("formatAppVersion", () => {
-  it("shows the version and the commit", () => {
-    expect(formatAppVersion("0.1.3", "9d92a33")).toBe("v0.1.3 · 9d92a33");
+  it("shows the version, the build number and the commit", () => {
+    expect(formatAppVersion("0.1.3", "412", "9d92a33")).toBe("v0.1.3 · build 412 · 9d92a33");
   });
 
-  it("shows the version alone when the commit is unknown", () => {
-    expect(formatAppVersion("0.1.3", "")).toBe("v0.1.3");
-    expect(formatAppVersion(" 0.1.3 ", "  ")).toBe("v0.1.3");
+  it("says what is missing instead of leaving it out", () => {
+    expect(formatAppVersion("0.1.3", "", "9d92a33")).toBe("v0.1.3 · build unknown · 9d92a33");
+    expect(formatAppVersion("0.1.3", "412", "")).toBe("v0.1.3 · build 412 · commit unknown");
+    expect(formatAppVersion("0.1.3", "", "")).toBe("v0.1.3 · build unknown · commit unknown");
+    expect(formatAppVersion("", "412", "9d92a33")).toBe("version unknown · build 412 · 9d92a33");
+    expect(formatAppVersion("", "", "")).toBe("version unknown · build unknown · commit unknown");
   });
 
-  it("says so when the version is unknown, whatever the commit", () => {
-    expect(formatAppVersion("", "")).toBe("version unknown");
-    expect(formatAppVersion("", "9d92a33")).toBe("version unknown");
+  it("ignores stray whitespace", () => {
+    expect(formatAppVersion(" 0.1.3 ", " 412 ", "  9d92a33")).toBe("v0.1.3 · build 412 · 9d92a33");
+    expect(formatAppVersion("0.1.3", "  ", "  ")).toBe("v0.1.3 · build unknown · commit unknown");
   });
 });
 
