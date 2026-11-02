@@ -372,3 +372,101 @@ async fn a_machine_set_aside_is_reconsidered_after_a_success_or_the_cool_down() 
     assert_eq!(host_read(&f, &only).await?["startGate"], Value::Null);
     Ok(())
 }
+
+/// The Overview's alerts, as the signed-in fixture user sees them.
+async fn overview_alerts(f: &Fixture) -> Result<Vec<Value>> {
+    let overview: Value = f
+        .client
+        .get(format!("{}/api/v1/overview", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(overview["slo"]["alerts"]
+        .as_array()
+        .context("alerts")?
+        .clone())
+}
+
+/// The Overview's alerts about machines set aside for failing starts.
+fn start_gate_alerts(alerts: &[Value]) -> Vec<&Value> {
+    alerts
+        .iter()
+        .filter(|alert| {
+            alert["title"]
+                .as_str()
+                .is_some_and(|title| title.contains("not accepting new runners"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_overview_raises_an_alert_for_a_machine_set_aside() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let (flaky, healthy) = two_machines(&f).await?;
+    for (machine, name) in [(&flaky, "flaky-box"), (&healthy, "healthy-box")] {
+        sqlx::query("UPDATE fleet_hosts SET name=? WHERE id=?")
+            .bind(name)
+            .bind(machine.host.to_string())
+            .execute(&f.database)
+            .await?;
+    }
+    // Nothing is set aside yet, so nothing is raised.
+    assert!(start_gate_alerts(&overview_alerts(&f).await?).is_empty());
+
+    for _ in 0..3 {
+        let workload = Uuid::new_v4();
+        let placement = prepared_placement(&f, &flaky, workload).await?;
+        fail_start(&f, placement, workload).await?;
+    }
+    let gate = host_read(&f, &flaky).await?["startGate"].clone();
+    assert_eq!(gate["failures"], 3);
+
+    // One alert, for the machine set aside and not the healthy one.
+    let alerts = overview_alerts(&f).await?;
+    let gated = start_gate_alerts(&alerts);
+    assert_eq!(gated.len(), 1, "{alerts:?}");
+    let alert = gated[0];
+    assert_eq!(alert["level"], "warning");
+    assert_eq!(
+        alert["title"],
+        "Fleet machine flaky-box is not accepting new runners"
+    );
+    // The gate's own words, and when it lifts, as the machine read says.
+    assert_eq!(alert["detail"], gate["message"]);
+    assert_eq!(alert["until"], gate["until"]);
+    assert!(alert["until"].is_string());
+    assert_eq!(alert["href"], format!("/fleet/machines/{}", flaky.host));
+    assert!(
+        !alerts.iter().any(|alert| alert["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("healthy-box"))),
+        "{alerts:?}"
+    );
+
+    // Machines are for system administrators, so a member sees no alert.
+    sqlx::query("UPDATE users SET role='member' WHERE id='fleet-user'")
+        .execute(&f.database)
+        .await?;
+    assert!(start_gate_alerts(&overview_alerts(&f).await?).is_empty());
+    sqlx::query("UPDATE users SET role='admin' WHERE id='fleet-user'")
+        .execute(&f.database)
+        .await?;
+    assert_eq!(start_gate_alerts(&overview_alerts(&f).await?).len(), 1);
+
+    // Once the failures age out of the window the gate lifts, and the alert
+    // goes with it.
+    sqlx::query(
+        "UPDATE fleet_events SET created_at=created_at-16*60000
+          WHERE host_id=? AND kind='placement_failed'",
+    )
+    .bind(flaky.host.to_string())
+    .execute(&f.database)
+    .await?;
+    assert_eq!(host_read(&f, &flaky).await?["startGate"], Value::Null);
+    assert!(start_gate_alerts(&overview_alerts(&f).await?).is_empty());
+    Ok(())
+}

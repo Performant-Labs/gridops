@@ -479,6 +479,7 @@ pub async fn overview(
         }));
     }
     alerts.extend(disk_alerts(&state, &user.role, now).await);
+    alerts.extend(start_gate_alerts(&state, &user.role, now).await);
 
     let pool_rows = sqlx::query(
         r#"SELECT p.id,p.name,p.scope,p.desired_count,p.mode,p.state,p.paused,
@@ -5564,6 +5565,54 @@ async fn disk_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
         }
     }
     alerts
+}
+
+/// One alert per machine set aside from new placements because it keeps
+/// failing runner starts (see `gridops_core::fleet::start_health`). Machines
+/// are infrastructure, so like the disk alarms these are for system admins.
+/// The gate is the one admission and the machine read use; the alert goes
+/// once it lifts. `until` is when the machine is reconsidered if nothing else
+/// changes, for the page to show in the reader's time.
+async fn start_gate_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
+    use gridops_core::fleet::{failure::PLACEMENT_FAILED_EVENT, start_health};
+    if role != "admin" {
+        return Vec::new();
+    }
+    let alerts = async {
+        let mut tx = state.database.begin().await?;
+        // Only a machine with a failure in the window can be gated, so the
+        // gate is asked of those alone.
+        let hosts: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT fh.id,fh.name FROM fleet_hosts fh
+                WHERE fh.deleted_at IS NULL
+                  AND fh.enrollment_state='approved'
+                  AND fh.lifecycle_state NOT IN ('retired')
+                  AND EXISTS (SELECT 1 FROM fleet_events e
+                    WHERE e.host_id=fh.id AND e.kind=? AND e.created_at>=?)
+                ORDER BY fh.name,fh.id"#,
+        )
+        .bind(PLACEMENT_FAILED_EVENT)
+        .bind(now - start_health::START_GATE_WINDOW_MILLIS)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut alerts = Vec::new();
+        for (id, name) in hosts {
+            if let Some(gate) = start_health::start_gate(&mut tx, &id, now).await? {
+                alerts.push(json!({
+                    "level": "warning",
+                    "title": format!("Fleet machine {name} is not accepting new runners"),
+                    "detail": gate.message(),
+                    "until": iso(gate.until),
+                    "href": format!("/fleet/machines/{id}"),
+                }));
+            }
+        }
+        Ok::<_, sqlx::Error>(alerts)
+    };
+    alerts.await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "could not read machines set aside for failing starts");
+        Vec::new()
+    })
 }
 
 async fn machine_performance(state: &AppState, user_id: &str, since: i64) -> ApiResult<Value> {

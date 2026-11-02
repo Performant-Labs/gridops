@@ -347,4 +347,8 @@ offline, and the start grant can't exceed local authority.
   out of new placements: its lifecycle, its running jobs and everything else
   stay as they are. A runner that waits because every machine that could
   take it is set aside this way shows the queue reason
-  `machines_failing_starts`.
+  `machines_failing_starts`. For system administrators, the overview
+  (`GET /api/v1/overview`) also lists one `warning` alert in `slo.alerts` per
+  approved, unretired machine set aside this way, titled with the machine's
+  name, with `detail` set to the gate's `message`, `until` as above and
+  `href` `/fleet/machines/<id>`; the alert goes once the gate lifts.

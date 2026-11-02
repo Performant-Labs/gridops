@@ -14,6 +14,7 @@ import { AgentRunRow } from "~/features/agent/agent-run-row";
 import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview, getQueuedJobsPage } from "~/features/dashboard/dashboard.functions";
+import { AttentionAlerts } from "~/features/dashboard/attention-alerts";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
 import { metricTiles } from "~/features/dashboard/metric-tiles";
@@ -398,28 +399,6 @@ function AgentRunsSection({ runs }: { runs: AgentRunListItem[] }) {
         ) : shown.map((run) => <AgentRunRow key={run.id} run={run} />)}
       </div>
     </section>
-  );
-}
-
-function AttentionAlerts({ alerts }: { alerts: DashboardOverview["slo"]["alerts"] }) {
-  return (
-    <div className="overflow-hidden rounded-lg border border-border">
-      <div className="flex h-9 items-center gap-2 border-b border-border bg-panel-subtle px-4 text-xs font-medium">
-        Needs attention<span className="tabular text-faint">{alerts.length}</span>
-      </div>
-      {alerts.length ? alerts.map((alert) => (
-        <Link className={cn(listRowClassName, "items-start py-3 last:border-b-0")} key={`${alert.href}-${alert.title}`} to={alert.href}>
-          <StatusDot className="mt-1.5" tone={alert.level === "error" ? "danger" : "warning"} />
-          <span className="min-w-0 flex-1">
-            <span className="block font-medium">{alert.title}</span>
-            <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{alert.detail}</span>
-          </span>
-          <ArrowRight className="mt-1 size-3.5 shrink-0 text-faint" />
-        </Link>
-      )) : (
-        <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground"><StatusDot tone="success" />No active runner-control incidents.</div>
-      )}
-    </div>
   );
 }
 
