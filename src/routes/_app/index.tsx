@@ -13,10 +13,11 @@ import { Tooltip } from "~/components/ui/tooltip";
 import { AgentRunRow } from "~/features/agent/agent-run-row";
 import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
-import { getCapacityHistory, getDashboardOverview } from "~/features/dashboard/dashboard.functions";
+import { getCapacityHistory, getDashboardOverview, getQueuedJobsPage } from "~/features/dashboard/dashboard.functions";
+import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { successRateTile } from "~/features/dashboard/success-rate";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
-import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, RunnerStartPhase } from "~/features/dashboard/types";
+import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
 import { RunRow } from "~/features/workflow-runs/run-row";
@@ -72,6 +73,7 @@ function OverviewPage() {
           <div className="grid gap-8 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,1fr)]">
             <div className="min-w-0 space-y-8">
               <CapacitySection installations={data.installations} />
+              {data.authenticated ? <QueuedJobsSection queued={data.metrics.queuedJobs} /> : null}
               {data.authenticated ? <FleetWorkloadSection /> : null}
               <PoolsSection pools={data.pools} />
               {data.machines?.items.length ? <MachinesSection machines={data.machines} /> : null}
@@ -112,7 +114,7 @@ function MetricStrip({ data }: { data: DashboardOverview }) {
   const metrics = [
     { label: "Runners", value: data.metrics.runners, hint: `${data.metrics.online} online`, to: "/runners", tone: data.metrics.online > 0 ? "success" : "neutral" },
     { label: "Busy", value: data.metrics.busy, hint: "Running jobs now", to: "/runners", tone: data.metrics.busy > 0 ? "progress" : "neutral" },
-    { label: "Queued jobs", value: data.metrics.queuedJobs, hint: data.metrics.queuedJobs > 0 ? "Waiting for a runner" : "Queue is clear", to: "/workflow-runs", tone: data.metrics.queuedJobs > 0 ? "warning" : "success" },
+    { label: "Queued jobs", value: data.metrics.queuedJobs, hint: data.metrics.queuedJobs > 0 ? "Waiting for a runner" : "Queue is clear", to: "/queued-jobs", tone: data.metrics.queuedJobs > 0 ? "warning" : "success" },
     { label: "Success rate", ...successRateTile(data.metrics), to: "/workflow-runs", tone: successTone(data.metrics.successRate) },
   ] as const;
   return (
@@ -284,6 +286,41 @@ function PoolsSection({ pools }: { pools: DashboardOverview["pools"] }) {
   );
 }
 
+const OVERVIEW_QUEUED_JOBS = 5;
+
+/** The jobs that have waited longest, with the pool each is for; the Queued jobs page lists them all. */
+function QueuedJobsSection({ queued }: { queued: number }) {
+  const [page, setPage] = useState<QueuedJobsPage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // The overview reloads every few seconds with the queued total; reload the list with it.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const response = await getQueuedJobsPage({ perPage: OVERVIEW_QUEUED_JOBS });
+        if (!cancelled) {
+          setPage(response);
+          setError(null);
+        }
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not load queued jobs.");
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, [queued]);
+
+  return (
+    <section className="space-y-3">
+      <SectionHeading actions={<ViewAll label={page && page.total > page.items.length ? `View all ${page.total}` : "View all"} to="/queued-jobs" />}>Queued jobs</SectionHeading>
+      <div className="overflow-hidden rounded-lg border border-border">
+        <QueuedJobsList error={error} items={page?.items ?? []} loading={page === null && error === null} page={1} perPage={OVERVIEW_QUEUED_JOBS} total={page?.total ?? 0} />
+      </div>
+    </section>
+  );
+}
+
 function MachinesSection({ machines }: { machines: NonNullable<DashboardOverview["machines"]> }) {
   return (
     <section className="space-y-3">
@@ -394,7 +431,7 @@ function AttentionSection({ data }: { data: DashboardOverview }) {
     <section className="space-y-3">
       <SectionHeading actions={<span className="text-xs text-faint">Last {windowHours}h</span>}>Service level</SectionHeading>
       <div className="grid grid-cols-3 overflow-hidden rounded-lg border border-border">
-        <SloCell hint={queue.p95Seconds === null ? "Queue is clear" : `p95 ${formatSeconds(queue.p95Seconds)}`} label="Oldest queued" value={formatSeconds(queue.oldestSeconds)} />
+        <SloCell hint={queue.p95Seconds === null ? "Queue is clear" : `p95 ${formatSeconds(queue.p95Seconds)}`} label="Oldest queued" to="/queued-jobs" value={formatSeconds(queue.oldestSeconds)} />
         <SloCell className="border-l" hint={startLatency.sampleSize ? phrases([`p95 ${formatSeconds(startLatency.p95Seconds)}`, `${startLatency.sampleSize} starts`]) : "No starts"} label="Start latency" value={formatSeconds(startLatency.p50Seconds)} />
         <SloCell className="border-l" hint={failures.length ? phrases(failures.map((item) => `${item.count} ${failureLabel(item.reason)}`)) : "None"} label="Failures" value={String(failures.reduce((total, item) => total + item.count, 0))} />
       </div>
@@ -454,13 +491,18 @@ function RunnerStarts({ starts, pass }: { starts: NonNullable<DashboardOverview[
   );
 }
 
-function SloCell({ label, value, hint, className }: { label: string; value: string; hint: string; className?: string }) {
-  return (
-    <div className={cn("min-w-0 px-3 py-3", className)}>
+function SloCell({ label, value, hint, className, to }: { label: string; value: string; hint: string; className?: string; to?: "/queued-jobs" }) {
+  const content = (
+    <>
       <div className="truncate text-xs text-muted-foreground">{label}</div>
       <div className="tabular mt-1 text-lg font-semibold tracking-tight">{value}</div>
       <div className="mt-0.5 line-clamp-2 text-2xs text-faint" title={hint}>{hint}</div>
-    </div>
+    </>
+  );
+  return to ? (
+    <Link className={cn("block min-w-0 px-3 py-3 transition-colors hover:bg-hover", className)} to={to}>{content}</Link>
+  ) : (
+    <div className={cn("min-w-0 px-3 py-3", className)}>{content}</div>
   );
 }
 

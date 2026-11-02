@@ -994,3 +994,307 @@ async fn signed_out_overview_names_the_success_rate_window() -> Result<()> {
     assert_eq!(body["metrics"]["successRateWindowDays"], Value::from(7));
     Ok(())
 }
+
+/// Minutes before now, in epoch milliseconds.
+fn minutes_ago(minutes: i64) -> i64 {
+    gridops_core::now_millis() - minutes * 60_000
+}
+
+/// An organization pool on installation 42 carrying one label.
+fn queued_jobs_pool(id: &str, label: &str, created_at: i64, max_count: i64) -> String {
+    format!(
+        "INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,max_count,autoscaling_enabled,created_at,updated_at)
+          VALUES ('{id}',42,NULL,'{id}','organization','[\"{label}\"]','runner:latest',{max_count},1,{created_at},{created_at});"
+    )
+}
+
+fn queued_jobs_runner(pool: &str, status: &str, busy: bool) -> String {
+    format!(
+        "INSERT INTO runners (id,pool_id,name,status,busy,created_at,updated_at)
+          VALUES ('{pool}-{status}','{pool}','{pool}-{status}','{status}',{},1,1);",
+        i64::from(busy)
+    )
+}
+
+fn queued_job(id: i64, run: i64, name: &str, labels: &str, queued_minutes_ago: i64) -> String {
+    let at = minutes_ago(queued_minutes_ago);
+    format!(
+        "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+          VALUES ({id},{run},'{name}','queued','{labels}','https://github.com/fixture/app/actions/runs/{run}/job/{id}',{at},{at});"
+    )
+}
+
+async fn queued_jobs_page(fixture: &ApiFixture, query: &str) -> Result<Value> {
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/api/v1/overview/queued-jobs{query}",
+            fixture.base_url
+        ))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK, "{query}");
+    Ok(response.json().await?)
+}
+
+fn ids(page: &Value) -> Vec<i64> {
+    page["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["id"].as_i64())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Repository 7 is the viewer's. Run 100 is unfinished, run 101 finished with a
+/// job still listed as queued, run 102 belongs to an installation the viewer
+/// can't see.
+const QUEUED_JOBS_BASE: &str = r#"
+    INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+      VALUES (43,43,'stranger','Organization','Organization','selected',1,1);
+    INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+      VALUES
+      (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',1,1,1),
+      (8,43,'stranger','secret','stranger/secret',0,'main','https://github.com/stranger/secret',1,1,1);
+    INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+      VALUES
+      (100,7,'CI',2,'push','queued','abc','https://github.com/fixture/app/actions/runs/100',2,2,2,2),
+      (101,7,'Release',1,'push','completed','abd','https://github.com/fixture/app/actions/runs/101',1,1,1,1),
+      (102,8,'Other',1,'push','queued','abe','https://github.com/stranger/secret/actions/runs/102',1,1,1,1);
+"#;
+
+#[tokio::test]
+async fn queued_jobs_are_listed_with_the_pool_the_scaler_owns_them_for() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // 'full' (older) is at its limit, so jobs for 'shared' pass to 'spare'.
+    // 'lane' has a runner starting, 'quiet' has room and nothing running, and
+    // 'tight' has one pool at its limit with nowhere else to send its job.
+    let pools = [
+        queued_jobs_pool("full", "shared", 1, 1),
+        queued_jobs_pool("spare", "shared", 2, 5),
+        queued_jobs_pool("lane", "lane", 3, 5),
+        queued_jobs_pool("quiet", "quiet", 4, 5),
+        queued_jobs_pool("tight", "tight", 5, 1),
+        queued_jobs_runner("full", "busy", true),
+        queued_jobs_runner("lane", "starting", false),
+        queued_jobs_runner("tight", "busy", true),
+    ]
+    .concat();
+    let jobs = [
+        queued_job(1, 100, "on-spare", r#"["self-hosted","shared"]"#, 120),
+        queued_job(2, 100, "no-pool", r#"["self-hosted","gridops-ci"]"#, 90),
+        queued_job(3, 100, "starting", r#"["self-hosted","lane"]"#, 60),
+        queued_job(4, 100, "idle-room", r#"["self-hosted","quiet"]"#, 30),
+        queued_job(5, 100, "stuck", r#"["self-hosted","tight"]"#, 10),
+        // None of these count: a finished run, another installation's job,
+        // and a job that is already running.
+        queued_job(6, 101, "orphan", r#"["self-hosted","shared"]"#, 600),
+        queued_job(7, 102, "foreign", r#"["self-hosted","shared"]"#, 600),
+        "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+          VALUES (8,100,'running','in_progress','[\"self-hosted\"]','u',1,1);"
+            .to_owned(),
+    ]
+    .concat();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "{QUEUED_JOBS_BASE}{pools}{jobs}"
+    )))
+    .execute(&database)
+    .await?;
+
+    let page = queued_jobs_page(&fixture, "").await?;
+    assert_eq!(page["authenticated"], true);
+    // Longest-waiting first.
+    assert_eq!(ids(&page), vec![1, 2, 3, 4, 5]);
+    assert_eq!(page["total"], 5);
+    let item = |id: i64| {
+        page["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let pool_and_reason = |id: i64| {
+        let item = item(id);
+        (
+            item["matchedPool"]["id"].as_str().map(str::to_owned),
+            item["waitingReason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    };
+    let expected = |pool: Option<&str>, reason: &str| (pool.map(str::to_owned), reason.to_owned());
+    // Owned by 'spare' because 'full' has no room left.
+    assert_eq!(
+        pool_and_reason(1),
+        expected(Some("spare"), "waiting_for_runner")
+    );
+    // No pool offers the label: listed, with no pool.
+    assert_eq!(pool_and_reason(2), expected(None, "no_matching_pool"));
+    assert!(item(2)["matchedPool"].is_null());
+    assert_eq!(
+        pool_and_reason(3),
+        expected(Some("lane"), "runner_starting")
+    );
+    assert_eq!(
+        pool_and_reason(4),
+        expected(Some("quiet"), "waiting_for_runner")
+    );
+    // 'tight' has a busy runner at its maximum of one: no room for job 5.
+    assert_eq!(
+        pool_and_reason(5),
+        expected(Some("tight"), "pool_at_capacity")
+    );
+
+    let first = item(1);
+    assert_eq!(first["name"], "on-spare");
+    assert_eq!(first["repository"], "fixture/app");
+    assert_eq!(first["workflow"], "CI");
+    assert_eq!(first["runId"], 100);
+    assert_eq!(
+        first["runUrl"],
+        "https://github.com/fixture/app/actions/runs/100"
+    );
+    assert_eq!(first["labels"], json!(["self-hosted", "shared"]));
+    assert_eq!(first["matchedPool"]["name"], "spare");
+    let age = first["ageSeconds"].as_i64().unwrap_or_default();
+    assert!((7_200..7_260).contains(&age), "age {age}");
+
+    // The headline count and the list use one filter, so they agree.
+    let overview = fixture
+        .client
+        .get(format!("{}/api/v1/overview", fixture.base_url))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    assert_eq!(overview["metrics"]["queuedJobs"], page["total"]);
+    assert_eq!(overview["metrics"]["queuedJobs"], 5);
+    assert_eq!(
+        overview["slo"]["alerts"][0]["href"], "/queued-jobs",
+        "the waiting alert opens this list"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_jobs_page_through_and_belong_to_the_viewers_installations() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    let jobs = (1..=5)
+        .map(|id| {
+            queued_job(
+                id,
+                100,
+                &format!("job-{id}"),
+                r#"["self-hosted"]"#,
+                100 - id * 10,
+            )
+        })
+        .collect::<String>();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("{QUEUED_JOBS_BASE}{jobs}")))
+        .execute(&database)
+        .await?;
+
+    let first = queued_jobs_page(&fixture, "?perPage=2").await?;
+    assert_eq!(
+        (ids(&first), first["total"].clone()),
+        (vec![1, 2], json!(5))
+    );
+    assert_eq!(
+        (first["page"].clone(), first["perPage"].clone()),
+        (json!(1), json!(2))
+    );
+    let second = queued_jobs_page(&fixture, "?perPage=2&page=2").await?;
+    assert_eq!(ids(&second), vec![3, 4]);
+    let last = queued_jobs_page(&fixture, "?perPage=2&page=3").await?;
+    assert_eq!(ids(&last), vec![5]);
+    // A page past the end shows the last one.
+    let beyond = queued_jobs_page(&fixture, "?perPage=2&page=99").await?;
+    assert_eq!((ids(&beyond), beyond["page"].clone()), (vec![5], json!(3)));
+
+    // Without access to the installation the jobs are not listed or counted.
+    sqlx::query("DELETE FROM user_installations WHERE user_id='user-1'")
+        .execute(&database)
+        .await?;
+    let hidden = queued_jobs_page(&fixture, "").await?;
+    assert_eq!(
+        (hidden["total"].clone(), ids(&hidden)),
+        (json!(0), Vec::new())
+    );
+    let overview = fixture
+        .client
+        .get(format!("{}/api/v1/overview", fixture.base_url))
+        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    assert_eq!(overview["metrics"]["queuedJobs"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_jobs_need_a_session_and_an_empty_queue_lists_nothing() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+
+    let signed_out = fixture
+        .client
+        .get(format!("{}/api/v1/overview/queued-jobs", fixture.base_url))
+        .send()
+        .await?;
+    assert_eq!(signed_out.status(), StatusCode::OK);
+    let body: Value = signed_out.json().await?;
+    assert_eq!(body["authenticated"], false);
+    assert_eq!(
+        (body["items"].clone(), body["total"].clone()),
+        (json!([]), json!(0))
+    );
+
+    // A cookie that doesn't verify is not a session.
+    let forged = fixture
+        .client
+        .get(format!("{}/api/v1/overview/queued-jobs", fixture.base_url))
+        .header(header::COOKIE, "gridops_session=forged.token")
+        .send()
+        .await?;
+    assert_eq!(forged.json::<Value>().await?["authenticated"], false);
+
+    let empty = queued_jobs_page(&fixture, "").await?;
+    assert_eq!(empty["authenticated"], true);
+    assert_eq!(
+        (empty["items"].clone(), empty["total"].clone()),
+        (json!([]), json!(0))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_queued_jobs_pool_the_viewer_cannot_fully_see_is_not_named() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // 'mixed' serves repository 7 and also repository 8, which belongs to an
+    // installation the viewer can't see.
+    let setup = format!(
+        "{QUEUED_JOBS_BASE}{}{}",
+        "INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,max_count,autoscaling_enabled,created_at,updated_at)
+          VALUES ('mixed',42,7,'mixed','repository','[\"mixed\"]','runner:latest',5,1,1,1);
+         INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('mixed',7,1),('mixed',8,1);",
+        queued_job(1, 100, "build", r#"["self-hosted","mixed"]"#, 5),
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(setup))
+        .execute(&database)
+        .await?;
+
+    let page = queued_jobs_page(&fixture, "").await?;
+    assert_eq!(ids(&page), vec![1]);
+    assert!(page["items"][0]["matchedPool"].is_null());
+    assert_eq!(page["items"][0]["waitingReason"], "pool_not_visible");
+    Ok(())
+}

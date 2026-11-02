@@ -67,6 +67,21 @@ macro_rules! waiting_jobs {
     };
 }
 
+/// The queued jobs the signed-in user can see, as a `FROM ... WHERE` clause
+/// over `wj` (the job), `wr` (its run) and `repo`; binds the user id. A job of
+/// a finished run doesn't count: GitHub can leave one listed as queued after
+/// its run completes, and it never runs. The Overview's queued count and its
+/// list of queued jobs are both built on this, so they can't disagree.
+macro_rules! visible_queued_jobs {
+    () => {
+        "FROM workflow_jobs wj
+          JOIN workflow_runs wr ON wr.id=wj.run_id
+          JOIN repositories repo ON repo.id=wr.repository_id
+          JOIN user_installations visible ON visible.installation_id=repo.installation_id
+          WHERE visible.user_id=? AND wj.status='queued' AND wr.status!='completed'"
+    };
+}
+
 #[derive(Debug, FromRow)]
 struct PoolAccess {
     installation_id: i64,
@@ -292,15 +307,14 @@ pub async fn overview(
     //   conclusion -> left out of both the numerator and the denominator.
     let metrics_window_start =
         now_millis().saturating_sub(SUCCESS_RATE_WINDOW_DAYS * 24 * 60 * 60 * 1_000);
-    let metrics = sqlx::query(
+    let metrics = sqlx::query(concat!(
         r#"SELECT
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL THEN r.id END) AS runners,
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL AND r.status IN ('idle','busy','online') THEN r.id END) AS online,
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN r.id END) AS busy,
-          (SELECT COUNT(*) FROM workflow_jobs wj JOIN workflow_runs wr ON wr.id=wj.run_id
-            JOIN repositories repo ON repo.id=wr.repository_id
-            JOIN user_installations ui2 ON ui2.installation_id=repo.installation_id
-            WHERE ui2.user_id=? AND wj.status='queued' AND wr.status!='completed') AS queued_jobs,
+          (SELECT COUNT(*) "#,
+        visible_queued_jobs!(),
+        r#") AS queued_jobs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui3 ON ui3.installation_id=repo.installation_id
             WHERE ui3.user_id=? AND wr.completed_at>=?
@@ -317,7 +331,7 @@ pub async fn overview(
               AND NOT EXISTS (SELECT 1 FROM user_installations access
                 WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
           )"#,
-    )
+    ))
     .bind(&user.id)
     .bind(&user.id)
     .bind(metrics_window_start)
@@ -417,7 +431,7 @@ pub async fn overview(
         alerts.push(json!({
             "level": "warning", "title": "Jobs have been waiting for over five minutes",
             "detail": format_duration_millis(oldest_queue_age_ms.unwrap_or_default()),
-            "href": "/workflow-runs",
+            "href": "/queued-jobs",
         }));
     }
     let open_circuits = provisioning.get::<i64, _>("open_circuits");
@@ -573,6 +587,147 @@ pub async fn overview(
         "machines": machines,
         "pools": pools, "runs": runs, "activity": activity, "installations": installations,
     })))
+}
+
+/// One page of the jobs counted as queued in the Overview, the ones that have
+/// waited longest first, each with the pool the scaler counts it for. Scoped
+/// to the signed-in user's installations, as the count is.
+pub async fn queued_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<PaginationQuery>,
+    OptionalAuth(user): OptionalAuth,
+) -> ApiResult<Json<Value>> {
+    let (requested_page, per_page) = pagination(query.page, query.per_page);
+    let Some(user) = user else {
+        return Ok(empty_paginated_page(requested_page, per_page));
+    };
+    let total = sqlx::query_scalar::<_, i64>(concat!("SELECT COUNT(*) ", visible_queued_jobs!()))
+        .bind(&user.id)
+        .fetch_one(&state.database)
+        .await?;
+    let (page, offset) = bounded_pagination(requested_page, total, per_page);
+    let rows = sqlx::query(concat!(
+        "SELECT wj.id,wj.name,wj.labels,wj.html_url,wj.created_at,wr.id AS run_id,wr.workflow_name,
+          wr.html_url AS run_url,repo.full_name ",
+        visible_queued_jobs!(),
+        " ORDER BY wj.created_at,wj.id LIMIT ? OFFSET ?"
+    ))
+    .bind(&user.id)
+    .bind(per_page)
+    .bind(offset)
+    .fetch_all(&state.database)
+    .await?;
+    let now = now_millis();
+    let (owners, pools) = if rows.is_empty() {
+        (HashMap::new(), HashMap::new())
+    } else {
+        // The same ownership the scaler counts a pool's queue by.
+        let owners = gridops_core::queued_job_ownership(&state.database)
+            .await?
+            .into_iter()
+            .map(|owner| (owner.job_id, owner))
+            .collect::<HashMap<_, _>>();
+        let page_pools = rows
+            .iter()
+            .filter_map(|row| owners.get(&row.get::<i64, _>("id")))
+            .map(|owner| owner.pool_id.clone())
+            .collect::<Vec<_>>();
+        let pools = queued_job_pools(&state, &user.id, &page_pools).await?;
+        (owners, pools)
+    };
+    let items = rows
+        .iter()
+        .map(|row| {
+            let id = row.get::<i64, _>("id");
+            let owner = owners.get(&id);
+            let pool = owner.and_then(|owner| pools.get(&owner.pool_id));
+            let created_at = row.get::<i64, _>("created_at");
+            json!({
+                "id": id, "name": row.get::<String, _>("name"),
+                "repository": row.get::<String, _>("full_name"),
+                "workflow": row.get::<String, _>("workflow_name"),
+                "runId": row.get::<i64, _>("run_id"),
+                "runUrl": row.get::<String, _>("run_url"),
+                "htmlUrl": row.get::<String, _>("html_url"),
+                "labels": json_array(row.get::<&str, _>("labels")),
+                "matchedPool": pool.map(|pool| json!({ "id": pool.id, "name": pool.name })),
+                "waitingReason": queued_job_waiting_reason(owner, pool),
+                "queuedAt": iso(created_at),
+                "ageSeconds": millis_to_seconds(now.saturating_sub(created_at)),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(paginated_page(&items, total, page, per_page))
+}
+
+/// What an owning pool says about the jobs it owns.
+struct QueuedJobPool {
+    id: String,
+    name: String,
+    /// Runners the pool is starting right now.
+    starting_runners: i64,
+}
+
+/// The pools in `ids` the user may see, by id. A pool spanning installations
+/// the user can't access is left out, as the Overview leaves it out.
+async fn queued_job_pools(
+    state: &AppState,
+    user_id: &str,
+    ids: &[String],
+) -> ApiResult<HashMap<String, QueuedJobPool>> {
+    let rows = sqlx::query(
+        r#"SELECT p.id,p.name,
+          (SELECT COUNT(*) FROM runners r WHERE r.pool_id=p.id AND r.deleted_at IS NULL
+            AND r.status='starting') AS starting_runners
+        FROM runner_pools p
+        WHERE p.id IN (SELECT value FROM json_each(?))
+          AND EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
+              AND NOT EXISTS (SELECT 1 FROM user_installations access
+                WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
+          )"#,
+    )
+    .bind(serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()))
+    .bind(user_id)
+    .fetch_all(&state.database)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let pool = QueuedJobPool {
+                id: row.get("id"),
+                name: row.get("name"),
+                starting_runners: row.get("starting_runners"),
+            };
+            (pool.id.clone(), pool)
+        })
+        .collect())
+}
+
+/// Why a queued job is still waiting, from what the scaler and the pool's
+/// runners say. Only reasons the data shows are given:
+///
+/// - `no_matching_pool`: no unpaused autoscaling pool serving the job's
+///   repository can run its labels, so the scaler owns it nowhere.
+/// - `pool_not_visible`: its pool also covers installations the viewer can't
+///   see, so the pool isn't named.
+/// - `pool_at_capacity`: every pool that could run it had used up its room
+///   (`max_count` less busy runners) before this job's turn.
+/// - `runner_starting`: its pool is starting a runner.
+/// - `waiting_for_runner`: its pool has room and nothing starting, so the
+///   job waits for the next scaling pass or an idle runner.
+fn queued_job_waiting_reason(
+    owner: Option<&gridops_core::QueuedJobOwner>,
+    pool: Option<&QueuedJobPool>,
+) -> &'static str {
+    match (owner, pool) {
+        (None, _) => "no_matching_pool",
+        (Some(_), None) => "pool_not_visible",
+        (Some(owner), _) if owner.over_capacity => "pool_at_capacity",
+        (Some(_), Some(pool)) if pool.starting_runners > 0 => "runner_starting",
+        _ => "waiting_for_runner",
+    }
 }
 
 pub async fn capacity_history(

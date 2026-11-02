@@ -180,8 +180,28 @@ async fn owned_queued_jobs(database: &SqlitePool, pool_id: &str) -> Result<Vec<i
     Ok(queued_job_owners(database)
         .await?
         .into_iter()
-        .filter_map(|(job, owner)| (owner == pool_id).then_some(job))
+        .filter_map(|owner| (owner.pool_id == pool_id).then_some(owner.job_id))
         .collect())
+}
+
+/// Which pool counts a queued job, as the scaler decides it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedJobOwner {
+    pub job_id: i64,
+    pub pool_id: String,
+    /// Every pool that could run the job had used up its room when the job was
+    /// handed out, so it stays with its first candidate until one frees up.
+    pub over_capacity: bool,
+}
+
+/// The owner of every queued job that has one, oldest job first. A queued job
+/// missing from the result has no unpaused autoscaling pool that serves its
+/// repository and can run its labels. This is the ownership the scaler uses
+/// ([`queued_job_owners`]); read it rather than matching labels again.
+pub async fn queued_job_ownership(
+    database: &SqlitePool,
+) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
+    queued_job_owners(database).await
 }
 
 /// The one pool that counts each queued job, oldest job first. Every view of
@@ -206,7 +226,7 @@ async fn owned_queued_jobs(database: &SqlitePool, pool_id: &str) -> Result<Vec<i
 /// an older one; a pool near its limit only gains or loses jobs when its own
 /// busy count, the queue or a pool's settings change, so ownership can't
 /// alternate between ticks on its own.
-async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<(i64, String)>, sqlx::Error> {
+async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
     let rows = sqlx::query(
         r#"SELECT wj.id AS job_id,candidate.id AS pool_id,
           candidate.max_count-(SELECT COUNT(*) FROM runners runner
@@ -272,7 +292,7 @@ async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<(i64, String)>, 
 /// oldest first and each job's pools in order.
 fn assign_queued_jobs(
     candidates: impl IntoIterator<Item = (i64, String, i64)>,
-) -> Vec<(i64, String)> {
+) -> Vec<QueuedJobOwner> {
     let mut room = std::collections::HashMap::<String, i64>::new();
     let mut jobs = Vec::<(i64, Vec<String>)>::new();
     for (job, pool, pool_room) in candidates {
@@ -284,15 +304,19 @@ fn assign_queued_jobs(
     }
     jobs.into_iter()
         .filter_map(|(job, pools)| {
-            let owner = pools
+            let with_room = pools
                 .iter()
-                .find(|pool| room.get(*pool).is_some_and(|room| *room > 0))
-                .or_else(|| pools.first())?
-                .clone();
+                .find(|pool| room.get(*pool).is_some_and(|room| *room > 0));
+            let over_capacity = with_room.is_none();
+            let owner = with_room.or_else(|| pools.first())?.clone();
             if let Some(room) = room.get_mut(&owner) {
                 *room -= 1;
             }
-            Some((job, owner))
+            Some(QueuedJobOwner {
+                job_id: job,
+                pool_id: owner,
+                over_capacity,
+            })
         })
         .collect()
 }
@@ -923,6 +947,45 @@ mod tests {
         assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
         // The same state gives the same owners.
         assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ownership_names_each_jobs_pool_and_whether_it_outgrew_every_pool() -> anyhow::Result<()>
+    {
+        // 'older' is full, so 100-101 go to 'newer' (room 2 of max 2); 102 finds
+        // both full and stays with the first candidate; 'gone' needs a label no
+        // pool has and has no owner at all.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}",
+            org_pool("older", 1, 1),
+            org_pool("newer", 2, 2),
+            pool_runners("older", "busy", 1, "busy", true),
+            shared_jobs(100..103),
+            "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (200,20,'gone','queued','[\"self-hosted\",\"no-such-label\"]','https://github.com/octo-org/gridops/actions/runs/20/job/200',1,1);",
+        ))
+        .await?;
+
+        let owners = queued_job_ownership(&database).await?;
+        let summary = owners
+            .iter()
+            .map(|owner| (owner.job_id, owner.pool_id.as_str(), owner.over_capacity))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            vec![
+                (100, "newer", false),
+                (101, "newer", false),
+                (102, "older", true)
+            ]
+        );
+        // The per-pool counts come from the same ownership.
+        assert_eq!(owned(&database, "newer").await?, vec![100, 101]);
+        assert_eq!(owned(&database, "older").await?, vec![102]);
 
         database.close().await;
         fs::remove_dir_all(directory)?;
