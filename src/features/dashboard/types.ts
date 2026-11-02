@@ -63,7 +63,7 @@ export type DashboardOverview = {
     /** How long reconciler passes take; older servers omit it. */
     reconcilerPass?: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null; intervalSeconds: number } | null;
     failures: Array<{ reason: string; count: number }>;
-    alerts: Array<{ level: "warning" | "error"; title: string; detail: string; href: "/queued-jobs" | "/workflow-runs" | "/runner-pools" | "/webhooks" }>;
+    alerts: OverviewAlert[];
   };
   pools: Array<{
     id: string;
@@ -104,6 +104,20 @@ export type DashboardOverview = {
     createdAt: string;
   }>;
   installations: number;
+};
+
+/** Something on the Overview's "Needs attention" list. */
+export type OverviewAlert = {
+  level: "warning" | "error";
+  title: string;
+  detail: string;
+  /**
+   * When the condition lifts by itself if nothing else changes, for the page to show in the
+   * reader's time: set on a machine left out of new placements for failing runner starts.
+   */
+  until?: string;
+  /** A page in the app; a machine's own alerts link to its page. */
+  href: "/queued-jobs" | "/workflow-runs" | "/runner-pools" | "/webhooks" | "/fleet" | "/settings/runner-host" | `/fleet/machines/${string}`;
 };
 
 export type MachinePerformance = {
