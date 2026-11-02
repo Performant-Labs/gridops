@@ -1,0 +1,3 @@
+# Structural validation only: the spec's style is governed by the drift and
+# contract tests in crates/gridops-api/src/fleet/openapi.rs.
+extends: [minimal]

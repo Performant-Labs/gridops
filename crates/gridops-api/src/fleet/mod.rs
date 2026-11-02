@@ -9,6 +9,7 @@ mod credentials;
 mod enrollment;
 mod error;
 mod inventory;
+pub(crate) mod openapi;
 mod profiles;
 mod query;
 mod query_boundary;
