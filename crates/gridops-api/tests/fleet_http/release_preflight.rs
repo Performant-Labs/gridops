@@ -26,6 +26,11 @@ impl Preflight {
 
 /// Runs the script with the release token and none of the optional settings.
 fn preflight(f: &Fixture, token: &str) -> Result<Preflight> {
+    preflight_with(f, token, &[])
+}
+
+/// Like [`preflight`], with the given `PREFLIGHT_*` settings.
+fn preflight_with(f: &Fixture, token: &str, settings: &[(&str, &str)]) -> Result<Preflight> {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/release-preflight.sh");
     let mut command = std::process::Command::new("sh");
@@ -40,6 +45,7 @@ fn preflight(f: &Fixture, token: &str) -> Result<Preflight> {
             command.env_remove(name);
         }
     }
+    command.envs(settings.iter().copied());
     let output = command.output()?;
     let text = format!(
         "{}{}",
@@ -52,6 +58,22 @@ fn preflight(f: &Fixture, token: &str) -> Result<Preflight> {
         ok: output.status.success(),
         output: text,
     })
+}
+
+/// Makes the machine the macOS ARM64 one every release builds the macOS agent
+/// on. The test agent reports the OS and architecture it was compiled for,
+/// which the registry records once, at enrollment.
+async fn make_mac(f: &Fixture, host: &str) -> Result<String> {
+    sqlx::query("UPDATE fleet_hosts SET host_os='macos',architecture='arm64' WHERE id=?")
+        .bind(host)
+        .execute(&f.database)
+        .await?;
+    Ok(
+        sqlx::query_scalar("SELECT name FROM fleet_hosts WHERE id=?")
+            .bind(host)
+            .fetch_one(&f.database)
+            .await?,
+    )
 }
 
 async fn host_state(f: &Fixture, host: &str) -> Result<(String, i64)> {
@@ -70,6 +92,8 @@ async fn the_release_preflight_passes_with_the_documented_token_and_a_healthy_fl
     seed_pool(&f).await?;
     let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
     let host = machine.host.to_string();
+    // A release's fleet has the Mac the macOS agent is built on.
+    let name = make_mac(&f, &host).await?;
     let before = host_state(&f, &host).await?;
     let token = mint(
         &f,
@@ -81,6 +105,11 @@ async fn the_release_preflight_passes_with_the_documented_token_and_a_healthy_fl
     let run = preflight(&f, &token)?;
     let out = &run.output;
     assert!(run.ok, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("PASS  macos-machine") && line.contains(&name)),
+        "{out}"
+    );
     assert!(run.line("PASS  control-plane"), "{out}");
     assert!(run.line("PASS  token-read"), "{out}");
     assert!(run.line("PASS  token-operate"), "{out}");
@@ -184,5 +213,43 @@ async fn the_release_preflight_names_a_machine_that_keeps_failing_starts() -> Re
         "{out}"
     );
     assert!(run.line("PASS  heartbeats"), "{out}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_release_preflight_fails_early_without_a_macos_arm64_machine() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    // A healthy fleet of one Linux machine: no Mac for the macOS agent build.
+    active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let token = mint(
+        &f,
+        "release",
+        &[ApiTokenScope::FleetRead, ApiTokenScope::FleetOperate],
+    )
+    .await?;
+
+    let run = preflight(&f, &token)?;
+    let out = &run.output;
+    assert!(!run.ok, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("FAIL  macos-machine")
+                && line.contains("no macOS ARM64 machine")
+                && line.contains("RELEASE_MACOS")),
+        "{out}"
+    );
+    assert!(run.line("PASS  heartbeats: 1 machine, all fresh"), "{out}");
+
+    // The emergency opt-out: skipped, and it says the release has no macOS agent.
+    let run = preflight_with(&f, &token, &[("PREFLIGHT_RELEASE_MACOS", "false")])?;
+    let out = &run.output;
+    assert!(run.ok, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("SKIP  macos-machine")
+                && line.contains("without a macOS agent")),
+        "{out}"
+    );
     Ok(())
 }

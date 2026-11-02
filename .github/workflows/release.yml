@@ -1,9 +1,15 @@
 # Builds a GridOps release on the project's own runners. A `vX.Y.Z` tag that
-# matches the workspace version publishes it: the Linux host agents and the
-# installer on the GitHub release, plus, where a macOS runner exists
-# (repository variable RELEASE_MACOS=true), the macOS agents, the control plane
-# images on GHCR and the compose file. Windows is not a deployment target.
-# Running it by hand builds everything without publishing.
+# matches the workspace version publishes it on the GitHub release:
+# - always: the Linux x64 host agent, install.sh and SHA256SUMS;
+# - always: the macOS agents, built on a self-hosted macOS ARM64 runner (a Tart
+#   VM guest or a Mac). The release is not published without them. The only
+#   way out is the repository variable RELEASE_MACOS=false, an emergency
+#   opt-out that publishes the release without a macOS agent;
+# - RELEASE_IMAGES=true: the control plane images on GHCR and the
+#   compose.release.yaml that names them (built on the macOS runner for now);
+# - RELEASE_LINUX_ARM64=true: the Linux arm64 agent, on a Linux ARM64 runner.
+# Windows is not a deployment target. Running it by hand on a branch builds the
+# same and assembles the release, and publishes nothing.
 name: Release
 
 on:
@@ -11,6 +17,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      skip_macos_agent:
+        # A run by hand never publishes. This lets one check the rest of the
+        # release while no macOS runner is online; a tag always builds the
+        # macOS agent unless RELEASE_MACOS is false.
+        description: "Dry run without the macOS agent (a run by hand publishes nothing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +53,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
       linux_agents: ${{ steps.version.outputs.linux_agents }}
+      macos: ${{ steps.version.outputs.macos }}
+      images: ${{ steps.version.outputs.images }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -49,6 +65,10 @@ jobs:
 
       - name: Read the version
         id: version
+        env:
+          RELEASE_MACOS: ${{ vars.RELEASE_MACOS }}
+          RELEASE_IMAGES: ${{ vars.RELEASE_IMAGES }}
+          SKIP_MACOS_AGENT: ${{ inputs.skip_macos_agent }}
         run: |
           version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
           [ -n "$version" ] || { echo "Cargo.toml has no workspace version"; exit 1; }
@@ -67,7 +87,39 @@ jobs:
             agents='[{"arch":"x64","target":"x86_64-unknown-linux-musl","runner":"X64"},{"arch":"arm64","target":"aarch64-unknown-linux-musl","runner":"ARM64"}]'
           fi
           echo "linux_agents=$agents" >> "$GITHUB_OUTPUT"
-          echo "Version $version, publish: $publish"
+          # The macOS agents are part of every release. Only RELEASE_MACOS set
+          # to exactly "false" leaves them out, and then the release is
+          # published without a macOS agent. A run by hand may also leave
+          # them out (skip_macos_agent); it publishes nothing anyway.
+          macos=true macos_note="required: the release is not published without them"
+          case "$RELEASE_MACOS" in
+            false) macos=false macos_note="left out: the repository variable RELEASE_MACOS is false, so the release has no macOS agent; write that in its checklist" ;;
+            "" | true) ;;
+            *) echo "::warning::RELEASE_MACOS is '$RELEASE_MACOS'; only 'false' leaves the macOS agents out, so they are built" ;;
+          esac
+          if [ "$macos" = true ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$SKIP_MACOS_AGENT" = true ]; then
+            macos=false macos_note="left out of this run by hand (skip_macos_agent); a tag builds them"
+          fi
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+          # The control plane images have their own switch, RELEASE_IMAGES.
+          images=false images_note="not built: the repository variable RELEASE_IMAGES is not true; deployments build from source"
+          if [ "$RELEASE_IMAGES" = true ]; then
+            images=true images_note="required"
+          fi
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+          echo "Version $version, publish: $publish, macOS agents: $macos, images: $images"
+          {
+            echo "### GridOps $version: what this run builds"
+            echo
+            if [ "$publish" = true ]; then echo "A tag: the release is published when every required build succeeds."
+            else echo "A run by hand on \`$GITHUB_REF_NAME\`: it builds and assembles the release and publishes nothing."; fi
+            echo
+            echo "| Build | |"
+            echo "|---|---|"
+            echo "| Linux agents ($(printf '%s' "$agents" | grep -o '"arch":"[a-z0-9]*"' | cut -d'"' -f4 | paste -sd ' ' -)), \`install.sh\`, \`SHA256SUMS\` | required |"
+            echo "| macOS agents | $macos_note |"
+            echo "| Control plane images, \`compose.release.yaml\` | $images_note |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The build number is counted once, here, so every artifact of a run carries the same one. It never
       # changes the version above: tags, installers and release assets are named by the version alone.
@@ -140,18 +192,53 @@ jobs:
   agent-macos:
     name: Agent (macOS)
     needs: version
-    # Needs a self-hosted macOS ARM64 runner. Set the repository variable
-    # RELEASE_MACOS to true where one exists; without it the release has no
-    # macOS binaries.
-    if: vars.RELEASE_MACOS == 'true'
+    # Every release builds the macOS agents; see the version job for the one
+    # way out. It needs a self-hosted macOS ARM64 runner: a Tart VM guest
+    # started by GridOps (docs/macos-runners.md) or a Mac. It needs no Docker
+    # and no Homebrew. GitHub keeps a job waiting for a runner for up to 24
+    # hours, so macos-runner-watchdog cancels the run when no runner takes
+    # this job in time.
+    if: needs.version.outputs.macos == 'true'
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
+      # A Tart guest starts from its prepared base image, not a configured
+      # Mac. The job uses what macOS and the Xcode command line tools put in
+      # /usr/bin (cc, ld, lipo, xcrun, git, curl, shasum) and installs Rust
+      # itself (below). Check them before checkout, which needs git: without
+      # the command line tools /usr/bin/git is only a stub.
+      - name: Check the runner
+        timeout-minutes: 5
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          sw_vers
+          [ "$(uname -s)" = Darwin ] || fail "not macOS: $(uname -s)"
+          # x86_64 here is an Intel Mac or a runner under Rosetta, where rustup
+          # would install an x86 toolchain.
+          [ "$(uname -m)" = arm64 ] || fail "not running natively on Apple silicon (uname -m: $(uname -m))"
+          echo "Virtual machine: $(sysctl -n kern.hv_vmm_present 2>/dev/null || echo unknown)"
+          if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find cc >/dev/null 2>&1; then
+            fail "no Xcode command line tools: use a Tart base image that has them (the Cirrus Labs -base and -xcode images do, -vanilla does not), or run xcode-select --install on the Mac"
+          fi
+          echo "Developer directory: $(xcode-select -p)"
+          echo "SDK: $(xcrun --sdk macosx --show-sdk-path)"
+          for tool in cc lipo git curl shasum; do
+            command -v "$tool" >/dev/null || fail "$tool is missing"
+          done
+          git --version
+          curl --version | head -1
+          # The toolchain, the crates and the release builds need a few GB;
+          # ask for 10 so a full disk fails here, not halfway through a build.
+          free_kb="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')"
+          echo "Free disk at the job's temporary directory: $((free_kb / 1024 / 1024)) GB"
+          [ "$free_kb" -ge $((10 * 1024 * 1024)) ] || fail "less than 10 GB free for the build"
+
       - name: Check out repository
         uses: actions/checkout@v5
         timeout-minutes: 5
 
-      # A toolchain of the job's own, so nothing on the host changes.
+      # A toolchain of the job's own under the job's temporary directory, so
+      # nothing on the host changes and a Tart image needs no Rust.
       - name: Install Rust
         timeout-minutes: 15
         run: |
@@ -161,7 +248,10 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
             https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
           sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal \
+            --default-host aarch64-apple-darwin \
             --default-toolchain "$RUST_VERSION" --target x86_64-apple-darwin
+          "$CARGO_HOME/bin/rustc" --version
+          "$CARGO_HOME/bin/rustup" target list --installed
           echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
           echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
@@ -175,14 +265,20 @@ jobs:
           cargo build --release --locked -p gridops-host-agent -p gridops-tart-agent --target aarch64-apple-darwin
           cargo build --release --locked -p gridops-host-agent --target x86_64-apple-darwin
 
+      # The names are the ones install.sh asks for (gridops-host-agent-<os>-<arch>);
+      # scripts/test-install.sh checks that they agree.
       - name: Check and stage
+        timeout-minutes: 5
         run: |
           mkdir -p dist
           cp target/aarch64-apple-darwin/release/gridops-host-agent dist/gridops-host-agent-macos-arm64
           cp target/x86_64-apple-darwin/release/gridops-host-agent dist/gridops-host-agent-macos-x64
           cp target/aarch64-apple-darwin/release/gridops-tart-agent dist/gridops-tart-agent-macos-arm64
           dist/gridops-host-agent-macos-arm64 --version
+          lipo -archs dist/gridops-host-agent-macos-arm64 | grep -qx arm64
+          lipo -archs dist/gridops-tart-agent-macos-arm64 | grep -qx arm64
           lipo -archs dist/gridops-host-agent-macos-x64 | grep -qx x86_64
+          (cd dist && shasum -a 256 ./*)
 
       # A few small binaries: a healthy upload takes seconds, so a hung one
       # fails here in minutes, not at the job's limit.
@@ -194,12 +290,100 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos-runner-watchdog:
+    name: macOS runner watchdog
+    needs: version
+    # GitHub keeps a job queued for a self-hosted runner for up to 24 hours and
+    # has no setting to shorten that; timeout-minutes counts only from the
+    # moment a runner starts the job. So this job, on Linux, watches
+    # agent-macos: once a runner starts it, this job ends. If none has after
+    # QUEUE_MINUTES, it says so in the run summary and cancels the run, which
+    # publishes nothing, instead of leaving the release waiting for a day.
+    if: needs.version.outputs.macos == 'true'
+    runs-on: [self-hosted-linux]
+    timeout-minutes: 75
+    permissions:
+      actions: write
+    env:
+      QUEUE_MINUTES: 60
+    steps:
+      - name: Wait for a macOS runner to start the macOS agent build
+        id: wait
+        uses: actions/github-script@v8
+        timeout-minutes: 70
+        with:
+          script: |
+            const jobName = 'Agent (macOS)';
+            const limit = Number(process.env.QUEUE_MINUTES);
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+            const begun = Date.now();
+            let lastState = 'not listed yet';
+            for (;;) {
+              let job;
+              try {
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  run_id: context.runId, attempt_number: attempt, per_page: 100,
+                });
+                job = jobs.find((j) => j.name === jobName);
+              } catch (error) {
+                core.warning(`Could not read this run's jobs: ${error.message}`);
+              }
+              if (job) {
+                if (job.status === 'in_progress' || job.status === 'completed') {
+                  core.info(`A macOS runner started "${jobName}" (${job.status}); nothing to watch.`);
+                  return;
+                }
+                lastState = job.status;
+              }
+              // Count from when the job was queued; this job may itself have
+              // waited for a Linux runner.
+              const since = job && job.created_at ? Date.parse(job.created_at) : begun;
+              const waited = Math.floor((Date.now() - since) / 60000);
+              if (waited >= limit) {
+                const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+                core.error(`No macOS ARM64 runner started "${jobName}" within ${limit} minutes (still ${lastState}); cancelling the run, which publishes nothing.`);
+                await core.summary
+                  .addHeading('Not published: no macOS runner', 3)
+                  .addRaw(`No self-hosted macOS ARM64 runner started <b>${jobName}</b> within ${limit} minutes (it was still <code>${lastState}</code>), so this run is cancelled and nothing is published. Every release includes the macOS agent.`, true)
+                  .addList([
+                    'Bring the macOS runner online: the Mac and its Tart pool in GridOps (docs/macos-runners.md); the release preflight\'s <code>macos-machine</code> check shows whether GridOps sees it.',
+                    `Then re-run the run: <code>gh run rerun ${context.runId} --repo ${context.repo.owner}/${context.repo.repo}</code>.`,
+                    'Only in an emergency: set the repository variable <code>RELEASE_MACOS</code> to <code>false</code> and re-run all jobs (not <code>--failed</code>). The release is then published <b>without a macOS agent</b>, and its checklist must say so.',
+                  ])
+                  .addLink('This run', runUrl)
+                  .write();
+                core.setOutput('stuck', 'true');
+                return;
+              }
+              core.info(`"${jobName}" is ${lastState} after ${waited} of ${limit} minutes`);
+              await new Promise((resolve) => setTimeout(resolve, 30000));
+            }
+
+      # A step of its own, so the summary above is saved before the run (and
+      # this job with it) is cancelled.
+      - name: Cancel the run
+        if: steps.wait.outputs.stuck == 'true'
+        timeout-minutes: 5
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner, repo: context.repo.repo, run_id: context.runId,
+            });
+            core.setFailed('Cancelled: no macOS runner started the macOS agent build; see the run summary.');
+
   images:
     name: Control plane images
     needs: version
-    # Built through Docker on the Mac runner; see agent-macos.
-    if: vars.RELEASE_MACOS == 'true'
-    # Docker on the Mac builds both platforms (amd64 through Rosetta).
+    # Its own switch, the repository variable RELEASE_IMAGES (see the version
+    # job): unset, the release has no images and no compose.release.yaml, and
+    # deployments build from source. It no longer follows RELEASE_MACOS.
+    if: needs.version.outputs.images == 'true'
+    # Built through Docker (OrbStack or Docker Desktop, with buildx) on a
+    # macOS ARM64 runner, which builds both platforms (amd64 through Rosetta).
+    # The macOS agent job needs none of that. Moving this job to a Linux
+    # runner is issue #80.
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 150
     permissions:
@@ -255,12 +439,12 @@ jobs:
   release:
     name: Publish release
     needs: [version, agent-linux, agent-macos, images]
-    # The macOS jobs are skipped where there is no Mac runner. A skipped job
-    # is fine; a failed or cancelled one is not.
-    if: >-
-      !cancelled() && !failure()
-      && needs.version.outputs.publish == 'true'
-      && needs.agent-linux.result == 'success'
+    # Waits for every build, then checks each one it needs succeeded and fails
+    # with the reason in the run summary rather than publish without one. A
+    # cancelled run (for example by macos-runner-watchdog) publishes nothing.
+    # A run by hand assembles and checks the release here too; only a tag
+    # reaches the last step, which publishes.
+    if: ${{ !cancelled() && needs.version.result == 'success' }}
     runs-on: [self-hosted-linux]
     timeout-minutes: 15
     permissions:
@@ -268,6 +452,51 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - name: Check that every required build succeeded
+        timeout-minutes: 2
+        env:
+          LINUX_RESULT: ${{ needs.agent-linux.result }}
+          MACOS_RESULT: ${{ needs.agent-macos.result }}
+          MACOS_WANTED: ${{ needs.version.outputs.macos }}
+          IMAGES_RESULT: ${{ needs.images.result }}
+          IMAGES_WANTED: ${{ needs.version.outputs.images }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
+        run: |
+          problems=""
+          {
+            echo "### Builds"
+            echo
+            echo "| Build | Needed | Result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # <build> <needed: true|false> <result>
+          need() {
+            echo "| $1 | $([ "$2" = true ] && echo yes || echo no) | $3 |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$2" = true ] && [ "$3" != success ]; then
+              echo "::error::$1: $3, so the release is not published"
+              problems="$problems $1"
+            fi
+          }
+          need "Linux agents" true "$LINUX_RESULT"
+          need "macOS agents" "$MACOS_WANTED" "$MACOS_RESULT"
+          need "Control plane images" "$IMAGES_WANTED" "$IMAGES_RESULT"
+          if [ "$MACOS_WANTED" != true ]; then
+            echo "::warning::No macOS agent in this run (RELEASE_MACOS is false, or skip_macos_agent on a run by hand)"
+            if [ "$PUBLISH" = true ]; then
+              printf '\n%s\n' "**This release is published without a macOS agent** (the repository variable \`RELEASE_MACOS\` is \`false\`). Write that in its checklist." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          if [ -n "$problems" ]; then
+            {
+              echo
+              echo "**Not published.** A build the release needs did not succeed:$problems. Re-run it (\`gh run rerun $GITHUB_RUN_ID --failed\`) once the cause is fixed."
+              case "$problems" in *macOS*)
+                echo "For the macOS agents, a macOS ARM64 runner must be online (docs/macos-runners.md). Only in an emergency, set \`RELEASE_MACOS\` to \`false\` and re-run all jobs: the release is then published without a macOS agent, and its checklist must say so." ;;
+              esac
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       - name: Check out repository
         uses: actions/checkout@v5
         timeout-minutes: 5
@@ -280,19 +509,51 @@ jobs:
           merge-multiple: true
 
       - name: Assemble
+        timeout-minutes: 5
+        env:
+          LINUX_AGENTS: ${{ needs.version.outputs.linux_agents }}
+          MACOS_WANTED: ${{ needs.version.outputs.macos }}
+          IMAGES_RESULT: ${{ needs.images.result }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
         run: |
           sed "s/__GRIDOPS_VERSION__/$VERSION/" scripts/install.sh > dist/install.sh
           # compose.release.yaml names the published images, so it ships only
           # when this run built them.
-          if [ "${{ needs.images.result }}" = success ]; then
+          if [ "$IMAGES_RESULT" = success ]; then
             node scripts/release-compose.mjs "$VERSION" > dist/compose.release.yaml
             cp .env.example dist/env.example
           fi
           cd dist
+          # Every binary this run had to build must be here and in SHA256SUMS;
+          # one that went missing fails the release instead of publishing
+          # without it. The names are the ones install.sh downloads.
+          # LINUX_AGENTS is the version job's JSON: one "arch" per agent.
+          expected="$(printf '%s' "$LINUX_AGENTS" | grep -o '"arch":"[a-z0-9]*"' | cut -d'"' -f4 | sed 's/^/gridops-host-agent-linux-/')"
+          [ -n "$expected" ] || { echo "::error::no Linux agent in $LINUX_AGENTS"; exit 1; }
+          if [ "$MACOS_WANTED" = true ]; then
+            expected="$expected gridops-host-agent-macos-arm64 gridops-host-agent-macos-x64 gridops-tart-agent-macos-arm64"
+          fi
+          for file in $expected; do
+            [ -s "$file" ] || { echo "::error::$file is not among the built binaries, so the release is not published"; exit 1; }
+          done
           sha256sum gridops-* install.sh $(ls compose.release.yaml env.example 2>/dev/null) > SHA256SUMS
+          for file in $expected install.sh; do
+            grep -q "  $file\$" SHA256SUMS || { echo "::error::SHA256SUMS does not list $file"; exit 1; }
+          done
           cat SHA256SUMS
+          {
+            echo "### Release assets"
+            echo
+            if [ "$PUBLISH" = true ]; then echo "Published as v$VERSION:"; else echo "Assembled by a run by hand; nothing is published:"; fi
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
+      # Only a tag publishes; a run by hand stops after Assemble.
       - name: Create the release
+        if: needs.version.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         timeout-minutes: 10
         with:

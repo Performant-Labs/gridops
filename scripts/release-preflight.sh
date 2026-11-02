@@ -19,6 +19,10 @@
 #   heartbeats          every approved, non-retired machine has a fresh heartbeat
 #   start-gate          no machine is set aside for failing runner starts
 #   placement-failures  no machine had failed placements in the last hour
+#   macos-machine       a macOS ARM64 machine is approved, active, not set aside
+#                       and has a fresh heartbeat: every release builds the
+#                       macOS agent on one (skipped only with
+#                       PREFLIGHT_RELEASE_MACOS=false)
 #   upgrade-sudo <h>    each listed system-service machine lets this user run
 #                       the upgrade command with sudo and no password
 #   disk                free space where the deployment keeps its data
@@ -35,6 +39,9 @@
 #   PREFLIGHT_MAX_TOKEN_DAYS        and expire within this many days (7)
 #   PREFLIGHT_IGNORE_HOSTS          machine names or ids left out on purpose
 #   PREFLIGHT_MAX_FAILED_PLACEMENTS failures per machine in the last hour allowed (0)
+#   PREFLIGHT_RELEASE_MACOS=false   only when the repository variable RELEASE_MACOS
+#                                   is false: the release then publishes no macOS
+#                                   agent, which its checklist must say
 #   PREFLIGHT_UPGRADE_HOSTS         space-separated ssh targets of the machines
 #                                   that run the agent as a system service
 #   PREFLIGHT_UPGRADE_COMMAND       the root-owned upgrade wrapper the sudo rule
@@ -62,6 +69,7 @@ DATA_PATH="${PREFLIGHT_DATA_PATH:-}"
 DEPLOY_HOST="${PREFLIGHT_DEPLOY_HOST:-}"
 MIN_FREE_GB="${PREFLIGHT_MIN_FREE_GB:-10}"
 IGNORE_HOSTS="${PREFLIGHT_IGNORE_HOSTS:-}"
+RELEASE_MACOS="${PREFLIGHT_RELEASE_MACOS:-true}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -109,6 +117,10 @@ is_number "$MAX_FAILED" || MAX_FAILED=0
 is_number "$MIN_FREE_GB" || MIN_FREE_GB=""
 is_number "$MIN_TOKEN_HOURS" || MIN_TOKEN_HOURS=6
 is_number "$MAX_TOKEN_DAYS" || MAX_TOKEN_DAYS=7
+case "$RELEASE_MACOS" in
+  true | false) ;;
+  *) fail config "PREFLIGHT_RELEASE_MACOS must be true or false, not '$RELEASE_MACOS'"; RELEASE_MACOS=true ;;
+esac
 upgrade_ready=1
 if [ -n "$UPGRADE_HOSTS" ] && ! is_plain "$UPGRADE_COMMAND"; then
   fail config "PREFLIGHT_UPGRADE_COMMAND must be a plain path (letters, digits, / . _ -)"
@@ -304,6 +316,44 @@ else
   for check in heartbeats start-gate placement-failures; do
     fail "$check" "not checked: the machine list could not be read"
   done
+fi
+
+# --- The macOS agent's machine ---------------------------------------------------
+
+# Every release builds the macOS agent on a self-hosted macOS ARM64 runner
+# (docs/macos-runners.md), and the release does not publish without it. A Mac
+# that cannot take that job now fails here, before step 1, rather than as a
+# release that waits for a runner and is cancelled. PREFLIGHT_IGNORE_HOSTS does
+# not excuse it: the release needs the Mac whether or not it is ignored above.
+macos_hint="the release builds its macOS agent on one (docs/macos-runners.md); bring one online, or opt out with the repository variable RELEASE_MACOS=false and PREFLIGHT_RELEASE_MACOS=false, which publishes the release without a macOS agent and must be written in its checklist"
+if [ "$RELEASE_MACOS" = false ]; then
+  skip macos-machine "PREFLIGHT_RELEASE_MACOS=false: this release publishes without a macOS agent; check that the repository variable RELEASE_MACOS is false and write it in the release's checklist"
+elif [ "$hosts_ready" != 1 ]; then
+  fail macos-machine "not checked: the machine list could not be read"
+elif [ -n "$restricted" ]; then
+  fail macos-machine "not checked: the token's owner sees only a restricted view of some machines"
+else
+  macs='select(.hostOs == "macos" and .architecture == "arm64")'
+  ready=$(jq -r "$macs"' | select(.enrollment == "approved" and .lifecycle == "active"
+      and .heartbeatFreshness == "fresh" and .startGate == null) | .name' \
+    "$tmp/hosts.jsonl" | paste -sd ',' - | sed 's/,/, /g')
+  # Why each other Mac cannot take the job; retired ones are left out.
+  unready=$(jq -r "$macs"' | select(.lifecycle != "retired") | select(
+        .enrollment != "approved" or .lifecycle != "active"
+        or .heartbeatFreshness != "fresh" or .startGate != null)
+      | "\(.name) (\([
+          (if .enrollment != "approved" then "enrollment \(.enrollment)" else empty end),
+          (if .lifecycle != "active" then .lifecycle else empty end),
+          (if .heartbeatFreshness != "fresh" then "heartbeat \(.heartbeatFreshness)" else empty end),
+          (if .startGate != null then "set aside for failing runner starts" else empty end)
+        ] | join(", ")))"' "$tmp/hosts.jsonl" | paste -sd ';' - | sed 's/;/; /g')
+  if [ -n "$ready" ]; then
+    pass macos-machine "macOS ARM64 machine ready for the macOS agent build: $ready"
+  elif [ -n "$unready" ]; then
+    fail macos-machine "no macOS ARM64 machine is approved, active and reporting in: $unready; $macos_hint"
+  else
+    fail macos-machine "no macOS ARM64 machine is enrolled in GridOps; $macos_hint"
+  fi
 fi
 
 # --- Upgrading system-service agents -------------------------------------------
