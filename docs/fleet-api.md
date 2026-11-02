@@ -63,6 +63,32 @@ with the same body returns the original result; a different body returns
 `idempotency_conflict`. Writes that change an existing record carry the
 expected revision and fail with `revision_conflict` when it has moved.
 
+## API tokens
+
+Administrators manage tokens in the web app under **Settings → API tokens**,
+which calls the three cookie-only routes above: it lists the caller's own
+tokens (name, display prefix, scopes, created, last used, expires, and
+active/expired/revoked state), creates a token with a fresh
+`Idempotency-Key` per submission (reused when the same submission is
+retried), shows the `tokenSecret` from the `201` exactly once in a dialog
+and discards it when the dialog closes, and revokes with a confirmation.
+Members who are not administrators see an explanation instead.
+
+The routes remain available to scripts that hold a cookie session:
+
+- `POST /api/v1/fleet/api-tokens` with `Idempotency-Key` and
+  `{ "name": string, "scopes": string[], "expiresInDays"?: number }`
+  (1–365, default 90). `201` returns the metadata plus `tokenSecret`; a
+  replay of the key returns `200 { "token": ... }` without the secret.
+- `GET /api/v1/fleet/api-tokens` returns `{ "items": [...] }`, newest
+  first, with no secret or verifier.
+- `POST /api/v1/fleet/api-tokens/{token_id}/revoke` returns
+  `{ "token": ... }` and is idempotent by state.
+
+Token metadata is `id`, `name`, `displayPrefix` (the first eight characters
+after `gat_`), `scopes`, `createdAt`, `expiresAt`, `lastUsedAt` and
+`revokedAt`.
+
 ## Responses and pagination
 
 Query responses carry `schemaVersion: 1`, `readAt`, and either `item` or
