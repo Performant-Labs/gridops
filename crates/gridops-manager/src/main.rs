@@ -716,8 +716,7 @@ async fn main() -> Result<()> {
         FsPath::new(&socket),
     )?;
     let provisioning_paused = env::var("GRIDOPS_PROVISIONING_PAUSED")
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
     tracing::info!(
         cpu_budget = limits.cpu_budget,
         memory_budget_mb = limits.memory_budget_mb,
