@@ -7,12 +7,12 @@ import { fleetErrorSchema, fleetIdSchema } from "./contracts";
 import { FleetRequestError } from "./registry-api";
 import { fleetIdempotencyKeySchema } from "./registry-contracts";
 import {
-  backendEnabledRequestSchema, budgetRequestSchema, budgetResultSchema, type BudgetRequest, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
+  backendEnabledRequestSchema, budgetRequestSchema, deletedHostSchema, budgetResultSchema, type BudgetRequest, fleetPoolIdSchema, grantPolicySchema, hostGrantListSchema, fleetTargetListSchema, lifecycleRequestSchema,
   profileInputSchema, profileResultSchema, savedProfileResultSchema,
   type GrantPolicy, type HostLifecycle, type ProfileInput, type WorkloadWindow, fleetWorkloadSchema, poolQueueSchema, agentLogListSchema, repairResultSchema, unconfirmedListSchema,
   apiTokenListSchema, apiTokenResultSchema, createApiTokenRequestSchema, createApiTokenResultSchema, type CreateApiTokenRequest } from "./admin-contracts";
 
-type Options = { signal?: AbortSignal; body?: unknown; key?: string; method?: "GET" | "POST" | "PUT" };
+type Options = { signal?: AbortSignal; body?: unknown; key?: string; method?: "GET" | "POST" | "PUT" | "DELETE" };
 
 async function request<S extends z.ZodType>(path: string, schema: S, options: Options = {}): Promise<z.output<S>> {
   const headers = new Headers({ Accept: "application/json" });
@@ -52,6 +52,12 @@ export const retireHost = (hostId: string, expectedRevision: number, signal?: Ab
   request(`${hostPath(hostId)}/retire`, emptyResponse, {
     method: "POST", body: { expectedRevision }, signal,
   });
+/**
+ * Permanently deletes a machine that is retired or never finished enrolling.
+ * A 409 `host_not_deletable` carries every reason in `details.reasons`.
+ */
+export const deleteHost = (hostId: string, signal?: AbortSignal) =>
+  request(hostPath(hostId), deletedHostSchema, { method: "DELETE", signal });
 export const setBackendEnabled = (hostId: string, backendId: string, enabled: boolean, signal?: AbortSignal) =>
   request(`${hostPath(hostId)}/backends/${fleetIdSchema.parse(backendId)}/enabled`, emptyResponse, {
     method: "POST", body: backendEnabledRequestSchema.parse({ enabled }), signal,

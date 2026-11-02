@@ -21,6 +21,7 @@ bot-driven enrollment.
 |---|---|---|---|
 | GET | `/api/v1/fleet/hosts` | browser, `fleet:read` | Paginated host list |
 | GET | `/api/v1/fleet/hosts/{host_id}` | browser, `fleet:read` | One host |
+| DELETE | `/api/v1/fleet/hosts/{host_id}` | browser, `fleet:operate` | Delete a retired machine (see [Deleting a machine](#deleting-a-machine)) |
 | GET | `/api/v1/fleet/hosts/{host_id}/backends[/{backend_id}]` | browser, `fleet:read` | Execution backends |
 | GET | `/api/v1/fleet/hosts/{host_id}/domains[/{domain_id}]` | browser, `fleet:read` | Resource domains (physical access only) |
 | GET | `/api/v1/fleet/hosts/{host_id}/samples` | browser, `fleet:read` | Resource samples (physical access only) |
@@ -92,6 +93,64 @@ Token metadata is `id`, `name`, `displayPrefix` (the first eight characters
 after `gat_`), `scopes`, `createdAt`, `expiresAt`, `lastUsedAt` and
 `revokedAt`.
 
+## Deleting a machine
+
+`DELETE /api/v1/fleet/hosts/{host_id}` removes a machine that can never take
+work again from the machine list, the machine counts, the Fleet and Overview
+pages, and capacity. It needs an administrator, or a token with
+`fleet:operate`; a member, or a token without the scope, gets `403`. It takes
+no body and returns `200 { "hostId": "..." }`.
+
+A machine can be deleted when it is **retired**, or when it **never finished
+enrolling** (pending or revoked) and has not reported in for 90 seconds. An
+approved machine is retired first (from its page; retirement is cookie-only),
+which also revokes its credential. Anything else is refused with
+`409 host_not_deletable` and `details.kind = "delete_blocked"`; the refusal
+lists **every** reason that applies in `details.reasons`:
+
+```json fleet-error
+{
+  "code": "host_not_deletable",
+  "message": "Machine cannot be deleted yet",
+  "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e71",
+  "details": { "kind": "delete_blocked", "reasons": ["live_placement", "pending_command"] }
+}
+```
+
+| Reason | Meaning |
+|---|---|
+| `not_retired` | The machine is approved and not retired. Retire it first. |
+| `still_heartbeating` | It reported in within the last 90 seconds (not checked for a retired machine, whose credential is already revoked). |
+| `active_credential` | An approved machine still holds an unrevoked credential. |
+| `live_placement` | A placement is not `cleaned` or `failed`, or capacity it holds is not released. |
+| `unconfirmed_start` | A placement is `uncertain`: its start could not be confirmed. Repair it on the machine page. |
+| `live_runner` | A runner placed on the machine has not finished (its status is not `deleted` or `failed`). |
+| `pending_command` | A command for the machine is still waiting or running within its deadline. |
+
+The delete is **soft**. The record stays, hidden everywhere, because
+placements, commands, events, samples and grants reference it and the runs
+list, the audit log and the event history keep showing them. A delete:
+
+- keeps the host record, its resource domains and budget, placements, intents,
+  commands and results, events, samples, inventory, agent logs and consumed
+  enrollments;
+- revokes its credentials and open credential rotations, its unused recovery
+  codes, and its target and user grants, and turns its backends off;
+- leaves the machine `retired` with enrollment `revoked`, so every credential,
+  recovery and approval check that refuses a retired machine refuses it;
+- leaves pool profile host selectors alone, because removing the last one could
+  widen a profile that selects "all authorized hosts";
+- writes the audit row and fleet event `fleet.host.deleted`, naming the actor
+  (and the API token name when a token was used), the machine's name and id,
+  and its last heartbeat (`lastHeartbeatAt`, milliseconds).
+
+A deleted machine is final. An agent that keeps talking with its credential is
+rejected as `unauthenticated` on every agent route and cannot recreate the
+record (only a valid enrollment code creates a machine). Recovery, rotation
+and approval of a deleted machine are refused, and the database rejects
+changing it back. Enrolling the same computer again with a new code creates a
+new, clean, pending record.
+
 ## Responses and pagination
 
 Query responses carry `schemaVersion: 1`, `readAt`, and either `item` or
@@ -138,7 +197,8 @@ missing scope named, and nothing else is revealed:
 | `invalid_request`, `contract_range` | 400 | No | Fix the request; a resend will not improve on its own. |
 | `unauthenticated` | 401 | No | Check the token. Unknown, expired, revoked and malformed tokens are deliberately indistinguishable. Mint a new token if the old one expired or was revoked. |
 | `forbidden` | 403 | No | The token lacks the route's scope (`details.kind = "scope"` names it), or the owner's role no longer permits the action. Cannot be fixed by retrying. |
-| `not_found` | 404 | No | The id is wrong or the record was retired. |
+| `not_found` | 404 | No | The id is wrong or the record was deleted. |
+| `host_not_deletable` | 409 | After cleanup | `details.reasons` lists everything keeping the machine: finish or clean up what each reason names, then delete again. See [Deleting a machine](#deleting-a-machine). |
 | `revision_conflict` | 409 | Yes | Re-read the resource, recompute from the fresh `revision` (or approval evidence), resend. On approve, `enrollment: "approved"` means the call already succeeded. |
 | `idempotency_conflict` | 409 | No | The same `Idempotency-Key` was used with a different body. Do not retry with that key. |
 | `enrollment_expired`, `grant_expired`, `cursor_expired`, `cursor_gap` | 410 | Re-issue | The one-time artifact is gone. Issue a new code (or re-read page one for cursors). |
@@ -148,9 +208,10 @@ missing scope named, and nothing else is revealed:
 
 `details` is optional and is one of `revision`, `invalid_field` (with
 `field`), `limit` (with `maximum`), `retry` (with `retryAfterMs`),
-`cursor_gap`, `readiness` (with a placement rejection reason), or `scope`
+`cursor_gap`, `readiness` (with a placement rejection reason), `scope`
 (with `requiredScope`, returned only when a bearer token authenticated but
-lacks the route's scope). A host with no compatible capacity is a queued
+lacks the route's scope), or `delete_blocked` (with `reasons`, on
+`host_not_deletable`). A host with no compatible capacity is a queued
 placement with an explanation, not an error.
 
 ## Idempotency and retries
@@ -165,6 +226,7 @@ Mutating browser routes protect replays in one of two ways:
 | `POST /fleet/hosts/{id}/credentials/rotate` | `Idempotency-Key` (required) | The original result |
 | `POST /fleet/hosts/{id}/approve` | `expectedRevision` | `revision_conflict` with `details.currentRevision`; if the host reads back `enrollment: "approved"`, the call already succeeded |
 | `POST /fleet/hosts/{id}/lifecycle` | `expectedRevision` | as above, with `lifecycle` as the readback |
+| `DELETE /fleet/hosts/{id}` | idempotent by state | `404 not_found`: the machine is already gone |
 | `POST /fleet/hosts/{id}/backends/{backend_id}/enabled` | last-write-wins | the new state |
 | `PUT /fleet/hosts/{id}/budget` | last-write-wins | the budget in force, returned in the response |
 | `POST /fleet/hosts/{id}/grants/{target_id}` | last-write-wins | the new state |
@@ -239,17 +301,20 @@ offline, and the start grant can't exceed local authority.
 - A **host** is one physical or virtual machine running the agent. It has an
   epoch that changes on re-enrollment or recovery; commands from an older
   epoch are refused.
-- A new enrollment always starts `pending`. If another approved host reports
-  the same hardware fingerprint, the host read sets `duplicateHardware: true`
-  for the approver. It's a hint only: a fingerprint never proves identity, and
-  replacing a host goes through explicit recovery.
+- A new enrollment always starts `pending`. If another approved, unretired
+  host reports the same hardware fingerprint, the host read sets
+  `duplicateHardware: true` for the approver, and `duplicateHardwareOf` lists
+  up to five of those other hosts the reader may see (`id` and `name`), so the
+  stale record is easy to tell from the live one. It's a hint only: a
+  fingerprint never proves identity, and replacing a host goes through
+  explicit recovery. To drop the stale record, retire it and then delete it.
 - A host exposes **backends** (Docker, Tart, native) and **resource
   domains**. Domains form a tree under one root domain, so Docker, Tart and
   native work on the same machine share one physical budget.
 - **Samples** are inclusive measurements of a domain. A sample is "current"
   only for the live session and when received less than 45 s ago.
-- **Events** are append-only. Host retirement and credential rotation keep
-  history and foreign keys intact.
+- **Events** are append-only. Host retirement, deletion and credential
+  rotation keep history and foreign keys intact.
 - A placement that fails records a `placement_failed` event on its host. Its
   detail holds a stable `reason`, a short `message` and the numbers behind it
   (such as `elapsed_ms` and `allowed_ms`), and its runner's `failure_reason`

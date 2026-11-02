@@ -154,6 +154,9 @@ pub enum HostReadV1 {
         /// fingerprint. This is a hint for the approver, never proof of
         /// identity or ownership.
         duplicate_hardware: bool,
+        /// Up to five of those other machines the reader may see, so the
+        /// stale record is easy to tell from the live one.
+        duplicate_hardware_of: Vec<DuplicateHardwareHostV1>,
         /// The current credential generation, which a rotation request names.
         credential_generation: BrowserUint53,
         /// Targets the host's enrollment was issued for; approval may grant
@@ -173,6 +176,14 @@ pub enum HostReadV1 {
         architecture: Architecture,
         counts: TargetFleetRecordCounts,
     },
+}
+
+/// Another machine that reports the same hardware.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DuplicateHardwareHostV1 {
+    pub id: HostId,
+    pub name: UpstreamText,
 }
 
 /// Failed placements of one reason on a host, with the newest one's message.

@@ -410,6 +410,29 @@ pub enum ErrorCode {
     DependencyUnavailable,
     NotReady,
     ContractRange,
+    /// A machine cannot be deleted yet; the details name every reason.
+    HostNotDeletable,
+}
+
+/// Why a machine cannot be deleted. Every reason that applies is reported, so
+/// one refusal says everything to clean up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostDeleteBlocker {
+    /// An approved machine must be retired first, which revokes its credential.
+    NotRetired,
+    /// The machine reported in recently; it may still be running.
+    StillHeartbeating,
+    /// An approved machine still holds a credential that has not been revoked.
+    ActiveCredential,
+    /// A placement is not cleaned up, or capacity it holds is not released.
+    LivePlacement,
+    /// A placement's start could not be confirmed (it is `uncertain`).
+    UnconfirmedStart,
+    /// A runner placed on the machine has not finished.
+    LiveRunner,
+    /// A command for the machine is still waiting or running within its deadline.
+    PendingCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +463,10 @@ pub enum ErrorDetails {
     Scope {
         required_scope: UpstreamText,
     },
+    /// A delete was refused; every reason that applies, in a fixed order.
+    DeleteBlocked {
+        reasons: Vec<HostDeleteBlocker>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,7 +485,7 @@ impl ErrorCode {
             Self::Unauthenticated => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
-            Self::RevisionConflict | Self::IdempotencyConflict => 409,
+            Self::RevisionConflict | Self::IdempotencyConflict | Self::HostNotDeletable => 409,
             Self::EnrollmentExpired
             | Self::GrantExpired
             | Self::CursorExpired

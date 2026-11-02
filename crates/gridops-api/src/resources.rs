@@ -5304,7 +5304,7 @@ async fn machine_performance(state: &AppState, user_id: &str, since: i64) -> Api
              ORDER BY named.created_at DESC LIMIT 1)
            JOIN workload_placements wp ON wp.id=(SELECT latest.id FROM workload_placements latest
              WHERE latest.workload_id=r.id ORDER BY latest.generation DESC LIMIT 1)
-           JOIN fleet_hosts fh ON fh.id=wp.host_id
+           JOIN fleet_hosts fh ON fh.id=wp.host_id AND fh.deleted_at IS NULL
           WHERE wj.status='completed' AND wj.completed_at>=? AND wj.started_at IS NOT NULL
             AND COALESCE(wj.runner_name,'')<>''"#,
     )

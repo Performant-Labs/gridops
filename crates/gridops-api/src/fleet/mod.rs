@@ -34,6 +34,7 @@ use crate::state::AppState;
 pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/fleet/hosts", "fleet:read"),
     ("GET", "/api/v1/fleet/hosts/{host_id}", "fleet:read"),
+    ("DELETE", "/api/v1/fleet/hosts/{host_id}", "fleet:operate"),
     (
         "GET",
         "/api/v1/fleet/hosts/{host_id}/backends",
@@ -130,7 +131,10 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/api/v1/fleet/workload", get(profiles::workload))
         .route("/api/v1/fleet/hosts", get(query::hosts))
-        .route("/api/v1/fleet/hosts/{host_id}", get(query::host))
+        .route(
+            "/api/v1/fleet/hosts/{host_id}",
+            get(query::host).delete(enrollment::delete_host),
+        )
         .route(
             "/api/v1/fleet/hosts/{host_id}/backends",
             get(query::backends),

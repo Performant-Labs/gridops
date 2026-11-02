@@ -101,6 +101,13 @@ export const logChunkSchema = z.strictObject({
 export const logMetadataSchema = z.strictObject({
   streamId: uuid, placementId: uuid, availability: z.enum(["pending", "available", "expired"]), startCursor: cursor.nullish(),
 });
+/** Why a machine cannot be deleted yet; a refusal names every reason that applies. */
+export const hostDeleteBlockers = [
+  "not_retired", "still_heartbeating", "active_credential", "live_placement",
+  "unconfirmed_start", "live_runner", "pending_command",
+] as const;
+export const hostDeleteBlockerSchema = z.enum(hostDeleteBlockers);
+export type HostDeleteBlocker = z.infer<typeof hostDeleteBlockerSchema>;
 const errorDetails = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("revision"), currentRevision: counter }),
   z.strictObject({ kind: z.literal("invalid_field"), field: text }),
@@ -109,9 +116,10 @@ const errorDetails = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("cursor_gap") }),
   z.strictObject({ kind: z.literal("readiness"), reason: rejectionReasonSchema }),
   z.strictObject({ kind: z.literal("scope"), requiredScope: text }),
+  z.strictObject({ kind: z.literal("delete_blocked"), reasons: z.array(hostDeleteBlockerSchema).max(16) }),
 ]);
 export const fleetErrorSchema = z.strictObject({
-  code: z.enum(["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range"]),
+  code: z.enum(["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range", "host_not_deletable"]),
   message: text, requestId: uuid, details: errorDetails.nullish(),
 });
 export function pageSchema<T extends z.ZodType>(item: T) {

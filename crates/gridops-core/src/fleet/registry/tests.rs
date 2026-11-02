@@ -28,6 +28,8 @@ use crate::{Vault, connect_database_path};
 const ADMIN: &str = "registry-admin";
 const TARGET: &str = "30000000-0000-4000-8000-000000000001";
 
+#[path = "delete_tests.rs"]
+mod delete_tests;
 #[path = "fault_tests.rs"]
 mod fault_tests;
 #[path = "invariants_tests.rs"]

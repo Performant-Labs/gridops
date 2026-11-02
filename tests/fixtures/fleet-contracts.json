@@ -1438,6 +1438,34 @@
     }
   },
   {
+    "name": "a refused delete names every reason",
+    "schema": "error",
+    "valid": true,
+    "body": {
+      "code": "host_not_deletable",
+      "message": "Machine cannot be deleted yet",
+      "requestId": "00000009-0000-4000-8000-000000000004",
+      "details": {
+        "kind": "delete_blocked",
+        "reasons": ["live_placement", "pending_command"]
+      }
+    }
+  },
+  {
+    "name": "an unknown delete blocker is rejected",
+    "schema": "error",
+    "valid": false,
+    "body": {
+      "code": "host_not_deletable",
+      "message": "Machine cannot be deleted yet",
+      "requestId": "00000009-0000-4000-8000-000000000005",
+      "details": {
+        "kind": "delete_blocked",
+        "reasons": ["made_up"]
+      }
+    }
+  },
+  {
     "name": "unknown error detail kind is rejected",
     "schema": "error",
     "valid": false,

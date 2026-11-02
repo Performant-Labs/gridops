@@ -49,6 +49,14 @@ impl RequestContext {
     }
 
     pub(super) fn registry_error(self, error: &RegistryError) -> FleetApiError {
+        if let RegistryError::HostNotDeletable(reasons) = error {
+            return self.error_with_details(
+                ErrorCode::HostNotDeletable,
+                ErrorDetails::DeleteBlocked {
+                    reasons: reasons.clone(),
+                },
+            );
+        }
         self.error(match error {
             RegistryError::Database(_) | RegistryError::Json(_) | RegistryError::Storage(_) => {
                 // Messages can carry stored values, so only the class and the
@@ -69,6 +77,7 @@ impl RequestContext {
                 ErrorCode::IdempotencyConflict
             }
             RegistryError::RotationGone => ErrorCode::GrantExpired,
+            RegistryError::HostNotDeletable(_) => ErrorCode::HostNotDeletable,
             RegistryError::EnrollmentScopeMismatch
             | RegistryError::InvalidRequest(_)
             | RegistryError::InvalidIdentifier(_)
@@ -144,6 +153,7 @@ impl IntoResponse for FleetApiError {
             ErrorCode::DependencyUnavailable => "Fleet service is temporarily unavailable",
             ErrorCode::NotReady => "Fleet is not ready for this operation",
             ErrorCode::ContractRange => "Fleet value is outside the supported range",
+            ErrorCode::HostNotDeletable => "Machine cannot be deleted yet",
         };
         (
             status,
@@ -182,6 +192,7 @@ mod tests {
             ErrorCode::DependencyUnavailable,
             ErrorCode::NotReady,
             ErrorCode::ContractRange,
+            ErrorCode::HostNotDeletable,
         ] {
             let context = RequestContext::new();
             let response = context.error(code).into_response();

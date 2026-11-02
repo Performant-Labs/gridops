@@ -26,10 +26,10 @@ use crate::fleet::{
         query::{
             AllocationReadV1, ApprovalEvidenceV1, ApprovalUnavailableReasonV1, BackendReadV1,
             BackendSafeReasonV1, CatalogQuery, CheckedTags, CountScope, CoverageV1, DomainReadV1,
-            EventQuery, FleetRecordCounts, HostEventKindV1, HostEventReadV1, HostReadV1,
-            InventoryEvidenceV1, MeasurementReadV1, ObservedCapacityV1, ObservedDomainKindV1,
-            PlacementFailureReadV1, QueryPage, QueryResult, SampleProvenanceV1, SampleQuery,
-            SampleReadV1,
+            DuplicateHardwareHostV1, EventQuery, FleetRecordCounts, HostEventKindV1,
+            HostEventReadV1, HostReadV1, InventoryEvidenceV1, MeasurementReadV1,
+            ObservedCapacityV1, ObservedDomainKindV1, PlacementFailureReadV1, QueryPage,
+            QueryResult, SampleProvenanceV1, SampleQuery, SampleReadV1,
         },
     },
 };
@@ -879,7 +879,7 @@ async fn visible_host_ids(
     limit: usize,
 ) -> Result<Vec<String>, QueryError> {
     let sql = format!(
-        "{} SELECT h.id FROM fleet_hosts h WHERE (
+        "{} SELECT h.id FROM fleet_hosts h WHERE h.deleted_at IS NULL AND (
            ?=1
            OR EXISTS (SELECT 1 FROM host_user_grants ug WHERE ug.host_id=h.id AND ug.user_id=? AND ug.permission IN ('read','operator','admin') AND ug.revoked_at IS NULL)
            OR EXISTS (SELECT 1 FROM host_target_grants tg JOIN readable_targets rt ON rt.id=tg.target_id WHERE tg.host_id=h.id AND tg.revoked_at IS NULL)
@@ -920,10 +920,11 @@ async fn host_visibility(
     host_id: HostId,
     target_filter: Option<CiTargetId>,
 ) -> Result<HostVisibility, QueryError> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM fleet_hosts WHERE id=?")
-        .bind(host_id.to_string())
-        .fetch_optional(&mut **tx)
-        .await?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM fleet_hosts WHERE id=? AND deleted_at IS NULL")
+            .bind(host_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
     if let Some(target_id) = target_filter {
         if !target_is_readable(tx, snapshot, target_id).await? {
             return Err(QueryError::NotFound);
@@ -975,7 +976,7 @@ async fn ensure_physical_host(
     snapshot: &Snapshot,
     host_id: HostId,
 ) -> Result<(), QueryError> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT h.id FROM fleet_hosts h WHERE h.id=? AND ( ? = 1 OR EXISTS (SELECT 1 FROM host_user_grants ug WHERE ug.host_id=h.id AND ug.user_id=? AND ug.permission IN ('read','operator','admin') AND ug.revoked_at IS NULL))").bind(host_id.to_string()).bind(i64::from(snapshot.system_admin)).bind(&snapshot.user_id).fetch_optional(&mut **tx).await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT h.id FROM fleet_hosts h WHERE h.id=? AND h.deleted_at IS NULL AND ( ? = 1 OR EXISTS (SELECT 1 FROM host_user_grants ug WHERE ug.host_id=h.id AND ug.user_id=? AND ug.permission IN ('read','operator','admin') AND ug.revoked_at IS NULL))").bind(host_id.to_string()).bind(i64::from(snapshot.system_admin)).bind(&snapshot.user_id).fetch_optional(&mut **tx).await?;
     if exists.is_some() {
         Ok(())
     } else {
@@ -1977,7 +1978,7 @@ impl RegistryService {
         visibility: HostVisibility,
         target_filter: Option<&str>,
     ) -> Result<HostReadV1, QueryError> {
-        let row = sqlx::query("SELECT id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,revision,agent_version,tags_json,last_heartbeat_at,last_inventory_at,pressure_state,inventory_complete,inventory_revision,inventory_digest,authority_incarnation,inventory_session_id,inventory_boot_id,inventory_epoch FROM fleet_hosts WHERE id=?").bind(host_id.to_string()).fetch_optional(&mut **tx).await?.ok_or(QueryError::NotFound)?;
+        let row = sqlx::query("SELECT id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,revision,agent_version,tags_json,last_heartbeat_at,last_inventory_at,pressure_state,inventory_complete,inventory_revision,inventory_digest,authority_incarnation,inventory_session_id,inventory_boot_id,inventory_epoch FROM fleet_hosts WHERE id=? AND deleted_at IS NULL").bind(host_id.to_string()).fetch_optional(&mut **tx).await?.ok_or(QueryError::NotFound)?;
         let counts = counts(
             tx,
             snapshot,
@@ -2042,11 +2043,34 @@ impl RegistryService {
             "SELECT EXISTS(SELECT 1 FROM fleet_hosts this JOIN fleet_hosts other
              ON other.hardware_fingerprint=this.hardware_fingerprint AND other.id<>this.id
              WHERE this.id=? AND other.enrollment_state='approved'
-             AND other.lifecycle_state<>'retired')",
+             AND other.lifecycle_state<>'retired' AND other.deleted_at IS NULL)",
         )
         .bind(host_id.to_string())
         .fetch_one(&mut **tx)
         .await?;
+        let duplicate_hardware_of = sqlx::query(
+            "SELECT other.id,other.name FROM fleet_hosts this JOIN fleet_hosts other
+             ON other.hardware_fingerprint=this.hardware_fingerprint AND other.id<>this.id
+             WHERE this.id=? AND other.enrollment_state='approved'
+             AND other.lifecycle_state<>'retired' AND other.deleted_at IS NULL
+             AND (?=1 OR EXISTS (SELECT 1 FROM host_user_grants ug WHERE ug.host_id=other.id
+                  AND ug.user_id=? AND ug.permission IN ('read','operator','admin')
+                  AND ug.revoked_at IS NULL))
+             ORDER BY other.last_heartbeat_at DESC,other.id LIMIT 5",
+        )
+        .bind(host_id.to_string())
+        .bind(i64::from(snapshot.system_admin))
+        .bind(&snapshot.user_id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(|other| {
+            Ok(DuplicateHardwareHostV1 {
+                id: parse_host_id(other.get::<String, _>("id").as_str())?,
+                name: checked_text(other.get("name"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
         let (generation, scope): (i64, Option<String>) = sqlx::query_as(
             "SELECT h.current_credential_generation,e.scope_json FROM fleet_hosts h
                LEFT JOIN host_enrollments e ON e.id=h.current_enrollment_id WHERE h.id=?",
@@ -2087,6 +2111,7 @@ impl RegistryService {
             inventory_evidence,
             approval_evidence,
             duplicate_hardware,
+            duplicate_hardware_of,
             credential_generation: BrowserUint53::new(
                 u64::try_from(generation).map_err(|_| QueryError::MalformedData)?,
             )?,

@@ -1,7 +1,7 @@
 /** Verifies fleet administration paths, bodies and response parsing. */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  getPoolProfile, listHostGrants, listTargets, savePoolProfile, setBackendEnabled, setHostGrant, setHostLifecycle,
+  deleteHost, getPoolProfile, listHostGrants, listTargets, savePoolProfile, setBackendEnabled, setHostGrant, setHostLifecycle,
 } from "../src/features/fleet/admin-api";
 import type { ProfileInput } from "../src/features/fleet/admin-contracts";
 
@@ -75,5 +75,25 @@ describe("fleet admin browser transport", () => {
     expect(JSON.parse(String(sent[3]?.[1].body))).toEqual(profileInput);
     expect(() => savePoolProfile("fleet-pool", { ...profileInput, cpuMillis: 0 })).toThrow();
     expect(() => getPoolProfile("../pools")).toThrow();
+  });
+
+  it("deletes a machine with DELETE and surfaces every refusal reason", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ hostId }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(deleteHost(hostId)).resolves.toEqual({ hostId });
+    const [path, init] = calls(fetcher)[0] ?? ["", {}];
+    expect(path).toBe(`/api/v1/fleet/hosts/${hostId}`);
+    expect(init).toMatchObject({ method: "DELETE", credentials: "same-origin", cache: "no-store", redirect: "error" });
+    expect(init.body).toBeUndefined();
+    expect(() => deleteHost("../secrets")).toThrow();
+
+    fetcher.mockResolvedValue(Response.json({
+      code: "host_not_deletable", message: "Machine cannot be deleted yet", requestId: hostId,
+      details: { kind: "delete_blocked", reasons: ["live_placement", "pending_command"] },
+    }, { status: 409 }));
+    await expect(deleteHost(hostId)).rejects.toMatchObject({
+      status: 409, code: "host_not_deletable", details: { kind: "delete_blocked", reasons: ["live_placement", "pending_command"] },
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

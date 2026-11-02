@@ -77,11 +77,12 @@ impl RegistryService {
         let user_id = require_user(principal).map_err(|_| RegistryError::Forbidden)?;
         let mut tx = self.pool.begin().await?;
         ensure_system_admin(&mut tx, user_id).await?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=?)")
-                .bind(host_id.to_string())
-                .fetch_one(&mut *tx)
-                .await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=? AND deleted_at IS NULL)",
+        )
+        .bind(host_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
         if !exists {
             return Err(RegistryError::NotFound);
         }

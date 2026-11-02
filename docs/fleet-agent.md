@@ -276,4 +276,7 @@ not share the socket are unchanged.
 
 `run` exits with 3 when GridOps doesn't support this agent version (upgrade the
 agent) and 4 when the credential was rejected (recover the machine from its
-page in GridOps, then enroll again with the recovery code).
+page in GridOps, then enroll again with the recovery code). A machine that was
+deleted from GridOps can't be recovered: its credential stays rejected until
+you enroll the computer again with a new code from **Machines → Add machine**,
+which creates a new machine.

@@ -133,6 +133,8 @@ export const unconfirmedPlacementSchema = z.strictObject({
   repair: z.enum(["reinspect", "release"]),
 });
 export const unconfirmedListSchema = z.strictObject({ items: z.array(unconfirmedPlacementSchema).max(1_000) });
+/** What a delete returns: the machine that is gone. */
+export const deletedHostSchema = z.strictObject({ hostId: fleetIdSchema });
 export const repairResultSchema = z.strictObject({ repaired: z.array(fleetIdSchema).max(64) });
 export type UnconfirmedPlacement = z.infer<typeof unconfirmedPlacementSchema>;
 

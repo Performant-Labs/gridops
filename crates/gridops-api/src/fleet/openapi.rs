@@ -166,6 +166,7 @@ mod tests {
         for (name, expected_status) in [
             ("fleetErrorRevisionConflict", 409u16),
             ("fleetErrorScopeDenied", 403),
+            ("fleetErrorHostNotDeletable", 409),
         ] {
             let example = spec["components"]["examples"][name]["value"].to_string();
             let parsed: FleetErrorResponse = serde_json::from_str(&example)

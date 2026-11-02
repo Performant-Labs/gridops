@@ -98,6 +98,7 @@ fn server_factories_and_error_mapping_preserve_browser_contracts() -> anyhow::Re
         (ErrorCode::RateLimited, 429),
         (ErrorCode::DependencyUnavailable, 503),
         (ErrorCode::NotReady, 503),
+        (ErrorCode::HostNotDeletable, 409),
     ] {
         assert_eq!(code.status(), status);
     }
@@ -129,6 +130,13 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
                         };
                         assert!(required_scope.as_str().starts_with("fleet:"));
                     }
+                    ErrorCode::HostNotDeletable => {
+                        assert_eq!(error.code.status(), 409);
+                        let Some(ErrorDetails::DeleteBlocked { reasons }) = error.details else {
+                            anyhow::bail!("a refused delete must carry its reasons");
+                        };
+                        assert_eq!(reasons.len(), 2);
+                    }
                     other => anyhow::bail!("untested error fixture: {other:?}"),
                 }
             }
@@ -140,6 +148,6 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
         }
         checked += 1;
     }
-    assert_eq!(checked, 3);
+    assert_eq!(checked, 4);
     Ok(())
 }
