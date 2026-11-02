@@ -1101,6 +1101,106 @@ async fn changed_idempotency_body_and_revoked_policy_are_rejected_at_the_right_s
 }
 
 #[tokio::test]
+async fn a_replaced_profile_is_staleness_and_a_disabled_pool_stays_forbidden() -> Result<()> {
+    let database = Database::ready().await?;
+    configure_default(&database).await?;
+    let service = FleetService::new(database.pool.clone());
+
+    // A runner waits while the pool's profile is replaced. The archived row
+    // must read as staleness so admission parks the intent with
+    // stale_profile_revision (which the reconciler re-plans) — not forbidden.
+    let superseded = service
+        .submit_intent(
+            &principal(),
+            request("superseded", "52000000-0000-4000-8000-000000000009")?,
+        )
+        .await?;
+    sqlx::query("UPDATE pool_execution_profiles SET enabled=0 WHERE id=?")
+        .bind(PROFILE)
+        .execute(&database.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO pool_execution_profiles
+           (id,pool_id,name,revision,enabled,runtime_kind,execution_os,architecture,mode,
+            requires_interactive,requires_docker_socket,all_authorized_hosts,preference,image,
+            labels_json,config_json,cpu_millis,memory_mib,disk_bytes,created_at,updated_at)
+         SELECT '41000000-0000-4000-8000-000000000001',pool_id,name,1,1,runtime_kind,
+                execution_os,architecture,mode,requires_interactive,requires_docker_socket,
+                all_authorized_hosts,preference,image,labels_json,config_json,cpu_millis,
+                memory_mib,disk_bytes,?,?
+           FROM pool_execution_profiles WHERE id=?",
+    )
+    .bind(now_millis())
+    .bind(now_millis())
+    .bind(PROFILE)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO profile_ci_targets (profile_id,target_id,enabled,revoked_at)
+         SELECT '41000000-0000-4000-8000-000000000001',target_id,enabled,revoked_at
+           FROM profile_ci_targets WHERE profile_id=?",
+    )
+    .bind(PROFILE)
+    .execute(&database.pool)
+    .await?;
+    service
+        .run_scheduling_slice(&Principal::Reconciler, ScanLimit::new(10)?)
+        .await?;
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("SELECT status,reason_code FROM workload_intents WHERE id=?")
+            .bind(superseded.operation_id.to_string())
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(status, "queued");
+    assert_eq!(reason.as_deref(), Some("stale_profile_revision"));
+
+    // Submitting against the archived profile is staleness too, so a
+    // controller retrying with the old identity learns to re-read the pool.
+    let error = service
+        .submit_intent(
+            &principal(),
+            request("superseded-submit", "52000000-0000-4000-8000-00000000000a")?,
+        )
+        .await
+        .expect_err("submitting against an archived, replaced profile must fail");
+    assert!(
+        matches!(error, FleetError::StaleProfileRevision),
+        "{error:?}"
+    );
+
+    // A pool whose every profile ends up disabled is a policy refusal, not
+    // staleness: the intent queued against the last enabled one parks as
+    // forbidden until fleet execution is enabled again.
+    let disabled = service
+        .submit_intent(
+            &principal(),
+            request_for(
+                "disabled-pool",
+                "52000000-0000-4000-8000-00000000000b",
+                "legacy-pool",
+                "41000000-0000-4000-8000-000000000001",
+                TARGET,
+            )?,
+        )
+        .await?;
+    sqlx::query("UPDATE pool_execution_profiles SET enabled=0 WHERE id=?")
+        .bind("41000000-0000-4000-8000-000000000001")
+        .execute(&database.pool)
+        .await?;
+    service
+        .run_scheduling_slice(&Principal::Reconciler, ScanLimit::new(10)?)
+        .await?;
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("SELECT status,reason_code FROM workload_intents WHERE id=?")
+            .bind(disabled.operation_id.to_string())
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(status, "queued");
+    assert_eq!(reason.as_deref(), Some("forbidden"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn stale_profile_and_unknown_allocation_keep_demand_queued() -> Result<()> {
     let database = Database::ready().await?;
     configure_default(&database).await?;

@@ -421,6 +421,21 @@ pub(crate) async fn ensure_current_intent_policy(
         return Err(FleetError::NotFound);
     };
     if enabled == 0 {
+        // A profile archived because a newer one replaced it is staleness,
+        // not policy: say so, so the intent re-plans against the current
+        // profile instead of parking as `forbidden`. A pool with no enabled
+        // profile at all stays forbidden.
+        let superseded: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pool_execution_profiles
+              WHERE pool_id=? AND enabled=1 AND id<>?",
+        )
+        .bind(&intent.pool_id)
+        .bind(&intent.profile_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if superseded > 0 {
+            return Err(FleetError::StaleProfileRevision);
+        }
         return Err(FleetError::Forbidden);
     }
     if admission && revision != intent.expected_profile_revision {
@@ -671,6 +686,17 @@ async fn ensure_profile_and_target(
         return Err(FleetError::NotFound);
     };
     if enabled == 0 {
+        let superseded: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pool_execution_profiles
+              WHERE pool_id = ? AND enabled=1 AND id<>?",
+        )
+        .bind(&request.pool_id)
+        .bind(request.profile_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+        if superseded > 0 {
+            return Err(FleetError::StaleProfileRevision);
+        }
         return Err(FleetError::Forbidden);
     }
     if let Some(expected) = request.expected_profile_revision {

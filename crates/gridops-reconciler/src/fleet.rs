@@ -244,6 +244,7 @@ pub(super) async fn provision(
 pub(super) async fn tick(app: &Reconciler) -> Result<()> {
     let service = FleetService::new(app.database.clone());
     service.admit_queued(&Principal::Reconciler, 100).await?;
+    retire_superseded_intents(&app.database, &service).await?;
     expire_queued(app, &service).await?;
     for placement in placement::placements(&app.database, &["registering"]).await? {
         if let Err(error) = register_and_start(app, &placement).await {
@@ -284,6 +285,39 @@ async fn expire_queued(app: &Reconciler, service: &FleetService) -> Result<()> {
             .bind(now_millis())
             .bind(row.get::<String, _>("workload_id"))
             .execute(&app.database)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Cancels queued intents whose fleet profile was replaced. They can never
+/// admit, and waiting out the queue timeout parks a runner for ten minutes
+/// with a misleading reason; cancelling now fails the runner so the next
+/// provisioning pass retries against the current profile.
+pub(super) async fn retire_superseded_intents(
+    database: &sqlx::SqlitePool,
+    service: &FleetService,
+) -> Result<()> {
+    let superseded = sqlx::query(
+        "SELECT i.id,i.workload_id FROM workload_intents i JOIN runners r ON r.id=i.workload_id
+          WHERE i.status='queued' AND i.reason_code='stale_profile_revision'",
+    )
+    .fetch_all(database)
+    .await?;
+    for row in superseded {
+        let intent: String = row.get("id");
+        if service
+            .cancel_queued(&intent, "stale_profile_revision")
+            .await?
+        {
+            sqlx::query(
+                "UPDATE runners SET status='failed',failure_reason=?,updated_at=? WHERE id=?",
+            )
+            .bind("Fleet execution profile was replaced; provisioning again.")
+            .bind(now_millis())
+            .bind(row.get::<String, _>("workload_id"))
+            .execute(database)
             .await?;
         }
     }

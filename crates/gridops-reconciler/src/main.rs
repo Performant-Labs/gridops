@@ -1129,11 +1129,24 @@ async fn refresh_stale_runs(
             .await;
         match result {
             Ok(run) => {
+                let completed = run.status == "completed";
                 let mut transaction = app.database.begin().await?;
                 upsert_workflow_run(&mut transaction, repository.id, run, now_millis()).await?;
                 transaction.commit().await?;
-                if let Err(error) = sync_run_jobs(app, repository, run_id, token).await {
-                    tracing::warn!(repository = %repository.full_name, run_id, error = ?error, "GitHub stale workflow job refresh failed");
+                match sync_run_jobs(app, repository, run_id, token).await {
+                    Ok(()) => {
+                        if completed {
+                            cancel_orphaned_jobs(&app.database, run_id).await?;
+                        }
+                    }
+                    Err(error) => {
+                        if completed && github_not_found(&error) {
+                            // GitHub no longer lists the run's jobs at all.
+                            cancel_orphaned_jobs(&app.database, run_id).await?;
+                        } else {
+                            tracing::warn!(repository = %repository.full_name, run_id, error = ?error, "GitHub stale workflow job refresh failed");
+                        }
+                    }
                 }
             }
             Err(error) if github_not_found(&error) => {
@@ -1171,6 +1184,33 @@ async fn stale_run_ids(
         .filter(|run_id| !just_synced.contains(run_id))
         .take(STALE_RUN_REFRESH_LIMIT)
         .collect())
+}
+
+/// A queued job under a run GitHub reports completed can never run: GitHub
+/// finished (or deleted) the run without ever reporting a conclusion for that
+/// job. Mark it cancelled so queue views and autoscaling stop counting it.
+async fn cancel_orphaned_jobs(database: &SqlitePool, run_id: i64) -> Result<()> {
+    let now = now_millis();
+    let changed = sqlx::query(
+        "UPDATE workflow_jobs
+            SET status='completed',conclusion=COALESCE(conclusion,'cancelled'),
+                completed_at=COALESCE(completed_at,?),updated_at=?
+          WHERE run_id=? AND status<>'completed'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(run_id)
+    .execute(database)
+    .await?
+    .rows_affected();
+    if changed > 0 {
+        tracing::info!(
+            run_id,
+            jobs = changed,
+            "cancelled orphaned queued jobs of a completed run"
+        );
+    }
+    Ok(())
 }
 
 fn github_not_found(error: &anyhow::Error) -> bool {
@@ -2624,6 +2664,103 @@ mod tests {
             bitbucket_registration(&failed),
             Some("{0f3b2c1d-aaaa-bbbb-cccc-123456789abc}")
         );
+    }
+
+    #[tokio::test]
+    async fn superseded_intents_are_cancelled_immediately_for_replanning() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-superseded-intent-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO runner_pools (id,installation_id,name,scope,image,created_at,updated_at)
+              VALUES ('pool-1',1,'linux','organization','runner:latest',1,1);
+            INSERT INTO runners (id,pool_id,name,provider,ci_platform,os,architecture,status,ephemeral,configuration_version,runtime,created_at,updated_at)
+              VALUES ('62000000-0000-4000-8000-000000000001','pool-1','linux-1','docker','github','linux','X64','starting',1,1,'vm',1,1);
+            INSERT INTO fleet_operations (id,principal_kind,principal_scope,kind,idempotency_key,request_hash,status,created_at,updated_at)
+              VALUES ('62000000-0000-4000-8000-000000000001','reconciler','controller:reconciler','submit_workload','runner:62000000-0000-4000-8000-000000000001','hash','queued',1,1);
+            INSERT INTO pool_execution_profiles (id,pool_id,name,runtime_kind,execution_os,architecture,mode,image,cpu_millis,memory_mib,disk_bytes,created_at,updated_at)
+              VALUES ('40000000-0000-4000-8000-000000000001','pool-1','linux','docker','linux','x64','ephemeral','runner:latest',2000,2048,0,1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (7,1,'octo-org','app','octo-org/app',0,'main','https://github.com/octo-org/app',1,1,1);
+            INSERT INTO fleet_ci_targets (id,kind,canonical_key,installation_id,repository_id)
+              VALUES ('30000000-0000-4000-8000-000000000001','github_repository','github:repository:1:7',1,7);
+            INSERT INTO profile_ci_targets (profile_id,target_id,enabled)
+              VALUES ('40000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',1);
+            INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,expected_profile_revision,status,reason_code,created_at,updated_at)
+              VALUES ('62000000-0000-4000-8000-000000000001','62000000-0000-4000-8000-000000000001',1,'ci_runner','pool-1','40000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',NULL,1,'queued','stale_profile_revision',1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        let service = gridops_core::fleet::FleetService::new(database.clone());
+        fleet::retire_superseded_intents(&database, &service).await?;
+
+        let intent: (String, Option<String>) = sqlx::query_as(
+            "SELECT status,reason_code FROM workload_intents WHERE id='62000000-0000-4000-8000-000000000001'",
+        )
+        .fetch_one(&database)
+        .await?;
+        assert_eq!(intent.0, "cancelled");
+        let runner: (String, Option<String>) = sqlx::query_as(
+            "SELECT status,failure_reason FROM runners WHERE id='62000000-0000-4000-8000-000000000001'",
+        )
+        .fetch_one(&database)
+        .await?;
+        assert_eq!(runner.0, "failed");
+        assert!(runner.1.is_some_and(|reason| reason.contains("replaced")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphaned_queued_jobs_of_a_completed_run_are_cancelled() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-orphan-jobs-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (7,1,'octo-org','app','octo-org/app',0,'main','https://github.com/octo-org/app',1,1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (500,7,'CI',1,'push','completed','success','abc','https://github.com/octo-org/app/actions/runs/500',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,conclusion,labels,html_url,created_at,updated_at)
+              VALUES (9001,500,'done','completed','success','[]','u',1,1),
+                     (9002,500,'never ran','queued',NULL,'[]','u',1,1),
+                     (9003,500,'in flight','in_progress',NULL,'[]','u',1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        cancel_orphaned_jobs(&database, 500).await?;
+
+        let rows = sqlx::query(
+            "SELECT id,status,conclusion FROM workflow_jobs WHERE run_id=500 ORDER BY id",
+        )
+        .fetch_all(&database)
+        .await?;
+        let summary: Vec<(i64, String, Option<String>)> = rows
+            .iter()
+            .map(|row| (row.get("id"), row.get("status"), row.get("conclusion")))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (9001, "completed".to_owned(), Some("success".to_owned())),
+                (9002, "completed".to_owned(), Some("cancelled".to_owned())),
+                (9003, "completed".to_owned(), Some("cancelled".to_owned())),
+            ]
+        );
+        // Existing conclusions are never overwritten.
+        assert_eq!(summary[0].2.as_deref(), Some("success"));
+        Ok(())
     }
 
     #[tokio::test]
