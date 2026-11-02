@@ -24,6 +24,10 @@ upgrade Linux fleet machines. Deployments that build their images from source
 
 ## Cut a release
 
+Start by creating the release's checklist issue from the template (see
+[Release checklist](#release-checklist)); it holds the record of the steps
+below, the dry run and the deployment.
+
 1. Set the version in `Cargo.toml` (`[workspace.package] version`), refresh
    `Cargo.lock` with `cargo check`, and merge that to `master`.
 2. Tag the merge commit and push the tag:
@@ -41,9 +45,49 @@ The workflow refuses a tag that doesn't match the workspace version. To check
 that everything builds without publishing, run the workflow by hand from the
 Actions tab.
 
+Run the workflow by hand on the release commit before tagging. The checklist
+asks for it.
+
 The images carry the repository as their source, so GHCR links each package
 to the repository and gives it the repository's visibility. For a public
 repository, anyone can pull them without logging in.
+
+## Release checklist
+
+Each release has one issue, `Release checklist: vX.Y.Z`, made from
+[`docs/release-checklist-template.md`](release-checklist-template.md). It lists
+the steps from the version bump through the dry run, the tag, the control plane
+deployment and the agent upgrades to the rollback plan, and it is where the
+results of the checks are recorded. The template carries the literal version
+`X.Y.Z`; the copy has the real one. Check boxes on the copy, never on the
+template file.
+
+To create the issue for a new version, run this from a checkout of the
+repository:
+
+```sh
+VERSION=0.2.0   # the version being released, without the leading v
+sed "s/X\.Y\.Z/$VERSION/g" docs/release-checklist-template.md |
+  gh issue create --repo Performant-Labs/gridops \
+    --title "Release checklist: v$VERSION" --body-file -
+```
+
+To see the issue first without creating it, leave out the `gh` half:
+
+```sh
+sed "s/X\.Y\.Z/$VERSION/g" docs/release-checklist-template.md | less
+```
+
+The `sed` replaces every `X.Y.Z` (the one in `vX.Y.Z` too). The other
+placeholders, `<previous version>`, `<deployment>`, `<merge commit sha>` and the
+`___` blanks, are filled in by hand on the issue as the steps are reached. The
+repository is public, so the issue gets no private hostnames or internal URLs:
+write `<deployment>`. Links in the template are absolute, because relative
+links do not resolve inside an issue. The title is always `Release checklist: v` followed by the
+version, with no labels.
+
+If a step in the template is wrong or missing, fix the template in a pull
+request as part of the release, so the next copy has it.
 
 ## Version and build number
 
