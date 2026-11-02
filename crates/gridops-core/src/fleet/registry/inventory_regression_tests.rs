@@ -1356,3 +1356,262 @@ async fn live_work_authority_conflict_preserves_expired_observation_history() ->
     assert_eq!(count, 1);
     fixture.close().await
 }
+
+/// A new agent session for the same machine: the agent restarted or
+/// reconnected from the same boot. Returns a report bound to that session.
+async fn reconnect(
+    fixture: &Fixture,
+    authenticated: &AuthenticatedHost,
+    boot_id: &UpstreamText,
+) -> Result<InventoryReport> {
+    let session = AuthoritySessionId::try_new(uuid::Uuid::new_v4())?;
+    fixture
+        .service
+        .handshake(
+            authenticated,
+            handshake_for(session, boot_id.clone(), authenticated.epoch())?,
+        )
+        .await?;
+    let mut value = report()?;
+    value.control_plane_incarnation = fixture.incarnation().await?;
+    value.authority_session_id = session;
+    value.boot_id = boot_id.clone();
+    Ok(value)
+}
+
+/// The shape a real agent sends: the root domain, the native backend and the
+/// Docker backend. `None` for an identity means the agent could not tell; for
+/// Docker that is the `docker_unreachable` report of a stopped engine.
+fn identity_report(
+    mut value: InventoryReport,
+    root: Option<&str>,
+    native: Option<&str>,
+    docker: Option<&str>,
+) -> Result<InventoryRequest> {
+    value.domains[0].runtime_identity = root.map(text).transpose()?;
+    value.backends[0].readiness = BackendReadiness::Ready;
+    value.backends[0].runtime_identity = native.map(text).transpose()?;
+    let mut engine = backend_variant(
+        "docker",
+        "root",
+        RuntimeKind::Docker,
+        ExecutionOs::Linux,
+        Architecture::X64,
+    )?;
+    engine.runtime_identity = docker.map(text).transpose()?;
+    if docker.is_none() {
+        engine.readiness = BackendReadiness::Unavailable;
+        engine.reason = Some(text("docker_unreachable")?);
+    }
+    value.backends.push(engine);
+    Ok(InventoryRequest::new(request_id()?, value)?)
+}
+
+type BackendState = (String, Option<String>, String, Option<String>, Option<String>);
+
+/// Readiness and reason as scheduling sees them, then as last observed, and
+/// the identity the mapping is pinned to.
+async fn backend_state(
+    fixture: &Fixture,
+    authenticated: &AuthenticatedHost,
+    local_key: &str,
+) -> Result<BackendState> {
+    Ok(sqlx::query_as(
+        "SELECT b.readiness,b.reason_code,o.observed_readiness,o.reason,o.runtime_identity
+           FROM fleet_observed_backends o JOIN host_backends b ON b.id=o.backend_id
+          WHERE o.host_id=? AND o.local_key=?",
+    )
+    .bind(authenticated.host_id().to_string())
+    .bind(local_key)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+async fn root_identity(
+    fixture: &Fixture,
+    authenticated: &AuthenticatedHost,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT runtime_identity FROM fleet_observed_domains WHERE host_id=? AND local_key='root'",
+    )
+    .bind(authenticated.host_id().to_string())
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn reconnect_without_runtime_identities_keeps_the_stored_ones_and_is_accepted() -> Result<()>
+{
+    let (fixture, authenticated, _, inventory) = started_fixture().await?;
+    let boot = inventory.report.boot_id.clone();
+    let first = fixture
+        .service
+        .submit_inventory(
+            &authenticated,
+            identity_report(
+                inventory.report.clone(),
+                Some("root-abc"),
+                Some("native-linux-x64"),
+                Some("docker-abc"),
+            )?,
+        )
+        .await?;
+
+    // The agent restarts while the Docker engine is stopped: Docker is
+    // reported unavailable with no identity. The other identities are absent
+    // too, so the same rule is proven for the native backend and the domain.
+    let unreachable = identity_report(
+        reconnect(&fixture, &authenticated, &boot).await?,
+        None,
+        None,
+        None,
+    )?;
+    let second = fixture
+        .service
+        .submit_inventory(&authenticated, unreachable)
+        .await?;
+    assert_eq!(second.backend_ids, first.backend_ids);
+    assert_eq!(second.domain_ids, first.domain_ids);
+    assert_eq!(
+        backend_state(&fixture, &authenticated, "docker").await?,
+        (
+            "unavailable".to_owned(),
+            Some("docker_unreachable".to_owned()),
+            "unavailable".to_owned(),
+            Some("docker_unreachable".to_owned()),
+            Some("docker-abc".to_owned()),
+        )
+    );
+    assert_eq!(
+        backend_state(&fixture, &authenticated, "native").await?.4,
+        Some("native-linux-x64".to_owned())
+    );
+    assert_eq!(
+        root_identity(&fixture, &authenticated).await?,
+        Some("root-abc".to_owned())
+    );
+
+    // The engine is back with the same identity: ready again.
+    let restored = identity_report(
+        reconnect(&fixture, &authenticated, &boot).await?,
+        Some("root-abc"),
+        Some("native-linux-x64"),
+        Some("docker-abc"),
+    )?;
+    let third = fixture
+        .service
+        .submit_inventory(&authenticated, restored)
+        .await?;
+    assert_eq!(third.backend_ids, first.backend_ids);
+    assert_eq!(
+        backend_state(&fixture, &authenticated, "docker").await?,
+        (
+            "ready".to_owned(),
+            None,
+            "ready".to_owned(),
+            None,
+            Some("docker-abc".to_owned()),
+        )
+    );
+    fixture.close().await
+}
+
+#[tokio::test]
+async fn a_different_runtime_identity_after_an_unreachable_reconnect_is_still_a_conflict()
+-> Result<()> {
+    let (fixture, authenticated, _, inventory) = started_fixture().await?;
+    let boot = inventory.report.boot_id.clone();
+    let stored = (
+        Some("root-abc"),
+        Some("native-linux-x64"),
+        Some("docker-abc"),
+    );
+    fixture
+        .service
+        .submit_inventory(
+            &authenticated,
+            identity_report(inventory.report.clone(), stored.0, stored.1, stored.2)?,
+        )
+        .await?;
+    fixture
+        .service
+        .submit_inventory(
+            &authenticated,
+            identity_report(
+                reconnect(&fixture, &authenticated, &boot).await?,
+                None,
+                None,
+                None,
+            )?,
+        )
+        .await?;
+
+    // Each identity changed on its own: a different Docker engine, a
+    // different native runtime, a different root domain.
+    for changed in [
+        (stored.0, stored.1, Some("docker-xyz")),
+        (stored.0, Some("native-linux-arm64"), stored.2),
+        (Some("root-xyz"), stored.1, stored.2),
+    ] {
+        let request = identity_report(
+            reconnect(&fixture, &authenticated, &boot).await?,
+            changed.0,
+            changed.1,
+            changed.2,
+        )?;
+        assert!(
+            matches!(
+                fixture
+                    .service
+                    .submit_inventory(&authenticated, request)
+                    .await,
+                Err(InventoryError::MappingConflict)
+            ),
+            "{changed:?} must be refused"
+        );
+        assert_eq!(
+            backend_state(&fixture, &authenticated, "docker").await?.4,
+            Some("docker-abc".to_owned())
+        );
+        assert_eq!(
+            backend_state(&fixture, &authenticated, "native").await?.4,
+            Some("native-linux-x64".to_owned())
+        );
+        assert_eq!(
+            root_identity(&fixture, &authenticated).await?,
+            Some("root-abc".to_owned())
+        );
+    }
+    fixture.close().await
+}
+
+#[tokio::test]
+async fn a_backend_first_seen_without_an_identity_is_accepted_once_it_reports_one() -> Result<()> {
+    let (fixture, authenticated, _, inventory) = started_fixture().await?;
+    let boot = inventory.report.boot_id.clone();
+    // Enrolled while the Docker engine was stopped.
+    fixture
+        .service
+        .submit_inventory(
+            &authenticated,
+            identity_report(inventory.report.clone(), None, None, None)?,
+        )
+        .await?;
+    let started = identity_report(
+        reconnect(&fixture, &authenticated, &boot).await?,
+        Some("root-abc"),
+        Some("native-linux-x64"),
+        Some("docker-abc"),
+    )?;
+    fixture
+        .service
+        .submit_inventory(&authenticated, started)
+        .await?;
+    // Ready now. The recorded identity stays unknown: the schema keeps a
+    // recorded identity immutable, including an unknown one.
+    assert_eq!(
+        backend_state(&fixture, &authenticated, "docker").await?,
+        ("ready".to_owned(), None, "ready".to_owned(), None, None)
+    );
+    fixture.close().await
+}
