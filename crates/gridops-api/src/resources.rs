@@ -619,7 +619,10 @@ pub async fn overview(
 
 /// One page of the jobs counted as queued in the Overview, the ones that have
 /// waited longest first, each with the pool the scaler counts it for. Scoped
-/// to the signed-in user's installations, as the count is.
+/// to the signed-in user's installations, as the count is. A job no pool
+/// serves lists the labels it asked for that no pool the viewer can see
+/// offers (`missingLabels`), as the Overview's alerts do; for every other job
+/// that list is empty.
 pub async fn queued_jobs(
     State(state): State<AppState>,
     Query(query): Query<PaginationQuery>,
@@ -646,8 +649,12 @@ pub async fn queued_jobs(
     .fetch_all(&state.database)
     .await?;
     let now = now_millis();
-    let (owners, pools) = if rows.is_empty() {
-        (HashMap::new(), HashMap::new())
+    let (owners, pools, offered) = if rows.is_empty() {
+        (
+            HashMap::new(),
+            HashMap::new(),
+            overview_queue::OfferedLabels::default(),
+        )
     } else {
         // The same ownership the scaler counts a pool's queue by.
         let owners = gridops_core::waiting_job_ownership(&state.database)
@@ -661,7 +668,10 @@ pub async fn queued_jobs(
             .map(|owner| owner.pool_id.clone())
             .collect::<Vec<_>>();
         let pools = queued_job_pools(&state, &user.id, &page_pools).await?;
-        (owners, pools)
+        let offered = overview_queue::OfferedLabels::new(
+            &overview_queue::visible_pools(&state, &user.id).await?,
+        );
+        (owners, pools, offered)
     };
     let items = rows
         .iter()
@@ -670,6 +680,12 @@ pub async fn queued_jobs(
             let owner = owners.get(&id);
             let pool = owner.and_then(|owner| pools.get(&owner.pool_id));
             let created_at = row.get::<i64, _>("created_at");
+            let labels = json_array(row.get::<&str, _>("labels"));
+            let missing_labels = if owner.is_none() {
+                offered.missing(&labels)
+            } else {
+                Vec::new()
+            };
             json!({
                 "id": id, "name": row.get::<String, _>("name"),
                 "repository": row.get::<String, _>("full_name"),
@@ -677,7 +693,8 @@ pub async fn queued_jobs(
                 "runId": row.get::<i64, _>("run_id"),
                 "runUrl": row.get::<String, _>("run_url"),
                 "htmlUrl": row.get::<String, _>("html_url"),
-                "labels": json_array(row.get::<&str, _>("labels")),
+                "labels": labels,
+                "missingLabels": missing_labels,
                 "matchedPool": pool.map(|pool| json!({ "id": pool.id, "name": pool.name })),
                 "waitingReason": queued_job_waiting_reason(owner, pool),
                 "queuedAt": iso(created_at),
@@ -737,7 +754,10 @@ async fn queued_job_pools(
 /// runners say. Only reasons the data shows are given:
 ///
 /// - `no_matching_pool`: no unpaused autoscaling pool serving the job's
-///   repository can run its labels, so the scaler owns it nowhere.
+///   repository can run its labels, so the scaler owns it nowhere. Its
+///   `missingLabels` say which labels no pool offers at all; when that is
+///   empty, pools offering them exist but are paused, tripped, on manual
+///   scaling or don't offer them all together.
 /// - `pool_not_visible`: its pool also covers installations the viewer can't
 ///   see, so the pool isn't named.
 /// - `pool_at_capacity`: every pool that could run it had used up its room

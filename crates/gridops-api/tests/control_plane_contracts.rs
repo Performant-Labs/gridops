@@ -1513,6 +1513,102 @@ async fn overview_tiles_split_a_live_shaped_fleet_into_parts_that_add_up() -> Re
 }
 
 #[tokio::test]
+async fn a_job_asking_for_a_platform_no_pool_runs_is_flagged_with_that_label() -> Result<()> {
+    // Issue #32: a job asking for `self-hosted-macos` when only a Linux pool
+    // exists can never run. It is named with the label it is missing, in the
+    // Overview and in the queued-jobs list, and no pool scales for it.
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("linux", "[\"linux-pool\"]", ""),
+            // Carries `paused-only`, but is paused, so it serves nothing.
+            org_pool("stopped", "[\"paused-only\"]", "1,0"),
+            QUEUED_RUN.to_owned(),
+            job(
+                3001,
+                100,
+                "queued",
+                "[\"self-hosted\",\"self-hosted-macos\"]",
+                10,
+            ),
+            job(3002, 100, "queued", "[\"self-hosted\",\"Windows\"]", 20),
+            job(
+                3003,
+                100,
+                "queued",
+                "[\"self-hosted\",\"linux\",\"linux-pool\"]",
+                30,
+            ),
+            job(3004, 100, "queued", "[\"self-hosted\",\"paused-only\"]", 40),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    assert_tiles_partition(&body);
+    assert_eq!(body["metrics"]["queuedJobs"], 4);
+    assert_eq!(body["metrics"]["queuedWaiting"], 1);
+    assert_eq!(body["metrics"]["queuedUnmatched"], 3);
+    assert_eq!(
+        body["queue"]["missingLabels"],
+        // Ties are ordered by label, upper case first.
+        json!([
+            { "labels": ["Windows"], "jobs": 1 },
+            { "labels": ["self-hosted-macos"], "jobs": 1 },
+        ])
+    );
+    let titles = body["slo"]["alerts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|alert| alert["title"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    for expected in [
+        "1 job needs `self-hosted-macos`; no pool has it",
+        "1 job needs `Windows`; no pool has it",
+        // The paused pool's label exists, so that job only has no pool free.
+        "1 job has no available pool",
+    ] {
+        assert!(titles.contains(&expected.to_owned()), "{titles:?}");
+    }
+
+    let list = queued_jobs_page(&fixture, "?perPage=100").await?;
+    let item = |id: i64| {
+        list["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(item(3001)["waitingReason"], "no_matching_pool");
+    assert_eq!(item(3001)["missingLabels"], json!(["self-hosted-macos"]));
+    assert_eq!(item(3002)["waitingReason"], "no_matching_pool");
+    assert_eq!(item(3002)["missingLabels"], json!(["Windows"]));
+    // A job a pool serves is missing nothing.
+    assert_eq!(item(3003)["matchedPool"]["id"], "linux");
+    assert_eq!(item(3003)["missingLabels"], json!([]));
+    // No pool free, but no label missing either.
+    assert_eq!(item(3004)["waitingReason"], "no_matching_pool");
+    assert_eq!(item(3004)["missingLabels"], json!([]));
+
+    // Autoscaling ignores the unmatched jobs: the Linux pool counts only the
+    // one job it can run, and the paused pool counts none.
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database, "linux").await?,
+        1
+    );
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database, "stopped").await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn busy_follows_the_runner_status_not_the_busy_flag() -> Result<()> {
     let fixture = ApiFixture::start().await?;
     let database = fixture.database().await?;
