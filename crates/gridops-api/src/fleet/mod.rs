@@ -61,6 +61,11 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/fleet/workload", "fleet:read"),
     ("GET", "/api/v1/fleet/pools/{pool_id}/profile", "fleet:read"),
     ("GET", "/api/v1/fleet/pools/{pool_id}/queue", "fleet:read"),
+    (
+        "GET",
+        "/api/v1/fleet/pools/{pool_id}/capacity",
+        "fleet:read",
+    ),
     ("GET", "/api/v1/operations/{operation_id}", "fleet:read"),
     ("POST", "/api/v1/fleet/enrollments", "fleet:enroll"),
     (
@@ -98,6 +103,11 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/fleet/pools/{pool_id}/profile",
         "fleet:operate",
     ),
+    (
+        "PUT",
+        "/api/v1/fleet/pools/{pool_id}/capacity",
+        "fleet:operate",
+    ),
 ];
 
 pub(crate) fn router() -> Router<AppState> {
@@ -108,6 +118,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(profiles::profile).put(profiles::save_profile),
         )
         .route("/api/v1/fleet/pools/{pool_id}/queue", get(profiles::queue))
+        .route(
+            "/api/v1/fleet/pools/{pool_id}/capacity",
+            get(profiles::capacity).put(profiles::save_capacity),
+        )
         .route("/api/v1/fleet/workload", get(profiles::workload))
         .route("/api/v1/fleet/hosts", get(query::hosts))
         .route("/api/v1/fleet/hosts/{host_id}", get(query::host))

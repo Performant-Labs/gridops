@@ -30,6 +30,7 @@ bot-driven enrollment.
 | GET | `/api/v1/fleet/workload` | browser, `fleet:read` | Workload overview |
 | GET | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:read` | Pool fleet execution profile |
 | GET | `/api/v1/fleet/pools/{pool_id}/queue` | browser, `fleet:read` | Queued runners and blocked hosts |
+| GET | `/api/v1/fleet/pools/{pool_id}/capacity` | browser, `fleet:read` | The pool's minimum, desired and maximum runner counts |
 | POST | `/api/v1/fleet/enrollments` | browser, `fleet:enroll` | Issue a single-use enrollment code |
 | GET | `/api/v1/fleet/enrollments/{enrollment_id}` | browser, `fleet:enroll` | Enrollment status |
 | POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | browser, `fleet:enroll` | Revoke an unused code |
@@ -38,6 +39,7 @@ bot-driven enrollment.
 | POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | browser, `fleet:operate` | Turn a runtime on or off |
 | POST | `/api/v1/fleet/hosts/{host_id}/grants/{target_id}` | browser, `fleet:operate` | Set a target grant |
 | PUT | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:operate` | Save the pool's fleet execution profile |
+| PUT | `/api/v1/fleet/pools/{pool_id}/capacity` | browser, `fleet:operate` | Set the pool's runner counts; runners above the new count finish their job and are not replaced |
 | POST | `/api/v1/fleet/api-tokens` | browser (admin, cookie only) | Create an API token |
 | GET | `/api/v1/fleet/api-tokens` | browser (cookie only) | List own API tokens |
 | POST | `/api/v1/fleet/api-tokens/{token_id}/revoke` | browser (cookie only) | Revoke an API token |
@@ -167,6 +169,7 @@ Mutating browser routes protect replays in one of two ways:
 | `POST /fleet/enrollments/{id}/revoke` | idempotent by state | `200` again |
 | `POST /fleet/api-tokens/{id}/revoke` | idempotent by state | `200` again |
 | `PUT /fleet/pools/{id}/profile` | last-write-wins | the saved profile |
+| `PUT /fleet/pools/{id}/capacity` | last-write-wins | the saved `minCount`, `desiredCount`, `maxCount` (`0 <= min <= desired <= max <= 256`; a repository pool's max must cover its repositories) |
 
 Routes not listed (`retire`, `repair_unconfirmed`) take `expectedRevision`
 in their body and fail replays with `revision_conflict`.
