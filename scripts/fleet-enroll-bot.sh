@@ -130,7 +130,8 @@ uuid_guess() {
   if command -v uuidgen >/dev/null 2>&1; then
     uuidgen
   else
-    printf 'bot-%s' "$(date +%s)-$$-$RANDOM"
+    # POSIX sh has no $RANDOM; read a few bytes from the kernel instead.
+    printf 'bot-%s' "$(date +%s)-$$-$(od -An -N4 -tu4 /dev/urandom | tr -d ' \n')"
   fi
 }
 

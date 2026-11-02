@@ -67,6 +67,13 @@ pub fn runner_arch_label() -> &'static str {
     }
 }
 
+/// The one label every Linux runner carries, whatever its pool configures, so
+/// a workflow that asks for `self-hosted-linux` can run on any of them.
+pub const LINUX_RUNNER_LABEL: &str = "self-hosted-linux";
+
+/// The same for macOS runners.
+pub const MACOS_RUNNER_LABEL: &str = "self-hosted-macos";
+
 pub fn runner_system_labels(provider: &str) -> [&'static str; 3] {
     match provider {
         "tart" => ["self-hosted", "macOS", "ARM64"],
@@ -79,6 +86,14 @@ pub fn effective_runner_labels(provider: &str, configured: &[String]) -> Vec<Str
         .into_iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
+    labels.push(
+        if provider == "tart" {
+            MACOS_RUNNER_LABEL
+        } else {
+            LINUX_RUNNER_LABEL
+        }
+        .to_owned(),
+    );
     for label in configured {
         if !is_runner_system_label(label)
             && !labels
@@ -116,6 +131,12 @@ pub fn provider_supports_labels(
     requested.iter().all(|requested| {
         if requested.eq_ignore_ascii_case("self-hosted") {
             return true;
+        }
+        if requested.eq_ignore_ascii_case(LINUX_RUNNER_LABEL) {
+            return provider != "tart";
+        }
+        if requested.eq_ignore_ascii_case(MACOS_RUNNER_LABEL) {
+            return provider == "tart";
         }
         if is_runner_system_label(requested) {
             return runner_supports_system_label(provider, requested);
@@ -222,7 +243,10 @@ async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<(i64, String)>, 
                     SELECT 1 FROM json_each(candidate.labels) assigned
                     WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
                   )) OR
-                  lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch)
+                  lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch) OR
+                  -- Every Linux and macOS runner takes its platform label, configured or not.
+                  (lower(CAST(requested.value AS TEXT))='self-hosted-linux' AND platform.os='linux') OR
+                  (lower(CAST(requested.value AS TEXT))='self-hosted-macos' AND platform.os='macos')
                 )
               )
             )
@@ -573,6 +597,59 @@ mod tests {
     }
 
     #[test]
+    fn every_linux_runner_takes_the_shared_linux_label() {
+        // Docker runners carry it whether or not the pool lists it, once.
+        for configured in [vec![], vec!["Self-Hosted-Linux".to_owned()]] {
+            let labels = effective_runner_labels("docker", &configured);
+            assert_eq!(
+                labels
+                    .iter()
+                    .filter(|label| label.eq_ignore_ascii_case(LINUX_RUNNER_LABEL))
+                    .count(),
+                1,
+                "{labels:?}"
+            );
+        }
+        assert!(provider_supports_labels(
+            "docker",
+            &["self-hosted-linux".into()],
+            &[]
+        ));
+        // A macOS VM isn't a Linux runner, even if its pool lists the label.
+        assert!(!provider_supports_labels(
+            "tart",
+            &["self-hosted-linux".into()],
+            &["self-hosted-linux".into()]
+        ));
+        assert!(
+            !effective_runner_labels("tart", &[])
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(LINUX_RUNNER_LABEL))
+        );
+        // And macOS runners carry theirs, which Linux ones don't.
+        assert!(provider_supports_labels(
+            "tart",
+            &["self-hosted-macos".into()],
+            &[]
+        ));
+        assert!(!provider_supports_labels(
+            "docker",
+            &["self-hosted-macos".into()],
+            &["self-hosted-macos".into()]
+        ));
+        assert!(
+            effective_runner_labels("tart", &[])
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL))
+        );
+        assert!(
+            !effective_runner_labels("docker", &[])
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL))
+        );
+    }
+
+    #[test]
     fn mixed_pools_choose_the_provider_that_matches_job_system_labels() {
         let providers = vec!["docker".into(), "tart".into()];
         let configured = vec!["gridops".into(), "release".into()];
@@ -657,6 +734,44 @@ mod tests {
             .await?,
             Some("tart".into())
         );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_platform_job_is_owned_by_any_pool_of_that_platform_not_just_ones_that_list_the_label()
+    -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-linux-label-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        // 'plain' never lists self-hosted-linux and 'mac' is Tart only.
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+            INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,provider,providers,labels,image,docker_image,tart_image,autoscaling_enabled,created_at,updated_at)
+              VALUES
+              ('plain',1,10,'plain','repository','docker','["docker"]','["gridops"]','runner:latest','runner:latest','macos-base',1,1,1),
+              ('mac',1,10,'mac','repository','tart','["tart"]','["self-hosted-linux"]','runner:latest','runner:latest','macos-base',1,2,2);
+            INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at)
+              VALUES ('plain',10,1),('mac',10,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES
+              (30,20,'test','queued','["self-hosted-linux"]','https://github.com/octo-org/gridops/actions/runs/20/job/30',1,1),
+              (31,20,'build','queued','["self-hosted-macos"]','https://github.com/octo-org/gridops/actions/runs/20/job/31',2,2);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        assert_eq!(assigned_queued_jobs(&database, "plain").await?, 1);
+        assert_eq!(assigned_queued_jobs(&database, "mac").await?, 1);
 
         database.close().await;
         fs::remove_dir_all(directory)?;

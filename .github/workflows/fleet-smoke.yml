@@ -1,6 +1,6 @@
 # Manually triggered check that a fleet machine can run a job end to end.
-# Runs on runners from a pool whose fleet profile adds the
-# `gridops-fleet-test` label.
+# Runs on any Linux runner a GridOps pool launched (every GridOps pool carries
+# the `gridops` label), as opposed to a legacy compose runner.
 name: Fleet smoke test
 
 on:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: [self-hosted, gridops-fleet-test]
+    runs-on: [self-hosted-linux, gridops]
     timeout-minutes: 10
     steps:
       # Expressions keep this working in bash and PowerShell alike.
