@@ -149,9 +149,9 @@ chmod +x "$stubs"/*
 
 # Machines, as GET /api/v1/fleet/hosts lists them (only the fields the
 # preflight reads, plus a few it must ignore).
-host() { # id name enrollment lifecycle freshness failed_last_hour start_gate_json
-  printf '{"projection":"host","id":"%s","name":"%s","enrollment":"%s","lifecycle":"%s","heartbeatFreshness":"%s","failedPlacementsLastHour":%s,"recentPlacementFailures":%s,"startGate":%s,"agentVersion":"0.1.4"}' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+host() { # id name enrollment lifecycle freshness failed_last_hour start_gate_json [os] [arch]
+  printf '{"projection":"host","id":"%s","name":"%s","hostOs":"%s","architecture":"%s","enrollment":"%s","lifecycle":"%s","heartbeatFreshness":"%s","failedPlacementsLastHour":%s,"recentPlacementFailures":%s,"startGate":%s,"agentVersion":"0.1.4"}' \
+    "$1" "$2" "${9:-linux}" "${10:-x64}" "$3" "$4" "$5" "$6" "$7" "$8"
 }
 page() { # next_cursor items...
   next=$1; shift
@@ -168,13 +168,29 @@ pending=$(host h-p new-box pending paused unknown 0 "$no_failures" null)
 stale=$(host h-s flaky-box approved active stale 0 "$no_failures" null)
 gated=$(host h-g gated-box approved active fresh 3 '[{"reason":"start_deadline_expired","message":"Runner did not start in time","count":3,"latestAt":"2026-11-02T19:58:00.000Z","latestPlacementId":"p"}]' '{"failures":3,"windowMinutes":15,"since":"2026-11-02T19:45:00.000Z","until":"2026-11-02T20:00:00.000Z","message":"Not accepting new runners: 3 start failures in the last 15 minutes."}')
 failing=$(host h-f failing-box approved active fresh 2 '[{"reason":"agent_reported","message":"not_registered","count":2,"latestAt":"2026-11-02T19:58:00.000Z","latestPlacementId":"p"}]' null)
+# The macOS ARM64 machine the release builds the macOS agent on, and ones
+# that cannot: paused, not reporting, set aside, waiting for approval, x64.
+mac=$(host h-m mac-box approved active fresh 0 "$no_failures" null macos arm64)
+mac_paused=$(host h-mp mac-paused approved paused fresh 0 "$no_failures" null macos arm64)
+mac_stale=$(host h-ms mac-stale approved active stale 0 "$no_failures" null macos arm64)
+mac_gated=$(host h-mg mac-gated approved active fresh 0 "$no_failures" '{"failures":3,"windowMinutes":15,"since":"2026-11-02T19:45:00.000Z","until":"2026-11-02T20:00:00.000Z","message":"Not accepting new runners: 3 start failures in the last 15 minutes."}' macos arm64)
+mac_pending=$(host h-mn mac-new pending paused unknown 0 "$no_failures" null macos arm64)
+mac_retired=$(host h-mr mac-old approved retired offline 0 "$no_failures" null macos arm64)
+mac_intel=$(host h-mi mac-intel approved active fresh 0 "$no_failures" null macos x64)
+linux_arm=$(host h-la linux-arm approved active fresh 0 "$no_failures" null linux arm64)
 
-page null "$healthy_a" "$retired" "$pending" > "$tmp/hosts-healthy"
+page null "$healthy_a" "$retired" "$pending" "$mac" > "$tmp/hosts-healthy"
 page page-2 "$healthy_a" > "$tmp/hosts-page1"
 page null "$stale" > "$tmp/hosts-page2"
-page null "$healthy_a" "$stale" > "$tmp/hosts-stale"
+page null "$healthy_a" "$stale" "$mac" > "$tmp/hosts-stale"
 page null "$healthy_b" "$gated" > "$tmp/hosts-gated"
-page null "$healthy_a" "$failing" > "$tmp/hosts-failing"
+page null "$healthy_a" "$failing" "$mac" > "$tmp/hosts-failing"
+page null "$healthy_a" > "$tmp/hosts-no-mac"
+page null "$healthy_a" "$mac_paused" "$mac_stale" "$mac_gated" > "$tmp/hosts-mac-unready"
+page null "$healthy_a" "$mac_pending" "$mac_retired" "$mac_intel" "$linux_arm" > "$tmp/hosts-mac-wrong"
+page null "$healthy_a" "$mac_paused" "$mac" > "$tmp/hosts-mac-one-ready"
+page page-2 "$healthy_a" > "$tmp/hosts-mac-page1"
+page null "$mac" > "$tmp/hosts-mac-page2"
 page null > "$tmp/hosts-none"
 
 # An expiry <seconds> from now, as Settings -> API tokens shows it (UTC).
@@ -205,11 +221,12 @@ check "all good: token expiry in range" 'line "^PASS  *token-expiry"'
 check "all good: heartbeats fresh" 'line "^PASS  *heartbeats"'
 check "all good: no start gate" 'line "^PASS  *start-gate"'
 check "all good: no placement failures" 'line "^PASS  *placement-failures"'
+check "all good: a macOS ARM64 machine is ready" 'line "^PASS  *macos-machine.*mac-box"'
 check "all good: sudo rule on ok.example" 'line "^PASS  *upgrade-sudo ok.example"'
 check "all good: sudo rule on all.example" 'line "^PASS  *upgrade-sudo all.example"'
 check "all good: disk" 'line "^PASS  *disk"'
 check "all good: no FAIL line" '! line "^FAIL"'
-check "retired and pending machines are not counted" 'line "1 machine" && ! line "old-box" && ! line "new-box"'
+check "retired and pending machines are not counted" 'line "2 machines" && ! line "old-box" && ! line "new-box"'
 check "the token is never printed" '! printf "%s" "$out" | grep -q "$token"'
 check "the token is never on a command line" '! grep -q "$token" "$tmp/curl-calls"'
 check "the token reaches curl through its config on stdin" 'grep -q "Authorization: Bearer $token" "$tmp/curl-config"'
@@ -280,8 +297,10 @@ check "placement failures: fails naming machine and reason" '[ $status != 0 ] &&
 check "placement failures: start gate still passes" 'line "^PASS  *start-gate"'
 run FAKE_HOSTS="$tmp/hosts-failing" PREFLIGHT_MAX_FAILED_PLACEMENTS=2
 check "placement failures within the allowance pass" '[ $status = 0 ]' || show
-run FAKE_HOSTS="$tmp/hosts-none"
+run FAKE_HOSTS="$tmp/hosts-none" PREFLIGHT_RELEASE_MACOS=false
 check "no machines: passes and says so" '[ $status = 0 ] && line "^PASS  *heartbeats.*0 machines"' || show
+run FAKE_HOSTS="$tmp/hosts-none"
+check "no machines: the macOS check fails" '[ $status != 0 ] && line "^FAIL  *macos-machine"' || show
 
 # 7. The upgrade command on system-service machines.
 run PREFLIGHT_UPGRADE_HOSTS="password.example"
@@ -310,6 +329,33 @@ run PREFLIGHT_DATA_PATH=/var/lib/docker PREFLIGHT_DEPLOY_HOST=deploy.example FAK
 check "disk on the deploy host over ssh" '[ $status != 0 ] && line "^FAIL  *disk.*2 GB free" && grep -q "deploy.example df -Pk /var/lib/docker" "$tmp/ssh-calls" && [ ! -s "$tmp/df-calls" ]'
 run PREFLIGHT_DATA_PATH=/var/lib/docker PREFLIGHT_MIN_FREE_GB=ten
 check "a non-number minimum is refused" '[ $status != 0 ] && line "^FAIL  *config.*PREFLIGHT_MIN_FREE_GB"'
+
+# 7b. The macOS ARM64 machine every release builds the macOS agent on.
+run FAKE_HOSTS="$tmp/hosts-no-mac"
+check "no Mac: fails early" '[ $status != 0 ] && line "^FAIL  *macos-machine.*no macOS ARM64 machine"' || show
+check "no Mac: says how to fix it or opt out" 'line "^FAIL  *macos-machine.*RELEASE_MACOS" && line "^FAIL  *macos-machine.*without a macOS agent"'
+check "no Mac: the other checks still pass" 'line "^PASS  *heartbeats" && line "^PASS  *start-gate"'
+check "no Mac: in the summary" 'line "^  - macos-machine"'
+run FAKE_HOSTS="$tmp/hosts-mac-unready"
+check "paused, stale or set-aside Macs: fails" '[ $status != 0 ] && line "^FAIL  *macos-machine"' || show
+check "names why each Mac cannot build" 'line "^FAIL  *macos-machine.*mac-paused.*paused" && line "^FAIL  *macos-machine.*mac-stale.*stale" && line "^FAIL  *macos-machine.*mac-gated.*set aside"'
+run FAKE_HOSTS="$tmp/hosts-mac-wrong"
+check "pending, retired, Intel Macs and Linux ARM64 do not count" '[ $status != 0 ] && line "^FAIL  *macos-machine.*no macOS ARM64 machine"' || show
+check "a Mac waiting for approval is pointed out" 'line "^FAIL  *macos-machine.*mac-new.*pending"'
+run FAKE_HOSTS="$tmp/hosts-mac-one-ready"
+check "one ready Mac is enough" 'line "^PASS  *macos-machine.*mac-box" && ! line "^FAIL  *macos-machine"' || show
+run FAKE_HOSTS="$tmp/hosts-mac-page1" FAKE_HOSTS_PAGE2="$tmp/hosts-mac-page2"
+check "a Mac on a later page is found" '[ $status = 0 ] && line "^PASS  *macos-machine.*mac-box"' || show
+run PREFLIGHT_IGNORE_HOSTS="mac-box"
+check "ignoring the Mac does not excuse it: the release still needs it" 'line "^PASS  *macos-machine.*mac-box"' || show
+run FAKE_HOSTS="$tmp/hosts-no-mac" PREFLIGHT_RELEASE_MACOS=false
+check "opt-out: skipped, passes, and says the release has no macOS agent" '[ $status = 0 ] && line "^SKIP  *macos-machine.*without a macOS agent" && line "^SKIP  *macos-machine.*checklist"' || show
+run PREFLIGHT_RELEASE_MACOS=true
+check "PREFLIGHT_RELEASE_MACOS=true is the default" '[ $status = 0 ] && line "^PASS  *macos-machine"' || show
+run PREFLIGHT_RELEASE_MACOS=no
+check "an unknown PREFLIGHT_RELEASE_MACOS is refused" '[ $status != 0 ] && line "^FAIL  *config.*PREFLIGHT_RELEASE_MACOS"'
+run GRIDOPS_TOKEN=gat_wrong
+check "machine list unreadable: the macOS check fails, not passes" 'line "^FAIL  *macos-machine.*not checked"'
 
 # 9. The summary lists every failure, and nothing is cut short by set -e.
 run GRIDOPS_TOKEN=gat_wrong PREFLIGHT_UPGRADE_HOSTS="password.example" PREFLIGHT_DATA_PATH=/missing

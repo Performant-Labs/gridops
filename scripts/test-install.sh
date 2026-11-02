@@ -4,6 +4,9 @@
 # outside a temp directory.
 #
 #   sh scripts/test-install.sh
+#
+# Checks are strings run by eval, so their variables expand when they run.
+# shellcheck disable=SC2016,SC2034
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +18,9 @@ mkdir -p "$stubs" "$tmp/usr/bin" "$tmp/release"
 # The "release": an agent that reports a version, and its checksums.
 printf '#!/bin/sh\necho "gridops-host-agent 9.9.9"\n' > "$tmp/release/gridops-host-agent-linux-x64"
 printf '#!/bin/sh\necho "gridops-host-agent 9.9.9"\n' > "$tmp/release/gridops-host-agent-linux-arm64"
-(cd "$tmp/release" && sha256sum gridops-host-agent-linux-* > SHA256SUMS)
+printf '#!/bin/sh\necho "gridops-host-agent 9.9.9 macos-arm64"\n' > "$tmp/release/gridops-host-agent-macos-arm64"
+printf '#!/bin/sh\necho "gridops-host-agent 9.9.9 macos-x64"\n' > "$tmp/release/gridops-host-agent-macos-x64"
+(cd "$tmp/release" && sha256sum gridops-host-agent-* > SHA256SUMS)
 
 cat > "$stubs/curl" <<STUB
 #!/bin/sh
@@ -42,6 +47,21 @@ echo "\${FAKE_UID:-0}"
 STUB
 cat > "$stubs/sleep" <<STUB
 #!/bin/sh
+STUB
+# uname and sysctl: a Linux x64 machine unless FAKE_UNAME_S/FAKE_UNAME_M say
+# otherwise; sysctl answers hw.optional.arm64 as Apple silicon does (1), or
+# as an Intel Mac does (FAKE_ARM64=0).
+cat > "$stubs/uname" <<STUB
+#!/bin/sh
+case "\$1" in
+  -s) echo "\${FAKE_UNAME_S:-Linux}" ;;
+  -m) echo "\${FAKE_UNAME_M:-x86_64}" ;;
+  *) exec /usr/bin/env -u PATH uname "\$@" ;;
+esac
+STUB
+cat > "$stubs/sysctl" <<STUB
+#!/bin/sh
+[ "\$*" = "-n hw.optional.arm64" ] && echo "\${FAKE_ARM64:-1}"
 STUB
 chmod +x "$stubs"/*
 
@@ -95,6 +115,35 @@ check "curl aborts a stalled transfer" 'grep -q -e "--speed-limit 1000 --speed-t
 run FAKE_OLD_CURL=1 FAKE_UNIT= GRIDOPS_NO_ENROLL=1 GRIDOPS_NO_SERVICE=1 GRIDOPS_INSTALL_DIR="$tmp/user-bin3" >/dev/null 2>&1
 check "an older curl still installs" '"$tmp/user-bin3/gridops-host-agent" --version | grep -q 9.9.9'
 check "an older curl is not given --retry-all-errors" '[ -s "$tmp/curl-calls" ] && ! grep -q -e "--retry-all-errors" "$tmp/curl-calls" && grep -q -e "--retry 5" "$tmp/curl-calls"'
+
+# 7. macOS: the installer asks the release for gridops-host-agent-macos-<arch>,
+# the name the release workflow stages, and checks it against SHA256SUMS.
+mac() { run FAKE_UNAME_S=Darwin FAKE_UNIT= GRIDOPS_NO_ENROLL=1 GRIDOPS_NO_SERVICE=1 "$@"; }
+: > "$tmp/curl-calls"; : > "$tmp/calls"
+out="$(mac FAKE_UNAME_M=arm64 GRIDOPS_INSTALL_DIR="$tmp/mac-bin" 2>&1)" || echo "$out"
+check "macOS arm64 downloads gridops-host-agent-macos-arm64" 'grep -q "/v9.9.9/gridops-host-agent-macos-arm64\$" "$tmp/curl-calls"'
+check "macOS arm64 installs that binary" '"$tmp/mac-bin/gridops-host-agent" --version | grep -q "9.9.9 macos-arm64"'
+check "macOS does not look for a systemd service" '! grep -q systemctl "$tmp/calls"'
+: > "$tmp/curl-calls"
+mac FAKE_UNAME_M=x86_64 FAKE_ARM64=1 GRIDOPS_INSTALL_DIR="$tmp/mac-bin-rosetta" >/dev/null 2>&1 || true
+check "a shell under Rosetta still gets the arm64 agent" '"$tmp/mac-bin-rosetta/gridops-host-agent" --version | grep -q "macos-arm64"'
+mac FAKE_UNAME_M=x86_64 FAKE_ARM64=0 GRIDOPS_INSTALL_DIR="$tmp/mac-bin-intel" >/dev/null 2>&1 || true
+check "an Intel Mac gets gridops-host-agent-macos-x64" '"$tmp/mac-bin-intel/gridops-host-agent" --version | grep -q "macos-x64"'
+# A release whose SHA256SUMS does not list the macOS binary is refused.
+cp "$tmp/release/SHA256SUMS" "$tmp/SHA256SUMS.full"
+grep -v macos-arm64 "$tmp/SHA256SUMS.full" > "$tmp/release/SHA256SUMS"
+if out="$(mac FAKE_UNAME_M=arm64 GRIDOPS_INSTALL_DIR="$tmp/mac-bin-nosum" 2>&1)"; then ok=0; else ok=1; fi
+cp "$tmp/SHA256SUMS.full" "$tmp/release/SHA256SUMS"
+check "a release without a checksum for the macOS agent is refused" '[ $ok = 1 ] && echo "$out" | grep -q "SHA256SUMS has no entry for gridops-host-agent-macos-arm64" && [ ! -e "$tmp/mac-bin-nosum/gridops-host-agent" ]'
+
+# 8. The release workflow publishes every name the installer asks for, and
+# lists each in SHA256SUMS (the Assemble step sums gridops-*).
+workflow="$here/../.github/workflows/release.yml"
+check "the workflow stages gridops-host-agent-macos-arm64" 'grep -q "dist/gridops-host-agent-macos-arm64\$" "$workflow"'
+check "the workflow stages gridops-host-agent-macos-x64" 'grep -q "dist/gridops-host-agent-macos-x64\$" "$workflow"'
+check "the workflow stages gridops-host-agent-linux-<arch>" 'grep -q "dist/gridops-host-agent-linux-\${{ matrix.arch }}" "$workflow"'
+check "SHA256SUMS sums every staged agent" 'grep -q "sha256sum gridops-\* " "$workflow"'
+check "the publish job requires the macOS agent among the files it sums" 'grep -q "expected=.*gridops-host-agent-macos-arm64" "$workflow"'
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all passed"

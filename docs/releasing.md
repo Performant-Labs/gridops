@@ -7,20 +7,57 @@ runners. Nothing is compiled on a user's machine.
 |---|---|---|
 | `gridops-host-agent-linux-x64`, `-linux-arm64` (static, musl) | the Linux Docker runners, in the CI image | release assets |
 | `install.sh`, `SHA256SUMS` | the Linux runner | release assets |
-| `gridops-host-agent-macos-arm64`, `-macos-x64`, `gridops-tart-agent-macos-arm64` | the Mac's native macOS runner | release assets (only with a Mac runner) |
-| `api`, `manager`, `reconciler` images (`linux/amd64`, `linux/arm64`) | the Mac's native macOS runner, through its Docker | `ghcr.io/<owner>/gridops-<service>:<version>`, `:<major.minor>`, `:latest` (only with a Mac runner) |
+| `gridops-host-agent-macos-arm64`, `-macos-x64`, `gridops-tart-agent-macos-arm64` | a self-hosted macOS ARM64 runner (a Tart VM guest, or a Mac) | release assets, in every release |
+| `api`, `manager`, `reconciler` images (`linux/amd64`, `linux/arm64`) | a self-hosted macOS ARM64 runner, through its Docker | `ghcr.io/<owner>/gridops-<service>:<version>`, `:<major.minor>`, `:latest` (only with `RELEASE_IMAGES`) |
 | `compose.release.yaml`, `env.example` | the Linux runner | release assets (only when the images were built) |
 
 Windows is not a deployment target: nothing is built or published for it.
 
-## Without a Mac runner
+## What a release builds
 
-The macOS agents and the control plane images need a self-hosted macOS ARM64
-runner. They run only when the repository variable `RELEASE_MACOS` is `true`
-(Settings → Secrets and variables → Actions → Variables). Without it the
-release carries the Linux agents and `install.sh`, which is enough to enroll and
-upgrade Linux fleet machines. Deployments that build their images from source
-(`docker compose build`) don't need the images at all.
+Repository variables (Settings → Secrets and variables → Actions → Variables,
+or `gh variable list --repo Performant-Labs/gridops`) decide the optional
+parts. Each is independent of the others.
+
+| Variable | Unset | Set |
+|---|---|---|
+| `RELEASE_MACOS` | the macOS agents are built: **every release has them** | `false` only: an emergency opt-out, see below. Any other value builds them |
+| `RELEASE_IMAGES` | no images, no `compose.release.yaml` or `env.example`; deployments build from source (`docker compose build`) | `true`: the control plane images and `compose.release.yaml` |
+| `RELEASE_LINUX_ARM64` | the Linux x64 agent only | `true`: the Linux arm64 agent too (needs an `ARM64` runner in a pool) |
+
+The Linux x64 agent, `install.sh` and `SHA256SUMS` are always built.
+`SHA256SUMS` lists every binary the release carries, the macOS ones included,
+and `install.sh` checks the one it downloads against it.
+
+### The macOS agent
+
+The macOS agents are part of every release. The `agent-macos` job builds them
+on a self-hosted macOS ARM64 runner, usually a Tart VM that GridOps starts on
+the Mac ([what it needs](macos-runners.md#what-a-release-needs-from-the-macos-runner)).
+The publish job waits for it and does not publish the release without them:
+
+- **No macOS runner takes the job.** GitHub would keep it queued for up to 24
+  hours and has no setting to shorten that (`timeout-minutes` counts only once
+  a runner has started a job). So the `macos-runner-watchdog` job, on Linux,
+  cancels the run when no runner has started the macOS job after 60 minutes,
+  and says so in the run summary. Nothing is published. Bring the runner
+  online and re-run the run.
+- **The macOS job fails.** The publish job fails with the reason in the run
+  summary, and nothing is published. Fix the cause and re-run the failed
+  jobs.
+
+The release preflight's `macos-machine` check fails before step 1 when GridOps
+has no approved, active macOS ARM64 machine with a fresh heartbeat, so a
+missing Mac is found before the tag rather than an hour after it.
+
+**Opting out.** Only in an emergency, set the repository variable
+`RELEASE_MACOS` to exactly `false`. The release is then **published without a
+macOS agent**: the installer of that version cannot install or upgrade the
+agent on a Mac. Write the opt-out, and why, into that release's checklist
+(step 4), run the preflight with `PREFLIGHT_RELEASE_MACOS=false`, and delete
+the variable again once the release is out. When a run was already waiting or failed, re-run all
+of its jobs after setting the variable, not only the failed ones: the `version`
+job, which reads the variable, must run again.
 
 ## Cut a release
 
@@ -47,8 +84,13 @@ and `scripts/release-preflight.sh` checks them before step 1.
    machines to `v0.2.0`; until that release exists, installs fail.
 
 The workflow refuses a tag that doesn't match the workspace version. To check
-that everything builds without publishing, run the workflow by hand from the
-Actions tab.
+that everything builds without publishing, run the workflow by hand on a branch
+from the Actions tab (`gh workflow run release.yml --ref master`). That run
+builds what a tag would, macOS agent included, and assembles the release in the
+publish job, but only a tag publishes: the last step is skipped and the run
+summary lists the assets it would have published. Its `skip_macos_agent` input
+leaves the macOS agent out of a run by hand, to check the rest while no macOS
+runner is online; it has no effect on a tag.
 
 Run the workflow by hand on the release commit before tagging. The checklist
 asks for it.
@@ -101,7 +143,8 @@ A release can be cut end to end by an agent, once the
 the checklist are in place: GitHub rights on the repository, the
 [release operator token](fleet-automation.md#the-release-operator-token),
 a login on the deploy host, the narrow sudo rule on each machine that runs
-the agent as a system service, and a healthy fleet.
+the agent as a system service, a healthy fleet, and a macOS ARM64 machine
+online for the macOS agent build.
 `scripts/release-preflight.sh` checks the ones it can reach and fails, with
 a list, before step 1 if any is missing. With them, the agent:
 
@@ -232,9 +275,17 @@ Rebuilding the same commit gives the same number. To get a new number, commit.
   `gcc` and `apt-get`. The x64 agent always builds. The arm64 agent builds only
   when the repository variable `RELEASE_LINUX_ARM64` is `true`, which needs an
   `ARM64` runner in a pool.
-- **macOS:** Xcode command line tools and Docker (OrbStack or Docker Desktop)
-  with buildx on the Mac. The job installs its own Rust toolchain under the
-  job's temporary directory.
+- **macOS agent** (every release): a runner with the labels `self-hosted`,
+  `macOS` and `ARM64`, running natively on Apple silicon, with the Xcode
+  command line tools and 10 GB free. A Tart VM guest from a Cirrus Labs
+  `-base` or `-xcode` image has all of it. The job installs its own Rust
+  toolchain under the job's temporary directory and needs no Docker and no
+  Homebrew; its first step checks the rest and fails with what is missing. See
+  [macOS runners](macos-runners.md#what-a-release-needs-from-the-macos-runner).
+- **Control plane images** (`RELEASE_IMAGES`): for now a macOS ARM64 runner
+  with Docker (OrbStack or Docker Desktop) and buildx, which a Tart VM guest
+  does not have. Moving this job to a Linux runner is
+  [issue #80](https://github.com/Performant-Labs/gridops/issues/80).
 
 ## How installs use a release
 

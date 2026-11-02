@@ -118,6 +118,24 @@ These are native-host limits, separate from the Docker container limits. The cen
 
 Each macOS runner receives only a short-lived GitHub JIT configuration over stdin. It is never placed in a command-line argument or persisted by the Tart agent. When the job ends, the VM is stopped; the reconciler deletes the clone and its retained management record. The base VM remains stopped and unchanged.
 
+## What a release needs from the macOS runner
+
+Every GridOps release builds the macOS agents (`gridops-host-agent-macos-arm64`, `-macos-x64` and `gridops-tart-agent-macos-arm64`) in the `agent-macos` job of `.github/workflows/release.yml`, and the release is not published without them ([Releasing](releasing.md#the-macos-agent)). The job asks for `runs-on: [self-hosted, macOS, ARM64]`, which every Tart runner advertises, so any pool with the Tart provider can take it. Inside the guest the job needs:
+
+- **Apple silicon, natively.** The first step fails under Rosetta or on an Intel Mac.
+- **The Xcode command line tools** (`cc`, `ld`, `lipo`, `xcrun`, `git` and the macOS SDK, which builds both the arm64 and the x86_64 agent). The Cirrus Labs `-base` and `-xcode` images have them; a `-vanilla` image does not.
+- **`curl` and `shasum`**, which macOS has in `/usr/bin`.
+- **10 GB free** for the Rust toolchain, the crates and two release builds.
+- **Internet access** to `sh.rustup.rs`, `static.rust-lang.org`, crates.io and GitHub. Softnet allows it; it blocks only private addresses.
+
+It needs no Rust in the image (it installs its own toolchain under the job's temporary directory), no Homebrew and no Docker. Its first step, **Check the runner**, checks the list above and names what is missing.
+
+The job's limit is 75 minutes once it starts. With the default guardrails above (4 CPUs, one runner at a time) a CI job that holds the only macOS slot delays the release, so start the release's dry run when the pool is idle. If no runner starts the job within 60 minutes, the release workflow's `macos-runner-watchdog` job cancels the run and says so in the run summary, rather than leaving it queued for GitHub's 24-hour limit.
+
+Before a release, `scripts/release-preflight.sh` checks that GridOps sees this Mac: its `macos-machine` check needs a machine in the fleet list with `hostOs` `macos` and `architecture` `arm64` that is approved, `active`, has a fresh heartbeat and is not set aside for failing starts. That means the Mac is enrolled as a fleet machine ([Fleet machines](fleet-agent.md)) as well as hosting the Tart agent. Pause or drain it during a release only if you mean to publish without the macOS agent, which needs the repository variable `RELEASE_MACOS` set to `false`.
+
+The release's control plane images (repository variable `RELEASE_IMAGES`) are a different job: it builds Linux images through Docker and buildx, which a Tart guest does not have, so for now it needs a Mac runner with OrbStack or Docker Desktop. Moving it to a Linux runner is [issue #80](https://github.com/Performant-Labs/gridops/issues/80).
+
 ## Bitbucket Cloud workspaces
 
 GridOps can attach Bitbucket Cloud workspaces to the same mixed Docker/Tart pool. The workspace runner remains a macOS Tart VM, uses the pool's existing CPU, memory, disk, and runner-count guardrails, and is isolated from GitHub runner credentials and workspaces.
