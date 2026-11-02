@@ -5,6 +5,7 @@ import { Activity, ArrowRight, ChevronDown, Server } from "lucide-react";
 import { useState } from "react";
 
 import { CapacityMeter } from "~/components/capacity-meter";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { Callout, InlineLoading, ListGroup, PropertiesPanel, PropertyGroup, PropertyRow, SectionHeading } from "~/components/page";
 import { StatusBadge, StatusDot, statusLabel } from "~/components/status-icon";
 import { Avatar, githubAvatar } from "~/components/ui/avatar";
@@ -16,6 +17,7 @@ import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { PoolEventTable, usePoolEvents } from "~/features/runner-pools/pool-events";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
+import { useRefreshInterval } from "~/lib/use-refresh-interval";
 import { cn, formatRunnerShape } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/runner-pools/$poolId/")({
@@ -52,11 +54,12 @@ function ProvisioningCallout({ pool }: { pool: RunnerPoolDetail }) {
 
 function PoolOverviewTab() {
   const pool = poolRoute.useLoaderData();
-  useLiveRouteRefresh(5_000);
+  const live = useLiveRouteRefresh(5_000);
+  const runnersInterval = useRefreshInterval(5_000);
   const runners = useQuery({
     queryKey: ["pool-runners", pool.id],
     queryFn: () => getRunnersPage({ pool: pool.id, page: 1 }),
-    refetchInterval: 5_000,
+    refetchInterval: runnersInterval ?? false,
   });
   const events = usePoolEvents(pool.id, 1);
   const providers = pool.providers?.length ? pool.providers : [pool.provider];
@@ -67,6 +70,7 @@ function PoolOverviewTab() {
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
       <div className="min-w-0 flex-1">
+        <LiveRouteRefreshNotice live={live} />
         <ProvisioningCallout pool={pool} />
 
         {runners.isPending ? <InlineLoading label="Loading runners…" /> : items.length === 0 ? (

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 
 import { SectionHeading } from "~/components/page";
+import { useRefreshInterval, useRefreshSignal } from "~/lib/use-refresh-interval";
 import { cn, formatDateTime } from "~/lib/utils";
 import { getFleetWorkload } from "./admin-api";
 import type { FleetWorkload, WorkloadWindow } from "./admin-contracts";
@@ -28,6 +29,9 @@ export function FleetWorkloadSection() {
   const [hidden, setHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  // The 24-hour chart reloads every minute at the default Refresh setting.
+  const chartInterval = useRefreshInterval(60_000);
+  const refreshSignal = useRefreshSignal();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -42,12 +46,12 @@ export function FleetWorkloadSection() {
       }
     }
     void load();
-    const interval = window_ === "24h" ? globalThis.setInterval(() => void load(), 60_000) : undefined;
+    const interval = window_ === "24h" && chartInterval !== null ? globalThis.setInterval(() => void load(), chartInterval) : undefined;
     return () => {
       controller.abort();
       if (interval !== undefined) globalThis.clearInterval(interval);
     };
-  }, [window_]);
+  }, [chartInterval, refreshSignal, window_]);
 
   if (hidden || (workload !== null && workload.machines.length === 0)) return null;
 

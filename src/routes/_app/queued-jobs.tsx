@@ -3,6 +3,7 @@ import { Hourglass } from "lucide-react";
 
 import { PageBody, PageHeader } from "~/components/page";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { getQueuedJobsPage } from "~/features/dashboard/dashboard.functions";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { validatePageSearch } from "~/lib/pagination";
@@ -19,11 +20,12 @@ export const Route = createFileRoute("/_app/queued-jobs")({
 function QueuedJobsPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
-  useLiveRouteRefresh(5_000, data.authenticated);
+  const live = useLiveRouteRefresh(5_000, data.authenticated);
 
   return (
     <>
       <PageHeader count={data.total || undefined} icon={Hourglass} title="Queued jobs" />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         <QueuedJobsList items={data.items} onPageChange={(page) => void navigate({ search: { page } })} page={data.page} perPage={data.perPage} total={data.total} />
       </PageBody>

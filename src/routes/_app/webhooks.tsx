@@ -11,6 +11,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type WebhookDelivery, type WebhookPayload, dismissFailedWebhooksAction, getWebhookPayloadAction, getWebhooksPage, retryWebhookAction } from "~/features/operations/operations.functions";
 import { validatePageSearch } from "~/lib/pagination";
 import { useAction } from "~/lib/use-action";
@@ -45,7 +46,7 @@ function WebhooksPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
   const run = useAction();
-  useLiveRouteRefresh(10_000, data.authenticated);
+  const live = useLiveRouteRefresh(10_000, data.authenticated);
   const [peek, setPeek] = useState<PayloadState | null>(null);
   const groups = GROUPS.map((group) => ({ ...group, deliveries: data.items.filter((delivery) => deliveryGroup(delivery) === group.key) })).filter((group) => group.deliveries.length);
 
@@ -62,6 +63,7 @@ function WebhooksPage() {
   return (
     <>
       <PageHeader count={data.total || undefined} icon={Webhook} title="Webhooks" />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         {data.failedTotal > 0 ? (
           <Callout

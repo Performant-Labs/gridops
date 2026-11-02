@@ -2,6 +2,7 @@ import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { CircleCheck, CircleX, ExternalLink, GitBranch, GitCommitHorizontal, GitPullRequestArrow, Radio, X } from "lucide-react";
 
 import { PageBody, PageHeader, PropertiesPanel, PropertyGroup, PropertyRow, SectionHeading, listRowClassName } from "~/components/page";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { RunStatusIcon, StatusBadge, statusLabel } from "~/components/status-icon";
 import { Avatar, githubAvatar } from "~/components/ui/avatar";
@@ -33,7 +34,9 @@ function WorkflowRunDetailPage() {
   const run = Route.useLoaderData();
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
-  useLiveRouteRefresh(3_000, isActiveRun(run));
+  // An active run refreshes faster than other pages (3 seconds at the default
+  // setting) and stops on its own once the run finishes.
+  const live = useLiveRouteRefresh(3_000, isActiveRun(run));
   const openJob = run.jobs.find((job) => job.id === search.job);
   const showJob = (jobId: number | undefined) => void navigate({ search: jobId ? { job: jobId } : {}, replace: Boolean(search.job && jobId) });
   const state = run.conclusion ?? run.status;
@@ -51,6 +54,7 @@ function WorkflowRunDetailPage() {
         breadcrumbs={[{ label: "Workflow runs", to: "/workflow-runs" }]}
         title={`${run.workflowName} #${run.runNumber}`}
       />
+      <LiveRouteRefreshNotice live={live} message="This run is still in progress; its status and jobs won’t update until you press Refresh." />
       <PageBody>
         <div className="flex min-h-full flex-col lg:flex-row">
           <div className="min-w-0 flex-1">

@@ -6,6 +6,7 @@ import { EmptyState, ListGroup, PageBody, PageHeader } from "~/components/page";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusBadge } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
+import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { getRunnersPage } from "~/features/operations/operations.functions";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { validatePageSearch } from "~/lib/pagination";
@@ -22,7 +23,7 @@ export const Route = createFileRoute("/_app/runners")({
 function RunnersPage() {
   const data = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
-  useLiveRouteRefresh(5_000, data.authenticated);
+  const live = useLiveRouteRefresh(5_000, data.authenticated);
 
   return (
     <>
@@ -32,6 +33,7 @@ function RunnersPage() {
         icon={Activity}
         title="Runners"
       />
+      <LiveRouteRefreshNotice live={live} />
       <PageBody>
         {data.items.length === 0 ? (
           <EmptyState description="Runners appear here as soon as a pool provisions its first execution environment." icon={Activity} title="No managed runners">

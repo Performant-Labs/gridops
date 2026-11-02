@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { SettingsLayout, SettingsRow, SettingsSection } from "~/components/settings-ui";
 import { useTheme } from "~/components/theme-provider";
 import { Shortcut } from "~/components/ui/kbd";
+import { RefreshPreferenceRow } from "~/features/settings/refresh-preference-row";
 import { allNavItems } from "~/lib/navigation";
 import { cn } from "~/lib/utils";
 
@@ -40,6 +41,10 @@ function PreferencesSettings() {
             ))}
           </div>
         </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="Live updates">
+        <RefreshPreferenceRow />
       </SettingsSection>
 
       <SettingsSection description="Available anywhere outside a text field." title="Keyboard shortcuts">

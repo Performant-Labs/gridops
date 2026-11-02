@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { KeyRound, LoaderCircle, Plus, RefreshCw, ScrollText, Server, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -6,6 +6,7 @@ import type * as React from "react";
 import { toast } from "sonner";
 
 import { confirmAction } from "~/components/confirm-dialog";
+import { LiveRefreshNotice } from "~/components/live-refresh-notice";
 import { Dialog, DialogTrigger, SheetContent } from "~/components/ui/dialog";
 import { CopyButton } from "~/components/copy-button";
 import {
@@ -30,6 +31,7 @@ import { failureReasonLabel, failuresLastHourLabel, startGateLabel } from "~/fea
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
 import type { BackendReadV1, HostEventReadV1, HostReadV1 } from "~/features/fleet/query-contracts";
 import { FleetRequestError, approveHost, recoverHost, rotateHostCredential } from "~/features/fleet/registry-api";
+import { useRefreshInterval } from "~/lib/use-refresh-interval";
 import { cn, formatDateTime, formatRelativeTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/fleet/machines/$hostId")({
@@ -37,14 +39,21 @@ export const Route = createFileRoute("/_app/fleet/machines/$hostId")({
 });
 
 type HostItem = Extract<HostReadV1, { projection: "host" }>;
-const REFRESH = 10_000;
+
+/** Machine views reload every 10 seconds at the default Refresh setting; Off stops them. */
+function useMachineRefetchInterval() {
+  return useRefreshInterval(10_000) ?? false;
+}
 
 function MachinePage() {
+  const refetchInterval = useMachineRefetchInterval();
+  const queryClient = useQueryClient();
+  const fleetFetching = useIsFetching({ queryKey: ["fleet"] });
   const { hostId } = Route.useParams();
   const host = useQuery({
     queryKey: ["fleet", "host", hostId],
     queryFn: ({ signal }) => getHost(hostId, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
 
   if (host.isPending) return <ResourcePageLoading icon={Server} title="Machine" />;
@@ -88,6 +97,12 @@ function MachinePage() {
         icon={Server}
         title={item.name}
       />
+      <LiveRefreshNotice
+        lastUpdatedAt={host.dataUpdatedAt || null}
+        off={refetchInterval === false}
+        onRefresh={() => queryClient.refetchQueries({ queryKey: ["fleet"], type: "active" })}
+        refreshing={fleetFetching > 0}
+      />
       <PageBody>
         {item.projection === "host" ? <MachineDetail host={item} /> : (
           <div className="p-4">
@@ -121,15 +136,16 @@ function useFleetAction() {
 }
 
 function MachineDetail({ host }: { host: HostItem }) {
+  const refetchInterval = useMachineRefetchInterval();
   const backends = useQuery({
     queryKey: ["fleet", "backends", host.id],
     queryFn: ({ signal }) => listBackends(host.id, { limit: 100 }, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
   const events = useQuery({
     queryKey: ["fleet", "events", host.id],
     queryFn: ({ signal }) => listHostEvents(host.id, { limit: 100 }, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
   const approved = host.enrollment === "approved";
   const queryClient = useQueryClient();
@@ -456,10 +472,11 @@ function AgentLogDrawer({ hostId, name }: { hostId: string; name: string }) {
 }
 
 function AgentLog({ hostId }: { hostId: string }) {
+  const refetchInterval = useMachineRefetchInterval();
   const logs = useQuery({
     queryKey: ["fleet", "logs", hostId],
     queryFn: ({ signal }) => listAgentLogs(hostId, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
   if (logs.isError) {
     return <div className="p-5"><Callout title="Couldn’t load the agent log" tone="danger">{fleetErrorMessage(logs.error, "")}</Callout></div>;
@@ -505,10 +522,11 @@ const since = (millis: number) => formatRelativeTime(new Date(millis).toISOStrin
 
 /** Placements whose last command went unanswered, each with the repair that settles it. */
 function UnconfirmedSection({ hostId }: { hostId: string }) {
+  const refetchInterval = useMachineRefetchInterval();
   const placements = useQuery({
     queryKey: ["fleet", "unconfirmed", hostId],
     queryFn: ({ signal }) => listUnconfirmed(hostId, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
   const { pending, run } = useFleetAction();
   if (placements.isError && isForbidden(placements.error)) return null;
@@ -565,10 +583,11 @@ function UnconfirmedSection({ hostId }: { hostId: string }) {
 }
 
 function GrantsSection({ hostId }: { hostId: string }) {
+  const refetchInterval = useMachineRefetchInterval();
   const grants = useQuery({
     queryKey: ["fleet", "grants", hostId],
     queryFn: ({ signal }) => listHostGrants(hostId, signal),
-    refetchInterval: REFRESH,
+    refetchInterval,
   });
   const targets = useQuery({ queryKey: ["fleet", "targets"], queryFn: ({ signal }) => listTargets(signal) });
   const [adding, setAdding] = useState<string[]>([]);
