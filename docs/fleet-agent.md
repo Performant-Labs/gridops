@@ -160,6 +160,21 @@ sudo systemctl daemon-reload && sudo systemctl restart gridops-host-agent
 Once the agent reconnects, the queued placements should clear on the next
 admission pass.
 
+## Docker actions and container jobs
+
+A profile that shares the host Docker socket lets jobs use Docker actions and `container:` or
+`services:` entries. Those make the runner ask the **host's** Docker daemon to bind-mount paths from the
+runner's work folder into another container, so the work folder must exist at the same absolute path on
+the host. For these profiles (Docker runtime, socket shared) GridOps therefore gives each runner the
+work folder `/var/lib/gridops-agent/work/<environment id>` instead of the default `_work`: the server
+writes it into the runner's registration, and the agent creates the folder and mounts it at the same
+path. The agent removes it when the runner is cleaned up.
+
+The folder lives under the agent's systemd `StateDirectory` (`/var/lib/gridops-agent`). An agent whose
+service user cannot create it there, such as one installed as a user service, fails the runner's start
+with a configuration error rather than starting a runner whose Docker actions would fail. Profiles that do
+not share the socket are unchanged.
+
 ## Exit codes
 
 `run` exits with 3 when GridOps doesn't support this agent version (upgrade the

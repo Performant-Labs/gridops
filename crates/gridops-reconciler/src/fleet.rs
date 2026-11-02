@@ -346,7 +346,13 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
                     name: name.clone(),
                     runner_group_id: runner.get("runner_group_id"),
                     labels: runner_labels(&prepare, &labels),
-                    work_folder: "_work".into(),
+                    // A Docker runner whose jobs share the host daemon needs a work folder at the same
+                    // absolute path on the host, or Docker actions get empty bind mounts.
+                    work_folder: gridops_core::fleet::job_work_folder(
+                        &prepare.runtime_kind,
+                        prepare.configuration.requires_docker_socket,
+                        prepared_environment_id,
+                    ),
                 },
             )
             .await?;
