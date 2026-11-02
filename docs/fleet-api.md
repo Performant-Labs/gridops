@@ -325,3 +325,26 @@ offline, and the start grant can't exceed local authority.
   `failedPlacementsLastHour` and `recentPlacementFailures` (the last 24 hours,
   grouped by reason). Only failures after the release that added this are
   recorded; earlier failed placements have no event.
+- A runner whose placement failed to start is started again as a new runner
+  (new name, new registration), placed with the machines its earlier attempts
+  failed on tried last. That is only done once nothing of the failed
+  placement can run on its machine: it is `failed` (never `uncertain`), its
+  local absence and delayed-start exclusion are proven, its capacity is
+  released and its prepare and start commands are settled. A runner gets at
+  most three placements, and only failures the machine could have caused are
+  retried (not `runner_removed_before_start`, `operator_released`, `unknown`,
+  or an agent-reported `configuration`, `unsupported` or `cancelled` code).
+  Each retry records a `placement_retried` event on the machine where the
+  start failed; its detail holds `attempt`, `max_attempts`, `failure_reason`,
+  `retry_runner_id`, `retry_operation_id`, `avoided_host_ids` and a `message`.
+- A machine that failed three starts in the last 15 minutes, with no
+  successful start since, takes no new runners. The host read carries this as
+  `startGate` (`null` when the machine takes new runners) with `failures`,
+  `windowMinutes`, `since` (the oldest failure counted), `until` (when it is
+  reconsidered if nothing else changes) and `message`, for example "Not
+  accepting new runners: 3 start failures in the last 15 minutes." A start
+  that succeeds on the machine lifts it at once. It only leaves the machine
+  out of new placements: its lifecycle, its running jobs and everything else
+  stay as they are. A runner that waits because every machine that could
+  take it is set aside this way shows the queue reason
+  `machines_failing_starts`.

@@ -29,7 +29,7 @@ use crate::fleet::{
             DuplicateHardwareHostV1, EventQuery, FleetRecordCounts, HostEventKindV1,
             HostEventReadV1, HostReadV1, InventoryEvidenceV1, MeasurementReadV1,
             ObservedCapacityV1, ObservedDomainKindV1, PlacementFailureReadV1, QueryPage,
-            QueryResult, SampleProvenanceV1, SampleQuery, SampleReadV1,
+            QueryResult, SampleProvenanceV1, SampleQuery, SampleReadV1, StartGateReadV1,
         },
     },
 };
@@ -1748,6 +1748,7 @@ fn event_kind(value: &str) -> HostEventKindV1 {
         "fleet.inventory.received" => HostEventKindV1::InventoryReceived,
         "fleet.inventory.conflict" => HostEventKindV1::InventoryConflict,
         crate::fleet::failure::PLACEMENT_FAILED_EVENT => HostEventKindV1::PlacementFailed,
+        crate::fleet::retry::PLACEMENT_RETRIED_EVENT => HostEventKindV1::PlacementRetried,
         value if value.starts_with("fleet.backend.") => HostEventKindV1::BackendChanged,
         value if value.starts_with("fleet.placement.queued") => HostEventKindV1::PlacementQueued,
         value if value.starts_with("fleet.placement.admitted") => {
@@ -1821,6 +1822,30 @@ async fn placement_failures(
         BrowserUint53::new(u64::try_from(last_hour).map_err(|_| QueryError::MalformedData)?)?,
         groups,
     ))
+}
+
+/// The machine's start gate, if it is set aside from new placements.
+async fn start_gate_read(
+    tx: &mut Transaction<'_, Sqlite>,
+    host_id: HostId,
+    now: i64,
+) -> Result<Option<StartGateReadV1>, QueryError> {
+    let Some(gate) = crate::fleet::start_health::start_gate(tx, &host_id.to_string(), now).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StartGateReadV1 {
+        failures: BrowserUint53::new(
+            u64::try_from(gate.failures).map_err(|_| QueryError::MalformedData)?,
+        )?,
+        window_minutes: BrowserUint53::new(
+            u64::try_from(crate::fleet::start_health::StartGate::window_minutes())
+                .map_err(|_| QueryError::MalformedData)?,
+        )?,
+        since: wire_timestamp(gate.since)?,
+        until: wire_timestamp(gate.until)?,
+        message: gate.message(),
+    }))
 }
 
 async fn inventory_evidence(
@@ -2085,6 +2110,7 @@ impl RegistryService {
             .unwrap_or_default();
         let (failed_placements_last_hour, recent_placement_failures) =
             placement_failures(tx, host_id, snapshot.now).await?;
+        let start_gate = start_gate_read(tx, host_id, snapshot.now).await?;
         Ok(HostReadV1::Host {
             id,
             name,
@@ -2118,6 +2144,7 @@ impl RegistryService {
             enrollment_target_ids,
             failed_placements_last_hour,
             recent_placement_failures,
+            start_gate,
         })
     }
 

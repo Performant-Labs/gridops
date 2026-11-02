@@ -202,6 +202,7 @@ reason a runner is waiting; each maps to one missing layer:
 |---|---|
 | `backend_disabled` | Layer 1 — the backend is disabled, or the host is paused/draining |
 | `no_eligible_host` | Layer 2 — no host's grant satisfies the platform (usually `allowDockerSocket`) |
+| `machines_failing_starts` | Not a host layer: every machine that could take it failed three runner starts in the last 15 minutes and is set aside until a start succeeds there or the failures age out (the machine page says why) |
 | `capability_unverified` | Layer 3 — the agent does not advertise the socket capability (`GRIDOPS_AGENT_DOCKER_SOCKET` unset) |
 | `forbidden` | Not a host layer: the intent is pinned to a replaced fleet profile (known issue; cancel and re-dispatch the run) |
 | `physical_resource_exhausted` | The platform reservation exceeds every host's budget — check disk/cpu/memory reservations against reported budgets, and raise a budget with `PUT /api/v1/fleet/hosts/{id}/budget` (`{"cpuMillis":…,"memoryMib":…,"diskBytes":…}`, any subset, never above what the machine reports) |

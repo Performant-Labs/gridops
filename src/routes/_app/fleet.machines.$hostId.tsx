@@ -26,7 +26,7 @@ import {
 } from "~/features/fleet/fleet-ui";
 import { canOfferDelete, deleteConfirmation, refusalMessage } from "~/features/fleet/machine-delete";
 import { MachineBudgetSection } from "~/features/fleet/machine-budget-section";
-import { failureReasonLabel, failuresLastHourLabel } from "~/features/fleet/placement-failures";
+import { failureReasonLabel, failuresLastHourLabel, startGateLabel } from "~/features/fleet/placement-failures";
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
 import type { BackendReadV1, HostEventReadV1, HostReadV1 } from "~/features/fleet/query-contracts";
 import { FleetRequestError, approveHost, recoverHost, rotateHostCredential } from "~/features/fleet/registry-api";
@@ -209,6 +209,14 @@ function HostAlerts({ host }: { host: HostItem }) {
       <Callout key="unconfirmed" title="Not taking new jobs" tone="danger">
         {unconfirmed === 1 ? "A job" : `${unconfirmed} jobs`} on this machine couldn’t be confirmed, so no new jobs start here until {unconfirmed === 1 ? "it’s" : "they’re"} settled.
         The agent settles these itself when it reconnects; if it can’t, repair them below.
+      </Callout>,
+    );
+  }
+  const gate = startGateLabel(host.startGate, formatDateTime);
+  if (gate) {
+    alerts.push(
+      <Callout key="start-gate" title="Not accepting new runners" tone="danger">
+        {gate} Runners already on it keep running, and nothing else about the machine changes. The failures are listed below.
       </Callout>,
     );
   }
@@ -811,6 +819,7 @@ const eventLabel: Record<HostEventReadV1["kind"], string> = {
   placement_queued: "Job queued",
   placement_admitted: "Job started",
   placement_failed: "Job failed",
+  placement_retried: "Failed start retried",
   placement_changed: "Job changed",
   command_changed: "Command changed",
   other: "Machine updated",

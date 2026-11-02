@@ -311,6 +311,28 @@ service user cannot create it there, such as one installed as a user service, fa
 with a configuration error rather than starting a runner whose Docker actions would fail. Profiles that do
 not share the socket are unchanged.
 
+## When runners fail to start on a machine
+
+A machine can look healthy and still fail some of the runners placed on it,
+for example when its network drops packets and a start can't fetch what it
+needs or reach GridOps in time. GridOps records why each placement failed (the
+machine page lists the last day's failures) and acts on it in two ways:
+
+- **The runner is started again elsewhere.** When a runner's start fails on a
+  machine and GridOps has proof that nothing of it can still start there, the
+  runner is replaced by a new one that tries the other machines first. It
+  goes back to the same machine only when no other machine can take it. A
+  runner gets at most three attempts. Each retry shows on the machine's page
+  as **Failed start retried**.
+- **A machine that keeps failing is set aside for a while.** After three
+  failed starts within 15 minutes with no successful start in between, the
+  machine takes no new runners. Its page and the Fleet list say so ("Not
+  accepting new runners: 3 start failures in the last 15 minutes") and when it
+  will be reconsidered. It is reconsidered when those failures are more than
+  15 minutes old, or sooner if a start on it succeeds. Nothing else changes:
+  it stays active, keeps its running jobs, and isn't drained or retired. Fix
+  the cause (often the machine's network) using the reasons on its page.
+
 ## Exit codes
 
 `run` exits with 3 when GridOps doesn't support this agent version (upgrade the

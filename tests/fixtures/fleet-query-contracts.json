@@ -83,7 +83,14 @@
             "latestAt": "2026-10-09T10:15:00.000Z",
             "latestPlacementId": "00000009-0000-4000-8000-000000000002"
           }
-        ]
+        ],
+        "startGate": {
+          "failures": 3,
+          "windowMinutes": 15,
+          "since": "2026-10-09T11:50:00.000Z",
+          "until": "2026-10-09T12:05:00.000Z",
+          "message": "Not accepting new runners: 3 start failures in the last 15 minutes."
+        }
       }
     },
     {
@@ -329,6 +336,15 @@
           "kind": "placement_failed",
           "occurredAt": "2026-10-09T11:59:45.000Z",
           "cursor": "q1.dGhpcmQtZXZlbnQ"
+        },
+        {
+          "id": "0000000a-0000-4000-8000-000000000002",
+          "hostId": "00000001-0000-4000-8000-000000000001",
+          "targetId": "00000008-0000-4000-8000-000000000001",
+          "placementId": "00000009-0000-4000-8000-000000000002",
+          "kind": "placement_retried",
+          "occurredAt": "2026-10-09T11:59:46.000Z",
+          "cursor": "q1.Zm91cnRoLWV2ZW50"
         }
       ],
       "nextCursor": null

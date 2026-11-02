@@ -168,6 +168,9 @@ pub enum HostReadV1 {
         /// The last day's recorded failures, grouped by reason, newest group
         /// first.
         recent_placement_failures: Vec<PlacementFailureReadV1>,
+        /// Set while the machine is left out of new placements because it
+        /// keeps failing to start runners; `None` when it takes new runners.
+        start_gate: Option<StartGateReadV1>,
     },
     Target {
         id: HostId,
@@ -184,6 +187,22 @@ pub enum HostReadV1 {
 pub struct DuplicateHardwareHostV1 {
     pub id: HostId,
     pub name: UpstreamText,
+}
+
+/// Why a machine is not taking new runners: it failed `failures` starts in
+/// the last `window_minutes`, with no successful start since. It is
+/// reconsidered at `until`, or sooner if a start there succeeds. Nothing else
+/// about the machine changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartGateReadV1 {
+    pub failures: BrowserUint53,
+    pub window_minutes: BrowserUint53,
+    /// The oldest of the failures counted.
+    pub since: WireTimestamp,
+    pub until: WireTimestamp,
+    /// The reason, in a sentence an operator can read.
+    pub message: String,
 }
 
 /// Failed placements of one reason on a host, with the newest one's message.
@@ -487,6 +506,8 @@ pub enum HostEventKindV1 {
     PlacementQueued,
     PlacementAdmitted,
     PlacementFailed,
+    /// A failed start was retried as a new runner, other machines first.
+    PlacementRetried,
     PlacementChanged,
     CommandChanged,
     Other,

@@ -99,6 +99,7 @@ const waitingReason: Record<string, string> = {
   backend_disabled: "The matching runtime is switched off on every machine.",
   native_not_trusted: "No machine allows native runs for this repository.",
   machines_under_pressure: "Every matching machine is under memory or CPU pressure.",
+  machines_failing_starts: "The matching machines keep failing to start runners, so none takes new ones for a while. Open a machine to see why.",
   physical_resource_exhausted: "Matching machines don’t have enough free CPU, memory or disk.",
   child_resource_exhausted: "The machine’s VM or container budget is full.",
   pool_capacity_exhausted: "The pool is at its maximum runner count.",

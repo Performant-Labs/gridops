@@ -148,6 +148,16 @@ export const placementFailureGroupSchema = z.strictObject({
 });
 export type PlacementFailureGroup = z.infer<typeof placementFailureGroupSchema>;
 
+/** Why a machine is left out of new placements: it keeps failing to start runners. */
+export const startGateSchema = z.strictObject({
+  failures: safeInteger,
+  windowMinutes: safeInteger,
+  since: fleetTimestampSchema,
+  until: fleetTimestampSchema,
+  message: z.string().max(240),
+});
+export type StartGate = z.infer<typeof startGateSchema>;
+
 const hostReadV1HostSchema = z.strictObject({
   projection: z.literal("host"),
   id: fleetIdSchema,
@@ -177,6 +187,7 @@ const hostReadV1HostSchema = z.strictObject({
   enrollmentTargetIds: z.array(fleetIdSchema).max(64),
   failedPlacementsLastHour: safeInteger,
   recentPlacementFailures: z.array(placementFailureGroupSchema).max(10),
+  startGate: startGateSchema.nullable(),
 });
 
 const hostReadV1TargetSchema = z.strictObject({
@@ -292,6 +303,7 @@ export const hostEventReadV1Schema = z.strictObject({
     "placement_queued",
     "placement_admitted",
     "placement_failed",
+    "placement_retried",
     "placement_changed",
     "command_changed",
     "other",

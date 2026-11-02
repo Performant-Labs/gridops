@@ -99,6 +99,11 @@ function MachineRow({ host }: { host: HostReadV1 }) {
             {full.enrollment === "approved" ? null : <EnrollmentBadge value={full.enrollment} />}
             <FreshnessBadge value={full.heartbeatFreshness} />
             {full.duplicateHardware ? <Badge variant="destructive">Duplicate hardware</Badge> : null}
+            {full.startGate ? (
+              <Badge title={full.startGate.message} variant="destructive">
+                Not accepting new runners
+              </Badge>
+            ) : null}
             {failuresLastHourLabel(full.failedPlacementsLastHour) ? (
               <Badge title="Placements on this machine failed. Open it to see why." variant="destructive">
                 {failuresLastHourLabel(full.failedPlacementsLastHour)}

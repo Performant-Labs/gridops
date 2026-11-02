@@ -166,114 +166,10 @@ impl FleetService {
         principal: &Principal,
         request: SubmitIntent,
     ) -> Result<Submission, FleetError> {
-        validate_request(&request)?;
-        let identity = PrincipalIdentity::from_principal(principal)?;
-        let request_hash = request_hash(&request)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-
-        if let Some(existing) =
-            store::operation_by_key(&mut tx, &identity.scope, &request.idempotency_key).await?
-        {
-            if existing.request_hash != request_hash {
-                return Err(FleetError::IdempotencyConflict);
-            }
-            let Some(intent) = store::intent_for_operation(&mut tx, &existing.id).await? else {
-                return Err(FleetError::NotFound);
-            };
-            // Replay is idempotent with respect to the original request, but
-            // authorization is always evaluated against current policy.
-            ensure_operation_access(&mut tx, principal, &intent).await?;
-            let operation_id = parse_id::<OperationId>(&existing.id)?;
-            let result = Submission {
-                operation_id,
-                workload_id: request.workload_id,
-                generation: request.generation,
-                state: SubmissionState::Replay,
-            };
-            tx.commit().await?;
-            return Ok(result);
-        }
-
-        ensure_profile_and_target(&mut tx, &request).await?;
-        ensure_target_identity(&mut tx, &request).await?;
-        ensure_pool_access(&mut tx, principal, &request.pool_id).await?;
-        ensure_target_access(&mut tx, principal, &request.target_id.to_string()).await?;
-        ensure_workload_policy(&mut tx, principal, &request).await?;
-
-        let duplicate_generation: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM workload_intents WHERE workload_id=? AND generation=?",
-        )
-        .bind(request.workload_id.to_string())
-        .bind(
-            i64::try_from(request.generation.get())
-                .map_err(|_| FleetError::InvalidRequest("generation exceeds SQLite integer"))?,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if duplicate_generation != 0 {
-            return Err(FleetError::IdempotencyConflict);
-        }
-
-        let operation_id = new_id::<OperationId>()?;
-        let now = crate::db::now_millis();
-        sqlx::query(
-            "INSERT INTO fleet_operations
-             (id,kind,requested_by_user_id,principal_kind,principal_scope,idempotency_key,
-              request_hash,status,created_at,updated_at)
-             VALUES (?,?,?,?,?,?,?,'queued',?,?)",
-        )
-        .bind(operation_id.to_string())
-        .bind("submit_workload")
-        .bind(identity.user_id.as_deref())
-        .bind(identity.kind)
-        .bind(&identity.scope)
-        .bind(&request.idempotency_key)
-        .bind(&request_hash)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO workload_intents
-             (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,
-              expected_profile_revision,status,created_at,updated_at)
-             SELECT ?,?,?,?,?,?,?,?,revision,'queued',?,?
-               FROM pool_execution_profiles WHERE id = ? AND pool_id = ?",
-        )
-        .bind(operation_id.to_string())
-        .bind(request.workload_id.to_string())
-        .bind(
-            i64::try_from(request.generation.get())
-                .map_err(|_| FleetError::InvalidRequest("generation exceeds SQLite integer"))?,
-        )
-        .bind(request.kind.as_str())
-        .bind(&request.pool_id)
-        .bind(request.profile_id.to_string())
-        .bind(request.target_id.to_string())
-        .bind(request.agent_run_id.as_deref())
-        .bind(now)
-        .bind(now)
-        .bind(request.profile_id.to_string())
-        .bind(&request.pool_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let inserted: i64 = sqlx::query_scalar("SELECT changes()")
-            .fetch_one(&mut *tx)
-            .await?;
-        if inserted != 1 {
-            return Err(FleetError::Invariant(
-                "profile disappeared during intent insert",
-            ));
-        }
+        let submission = submit_intent_in(&mut tx, principal, request).await?;
         tx.commit().await?;
-        Ok(Submission {
-            operation_id,
-            workload_id: request.workload_id,
-            generation: request.generation,
-            state: SubmissionState::Queued,
-        })
+        Ok(submission)
     }
 
     pub async fn load_operation(
@@ -317,6 +213,118 @@ impl FleetService {
     ) -> Result<super::admission::SliceReport, FleetError> {
         super::admission::run_slice(&self.pool, controller, limit).await
     }
+}
+
+/// Accepts an intent inside the caller's transaction, so a caller can create
+/// what the intent is for in the same commit. See
+/// [`FleetService::submit_intent`].
+pub(crate) async fn submit_intent_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    principal: &Principal,
+    request: SubmitIntent,
+) -> Result<Submission, FleetError> {
+    validate_request(&request)?;
+    let identity = PrincipalIdentity::from_principal(principal)?;
+    let request_hash = request_hash(&request)?;
+    if let Some(existing) =
+        store::operation_by_key(tx, &identity.scope, &request.idempotency_key).await?
+    {
+        if existing.request_hash != request_hash {
+            return Err(FleetError::IdempotencyConflict);
+        }
+        let Some(intent) = store::intent_for_operation(tx, &existing.id).await? else {
+            return Err(FleetError::NotFound);
+        };
+        // Replay is idempotent with respect to the original request, but
+        // authorization is always evaluated against current policy.
+        ensure_operation_access(tx, principal, &intent).await?;
+        return Ok(Submission {
+            operation_id: parse_id::<OperationId>(&existing.id)?,
+            workload_id: request.workload_id,
+            generation: request.generation,
+            state: SubmissionState::Replay,
+        });
+    }
+
+    ensure_profile_and_target(tx, &request).await?;
+    ensure_target_identity(tx, &request).await?;
+    ensure_pool_access(tx, principal, &request.pool_id).await?;
+    ensure_target_access(tx, principal, &request.target_id.to_string()).await?;
+    ensure_workload_policy(tx, principal, &request).await?;
+
+    let duplicate_generation: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workload_intents WHERE workload_id=? AND generation=?",
+    )
+    .bind(request.workload_id.to_string())
+    .bind(
+        i64::try_from(request.generation.get())
+            .map_err(|_| FleetError::InvalidRequest("generation exceeds SQLite integer"))?,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if duplicate_generation != 0 {
+        return Err(FleetError::IdempotencyConflict);
+    }
+
+    let operation_id = new_id::<OperationId>()?;
+    let now = crate::db::now_millis();
+    sqlx::query(
+        "INSERT INTO fleet_operations
+             (id,kind,requested_by_user_id,principal_kind,principal_scope,idempotency_key,
+              request_hash,status,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,'queued',?,?)",
+    )
+    .bind(operation_id.to_string())
+    .bind("submit_workload")
+    .bind(identity.user_id.as_deref())
+    .bind(identity.kind)
+    .bind(&identity.scope)
+    .bind(&request.idempotency_key)
+    .bind(&request_hash)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO workload_intents
+             (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,
+              expected_profile_revision,status,created_at,updated_at)
+             SELECT ?,?,?,?,?,?,?,?,revision,'queued',?,?
+               FROM pool_execution_profiles WHERE id = ? AND pool_id = ?",
+    )
+    .bind(operation_id.to_string())
+    .bind(request.workload_id.to_string())
+    .bind(
+        i64::try_from(request.generation.get())
+            .map_err(|_| FleetError::InvalidRequest("generation exceeds SQLite integer"))?,
+    )
+    .bind(request.kind.as_str())
+    .bind(&request.pool_id)
+    .bind(request.profile_id.to_string())
+    .bind(request.target_id.to_string())
+    .bind(request.agent_run_id.as_deref())
+    .bind(now)
+    .bind(now)
+    .bind(request.profile_id.to_string())
+    .bind(&request.pool_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let inserted: i64 = sqlx::query_scalar("SELECT changes()")
+        .fetch_one(&mut **tx)
+        .await?;
+    if inserted != 1 {
+        return Err(FleetError::Invariant(
+            "profile disappeared during intent insert",
+        ));
+    }
+    Ok(Submission {
+        operation_id,
+        workload_id: request.workload_id,
+        generation: request.generation,
+        state: SubmissionState::Queued,
+    })
 }
 
 pub(crate) async fn recheck_intent_authorization(
