@@ -56,7 +56,7 @@ request() {
   set -- curl -sS -X "$method" "$API$path" \
     -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' \
-    --max-time 30 \
+    --connect-timeout 10 --max-time 30 \
     -w '\n%{http_code}'
   [ -z "$key" ] || set -- "$@" -H "Idempotency-Key: $key"
   [ -z "$body" ] || set -- "$@" -d "$body"

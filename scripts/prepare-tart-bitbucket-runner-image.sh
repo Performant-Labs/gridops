@@ -54,7 +54,7 @@ java -version >&2
 command -v git >/dev/null
 rm -rf ${quoted_root}
 mkdir -p ${quoted_root}
-curl --fail --location --proto '=https' --tlsv1.2 ${quoted_url} --output /tmp/gridops-bitbucket-runner.tar.gz
+curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 15 --speed-limit 1000 --speed-time 30 ${quoted_url} --output /tmp/gridops-bitbucket-runner.tar.gz
 tar -xzf /tmp/gridops-bitbucket-runner.tar.gz -C ${quoted_root}
 rm -f /tmp/gridops-bitbucket-runner.tar.gz
 test -x ${quoted_root}/bin/start.sh

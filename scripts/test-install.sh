@@ -19,7 +19,11 @@ printf '#!/bin/sh\necho "gridops-host-agent 9.9.9"\n' > "$tmp/release/gridops-ho
 
 cat > "$stubs/curl" <<STUB
 #!/bin/sh
-# curl -fsSL --retry 3 -o <dest> <url>
+# curl <options> -o <dest> <url>; "curl --help all" lists the options this curl has.
+case "\$1" in
+  --help) [ -n "\${FAKE_OLD_CURL:-}" ] || echo "     --retry-all-errors  Retry all errors"; exit 0 ;;
+esac
+echo "curl \$*" >> "$tmp/curl-calls"
 while [ \$# -gt 0 ]; do [ "\$1" = -o ] && dest="\$2"; url="\$1"; shift; done
 cp "$tmp/release/\$(basename "\$url")" "\$dest"
 STUB
@@ -78,6 +82,19 @@ rm -f "$tmp/usr/bin/gridops-host-agent.previous"
 run FAKE_UNIT= GRIDOPS_NO_ENROLL=1 GRIDOPS_NO_SERVICE=1 GRIDOPS_INSTALL_DIR="$tmp/user-bin" >/dev/null 2>&1
 check "installs per user when there is no system unit" '"$tmp/user-bin/gridops-host-agent" --version | grep -q 9.9.9'
 check "does not touch the system binary then" '! [ -e "$tmp/usr/bin/gridops-host-agent.previous" ]'
+
+# 6. The download survives a flaky network: it retries every error and bounds
+# a stalled connection or transfer. A curl without --retry-all-errors (older
+# than 7.71) still works, just without that flag.
+: > "$tmp/curl-calls"
+run FAKE_UNIT= GRIDOPS_NO_ENROLL=1 GRIDOPS_NO_SERVICE=1 GRIDOPS_INSTALL_DIR="$tmp/user-bin2" >/dev/null 2>&1
+check "curl retries every error" 'grep -q -e "--retry 5 --retry-all-errors" "$tmp/curl-calls"'
+check "curl bounds a connection attempt" 'grep -q -e "--connect-timeout 15" "$tmp/curl-calls"'
+check "curl aborts a stalled transfer" 'grep -q -e "--speed-limit 1000 --speed-time 30" "$tmp/curl-calls"'
+: > "$tmp/curl-calls"
+run FAKE_OLD_CURL=1 FAKE_UNIT= GRIDOPS_NO_ENROLL=1 GRIDOPS_NO_SERVICE=1 GRIDOPS_INSTALL_DIR="$tmp/user-bin3" >/dev/null 2>&1
+check "an older curl still installs" '"$tmp/user-bin3/gridops-host-agent" --version | grep -q 9.9.9'
+check "an older curl is not given --retry-all-errors" '[ -s "$tmp/curl-calls" ] && ! grep -q -e "--retry-all-errors" "$tmp/curl-calls" && grep -q -e "--retry 5" "$tmp/curl-calls"'
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all passed"

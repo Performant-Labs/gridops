@@ -11,6 +11,8 @@ RUN sh /docker-build-info.sh /build-info.env
 
 FROM node:22-bookworm-slim AS ui-dependencies
 WORKDIR /app
+# Retry a failed registry fetch more often than npm's default of 2 (fetch-retries). Build stages only: no runtime image inherits this.
+ENV npm_config_fetch_retries=5
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
@@ -23,8 +25,11 @@ RUN set -a && . /build-info.env && set +a && npm run build
 
 FROM rust:1.96-slim-bookworm AS rust-build
 WORKDIR /app
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates pkg-config \
+# Retry a possibly spurious network error more often than cargo's default of 3 (net.retry). Build stage only: no runtime image inherits this.
+ENV CARGO_NET_RETRY=10
+# Acquire::Retries: apt retries a failed download or connection (default 0).
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends build-essential ca-certificates pkg-config \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -46,8 +51,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp /app/target/release/gridops-reconciler /app/bin/gridops-reconciler
 
 FROM debian:bookworm-slim AS rust-runtime
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 gridops \
     && mkdir -p /app/data/logs \

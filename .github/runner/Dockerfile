@@ -13,13 +13,13 @@ USER root
 # expect from GitHub's hosted runners are installed now: zip, pip and venv, and
 # the GitHub CLI from GitHub's own apt repository.
 RUN install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && curl -fsSL --retry 5 --retry-all-errors --connect-timeout 15 --speed-limit 1000 --speed-time 30 https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates musl-tools pkg-config \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends build-essential ca-certificates musl-tools pkg-config \
         clang cmake gh python3-pip python3-venv zip \
         libasound2-dev libdbus-1-dev libegl-dev libfontconfig-dev libfreetype-dev libssl-dev \
         libvulkan-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev \

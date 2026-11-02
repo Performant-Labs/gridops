@@ -82,7 +82,7 @@ runner_digest="$3"
 archive="/tmp/$(basename "$runner_url")"
 rm -rf "$runner_root"
 mkdir -p "$runner_root"
-curl --fail --location --retry 4 --output "$archive" "$runner_url"
+curl --fail --location --retry 5 --retry-all-errors --connect-timeout 15 --speed-limit 1000 --speed-time 30 --output "$archive" "$runner_url"
 printf '%s  %s\n' "$runner_digest" "$archive" | shasum -a 256 --check
 tar -xzf "$archive" -C "$runner_root"
 rm -f "$archive"

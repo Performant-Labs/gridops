@@ -19,8 +19,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Tolerate a flaky network. Every value is a ceiling on retrying; a healthy
+# network never reaches it. CARGO_NET_RETRY is cargo's net.retry (default 3):
+# how often cargo retries a possibly spurious network error, such as a failed
+# crates.io download.
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
   RUST_VERSION: 1.96.0
 
 jobs:
@@ -37,6 +42,7 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 4
         with:
           # The build number counts the commits in the history.
           fetch-depth: 0
@@ -83,24 +89,29 @@ jobs:
     # Static musl binaries run on any distro. The runner image is the shared
     # one, which has no musl toolchain, so the job installs it (below).
     runs-on: [self-hosted-linux, "${{ matrix.runner }}"]
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       # The job runs as root in a throwaway container, so this changes nothing
       # on the machine.
       - name: Install the musl toolchain
+        timeout-minutes: 10
         run: |
           if ! command -v musl-gcc >/dev/null; then
             SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
-            $SUDO apt-get update -qq
-            $SUDO apt-get install -y -qq musl-tools
+            # Acquire::Retries: apt retries a failed download or connection
+            # (default 0).
+            $SUDO apt-get -o Acquire::Retries=5 update -qq
+            $SUDO apt-get -o Acquire::Retries=5 install -y -qq musl-tools
           fi
           rustup target add ${{ matrix.target }}
           musl-gcc --version 2>&1 | head -1 || true
 
       - name: Build
+        timeout-minutes: 20
         env:
           GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
           GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
@@ -116,8 +127,11 @@ jobs:
           mkdir -p dist
           cp "$bin" "dist/gridops-host-agent-linux-${{ matrix.arch }}"
 
+      # A few small binaries: a healthy upload takes seconds, so a hung one
+      # fails here in minutes, not at the job's limit.
       - name: Upload
         uses: actions/upload-artifact@v4
+        timeout-minutes: 10
         with:
           name: agent-linux-${{ matrix.arch }}
           path: dist/*
@@ -135,12 +149,17 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       # A toolchain of the job's own, so nothing on the host changes.
       - name: Install Rust
+        timeout-minutes: 15
         run: |
           export RUSTUP_HOME="$RUNNER_TEMP/rustup" CARGO_HOME="$RUNNER_TEMP/cargo"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          # Retry any failed attempt; give up on a connection after 15 s and on
+          # the (small) script after 2 minutes.
+          curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+            https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
           sh "$RUNNER_TEMP/rustup-init.sh" -y --no-modify-path --profile minimal \
             --default-toolchain "$RUST_VERSION" --target x86_64-apple-darwin
           echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
@@ -148,6 +167,7 @@ jobs:
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Build
+        timeout-minutes: 45
         env:
           GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
           GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
@@ -164,8 +184,11 @@ jobs:
           dist/gridops-host-agent-macos-arm64 --version
           lipo -archs dist/gridops-host-agent-macos-x64 | grep -qx x86_64
 
+      # A few small binaries: a healthy upload takes seconds, so a hung one
+      # fails here in minutes, not at the job's limit.
       - name: Upload
         uses: actions/upload-artifact@v4
+        timeout-minutes: 10
         with:
           name: agent-macos
           path: dist/*
@@ -185,6 +208,7 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Build, and push on a release
         env:
@@ -246,9 +270,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Download binaries
         uses: actions/download-artifact@v5
+        timeout-minutes: 10
         with:
           path: dist
           merge-multiple: true
@@ -268,6 +294,7 @@ jobs:
 
       - name: Create the release
         uses: softprops/action-gh-release@v2
+        timeout-minutes: 10
         with:
           tag_name: v${{ env.VERSION }}
           name: GridOps ${{ env.VERSION }}
