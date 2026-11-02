@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { KeyRound, LoaderCircle, Plus, RefreshCw, ScrollText, Server, ShieldCheck } from "lucide-react";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { KeyRound, LoaderCircle, Plus, RefreshCw, ScrollText, Server, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type * as React from "react";
 import { toast } from "sonner";
@@ -17,13 +17,14 @@ import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import {
-  listAgentLogs, listHostGrants, listTargets, listUnconfirmed, repairUnconfirmed, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle,
+  deleteHost, listAgentLogs, listHostGrants, listTargets, listUnconfirmed, repairUnconfirmed, retireHost, setBackendEnabled, setHostGrant, setHostLifecycle,
 } from "~/features/fleet/admin-api";
 import type { AgentLog, GrantPolicy, HostGrant, HostLifecycle, UnconfirmedPlacement } from "~/features/fleet/admin-contracts";
 import {
   EnrollmentBadge, FreshnessBadge, PressureBadge, fleetErrorMessage, formatBytes, formatCores, formatMib, isForbidden,
   lifecycleLabel, newIdempotencyKey, osLabel, platformLabel, runtimeLabel,
 } from "~/features/fleet/fleet-ui";
+import { canOfferDelete, deleteConfirmation, refusalMessage } from "~/features/fleet/machine-delete";
 import { MachineBudgetSection } from "~/features/fleet/machine-budget-section";
 import { failureReasonLabel, failuresLastHourLabel } from "~/features/fleet/placement-failures";
 import { getHost, listBackends, listHostEvents } from "~/features/fleet/query-api";
@@ -141,6 +142,7 @@ function MachineDetail({ host }: { host: HostItem }) {
         {approved && host.lifecycle !== "retired" ? <LifecycleSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" && (host.integrity === "quarantined" || host.heartbeatFreshness === "offline") ? <RecoverSection host={host} /> : null}
         {host.counts.uncertainPlacementCount > 0 ? <UnconfirmedSection hostId={host.id} /> : null}
+        {canOfferDelete(host) ? <DeleteSection host={host} /> : null}
         {approved && host.lifecycle !== "retired" ? (
           <MachineBudgetSection budget={host.physicalBudget} hostId={host.id} onSaved={() => queryClient.invalidateQueries({ queryKey: ["fleet"] })} />
         ) : null}
@@ -186,6 +188,18 @@ function HostAlerts({ host }: { host: HostItem }) {
     alerts.push(
       <Callout key="duplicate" title="Another machine reports the same hardware" tone="danger">
         This can mean the agent’s identity was copied to another machine. Check both machines before approving or running jobs.
+        {host.duplicateHardwareOf.length > 0 ? (
+          <p className="mt-2">
+            Compare with{" "}
+            {host.duplicateHardwareOf.map((other, index) => (
+              <span key={other.id}>
+                {index > 0 ? ", " : ""}
+                <Link className="font-medium underline" params={{ hostId: other.id }} to="/fleet/machines/$hostId">{other.name}</Link>
+              </span>
+            ))}
+            . If this is the stale record, retire it, then delete it.
+          </p>
+        ) : null}
       </Callout>,
     );
   }
@@ -324,6 +338,46 @@ function LifecycleSection({ host }: { host: HostItem }) {
         variant="destructive"
       >
         {pending === "retire" ? <LoaderCircle className="animate-spin" /> : null}Retire machine
+      </Button>
+    </section>
+  );
+}
+
+/** Removes a machine that can never take work again. The server decides; a refusal names every reason. */
+function DeleteSection({ host }: { host: HostItem }) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [pending, setPending] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  async function remove() {
+    if (!(await confirmAction(deleteConfirmation(host.name), { confirmLabel: "Delete machine", destructive: true }))) return;
+    setPending(true);
+    setRefusal(null);
+    try {
+      await deleteHost(host.id);
+      toast.success(`${host.name} deleted.`);
+      await navigate({ to: "/fleet" });
+      void queryClient.invalidateQueries({ queryKey: ["fleet"] });
+    } catch (error) {
+      const message = refusalMessage(error) ?? fleetErrorMessage(error, "The machine could not be deleted.");
+      setRefusal(message);
+      toast.error(message);
+    } finally {
+      setPending(false);
+    }
+  }
+  return (
+    <section className="space-y-3">
+      <SectionHeading>Delete machine</SectionHeading>
+      <p className="text-sm text-muted-foreground">
+        {host.lifecycle === "retired"
+          ? "This machine is retired and can never take work again. Deleting it removes it from the machine list and counts."
+          : "This machine never finished enrolling and has gone quiet. Deleting it removes it from the machine list and counts."}
+        {" "}Its job history and audit log stay. This can’t be undone.
+      </p>
+      {refusal ? <Callout title="Can’t delete yet" tone="warning">{refusal}</Callout> : null}
+      <Button disabled={pending} onClick={() => void remove()} size="sm" variant="destructive">
+        {pending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Delete machine
       </Button>
     </section>
   );

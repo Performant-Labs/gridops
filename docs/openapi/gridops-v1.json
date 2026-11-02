@@ -10,7 +10,7 @@
     { "name": "fleet-read", "description": "Read fleet state (token scope `fleet:read` or cookie)" },
     { "name": "fleet-enroll", "description": "Issue and manage enrollment codes (token scope `fleet:enroll` or cookie)" },
     { "name": "fleet-approve", "description": "Approve pending hosts (token scope `fleet:approve` or cookie)" },
-    { "name": "fleet-operate", "description": "Run-time levers: runtimes, lifecycle, grants, pool profiles (token scope `fleet:operate` or cookie)" },
+    { "name": "fleet-operate", "description": "Run-time levers: runtimes, lifecycle, grants, pool profiles, deleting retired machines (token scope `fleet:operate` or cookie)" },
     { "name": "fleet-admin", "description": "Cookie-only administration (API tokens, recovery, retirement, rotation)" },
     { "name": "operations", "description": "Durable operation status (token scope `fleet:read` or cookie)" },
     { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" }
@@ -121,15 +121,28 @@
             "type": "object",
             "properties": { "kind": { "const": "scope" }, "requiredScope": { "type": "string", "enum": ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate"] } },
             "required": ["kind", "requiredScope"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": { "const": "delete_blocked" },
+              "reasons": { "type": "array", "items": { "$ref": "#/components/schemas/HostDeleteBlocker" } }
+            },
+            "required": ["kind", "reasons"], "additionalProperties": false
           }
         ]
+      },
+      "HostDeleteBlocker": {
+        "type": "string",
+        "description": "Why a machine cannot be deleted yet. A refusal lists every reason that applies.",
+        "enum": ["not_retired", "still_heartbeating", "active_credential", "live_placement", "unconfirmed_start", "live_runner", "pending_command"]
       },
       "ErrorResponse": {
         "type": "object",
         "properties": {
           "code": {
             "type": "string",
-            "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range"]
+            "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range", "host_not_deletable"]
           },
           "message": { "type": "string" },
           "requestId": { "$ref": "#/components/schemas/Uuid" },
@@ -308,6 +321,14 @@
           "details": { "kind": "scope", "requiredScope": "fleet:approve" }
         }
       },
+      "fleetErrorHostNotDeletable": {
+        "value": {
+          "code": "host_not_deletable",
+          "message": "Machine cannot be deleted yet",
+          "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e71",
+          "details": { "kind": "delete_blocked", "reasons": ["live_placement", "pending_command"] }
+        }
+      },
       "enrollmentIssueCreated": {
         "value": {
           "code": "7MFBNUWH2DWCLSPZR4XZJRMNFBWKMPRLIQZKBEXYKV4",
@@ -357,7 +378,25 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
-          "200": { "description": "Host detail (projection `host`). The `host` projection also carries `failedPlacementsLastHour` (integer) and `recentPlacementFailures`, the last 24 hours of recorded placement failures grouped by reason, newest group first (see `PlacementFailureGroup`).", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "type": "object", "properties": { "failedPlacementsLastHour": { "type": "integer", "minimum": 0 }, "recentPlacementFailures": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/PlacementFailureGroup" } } } } } } } } },
+          "200": { "description": "Host detail (projection `host`). The `host` projection also carries `failedPlacementsLastHour` (integer) and `recentPlacementFailures`, the last 24 hours of recorded placement failures grouped by reason, newest group first (see `PlacementFailureGroup`).", "content": { "application/json": { "schema": { "type": "object", "properties": { "item": { "type": "object", "properties": { "failedPlacementsLastHour": { "type": "integer", "minimum": 0 }, "recentPlacementFailures": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/PlacementFailureGroup" } }, "duplicateHardwareOf": { "type": "array", "maxItems": 5, "description": "Other approved, unretired machines reporting the same hardware that the reader may see, so the stale record is easy to tell from the live one.", "items": { "type": "object", "properties": { "id": { "$ref": "#/components/schemas/Uuid" }, "name": { "type": "string" } }, "required": ["id", "name"], "additionalProperties": false } } } } } } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "delete": {
+        "tags": ["fleet-operate"],
+        "summary": "Delete a retired machine",
+        "description": "Permanently removes a machine that can never take work again from the machine list, the counts and capacity. Allowed for a retired machine, or one that never finished enrolling (not approved) and has not reported in for 90 seconds. Refused with `409 host_not_deletable` while the machine is approved but not retired, still reporting in, holds an unrevoked credential (approved machines), or still has a placement that is not cleaned up, an unconfirmed start, capacity still charged, a runner that has not finished, or a command waiting within its deadline; `details.reasons` names every reason that applies. The delete is soft: placements, events, samples and audit history stay, and the machine's credential, open recovery codes and grants are revoked. An agent still using the machine's credential is rejected as `unauthenticated` and cannot recreate it. Enrolling the computer again creates a new record. The audit row `fleet.host.deleted` names the actor (and the API token name when one was used), the machine's name and id, and its last heartbeat. Deleting a machine that is already deleted is `404 not_found`.",
+        "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "hostId": { "$ref": "#/components/schemas/Uuid" } }, "required": ["hostId"], "additionalProperties": false } } }
+          },
+          "409": {
+            "description": "The machine cannot be deleted yet; `details.kind` is `delete_blocked`.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" }, "examples": { "hostNotDeletable": { "$ref": "#/components/examples/fleetErrorHostNotDeletable" } } } }
+          },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

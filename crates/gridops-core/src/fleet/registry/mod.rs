@@ -8,6 +8,7 @@
 
 mod commands;
 mod credentials;
+pub mod delete;
 mod enrollment;
 mod handshake;
 mod inventory;
@@ -202,6 +203,8 @@ pub enum RegistryError {
     StaleGeneration,
     #[error("registry request is invalid: {0}")]
     InvalidRequest(&'static str),
+    #[error("the machine cannot be deleted yet")]
+    HostNotDeletable(Vec<super::protocol::browser::HostDeleteBlocker>),
     #[error("invalid fleet identifier: {0}")]
     InvalidIdentifier(String),
     #[error("target scope is not administered by the requesting user")]
@@ -518,12 +521,13 @@ impl RegistryService {
             let expected_revision =
                 expected_revision.ok_or(RegistryError::EnrollmentScopeMismatch)?;
             let host_row = sqlx::query(
-                "SELECT epoch,revision,enrollment_state,lifecycle_state FROM fleet_hosts WHERE id=?",
+                "SELECT epoch,revision,enrollment_state,lifecycle_state FROM fleet_hosts
+                  WHERE id=? AND deleted_at IS NULL",
             )
-                    .bind(recovery_host_id.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .ok_or(RegistryError::EnrollmentScopeMismatch)?;
+            .bind(recovery_host_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(RegistryError::EnrollmentScopeMismatch)?;
             if host_row.get::<i64, _>("epoch") != expected_epoch
                 || host_row.get::<i64, _>("revision") != expected_revision
                 || host_row.get::<String, _>("enrollment_state") == "revoked"
@@ -776,7 +780,7 @@ impl RegistryService {
         }
         let host_row = sqlx::query(
             "SELECT epoch,revision,enrollment_state,lifecycle_state FROM fleet_hosts
-              WHERE id=? AND enrollment_state!='revoked'",
+              WHERE id=? AND enrollment_state!='revoked' AND deleted_at IS NULL",
         )
         .bind(request.host_id.to_string())
         .fetch_optional(&mut *tx)
@@ -888,7 +892,8 @@ impl RegistryService {
         let now = self.clock.now_millis();
         ensure_system_admin(&mut tx, user_id).await?;
         let Some(row) = sqlx::query(
-            "SELECT revision,enrollment_state,lifecycle_state FROM fleet_hosts WHERE id=?",
+            "SELECT revision,enrollment_state,lifecycle_state FROM fleet_hosts
+              WHERE id=? AND deleted_at IS NULL",
         )
         .bind(host_id.to_string())
         .fetch_optional(&mut *tx)
@@ -952,10 +957,12 @@ impl RegistryService {
         ensure_system_admin(&mut tx, user_id).await?;
         let expected = i64::try_from(expected_revision.get())
             .map_err(|_| RegistryError::InvalidRequest("revision exceeds SQLite integer"))?;
-        let Some(row) = sqlx::query("SELECT revision,lifecycle_state FROM fleet_hosts WHERE id=?")
-            .bind(host_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await?
+        let Some(row) = sqlx::query(
+            "SELECT revision,lifecycle_state FROM fleet_hosts WHERE id=? AND deleted_at IS NULL",
+        )
+        .bind(host_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
         else {
             return Err(RegistryError::NotFound);
         };
@@ -1023,7 +1030,10 @@ impl RegistryService {
         let mut tx = self.begin().await?;
         let now = self.clock.now_millis();
         ensure_system_admin(&mut tx, user_id).await?;
-        let changed = sqlx::query("UPDATE host_backends SET enabled=? WHERE id=? AND host_id=?")
+        let changed = sqlx::query(
+            "UPDATE host_backends SET enabled=? WHERE id=? AND host_id=?
+               AND EXISTS (SELECT 1 FROM fleet_hosts h WHERE h.id=host_backends.host_id AND h.deleted_at IS NULL)",
+        )
             .bind(enabled)
             .bind(backend_id.to_string())
             .bind(host_id.to_string())
@@ -1209,7 +1219,7 @@ impl RegistryService {
         let now = self.clock.now_millis();
         ensure_system_admin(&mut tx, user_id).await?;
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=? AND lifecycle_state!='retired')
+            "SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=? AND lifecycle_state!='retired' AND deleted_at IS NULL)
                 AND EXISTS (SELECT 1 FROM fleet_ci_targets WHERE id=?)",
         )
         .bind(host_id.to_string())
@@ -1497,7 +1507,7 @@ impl RegistryService {
         let row = sqlx::query(
             "SELECT c.id,c.generation,c.host_epoch,c.verifier,h.epoch,h.enrollment_state,h.lifecycle_state
                FROM host_credentials c JOIN fleet_hosts h ON h.id=c.host_id
-              WHERE c.host_id=? AND c.verifier_format='sha256'
+              WHERE c.host_id=? AND c.verifier_format='sha256' AND h.deleted_at IS NULL
                 AND c.revoked_at IS NULL AND (c.overlap_expires_at IS NULL OR c.overlap_expires_at>?)",
         )
         .bind(host_id.to_string())
@@ -1847,7 +1857,7 @@ impl RegistryService {
             "INSERT INTO host_credentials
              (id,host_id,host_epoch,generation,verifier,verifier_format,created_at,overlap_expires_at)
              SELECT ?,id,epoch,?,?,'sha256',?,NULL
-             FROM fleet_hosts WHERE id=?",
+             FROM fleet_hosts WHERE id=? AND deleted_at IS NULL",
         )
         .bind(credential_id.to_string())
         .bind(i64::try_from(next_generation.get()).map_err(|_| RegistryError::InvalidRequest("generation exceeds SQLite integer"))?)
@@ -2214,7 +2224,8 @@ async fn ensure_authenticated_generation(
          WHERE c.id=? AND c.host_id=? AND c.generation=? AND c.host_epoch=?
            AND h.epoch=?
            AND c.revoked_at IS NULL AND (c.overlap_expires_at IS NULL OR c.overlap_expires_at>?)
-           AND h.enrollment_state!='revoked' AND h.lifecycle_state!='retired'",
+           AND h.enrollment_state!='revoked' AND h.lifecycle_state!='retired'
+           AND h.deleted_at IS NULL",
     )
     .bind(authenticated.credential_id.to_string())
     .bind(authenticated.host_id.to_string())

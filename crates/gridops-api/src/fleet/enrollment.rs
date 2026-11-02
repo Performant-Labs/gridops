@@ -553,6 +553,29 @@ pub(super) async fn retire(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeletedHostReceipt {
+    host_id: HostId,
+}
+
+/// Deletes a machine that is retired (or never finished enrolling) once
+/// nothing live refers to it. The registry names every reason it refuses.
+pub(super) async fn delete_host(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser<Operate>,
+    FleetPath(host_id): FleetPath<HostId>,
+) -> Result<Json<DeletedHostReceipt>, FleetApiError> {
+    let deleted = RegistryService::new(state.database, state.vault)
+        .delete_host(user.principal(), host_id)
+        .await
+        .map_err(|error| context.registry_error(&error))?;
+    Ok(Json(DeletedHostReceipt {
+        host_id: deleted.host_id,
+    }))
+}
+
+#[derive(Serialize)]
 pub(super) struct AgentLogList {
     items: Vec<gridops_core::fleet::registry::logs::StoredAgentLog>,
 }

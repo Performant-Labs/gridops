@@ -621,6 +621,9 @@ async fn matching_hardware_keeps_a_new_host_pending_and_flags_it_for_the_approve
         .await?;
     assert_eq!(read["item"]["enrollment"], "pending");
     assert_eq!(read["item"]["duplicateHardware"], true);
+    // The second machine links to the first, so the stale record is easy to tell.
+    assert_eq!(read["item"]["duplicateHardwareOf"][0]["id"], first.as_str());
+    assert_eq!(read["item"]["duplicateHardwareOf"][0]["name"], "ThinkPad");
     let read: Value = get(&f, &format!("/hosts/{first}"))
         .send()
         .await?
@@ -628,5 +631,6 @@ async fn matching_hardware_keeps_a_new_host_pending_and_flags_it_for_the_approve
         .await?;
     assert_eq!(read["item"]["enrollment"], "approved");
     assert_eq!(read["item"]["duplicateHardware"], false);
+    assert_eq!(read["item"]["duplicateHardwareOf"], json!([]));
     Ok(())
 }
