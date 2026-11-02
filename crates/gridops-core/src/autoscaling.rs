@@ -149,13 +149,52 @@ pub async fn assigned_queued_jobs(
     database: &SqlitePool,
     pool_id: &str,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM workflow_jobs wj
+    let owned = owned_queued_jobs(database, pool_id).await?;
+    Ok(i64::try_from(owned.len()).unwrap_or(i64::MAX))
+}
+
+/// Ids of the queued jobs this pool owns, oldest first; see
+/// [`queued_job_owners`].
+async fn owned_queued_jobs(database: &SqlitePool, pool_id: &str) -> Result<Vec<i64>, sqlx::Error> {
+    Ok(queued_job_owners(database)
+        .await?
+        .into_iter()
+        .filter_map(|(job, owner)| (owner == pool_id).then_some(job))
+        .collect())
+}
+
+/// The one pool that counts each queued job, oldest job first. Every view of
+/// a pool's queue ([`assigned_queued_jobs`], [`queued_job_assignments`],
+/// [`repository_capacities`]) is built from this, so no two of them disagree
+/// about who owns a job and no job makes two pools scale.
+///
+/// A job's candidates are the unpaused autoscaling pools that serve its
+/// repository and can run its labels, repository pools first, then the
+/// oldest, then by id. The job goes to the first candidate with room left,
+/// where a pool's room is `max_count` less its busy runners: an idle or
+/// starting runner can take a queued job and the pool can grow to
+/// `max_count`, but a busy runner can't. Busy runners are counted as the
+/// reconciler counts them: not deleted and in an active status. Jobs are
+/// handed out oldest first and each one uses up a unit of its owner's room. If
+/// every candidate is full the job stays with the first one, as it did before
+/// room was considered, so a queue with nowhere to go looks the same.
+///
+/// Owners depend only on the queued jobs, the pools and their busy counts,
+/// and every ordering ends in an id, so the same state always gives the same
+/// owners. Since older jobs claim room first, a newly queued job never moves
+/// an older one; a pool near its limit only gains or loses jobs when its own
+/// busy count, the queue or a pool's settings change, so ownership can't
+/// alternate between ticks on its own.
+async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<(i64, String)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT wj.id AS job_id,candidate.id AS pool_id,
+          candidate.max_count-(SELECT COUNT(*) FROM runners runner
+            WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
+              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS room
+          FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
-            SELECT candidate.id FROM runner_pools candidate
-            WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
+          JOIN runner_pools candidate ON candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
               EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
                 WHERE candidate_repo.pool_id=candidate.id AND candidate_repo.repository_id=repo.id) OR
               candidate.repository_id=repo.id OR
@@ -187,15 +226,51 @@ pub async fn assigned_queued_jobs(
                 )
               )
             )
-            ORDER BY CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
-              candidate.created_at,candidate.id
-            LIMIT 1
-          )"#,
+          WHERE wj.status='queued' AND wr.status!='completed'
+          ORDER BY wj.created_at,wj.id,
+            CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
+            candidate.created_at,candidate.id"#,
     )
-    .bind(pool_id)
     .bind(runner_arch_label())
-    .fetch_one(database)
-    .await
+    .fetch_all(database)
+    .await?;
+    Ok(assign_queued_jobs(rows.into_iter().map(|row| {
+        (
+            row.get::<i64, _>("job_id"),
+            row.get::<String, _>("pool_id"),
+            row.get::<i64, _>("room"),
+        )
+    })))
+}
+
+/// Gives each job to its first candidate with room; see [`queued_job_owners`].
+/// `candidates` holds `(job, pool, room)` with each job's rows together, jobs
+/// oldest first and each job's pools in order.
+fn assign_queued_jobs(
+    candidates: impl IntoIterator<Item = (i64, String, i64)>,
+) -> Vec<(i64, String)> {
+    let mut room = std::collections::HashMap::<String, i64>::new();
+    let mut jobs = Vec::<(i64, Vec<String>)>::new();
+    for (job, pool, pool_room) in candidates {
+        room.entry(pool.clone()).or_insert(pool_room);
+        match jobs.last_mut() {
+            Some((last, pools)) if *last == job => pools.push(pool),
+            _ => jobs.push((job, vec![pool])),
+        }
+    }
+    jobs.into_iter()
+        .filter_map(|(job, pools)| {
+            let owner = pools
+                .iter()
+                .find(|pool| room.get(*pool).is_some_and(|room| *room > 0))
+                .or_else(|| pools.first())?
+                .clone();
+            if let Some(room) = room.get_mut(&owner) {
+                *room -= 1;
+            }
+            Some((job, owner))
+        })
+        .collect()
 }
 
 pub async fn provider_capacities(
@@ -332,6 +407,7 @@ pub async fn queued_job_assignments(
     database: &SqlitePool,
     pool_id: &str,
 ) -> Result<Vec<QueuedJob>, sqlx::Error> {
+    let owned = owned_queued_jobs(database, pool_id).await?;
     let sql = concat!(
         r#"SELECT repo.id AS repository_id,wj.labels,wj.created_at,
           "#,
@@ -339,51 +415,15 @@ pub async fn queued_job_assignments(
         r#" AS prioritised FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
-            SELECT candidate.id FROM runner_pools candidate
-            WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
-              EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
-                WHERE candidate_repo.pool_id=candidate.id AND candidate_repo.repository_id=repo.id) OR
-              candidate.repository_id=repo.id OR
-              (candidate.scope='organization' AND candidate.installation_id=repo.installation_id)
-            ) AND EXISTS (
-              SELECT 1 FROM (
-                -- The built-in host's runners, unless the pool runs on machines only.
-                SELECT CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'macos' ELSE 'linux' END AS os,
-                  CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'arm64' ELSE lower(?) END AS arch
-                FROM json_each(candidate.providers) provider
-                WHERE lower(CAST(provider.value AS TEXT)) IN ('docker','tart')
-                  AND NOT EXISTS (SELECT 1 FROM pool_execution_profiles machines_only
-                    WHERE machines_only.pool_id=candidate.id AND machines_only.enabled=1
-                      AND machines_only.archived_at IS NULL AND machines_only.placement='machines')
-                UNION ALL
-                -- Each fleet platform the pool runs on.
-                SELECT profile.execution_os,profile.architecture FROM pool_execution_profiles profile
-                WHERE profile.pool_id=candidate.id AND profile.enabled=1 AND profile.archived_at IS NULL
-              ) platform
-              WHERE NOT EXISTS (
-                SELECT 1 FROM json_each(wj.labels) requested
-                WHERE NOT (
-                  lower(CAST(requested.value AS TEXT))='self-hosted' OR
-                  (lower(CAST(requested.value AS TEXT)) NOT IN ('linux','macos','windows','x64','arm64','arm','x86') AND EXISTS (
-                    SELECT 1 FROM json_each(candidate.labels) assigned
-                    WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
-                  )) OR
-                  lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch)
-                )
-              )
-            )
-            ORDER BY CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
-              candidate.created_at,candidate.id
-            LIMIT 1
-          ) ORDER BY wj.created_at,wj.id"#
+          WHERE wj.status='queued' AND wr.status!='completed'
+            AND wj.id IN (SELECT value FROM json_each(?))
+          ORDER BY wj.created_at,wj.id"#
     );
     let rows = sqlx::query(sql)
         .bind(pool_id)
         .bind(crate::now_millis())
         .bind(pool_id)
-        .bind(pool_id)
-        .bind(runner_arch_label())
+        .bind(serde_json::to_string(&owned).unwrap_or_else(|_| "[]".into()))
         .fetch_all(database)
         .await?;
     Ok(rows
@@ -422,46 +462,21 @@ pub async fn repository_capacities(
         r#" AS prioritised
             FROM workflow_jobs wj
             JOIN workflow_runs wr ON wr.id=wj.run_id
-            JOIN repositories repo ON repo.id=wr.repository_id
-            WHERE wj.status='queued' AND wr.status!='completed' AND ?=(
-              SELECT candidate.id FROM runner_pools candidate
-              WHERE candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
-                EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
-                  WHERE candidate_repo.pool_id=candidate.id AND candidate_repo.repository_id=repo.id) OR
-                candidate.repository_id=repo.id OR
-                (candidate.scope='organization' AND candidate.installation_id=repo.installation_id)
-              ) AND EXISTS (
-                SELECT 1 FROM json_each(candidate.providers) provider
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM json_each(wj.labels) requested
-                  WHERE NOT (
-                    lower(CAST(requested.value AS TEXT))='self-hosted' OR
-                    (lower(CAST(requested.value AS TEXT)) NOT IN ('linux','macos','windows','x64','arm64','arm','x86') AND EXISTS (
-                      SELECT 1 FROM json_each(candidate.labels) assigned
-                      WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
-                    )) OR
-                    (lower(CAST(provider.value AS TEXT))='docker' AND lower(CAST(requested.value AS TEXT)) IN ('linux',lower(?))) OR
-                    (lower(CAST(provider.value AS TEXT))='tart' AND lower(CAST(requested.value AS TEXT)) IN ('macos','arm64'))
-                  )
-                )
-              )
-              ORDER BY CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
-                candidate.created_at,candidate.id
-              LIMIT 1
-            )
+            WHERE wj.status='queued' AND wr.status!='completed'
+              AND wj.id IN (SELECT value FROM json_each(?))
           ) job ON job.repository_id=repo.id
           WHERE membership.pool_id=? AND repo.archived=0
           GROUP BY repo.id
           ORDER BY membership.created_at,repo.id"#
     );
+    let owned = owned_queued_jobs(database, pool_id).await?;
     let rows = sqlx::query(sql)
         .bind(pool_id)
         .bind(pool_id)
         .bind(pool_id)
         .bind(crate::now_millis())
         .bind(pool_id)
-        .bind(pool_id)
-        .bind(runner_arch_label())
+        .bind(serde_json::to_string(&owned).unwrap_or_else(|_| "[]".into()))
         .bind(pool_id)
         .fetch_all(database)
         .await?;
@@ -686,6 +701,342 @@ mod tests {
         let capacities = repository_capacities(&database, "linux").await?;
         assert_eq!(capacities.len(), 1);
         assert_eq!((capacities[0].queued, capacities[0].prioritised), (1, 0));
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// A database with one organization, repositories 10 and 11, and `extra`
+    /// (pools, runners and jobs) applied on top.
+    async fn ownership_fixture(extra: &str) -> anyhow::Result<(std::path::PathBuf, SqlitePool)> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-capacity-ownership-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES
+              (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1),
+              (11,1,'octo-org','other','octo-org/other',0,'master','https://github.com/octo-org/other',1,1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(extra.to_owned()))
+            .execute(&database)
+            .await?;
+        Ok((directory, database))
+    }
+
+    /// An organization pool carrying the `shared` label.
+    fn org_pool(id: &str, created_at: i64, max_count: i64) -> String {
+        format!(
+            "INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,max_count,autoscaling_enabled,created_at,updated_at)
+              VALUES ('{id}',1,NULL,'{id}','organization','[\"shared\"]','runner:latest',{max_count},1,{created_at},{created_at});"
+        )
+    }
+
+    /// A repository pool on repository 10 carrying the `shared` label.
+    fn repository_pool(id: &str, created_at: i64, max_count: i64) -> String {
+        format!(
+            "INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,max_count,autoscaling_enabled,created_at,updated_at)
+              VALUES ('{id}',1,10,'{id}','repository','[\"shared\"]','runner:latest',{max_count},1,{created_at},{created_at});
+            INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('{id}',10,1);"
+        )
+    }
+
+    /// `count` runners in the pool with the given status and busy flag.
+    fn pool_runners(pool: &str, tag: &str, count: usize, status: &str, busy: bool) -> String {
+        (0..count)
+            .map(|index| {
+                format!(
+                    "INSERT INTO runners (id,pool_id,target_repository_id,name,status,busy,created_at,updated_at)
+                      VALUES ('{pool}-{tag}-{index}','{pool}',10,'{pool}-{tag}-{index}','{status}',{},1,1);",
+                    i64::from(busy)
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    /// Queued `shared` jobs on repository 10 with the given ids; each is queued
+    /// at its id, so lower ids are older.
+    fn shared_jobs(ids: std::ops::Range<i64>) -> String {
+        ids.map(|id| {
+                format!(
+                    "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+                      VALUES ({id},20,'job-{id}','queued','[\"self-hosted\",\"shared\"]','https://github.com/octo-org/gridops/actions/runs/20/job/{id}',{id},{id});"
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    /// The queue times of the jobs the pool owns, checking that the count and
+    /// the per-job list agree.
+    async fn owned(database: &SqlitePool, pool_id: &str) -> anyhow::Result<Vec<i64>> {
+        let jobs = queued_job_assignments(database, pool_id).await?;
+        let count = assigned_queued_jobs(database, pool_id).await?;
+        assert_eq!(
+            i64::try_from(jobs.len())?,
+            count,
+            "{pool_id}: assignment list and count disagree"
+        );
+        Ok(jobs.into_iter().map(|job| job.queued_at).collect())
+    }
+
+    #[tokio::test]
+    async fn a_saturated_pool_passes_queued_jobs_to_the_next_compatible_pool() -> anyhow::Result<()>
+    {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("older", 1, 2),
+            org_pool("newer", 2, 10),
+            pool_runners("older", "busy", 2, "busy", true),
+            shared_jobs(100..103),
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+        // The same state gives the same owners.
+        assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pool_with_room_keeps_its_queued_jobs() -> anyhow::Result<()> {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("older", 1, 10),
+            org_pool("newer", 2, 10),
+            pool_runners("older", "busy", 2, "busy", true),
+            shared_jobs(100..103),
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, vec![100, 101, 102]);
+        assert_eq!(owned(&database, "newer").await?, Vec::<i64>::new());
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_partly_busy_pool_keeps_only_the_oldest_jobs_it_has_room_for() -> anyhow::Result<()> {
+        // Room is max 4 less 2 busy: the idle runner can take a job and the
+        // pool can start one more.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}",
+            org_pool("older", 1, 4),
+            org_pool("newer", 2, 10),
+            pool_runners("older", "busy", 2, "busy", true),
+            pool_runners("older", "idle", 1, "idle", false),
+            shared_jobs(100..105),
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, vec![100, 101]);
+        assert_eq!(owned(&database, "newer").await?, vec![102, 103, 104]);
+
+        // A newer job never takes room from an older one, so the older jobs
+        // keep their owners as the queue grows.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(shared_jobs(105..106)))
+            .execute(&database)
+            .await?;
+        assert_eq!(owned(&database, "older").await?, vec![100, 101]);
+        assert_eq!(owned(&database, "newer").await?, vec![102, 103, 104, 105]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn when_every_compatible_pool_is_full_the_first_pool_keeps_the_jobs() -> anyhow::Result<()>
+    {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}",
+            org_pool("older", 1, 2),
+            org_pool("newer", 2, 1),
+            pool_runners("older", "busy", 2, "busy", true),
+            pool_runners("newer", "busy", 1, "busy", true),
+            shared_jobs(100..103),
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, vec![100, 101, 102]);
+        assert_eq!(owned(&database, "newer").await?, Vec::<i64>::new());
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repository_pools_go_first_and_pass_overflow_to_organization_pools()
+    -> anyhow::Result<()> {
+        // The organization pool is older, but the repository pool still
+        // outranks it while it has room.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("org", 0, 10),
+            repository_pool("repo", 5, 3),
+            pool_runners("repo", "busy", 1, "busy", true),
+            shared_jobs(100..104),
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "repo").await?, vec![100, 101]);
+        assert_eq!(owned(&database, "org").await?, vec![102, 103]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_runners_are_room_and_finished_runners_are_ignored() -> anyhow::Result<()> {
+        // Max 3: one busy runner takes room; idle runners don't; runners that
+        // were deleted or failed, even if last seen busy, don't either.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}{}{}",
+            org_pool("older", 1, 3),
+            org_pool("newer", 2, 10),
+            pool_runners("older", "busy", 1, "busy", true),
+            pool_runners("older", "idle", 2, "online", false),
+            pool_runners("older", "deleted", 2, "deleted", true),
+            pool_runners("older", "failed", 1, "failed", true),
+            shared_jobs(100..104),
+        ))
+        .await?;
+        sqlx::raw_sql(
+            "INSERT INTO runners (id,pool_id,target_repository_id,name,status,busy,deleted_at,created_at,updated_at)
+              VALUES ('older-gone','older',10,'older-gone','busy',1,5,1,1);",
+        )
+        .execute(&database)
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, vec![100, 101]);
+        assert_eq!(owned(&database, "newer").await?, vec![102, 103]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn paused_and_manual_pools_never_own_queued_jobs() -> anyhow::Result<()> {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}{}",
+            org_pool("older", 1, 1),
+            org_pool("paused", 2, 10),
+            org_pool("manual", 3, 10),
+            org_pool("newest", 4, 10),
+            pool_runners("older", "busy", 1, "busy", true),
+            shared_jobs(100..102),
+        ))
+        .await?;
+        sqlx::raw_sql(
+            "UPDATE runner_pools SET paused=1 WHERE id='paused';
+             UPDATE runner_pools SET autoscaling_enabled=0 WHERE id='manual';",
+        )
+        .execute(&database)
+        .await?;
+
+        assert_eq!(owned(&database, "older").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "paused").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "manual").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "newest").await?, vec![100, 101]);
+
+        // With the only other autoscaling pool paused too, the full pool keeps
+        // the jobs rather than handing them to a pool that won't scale.
+        sqlx::raw_sql("UPDATE runner_pools SET paused=1 WHERE id='newest';")
+            .execute(&database)
+            .await?;
+        assert_eq!(owned(&database, "older").await?, vec![100, 101]);
+        for pool in ["paused", "manual", "newest"] {
+            assert_eq!(owned(&database, pool).await?, Vec::<i64>::new());
+        }
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_queued_job_has_exactly_one_owner() -> anyhow::Result<()> {
+        // Pools created at the same time are ordered by id.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}{}{}",
+            org_pool("pool-c", 1, 10),
+            org_pool("pool-a", 1, 2),
+            org_pool("pool-b", 1, 3),
+            pool_runners("pool-a", "busy", 1, "busy", true),
+            pool_runners("pool-b", "busy", 1, "busy", true),
+            pool_runners("pool-b", "idle", 1, "idle", false),
+            shared_jobs(100..106),
+        ))
+        .await?;
+
+        let a = owned(&database, "pool-a").await?;
+        let b = owned(&database, "pool-b").await?;
+        let c = owned(&database, "pool-c").await?;
+        assert_eq!(a, vec![100]);
+        assert_eq!(b, vec![101, 102]);
+        assert_eq!(c, vec![103, 104, 105]);
+        let mut all = [a, b, c].concat();
+        all.sort_unstable();
+        assert_eq!(all, (100..106).collect::<Vec<_>>());
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repository_capacity_counts_the_jobs_the_pool_owns() -> anyhow::Result<()> {
+        // A full repository pool passes its jobs on; the next repository pool
+        // must then aim its runners at the repository those jobs are in.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            repository_pool("older", 1, 1),
+            repository_pool("newer", 2, 10),
+            pool_runners("older", "busy", 1, "busy", true),
+            shared_jobs(100..102),
+        ))
+        .await?;
+        sqlx::raw_sql(
+            "INSERT INTO runner_pool_repositories (pool_id,repository_id,created_at) VALUES ('newer',11,0);",
+        )
+        .execute(&database)
+        .await?;
+
+        let older = repository_capacities(&database, "older").await?;
+        assert_eq!(older.iter().map(|capacity| capacity.queued).sum::<i64>(), 0);
+        let newer = repository_capacities(&database, "newer").await?;
+        let queued = |repository_id: i64| {
+            newer
+                .iter()
+                .find(|capacity| capacity.repository_id == repository_id)
+                .map(|capacity| capacity.queued)
+        };
+        assert_eq!((queued(10), queued(11)), (Some(2), Some(0)));
+        let target = next_runner_repository(&database, "newer", 1)
+            .await?
+            .map(|capacity| capacity.repository_id);
+        assert_eq!(target, Some(10));
 
         database.close().await;
         fs::remove_dir_all(directory)?;
