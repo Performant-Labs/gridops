@@ -1040,6 +1040,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pool_keeps_the_jobs_it_scaled_for_until_the_full_pool_frees_a_runner()
+    -> anyhow::Result<()> {
+        // Issue #42, across reconcile ticks. The scale-down path
+        // (maybe_scale_down) keeps a pool's runners only while
+        // assigned_queued_jobs is above zero, so the pool that takes a full
+        // pool's jobs must keep counting them while its new runners start,
+        // or it would scale straight back down and the jobs would wait.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("older", 1, 2),
+            org_pool("newer", 2, 10),
+            pool_runners("older", "busy", 2, "busy", true),
+            shared_jobs(100..103),
+        ))
+        .await?;
+
+        // Tick 1: 'older' is full, so 'newer' owns every job and scales up.
+        assert_eq!(owned(&database, "older").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+
+        // Tick 2: 'newer' has started three runners that are not on a job
+        // yet. Idle and starting runners are room, not load, so it still owns
+        // the jobs and is not scaled down; 'older' does not take them back.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "{}{}",
+            pool_runners("newer", "starting", 1, "starting", false),
+            pool_runners("newer", "idle", 2, "online", false),
+        )))
+        .execute(&database)
+        .await?;
+        for _ in 0..2 {
+            assert_eq!(owned(&database, "older").await?, Vec::<i64>::new());
+            assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+        }
+
+        // Tick 3: one of 'older's runners finishes and goes idle, so 'older'
+        // has room for one job again and takes back the oldest; the other two
+        // stay with 'newer'. Nothing is counted twice or dropped.
+        sqlx::raw_sql("UPDATE runners SET status='online',busy=0 WHERE id='older-busy-0';")
+            .execute(&database)
+            .await?;
+        assert_eq!(owned(&database, "older").await?, vec![100]);
+        assert_eq!(owned(&database, "newer").await?, vec![101, 102]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_pool_with_room_keeps_its_queued_jobs() -> anyhow::Result<()> {
         let (directory, database) = ownership_fixture(&format!(
             "{}{}{}{}",
