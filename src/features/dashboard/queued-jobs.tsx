@@ -8,13 +8,35 @@ import { statusLabel } from "~/components/status-icon";
 import { cn } from "~/lib/utils";
 import type { QueuedJob } from "./types";
 
-const REASONS: Record<string, { label: string; hint: string; tone: "danger" | "warning" | "muted" }> = {
-  no_matching_pool: { label: "No pool offers these labels", hint: "No unpaused autoscaling pool serving this repository can run every requested label, so no runner will be started for it.", tone: "danger" },
+type Reason = { label: string; hint: string; tone: "danger" | "warning" | "muted" };
+
+/** A job no pool serves, from a server that doesn't say which labels are missing. */
+const NO_MATCHING_POOL: Reason = { label: "No pool offers these labels", hint: "No unpaused autoscaling pool serving this repository can run every requested label, so no runner will be started for it.", tone: "danger" };
+
+const REASONS: Record<string, Reason> = {
+  no_matching_pool: NO_MATCHING_POOL,
   pool_at_capacity: { label: "Pool is at its runner limit", hint: "Every pool that can run this job is using all of its runners, so it waits for one to finish.", tone: "warning" },
   runner_starting: { label: "Runner starting", hint: "Its pool is starting a runner.", tone: "muted" },
   waiting_for_runner: { label: "Waiting for a runner", hint: "Its pool has room and will start or free a runner for it.", tone: "muted" },
   pool_not_visible: { label: "Pool not visible to you", hint: "Its pool also covers repositories you can't access, so it isn't named.", tone: "muted" },
 };
+
+/** What to say about a job no pool serves, given the labels no pool provides (unknown on older servers). */
+function unmatchedReason(missingLabels: string[] | undefined): Reason {
+  if (!missingLabels) return NO_MATCHING_POOL;
+  if (missingLabels.length > 0) {
+    return {
+      label: `No pool provides ${missingLabels.join(", ")}`,
+      hint: "No runner pool you can see offers these labels, so no runner will be started for this job until a pool is given them.",
+      tone: "danger",
+    };
+  }
+  return {
+    label: "No available pool",
+    hint: "Pools offer each of these labels, but every one that could run this job is paused, has an open provisioning circuit, has autoscaling off or doesn't offer them all together.",
+    tone: "danger",
+  };
+}
 
 /** "45s", "12m", "7h 22m", "2d 3h": how long a job has waited. */
 export function formatWait(seconds: number) {
@@ -75,8 +97,11 @@ export function QueuedJobsList({ error = null, items, loading = false, onPageCha
 }
 
 function QueuedJobRow({ job }: { job: QueuedJob }) {
-  const reason = REASONS[job.waitingReason] ?? { label: statusLabel(job.waitingReason), hint: "", tone: "muted" as const };
   const unmatched = job.waitingReason === "no_matching_pool";
+  const reason = unmatched
+    ? unmatchedReason(job.missingLabels)
+    : REASONS[job.waitingReason] ?? { label: statusLabel(job.waitingReason), hint: "", tone: "muted" };
+  const missing = new Set((unmatched ? job.missingLabels ?? [] : []).map((label) => label.toLowerCase()));
   return (
     <tr className="border-b border-border align-top transition-colors last:border-b-0 hover:bg-hover" data-reason={job.waitingReason}>
       <td className="max-w-64 px-4 py-2.5">
@@ -86,7 +111,10 @@ function QueuedJobRow({ job }: { job: QueuedJob }) {
       <td className="max-w-48 px-3 py-2.5 text-xs text-muted-foreground"><span className="block truncate" title={job.repository}>{job.repository}</span></td>
       <td className="px-3 py-2.5">
         <div className="flex max-w-60 flex-wrap gap-1">
-          {job.labels.map((label) => <Badge className="font-mono" key={label} variant="outline">{label}</Badge>)}
+          {job.labels.map((label) => {
+            const isMissing = missing.has(label.toLowerCase());
+            return <Badge className="font-mono" data-missing={isMissing ? "true" : undefined} key={label} title={isMissing ? "No pool provides this label" : undefined} variant={isMissing ? "destructive" : "outline"}>{label}</Badge>;
+          })}
         </div>
       </td>
       <td className="px-3 py-2.5">

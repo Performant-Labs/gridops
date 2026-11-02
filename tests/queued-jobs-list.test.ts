@@ -109,6 +109,30 @@ describe("queued jobs list", () => {
     expect(row?.querySelector("a[href^='/runner-pools']")).toBeNull();
   });
 
+  it("names the labels no pool provides for a job that can never run", () => {
+    render(createElement(QueuedJobsList, listProps({
+      items: [job({ id: 5, labels: ["self-hosted", "self-hosted-macos", "xcode"], missingLabels: ["self-hosted-macos", "xcode"], matchedPool: null, waitingReason: "no_matching_pool" })],
+      total: 1,
+    })));
+    const [row] = rows();
+    expect(row?.textContent).toContain("No matching pool");
+    expect(row?.textContent).toContain("No pool provides self-hosted-macos, xcode");
+    expect(row?.textContent).not.toContain("No pool offers these labels");
+    const missing = [...(row?.querySelectorAll("[data-missing='true']") ?? [])].map((badge) => badge.textContent);
+    expect(missing).toEqual(["self-hosted-macos", "xcode"]);
+  });
+
+  it("says no pool is available when every label exists but no pool can take the job", () => {
+    render(createElement(QueuedJobsList, listProps({
+      items: [job({ id: 6, labels: ["self-hosted", "paused-only"], missingLabels: [], matchedPool: null, waitingReason: "no_matching_pool" })],
+      total: 1,
+    })));
+    const [row] = rows();
+    expect(row?.textContent).toContain("No matching pool");
+    expect(row?.textContent).toContain("No available pool");
+    expect(row?.querySelector("[data-missing='true']")).toBeNull();
+  });
+
   it("shows an unknown reason as plain text rather than failing", () => {
     render(createElement(QueuedJobsList, listProps({ items: [job({ id: 4, waitingReason: "unmatched_labels" })], total: 1 })));
     expect(rows()[0]?.textContent).toContain("Unmatched labels");

@@ -150,6 +150,13 @@ export type QueuedJob = {
   runUrl: string;
   htmlUrl: string;
   labels: string[];
+  /**
+   * For a job no pool serves: the labels it asked for that no pool you can see offers
+   * (a platform label such as `self-hosted-macos` counts as offered only by a pool running
+   * that platform). Empty when each label is offered but no available pool offers them all,
+   * and for every job a pool serves. Missing from older servers.
+   */
+  missingLabels?: string[];
   /** The pool the scaler counts the job for; null when no pool can run it (or you can't see the pool, see `waitingReason`). */
   matchedPool: { id: string; name: string } | null;
   waitingReason: QueuedJobWaitingReason | (string & {});

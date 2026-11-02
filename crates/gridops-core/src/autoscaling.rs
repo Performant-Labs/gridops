@@ -49,6 +49,32 @@ macro_rules! prioritised_job {
     };
 }
 
+/// The platforms a pool's runners run on, one `os,arch` row each:
+/// the built-in host's (Docker is Linux on the host's architecture, Tart is
+/// macOS on arm64) unless the pool runs on machines only, then each enabled
+/// fleet platform. Correlated on the pool as `candidate`; binds the built-in
+/// host's architecture label ([`runner_arch_label`]). Queue ownership and
+/// [`pool_platform_labels`] both read this, so a label counts as offered
+/// exactly when some pool could run it.
+macro_rules! pool_platforms {
+    () => {
+        "
+                -- The built-in host's runners, unless the pool runs on machines only.
+                SELECT CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'macos' ELSE 'linux' END AS os,
+                  CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'arm64' ELSE lower(?) END AS arch
+                FROM json_each(candidate.providers) provider
+                WHERE lower(CAST(provider.value AS TEXT)) IN ('docker','tart')
+                  AND NOT EXISTS (SELECT 1 FROM pool_execution_profiles machines_only
+                    WHERE machines_only.pool_id=candidate.id AND machines_only.enabled=1
+                      AND machines_only.archived_at IS NULL AND machines_only.placement='machines')
+                UNION ALL
+                -- Each fleet platform the pool runs on.
+                SELECT profile.execution_os,profile.architecture FROM pool_execution_profiles profile
+                WHERE profile.pool_id=candidate.id AND profile.enabled=1 AND profile.archived_at IS NULL
+              "
+    };
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderCapacity {
     pub provider: String,
@@ -270,7 +296,7 @@ async fn queued_job_candidates(
     database: &SqlitePool,
     every_waiting_status: bool,
 ) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"SELECT wj.id AS job_id,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
           candidate.max_count-(SELECT COUNT(*) FROM runners runner
             WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
@@ -284,20 +310,9 @@ async fn queued_job_candidates(
               candidate.repository_id=repo.id OR
               (candidate.scope='organization' AND candidate.installation_id=repo.installation_id)
             ) AND EXISTS (
-              SELECT 1 FROM (
-                -- The built-in host's runners, unless the pool runs on machines only.
-                SELECT CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'macos' ELSE 'linux' END AS os,
-                  CASE lower(CAST(provider.value AS TEXT)) WHEN 'tart' THEN 'arm64' ELSE lower(?) END AS arch
-                FROM json_each(candidate.providers) provider
-                WHERE lower(CAST(provider.value AS TEXT)) IN ('docker','tart')
-                  AND NOT EXISTS (SELECT 1 FROM pool_execution_profiles machines_only
-                    WHERE machines_only.pool_id=candidate.id AND machines_only.enabled=1
-                      AND machines_only.archived_at IS NULL AND machines_only.placement='machines')
-                UNION ALL
-                -- Each fleet platform the pool runs on.
-                SELECT profile.execution_os,profile.architecture FROM pool_execution_profiles profile
-                WHERE profile.pool_id=candidate.id AND profile.enabled=1 AND profile.archived_at IS NULL
-              ) platform
+              SELECT 1 FROM ("#,
+        pool_platforms!(),
+        r#") platform
               WHERE NOT EXISTS (
                 SELECT 1 FROM json_each(wj.labels) requested
                 WHERE NOT (
@@ -317,8 +332,8 @@ async fn queued_job_candidates(
             AND wr.status!='completed'
           ORDER BY wj.created_at,wj.id,
             CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
-            candidate.created_at,candidate.id"#,
-    )
+            candidate.created_at,candidate.id"#
+    ))
     .bind(runner_arch_label())
     .bind(every_waiting_status)
     .fetch_all(database)
@@ -330,6 +345,51 @@ async fn queued_job_candidates(
             pool: row.get::<String, _>("pool_id"),
             room: row.get::<i64, _>("room"),
             circuit_open: row.get::<bool, _>("circuit_open"),
+        })
+        .collect())
+}
+
+/// The platform labels each pool offers, by pool id, lowercase, sorted and
+/// without repeats: the OS and architecture of each platform it runs on (the
+/// same platforms queue ownership matches system labels against), plus
+/// [`LINUX_RUNNER_LABEL`] or [`MACOS_RUNNER_LABEL`] for a Linux or macOS
+/// platform. A pool's configured labels never offer these; a pool with no
+/// platform maps to an empty list.
+pub async fn pool_platform_labels(
+    database: &SqlitePool,
+) -> Result<std::collections::HashMap<String, Vec<String>>, sqlx::Error> {
+    let rows = sqlx::query(concat!(
+        r#"SELECT candidate.id AS pool_id,
+          (SELECT json_group_array(json_array(platform.os,platform.arch)) FROM ("#,
+        pool_platforms!(),
+        r#") platform) AS platforms
+          FROM runner_pools candidate"#
+    ))
+    .bind(runner_arch_label())
+    .fetch_all(database)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let platforms =
+                serde_json::from_str::<Vec<(String, String)>>(row.get::<&str, _>("platforms"))
+                    .unwrap_or_default();
+            let mut labels = platforms
+                .into_iter()
+                .flat_map(|(os, arch)| {
+                    let os = os.to_lowercase();
+                    let named = match os.as_str() {
+                        "linux" => Some(LINUX_RUNNER_LABEL.to_owned()),
+                        "macos" => Some(MACOS_RUNNER_LABEL.to_owned()),
+                        _ => None,
+                    };
+                    [Some(os), Some(arch.to_lowercase()), named]
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            labels.sort();
+            labels.dedup();
+            (row.get::<String, _>("pool_id"), labels)
         })
         .collect())
 }
@@ -843,6 +903,55 @@ mod tests {
 
         assert_eq!(assigned_queued_jobs(&database, "plain").await?, 1);
         assert_eq!(assigned_queued_jobs(&database, "mac").await?, 1);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn each_pool_offers_the_platform_labels_of_the_platforms_it_runs_on() -> anyhow::Result<()>
+    {
+        let (directory, database) = ownership_fixture(
+            r#"
+            INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,provider,providers,labels,image,docker_image,tart_image,autoscaling_enabled,created_at,updated_at)
+              VALUES
+              ('docker',1,NULL,'docker','organization','docker','["docker"]','["macos"]','runner:latest','runner:latest','base',1,1,1),
+              ('tart',1,NULL,'tart','organization','tart','["tart"]','[]','runner:latest','runner:latest','base',1,2,2),
+              ('machines',1,NULL,'machines','organization','docker','["docker"]','[]','runner:latest','runner:latest','base',1,3,3);
+            INSERT INTO pool_execution_profiles (id,pool_id,name,enabled,runtime_kind,execution_os,architecture,mode,image,cpu_millis,memory_mib,disk_bytes,placement,archived_at,created_at,updated_at)
+              VALUES
+              ('windows','machines','windows',1,'native_process','windows','x64','ephemeral','native',1000,1024,0,'machines',NULL,1,1),
+              ('off','machines','off',0,'docker','linux','arm64','ephemeral','runner',1000,1024,0,'machines',NULL,1,1),
+              ('gone','machines','gone',1,'tart_vm','macos','arm64','ephemeral','base',1000,1024,0,'machines',5,1,1);
+            "#,
+        )
+        .await?;
+
+        let labels = pool_platform_labels(&database).await?;
+        let host = runner_arch_label().to_lowercase();
+        let mut docker = vec![
+            "linux".to_owned(),
+            host.clone(),
+            LINUX_RUNNER_LABEL.to_owned(),
+        ];
+        docker.sort();
+        // A configured `macos` label offers no macOS platform.
+        assert_eq!(labels.get("docker"), Some(&docker));
+        assert_eq!(
+            labels.get("tart"),
+            Some(&vec![
+                "arm64".to_owned(),
+                "macos".to_owned(),
+                MACOS_RUNNER_LABEL.to_owned()
+            ])
+        );
+        // Runs on machines only, so the built-in host's Linux is not offered;
+        // disabled and archived platforms are not offered either.
+        assert_eq!(
+            labels.get("machines"),
+            Some(&vec!["windows".to_owned(), "x64".to_owned()])
+        );
 
         database.close().await;
         fs::remove_dir_all(directory)?;

@@ -10,7 +10,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gridops_core::{
-    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, is_runner_system_label, waiting_job_ownership,
+    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, is_runner_system_label, pool_platform_labels,
+    waiting_job_ownership,
 };
 use serde_json::{Value, json};
 use sqlx::Row as _;
@@ -31,10 +32,71 @@ pub(super) struct WaitingJob {
     pub created_at: i64,
 }
 
-/// A pool the viewer can see: every label a job can ask it for.
+/// A pool the viewer can see, with the labels a job can ask it for.
 #[derive(Debug, Clone)]
 pub(super) struct VisiblePool {
+    /// Labels it carries: its configured labels and its name.
     pub labels: Vec<String>,
+    /// Platform labels its platforms offer (OS, architecture,
+    /// `self-hosted-linux`, `self-hosted-macos`); see
+    /// [`gridops_core::pool_platform_labels`].
+    pub platform_labels: Vec<String>,
+}
+
+/// Every label some pool the viewer can see offers, split the way the scaler
+/// matches labels: a platform label (`linux`, `macos`, `windows`, `x64`,
+/// `arm64`, `arm`, `x86`, `self-hosted-linux`, `self-hosted-macos`) is offered
+/// only by a pool running that platform, never by a configured label, and any
+/// other label only by a pool carrying it.
+#[derive(Debug, Default)]
+pub(super) struct OfferedLabels {
+    carried: HashSet<String>,
+    platform: HashSet<String>,
+}
+
+impl OfferedLabels {
+    pub fn new(pools: &[VisiblePool]) -> Self {
+        let lower = |labels: &[String]| {
+            labels
+                .iter()
+                .map(|label| label.to_lowercase())
+                .collect::<Vec<_>>()
+        };
+        Self {
+            carried: pools.iter().flat_map(|pool| lower(&pool.labels)).collect(),
+            platform: pools
+                .iter()
+                .flat_map(|pool| lower(&pool.platform_labels))
+                .collect(),
+        }
+    }
+
+    /// The labels of `requested` no pool offers, as the job spelled them,
+    /// sorted and without repeats, ignoring case. `self-hosted` is never
+    /// missing. Empty when each label is offered by some pool, even if no
+    /// single pool offers them all.
+    pub fn missing(&self, requested: &[String]) -> Vec<String> {
+        let mut missing = requested
+            .iter()
+            .filter(|label| {
+                let lower = label.to_lowercase();
+                if lower == "self-hosted" {
+                    false
+                } else if is_runner_system_label(&lower)
+                    || lower == LINUX_RUNNER_LABEL
+                    || lower == MACOS_RUNNER_LABEL
+                {
+                    !self.platform.contains(&lower)
+                } else {
+                    !self.carried.contains(&lower)
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort_by_key(|label| label.to_lowercase());
+        missing.dedup_by_key(|label| label.to_lowercase());
+        missing
+    }
 }
 
 /// Jobs that ask for the same labels no pool has.
@@ -140,12 +202,7 @@ pub(super) fn split_queue(
     pools: &[VisiblePool],
     now: i64,
 ) -> QueueBreakdown {
-    // Labels some pool the viewer can see carries.
-    let known = pools
-        .iter()
-        .flat_map(|pool| pool.labels.iter())
-        .map(|label| label.to_lowercase())
-        .collect::<HashSet<_>>();
+    let offered = OfferedLabels::new(pools);
     let mut breakdown = QueueBreakdown::default();
     let mut missing = BTreeMap::<Vec<String>, (Vec<String>, i64)>::new();
     for job in jobs {
@@ -157,19 +214,7 @@ pub(super) fn split_queue(
             continue;
         }
         breakdown.unmatched += 1;
-        let mut labels = job
-            .labels
-            .iter()
-            .filter(|label| {
-                !is_runner_system_label(label)
-                    && !label.eq_ignore_ascii_case(LINUX_RUNNER_LABEL)
-                    && !label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL)
-                    && !known.contains(&label.to_lowercase())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        labels.sort_by_key(|label| label.to_lowercase());
-        labels.dedup_by_key(|label| label.to_lowercase());
+        let labels = offered.missing(&job.labels);
         if labels.is_empty() {
             breakdown.unavailable += 1;
         } else {
@@ -190,6 +235,42 @@ pub(super) fn split_queue(
     missing.truncate(MAX_MISSING_LABEL_SETS);
     breakdown.missing_labels = missing;
     breakdown
+}
+
+/// The pools `user_id` may see (every installation a pool covers is one of
+/// theirs), with the labels each offers.
+pub(super) async fn visible_pools(state: &AppState, user_id: &str) -> ApiResult<Vec<VisiblePool>> {
+    let pool_rows = sqlx::query(
+        r#"SELECT p.id,p.name,p.labels FROM runner_pools p
+          WHERE EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
+                AND NOT EXISTS (SELECT 1 FROM user_installations access
+                  WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
+            )"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.database)
+    .await?;
+    let mut platforms = if pool_rows.is_empty() {
+        HashMap::new()
+    } else {
+        pool_platform_labels(&state.database).await?
+    };
+    Ok(pool_rows
+        .iter()
+        .map(|row| {
+            // A pool's name is a label of it too.
+            let mut labels = json_array(row.get::<&str, _>("labels"));
+            labels.push(row.get::<String, _>("name"));
+            VisiblePool {
+                labels,
+                platform_labels: platforms
+                    .remove(&row.get::<String, _>("id"))
+                    .unwrap_or_default(),
+            }
+        })
+        .collect())
 }
 
 /// The queue as `user` may see it: the jobs of their installations waiting to
@@ -215,27 +296,7 @@ pub(super) async fn queue_breakdown(
             created_at: row.get::<i64, _>("created_at"),
         })
         .collect::<Vec<_>>();
-    let pool_rows = sqlx::query(
-        r#"SELECT p.name,p.labels FROM runner_pools p
-          WHERE EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
-            AND NOT EXISTS (
-              SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
-                AND NOT EXISTS (SELECT 1 FROM user_installations access
-                  WHERE access.user_id=? AND access.installation_id=mapped.installation_id)
-            )"#,
-    )
-    .bind(&user.id)
-    .fetch_all(&state.database)
-    .await?;
-    let pools = pool_rows
-        .iter()
-        .map(|row| {
-            // A pool's name is a label of it too.
-            let mut labels = json_array(row.get::<&str, _>("labels"));
-            labels.push(row.get::<String, _>("name"));
-            VisiblePool { labels }
-        })
-        .collect::<Vec<_>>();
+    let pools = visible_pools(state, &user.id).await?;
     let serving = if jobs.is_empty() {
         HashMap::new()
     } else {
@@ -260,10 +321,68 @@ mod tests {
         }
     }
 
+    /// A pool carrying `labels` that runs Linux on x64, as a Docker pool on
+    /// an x64 host does.
     fn pool(labels: &[&str]) -> VisiblePool {
+        platform_pool(labels, &["linux", "x64", "self-hosted-linux"])
+    }
+
+    fn platform_pool(labels: &[&str], platform_labels: &[&str]) -> VisiblePool {
         VisiblePool {
             labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            platform_labels: platform_labels
+                .iter()
+                .map(|label| (*label).to_owned())
+                .collect(),
         }
+    }
+
+    #[test]
+    fn a_platform_no_pool_runs_is_a_missing_label() {
+        // Issue #32: with only Linux pools, a macOS or Windows job can never
+        // run, and the label it is missing is named.
+        let jobs = [
+            job(1, &["self-hosted", "self-hosted-macos"], 10),
+            job(2, &["self-hosted", "macOS", "ARM64"], 20),
+            job(3, &["self-hosted", "Windows", "gpu"], 30),
+            // Each label exists on some pool, just not together: no pool is
+            // free for it, but nothing is missing.
+            job(4, &["self-hosted", "linux", "x64", "mac-only"], 40),
+        ];
+        // A configured `macos` label does not make a pool run macOS.
+        let pools = [
+            pool(&["linux-pool", "macos"]),
+            platform_pool(&["mac-only"], &[]),
+        ];
+
+        let breakdown = split_queue(&jobs, &HashMap::new(), &pools, 100);
+
+        assert_eq!(breakdown.unmatched, 4);
+        assert_eq!(
+            breakdown.missing_labels,
+            vec![
+                MissingLabels {
+                    labels: vec!["ARM64".into(), "macOS".into()],
+                    jobs: 1
+                },
+                MissingLabels {
+                    labels: vec!["gpu".into(), "Windows".into()],
+                    jobs: 1
+                },
+                MissingLabels {
+                    labels: vec!["self-hosted-macos".into()],
+                    jobs: 1
+                },
+            ]
+        );
+        assert_eq!(breakdown.unavailable, 1);
+
+        // Once a macOS pool exists, the macOS jobs are missing nothing.
+        let offered =
+            OfferedLabels::new(&[platform_pool(&[], &["macos", "arm64", "self-hosted-macos"])]);
+        assert!(offered.missing(&jobs[0].labels).is_empty());
+        assert!(offered.missing(&jobs[1].labels).is_empty());
+        assert_eq!(offered.missing(&jobs[2].labels), vec!["gpu", "Windows"]);
     }
 
     #[test]
