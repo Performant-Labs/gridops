@@ -112,7 +112,10 @@ async fn run() -> Result<ExitCode> {
         }
         "run" => serve(journal().await?).await,
         "version" | "--version" | "-V" => {
-            println!("gridops-host-agent {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "gridops-host-agent {}",
+                gridops_core::build_info::describe()
+            );
             Ok(ExitCode::SUCCESS)
         }
         "" if interactive() => {
@@ -186,7 +189,7 @@ async fn serve(journal: Journal) -> Result<ExitCode> {
     };
     tracing::info!(
         "gridops-host-agent {} connecting to {url}",
-        env!("CARGO_PKG_VERSION")
+        gridops_core::build_info::describe()
     );
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

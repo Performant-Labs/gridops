@@ -16,6 +16,10 @@ export type DashboardOverview = {
     busy: number;
     queuedJobs: number;
     successRate: number | null;
+    /** Days of completed runs the rate covers; older servers omit it. */
+    successRateWindowDays?: number;
+    /** Runs counted in the rate (skipped and cancelled excluded); older servers omit it. */
+    successRateRuns?: number;
   };
   slo: {
     windowHours: number;

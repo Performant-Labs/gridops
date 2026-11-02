@@ -1,17 +1,25 @@
 # syntax=docker/dockerfile:1.7
 
+# Every build is numbered. scripts/build-info.sh prints GRIDOPS_BUILD_NUMBER and GRIDOPS_COMMIT (the image has no .git to read them from),
+# and compose passes them through from the environment. This stage refuses a build without them, before anything slow runs, and hands the
+# checked values to the web and Rust stages as a file (so an ARG is declared in one place, and a changed number reaches only the layers that use it).
+FROM debian:bookworm-slim AS build-info
+ARG GRIDOPS_BUILD_NUMBER=""
+ARG GRIDOPS_COMMIT=""
+COPY scripts/docker-build-info.sh /docker-build-info.sh
+RUN sh /docker-build-info.sh /build-info.env
+
 FROM node:22-bookworm-slim AS ui-dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 FROM ui-dependencies AS ui-build
-# Cargo.toml: the version bar reads the workspace version. GRIDOPS_COMMIT: this stage has no .git (pass --build-arg GRIDOPS_COMMIT=<sha>).
-ARG GRIDOPS_COMMIT=""
-ENV GRIDOPS_COMMIT=$GRIDOPS_COMMIT
+# Cargo.toml: the version bar reads the workspace version. The build number and commit come from the build-info stage (this stage has no .git).
 COPY index.html tsconfig.json vite.config.ts Cargo.toml ./
 COPY src ./src
-RUN npm run build
+COPY --from=build-info /build-info.env /build-info.env
+RUN set -a && . /build-info.env && set +a && npm run build
 
 FROM rust:1.96-slim-bookworm AS rust-build
 WORKDIR /app
@@ -21,10 +29,16 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
+# The API embeds the OpenAPI spec at compile time (include_str!).
+COPY docs/openapi ./docs/openapi
 COPY scripts/install.sh ./scripts/
+# gridops-core's build script compiles the number in and reruns when GRIDOPS_BUILD_NUMBER or GRIDOPS_COMMIT changes, so the
+# target cache below never serves a binary with an older number.
+COPY --from=build-info /build-info.env /build-info.env
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    find crates migrations scripts -type f -exec touch {} + \
+    set -a && . /build-info.env && set +a \
+    && find crates migrations scripts -type f -exec touch {} + \
     && cargo build --workspace --release --locked \
     && mkdir -p /app/bin \
     && cp /app/target/release/gridops-api /app/bin/gridops-api \

@@ -37,6 +37,9 @@ use crate::{
     output, probe,
 };
 
+/// The agent version reported in the handshake: the release version with the build number (`0.1.3+build.412`), so an
+/// upgraded agent is told apart from the one it replaced even when the release version is the same.
+pub const AGENT_VERSION: &str = gridops_core::build_info::FULL_VERSION;
 const MAX_HEARTBEAT: Duration = Duration::from_secs(15);
 const INVENTORY_REFRESH: Duration = Duration::from_secs(30);
 /// How far back a reconnecting agent looks for results the server never got.
@@ -225,7 +228,7 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
                     session_id,
                     boot_id.clone(),
                     ProtocolRange::new(1, 1).map_err(internal)?,
-                    text(env!("CARGO_PKG_VERSION"))?,
+                    text(AGENT_VERSION)?,
                     // The credential is bound to the host's epoch; the server
                     // reports it, which also covers recovery.
                     None,
@@ -618,4 +621,25 @@ fn now() -> Result<WireTimestamp, ClientError> {
 
 fn internal(error: impl std::fmt::Display) -> ClientError {
     ClientError::Unavailable(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_handshake_reports_the_release_version_and_the_build_number() {
+        assert!(AGENT_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(
+            AGENT_VERSION.ends_with(&format!(
+                "+build.{}",
+                gridops_core::build_info::BUILD_NUMBER
+            )),
+            "{AGENT_VERSION} lacks the build number"
+        );
+        assert!(
+            text(AGENT_VERSION).is_ok(),
+            "the fleet protocol refuses {AGENT_VERSION}"
+        );
+    }
 }

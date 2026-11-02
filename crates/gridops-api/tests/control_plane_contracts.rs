@@ -214,6 +214,31 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
 }
 
 #[tokio::test]
+async fn health_is_public_and_names_the_version_and_the_build() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let health: Value = fixture
+        .client
+        .get(format!("{}/api/health", fixture.base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        health["buildNumber"],
+        json!(gridops_core::build_info::build_number()),
+        "{health}"
+    );
+    assert_eq!(
+        health["commit"],
+        json!(gridops_core::build_info::commit()),
+        "{health}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn installer_is_public_and_points_at_this_deployment() -> Result<()> {
     let fixture = ApiFixture::start().await?;
 
@@ -242,6 +267,8 @@ async fn installer_is_public_and_points_at_this_deployment() -> Result<()> {
                 .any(|v| script.contains(v.as_str())),
             "{path} doesn't carry the version"
         );
+        // Installers pin the release version, which names a release asset; the build number never goes into it.
+        assert!(!script.contains("+build"), "{path} carries a build number");
     }
     // Windows is not a deployment target.
     let windows = fixture
@@ -763,41 +790,44 @@ async fn a_workflow_job_webhook_syncs_an_org_scope_repository_instead_of_rejecti
     Ok(())
 }
 
-#[tokio::test]
-async fn success_rate_covers_seven_days_and_excludes_skipped_runs() -> Result<()> {
-    let fixture = ApiFixture::start().await?;
-    let database = fixture.database().await?;
-    let now = gridops_core::now_millis();
-    let day = 24 * 60 * 60 * 1_000_i64;
-    sqlx::query("INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at) VALUES (7,42,'fixture','app','fixture/app',0,'main','https://github.com/fixture/app',?,?,?)")
-        .bind(now)
-        .bind(now)
-        .bind(now)
-        .execute(&database)
-        .await?;
-    // In-window: one success, one failure, one cancelled, one skipped.
-    // Outside the window: successes and failures that must not move the
-    // number, proving the metric is a current-health signal, not history.
-    let mut statements = Vec::new();
-    for (id, conclusion, completed_ago_days) in [
-        (100_i64, "success", 1_i64),
-        (101, "failure", 2),
-        (102, "skipped", 1),
-        (103, "cancelled", 1),
-        (104, "success", 20),
-        (105, "failure", 20),
-    ] {
-        statements.push(format!(
-            "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at,completed_at) VALUES ({id},7,'CI',{id},'push','completed','{conclusion}','abc','u',{ts},{ts},{ts},{ts},{completed});",
-            ts = now,
-            completed = now - completed_ago_days * day,
-        ));
-    }
-    let seed = statements.join("\n");
-    sqlx::raw_sql(sqlx::AssertSqlSafe(seed))
-        .execute(&database)
-        .await?;
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
+/// Inserts a repository under `installation_id`, plus one completed workflow
+/// run per `(id, conclusion, completed_days_ago)` entry.
+async fn seed_completed_runs(
+    database: &SqlitePool,
+    repository_id: i64,
+    installation_id: i64,
+    runs: &[(i64, &str, i64)],
+) -> Result<()> {
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at) VALUES (?,?,'fixture',?,?,0,'main','https://github.com/fixture/app',?,?,?)")
+        .bind(repository_id)
+        .bind(installation_id)
+        .bind(format!("app-{repository_id}"))
+        .bind(format!("fixture/app-{repository_id}"))
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(database)
+        .await?;
+    let statements = runs
+        .iter()
+        .map(|(id, conclusion, completed_ago_days)| {
+            format!(
+                "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at,completed_at) VALUES ({id},{repository_id},'CI',{id},'push','completed','{conclusion}','abc','u',{now},{now},{now},{now},{completed});",
+                completed = now - completed_ago_days * DAY_MS - 60_000,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(statements))
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+async fn overview_metrics(fixture: &ApiFixture) -> Result<Value> {
     let response = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
@@ -806,8 +836,162 @@ async fn success_rate_covers_seven_days_and_excludes_skipped_runs() -> Result<()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await?;
-    // Skipped leaves the denominator: 1 success in 3 decisive runs.
-    assert_eq!(body["metrics"]["successRate"], Value::from(33.3));
+    Ok(body["metrics"].clone())
+}
+
+#[tokio::test]
+async fn success_rate_ignores_skipped_cancelled_and_other_outcomes() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // Counted: 2 success, 1 failure. Everything else is not a verdict on the
+    // runners or the workflows and must not move the number.
+    seed_completed_runs(
+        &database,
+        7,
+        42,
+        &[
+            (100, "success", 1),
+            (101, "success", 2),
+            (102, "failure", 3),
+            (103, "skipped", 1),
+            (104, "skipped", 2),
+            (105, "cancelled", 1),
+            (106, "cancelled", 4),
+            (107, "action_required", 1),
+            (108, "neutral", 1),
+            (109, "stale", 1),
+        ],
+    )
+    .await?;
+    let metrics = overview_metrics(&fixture).await?;
+    assert_eq!(metrics["successRate"], Value::from(66.7));
+    assert_eq!(metrics["successRateRuns"], Value::from(3));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
+    Ok(())
+}
+
+#[tokio::test]
+async fn success_rate_counts_failure_startup_failure_and_timed_out_against_it() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed_completed_runs(
+        &database,
+        7,
+        42,
+        &[
+            (100, "success", 1),
+            (101, "failure", 1),
+            (102, "startup_failure", 1),
+            (103, "timed_out", 1),
+        ],
+    )
+    .await?;
+    let metrics = overview_metrics(&fixture).await?;
+    assert_eq!(metrics["successRate"], Value::from(25.0));
+    assert_eq!(metrics["successRateRuns"], Value::from(4));
+    Ok(())
+}
+
+#[tokio::test]
+async fn success_rate_window_is_seven_days_of_completed_at() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // 6 days old is in, 8 days old is out. The old successes would lift
+    // the rate to 80% if the window leaked.
+    seed_completed_runs(
+        &database,
+        7,
+        42,
+        &[
+            (100, "success", 6),
+            (101, "failure", 6),
+            (102, "success", 8),
+            (103, "success", 8),
+            (104, "success", 8),
+            (105, "success", 200),
+        ],
+    )
+    .await?;
+    let metrics = overview_metrics(&fixture).await?;
+    assert_eq!(metrics["successRate"], Value::from(50.0));
+    assert_eq!(metrics["successRateRuns"], Value::from(2));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
+    Ok(())
+}
+
+#[tokio::test]
+async fn success_rate_is_null_when_no_runs_count() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    // Only skipped, cancelled and out-of-window runs: nothing to report.
+    seed_completed_runs(
+        &database,
+        7,
+        42,
+        &[
+            (100, "skipped", 1),
+            (101, "cancelled", 1),
+            (102, "success", 45),
+            (103, "failure", 45),
+        ],
+    )
+    .await?;
+    let metrics = overview_metrics(&fixture).await?;
+    assert_eq!(metrics["successRate"], Value::Null);
+    assert_eq!(metrics["successRateRuns"], Value::from(0));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
+    Ok(())
+}
+
+#[tokio::test]
+async fn success_rate_only_counts_installations_the_user_can_access() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    let now = gridops_core::now_millis();
+    sqlx::query("INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at) VALUES (43,43,'other','Organization','Organization','selected',?,?)")
+        .bind(now)
+        .bind(now)
+        .execute(&database)
+        .await?;
+    seed_completed_runs(
+        &database,
+        7,
+        42,
+        &[(100, "success", 1), (101, "failure", 1)],
+    )
+    .await?;
+    // The signed-in user has no access to installation 43; its runs must not
+    // appear in either the rate or the run count.
+    seed_completed_runs(
+        &database,
+        8,
+        43,
+        &[
+            (200, "failure", 1),
+            (201, "failure", 1),
+            (202, "failure", 1),
+        ],
+    )
+    .await?;
+    let metrics = overview_metrics(&fixture).await?;
+    assert_eq!(metrics["successRate"], Value::from(50.0));
+    assert_eq!(metrics["successRateRuns"], Value::from(2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_out_overview_names_the_success_rate_window() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let response = fixture
+        .client
+        .get(format!("{}/api/v1/overview", fixture.base_url))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["metrics"]["successRate"], Value::Null);
+    assert_eq!(body["metrics"]["successRateRuns"], Value::from(0));
+    assert_eq!(body["metrics"]["successRateWindowDays"], Value::from(7));
     Ok(())
 }
 
