@@ -41,6 +41,7 @@ names into the issue. Say `<deployment>` and keep the real address elsewhere.
   - `Cargo.toml`: `[workspace.package] version = "X.Y.Z"`
   - `Cargo.lock`: refresh with `cargo check` and commit the result (the release builds with `--locked`)
   - Version examples in `README.md` and `docs/` still read as examples, not as the current version: `git grep -n '<previous version>' -- Cargo.toml Cargo.lock README.md docs`; what is left must be history or an example
+  - In the same pull request, add the release's section to `CHANGELOG.md` (step 7) and review the README's `## Known issues` (step 8). The release commit has to contain both, because the tag points at it
   - Open the pull request, wait for CI, merge it to `master`. The merge commit is the release commit of step 1
 - [ ] 6. **The version and the build number are what you expect**
   - `cargo metadata --no-deps --format-version 1 | grep -o '"version":"X.Y.Z"' | head -1` prints a match
@@ -49,11 +50,15 @@ names into the issue. Say `<deployment>` and keep the real address elsewhere.
 
 ## Release notes and docs
 
-- [ ] 7. **Review what the release will say**
-  - The workflow publishes GitHub's generated notes (`generate_release_notes: true`): the merged pull requests since the previous tag. Read the list: `git log --oneline --merges v<previous version>..<merge commit sha>`
+- [ ] 7. **Write the changelog and review what the release will say**
+  - `CHANGELOG.md` has a `## X.Y.Z - <date of the tag>` section, newest first, written from the merged pull requests (`git log --oneline --merges v<previous version>..<merge commit sha>`) under **Upgrading** (what an operator must do or will notice: upgrade commands, removed things, changed defaults), **Added**, **Changed** and **Fixed**. One line per change, with its pull request number. Only what was checked: do not describe behaviour from a title alone
+  - Changelog section is in the release commit: `git show <merge commit sha>:CHANGELOG.md | head -40`. Result: `___`
+  - The workflow publishes GitHub's generated notes (`generate_release_notes: true`): the merged pull requests since the previous tag. Read that list against the changelog; they must not disagree
   - Anything user-visible that needs a sentence (a changed setting, a removed flag, a migration, an agent that must be upgraded): `___`
   - Left out on purpose: `___`
-- [ ] 8. **Docs match this release**
+- [ ] 8. **Known issues and docs match this release**
+  - README `## Known issues`: every entry is still true for this release, fixed ones are removed, new user-visible problems are added, each with a link to its issue (file one if there is none), and the "Last reviewed for" line names X.Y.Z. This is part of the pull request in step 5
+  - Known issues now: `___`
   - `docs/fleet-agent.md`, `docs/releasing.md` and `README.md` describe what the release does (installer, upgrade path, settings, compose file names)
   - Skip explicitly ("nothing changed") rather than leaving the box unchecked: `___`
 
@@ -128,5 +133,6 @@ Only after step 13. Do this per deployment, and name it as `<deployment>`.
   - Did anything have to be rolled back? `___`
 - [ ] 23. **Close out**
   - Close the issues this release fixed, and the milestone if one was used
-  - Link this checklist from the GitHub release (edit its notes) and note any known issue found after the release below
+  - Link this checklist from the GitHub release (edit its notes)
+  - A problem found after the release goes into the README's `## Known issues` (with an issue link) in a pull request, and is noted below. Put a fix in the next release's changelog
   - Tick every box above, then close this issue
