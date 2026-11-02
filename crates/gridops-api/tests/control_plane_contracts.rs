@@ -832,7 +832,7 @@ async fn success_rate_ignores_skipped_cancelled_and_other_outcomes() -> Result<(
     let metrics = overview_metrics(&fixture).await?;
     assert_eq!(metrics["successRate"], Value::from(66.7));
     assert_eq!(metrics["successRateRuns"], Value::from(3));
-    assert_eq!(metrics["successRateWindowDays"], Value::from(30));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
     Ok(())
 }
 
@@ -859,21 +859,21 @@ async fn success_rate_counts_failure_startup_failure_and_timed_out_against_it() 
 }
 
 #[tokio::test]
-async fn success_rate_window_is_thirty_days_of_completed_at() -> Result<()> {
+async fn success_rate_window_is_seven_days_of_completed_at() -> Result<()> {
     let fixture = ApiFixture::start().await?;
     let database = fixture.database().await?;
-    // 29 days old is in, 31 days old is out. The old successes would lift
+    // 6 days old is in, 8 days old is out. The old successes would lift
     // the rate to 80% if the window leaked.
     seed_completed_runs(
         &database,
         7,
         42,
         &[
-            (100, "success", 29),
-            (101, "failure", 29),
-            (102, "success", 31),
-            (103, "success", 31),
-            (104, "success", 31),
+            (100, "success", 6),
+            (101, "failure", 6),
+            (102, "success", 8),
+            (103, "success", 8),
+            (104, "success", 8),
             (105, "success", 200),
         ],
     )
@@ -881,7 +881,7 @@ async fn success_rate_window_is_thirty_days_of_completed_at() -> Result<()> {
     let metrics = overview_metrics(&fixture).await?;
     assert_eq!(metrics["successRate"], Value::from(50.0));
     assert_eq!(metrics["successRateRuns"], Value::from(2));
-    assert_eq!(metrics["successRateWindowDays"], Value::from(30));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
     Ok(())
 }
 
@@ -905,7 +905,7 @@ async fn success_rate_is_null_when_no_runs_count() -> Result<()> {
     let metrics = overview_metrics(&fixture).await?;
     assert_eq!(metrics["successRate"], Value::Null);
     assert_eq!(metrics["successRateRuns"], Value::from(0));
-    assert_eq!(metrics["successRateWindowDays"], Value::from(30));
+    assert_eq!(metrics["successRateWindowDays"], Value::from(7));
     Ok(())
 }
 
@@ -957,6 +957,6 @@ async fn signed_out_overview_names_the_success_rate_window() -> Result<()> {
     let body: Value = response.json().await?;
     assert_eq!(body["metrics"]["successRate"], Value::Null);
     assert_eq!(body["metrics"]["successRateRuns"], Value::from(0));
-    assert_eq!(body["metrics"]["successRateWindowDays"], Value::from(30));
+    assert_eq!(body["metrics"]["successRateWindowDays"], Value::from(7));
     Ok(())
 }

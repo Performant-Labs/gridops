@@ -45,7 +45,7 @@ const MAX_ARCHIVED_LOG_VIEW_BYTES: u64 = 1_000_000;
 const MAX_STRUCTURED_LOG_BYTES: usize = 25 * 1_024 * 1_024;
 const DEFAULT_PAGE_SIZE: i64 = 25;
 /// Overview success rate window, reported to clients as `successRateWindowDays`.
-const SUCCESS_RATE_WINDOW_DAYS: i64 = 30;
+const SUCCESS_RATE_WINDOW_DAYS: i64 = 7;
 const FALLBACK_MANAGER_CPU_LIMIT: i64 = 2;
 const FALLBACK_MANAGER_MEMORY_LIMIT_MB: i64 = 2_048;
 

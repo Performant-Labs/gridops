@@ -4,14 +4,14 @@ import { successRateTile } from "~/features/dashboard/success-rate";
 
 describe("success rate tile", () => {
   it("names the period and the number of runs counted", () => {
-    expect(successRateTile({ successRate: 86.4, successRateWindowDays: 30, successRateRuns: 5372 })).toEqual({
+    expect(successRateTile({ successRate: 86.4, successRateWindowDays: 7, successRateRuns: 5372 })).toEqual({
       value: "86.4%",
-      hint: "Last 30 days · 5,372 runs",
+      hint: "Last 7 days · 5,372 runs",
     });
   });
 
   it("uses singular wording for one run", () => {
-    expect(successRateTile({ successRate: 100, successRateWindowDays: 30, successRateRuns: 1 }).hint).toBe("Last 30 days · 1 run");
+    expect(successRateTile({ successRate: 100, successRateWindowDays: 7, successRateRuns: 1 }).hint).toBe("Last 7 days · 1 run");
   });
 
   it("follows the window the API reports rather than a hard-coded one", () => {
@@ -20,9 +20,9 @@ describe("success rate tile", () => {
   });
 
   it("shows a dash and still names the window when no runs count", () => {
-    expect(successRateTile({ successRate: null, successRateWindowDays: 30, successRateRuns: 0 })).toEqual({
+    expect(successRateTile({ successRate: null, successRateWindowDays: 7, successRateRuns: 0 })).toEqual({
       value: "—",
-      hint: "Last 30 days · 0 runs",
+      hint: "Last 7 days · 0 runs",
     });
   });
 
