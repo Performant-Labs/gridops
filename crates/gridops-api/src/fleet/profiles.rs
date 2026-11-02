@@ -99,6 +99,161 @@ pub(super) async fn save_profile(
     Ok(Json(ProfileResponse { item: Some(item) }))
 }
 
+/// The runner counts a pool may scale between.
+#[derive(Serialize)]
+pub(super) struct Capacity {
+    #[serde(rename = "minCount")]
+    min: i64,
+    #[serde(rename = "desiredCount")]
+    desired: i64,
+    #[serde(rename = "maxCount")]
+    max: i64,
+}
+
+/// The most runners one pool can be set to run at once.
+const MAX_POOL_RUNNERS: i64 = 256;
+
+pub(super) async fn capacity(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetUser<Read>,
+    FleetPath(path): FleetPath<PoolPath>,
+) -> Result<Json<Capacity>, FleetApiError> {
+    require_admin(&state, &context, user.principal()).await?;
+    read_capacity(&state, &context, &path.pool_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| context.error(ErrorCode::NotFound))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CapacityInput {
+    #[serde(rename = "minCount")]
+    min: i64,
+    #[serde(rename = "desiredCount")]
+    desired: i64,
+    #[serde(rename = "maxCount")]
+    max: i64,
+}
+
+/// Set a pool's runner counts. Runners above the new count are not stopped:
+/// ephemeral runners finish their job and are not replaced, so the pool
+/// drains down to the new count on its own.
+pub(super) async fn save_capacity(
+    State(state): State<AppState>,
+    context: RequestContext,
+    user: FleetWriteUser<Operate>,
+    FleetPath(path): FleetPath<PoolPath>,
+    FleetJson(body): FleetJson<CapacityInput>,
+) -> Result<Json<Capacity>, FleetApiError> {
+    require_admin(&state, &context, user.principal()).await?;
+    let database_down = |_| context.error(ErrorCode::DependencyUnavailable);
+    if !(0 <= body.min
+        && body.min <= body.desired
+        && body.desired <= body.max
+        && body.max <= MAX_POOL_RUNNERS)
+    {
+        return Err(context.error(ErrorCode::InvalidRequest));
+    }
+    let Some(before) = read_capacity(&state, &context, &path.pool_id).await? else {
+        return Err(context.error(ErrorCode::NotFound));
+    };
+    // A repository pool keeps a runner for each of its repositories, as the
+    // browser route requires.
+    let repositories: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runner_pool_repositories WHERE pool_id=?")
+            .bind(&path.pool_id)
+            .fetch_one(&state.database)
+            .await
+            .map_err(database_down)?;
+    let scope: String = sqlx::query_scalar("SELECT scope FROM runner_pools WHERE id=?")
+        .bind(&path.pool_id)
+        .fetch_one(&state.database)
+        .await
+        .map_err(database_down)?;
+    if scope == "repository" && repositories > body.max {
+        return Err(context.error(ErrorCode::InvalidRequest));
+    }
+    sqlx::query(
+        "UPDATE runner_pools SET min_count=?,desired_count=?,max_count=?,updated_at=? WHERE id=?",
+    )
+    .bind(body.min)
+    .bind(body.desired)
+    .bind(body.max)
+    .bind(gridops_core::now_millis())
+    .bind(&path.pool_id)
+    .execute(&state.database)
+    .await
+    .map_err(database_down)?;
+    record_capacity_saved(
+        &state,
+        context,
+        user.principal(),
+        &path.pool_id,
+        &before,
+        &body,
+    )
+    .await?;
+    Ok(Json(Capacity {
+        min: body.min,
+        desired: body.desired,
+        max: body.max,
+    }))
+}
+
+async fn read_capacity(
+    state: &AppState,
+    context: &RequestContext,
+    pool_id: &str,
+) -> Result<Option<Capacity>, FleetApiError> {
+    let row: Option<(i64, i64, i64)> =
+        sqlx::query_as("SELECT min_count,desired_count,max_count FROM runner_pools WHERE id=?")
+            .bind(pool_id)
+            .fetch_optional(&state.database)
+            .await
+            .map_err(|_| context.error(ErrorCode::DependencyUnavailable))?;
+    Ok(row.map(|(min, desired, max)| Capacity { min, desired, max }))
+}
+
+async fn record_capacity_saved(
+    state: &AppState,
+    context: RequestContext,
+    principal: &Principal,
+    pool_id: &str,
+    before: &Capacity,
+    body: &CapacityInput,
+) -> Result<(), FleetApiError> {
+    let Some(user_id) = principal.user_id() else {
+        return Ok(());
+    };
+    let login: Option<String> = sqlx::query_scalar("SELECT login FROM users WHERE id=?")
+        .bind(user_id)
+        .fetch_optional(&state.database)
+        .await
+        .map_err(|_| context.error(ErrorCode::DependencyUnavailable))?;
+    sqlx::query(
+        r#"INSERT INTO audit_events (id,actor_user_id,actor_label,action,target_type,target_id,metadata,created_at)
+           VALUES (?,?,?,'fleet.pool.capacity_saved','runner_pool',?,?,?)"#,
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(login.unwrap_or_else(|| user_id.to_owned()))
+    .bind(pool_id)
+    .bind(
+        serde_json::json!({
+            "from": {"min": before.min, "desired": before.desired, "max": before.max},
+            "to": {"min": body.min, "desired": body.desired, "max": body.max},
+        })
+        .to_string(),
+    )
+    .bind(gridops_core::now_millis())
+    .execute(&state.database)
+    .await
+    .map_err(|_| context.error(ErrorCode::DependencyUnavailable))?;
+    Ok(())
+}
+
 /// Every other admin change to pool/runner/installation state is logged in
 /// `audit_events` (pool settings, host enrollment/approval, GitHub app events);
 /// a fleet execution profile save is exactly the kind of change you'd most
