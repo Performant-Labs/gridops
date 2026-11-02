@@ -45,6 +45,68 @@ The images carry the repository as their source, so GHCR links each package
 to the repository and gives it the repository's visibility. For a public
 repository, anyone can pull them without logging in.
 
+## Version and build number
+
+Two numbers name a GridOps build, and they change for different reasons.
+
+| | Example | Changes | Used for |
+|---|---|---|---|
+| **Version** (semver) | `0.1.3` | when you cut a release | release tags, the `v0.1.3` assets installers download, the version `/install.sh` is pinned to |
+| **Build number** | `412` | with every commit | telling builds apart: each commit merged to `master` is a new build, so two builds of the same version are never confused |
+
+The build number is the number of commits in the history of the commit being
+built (`git rev-list --count HEAD`). It rises with every merge and is the same
+for everyone who builds the same commit. It never goes into a release tag, an
+installer or a release asset name: the version alone names those, which is why
+the version is not bumped per build (a bump would point installers at a release
+that has not been cut yet).
+
+Where the number shows:
+
+- **Web UI:** the bar at the top of every page, `v0.1.3 · build 412 · 9d92a33`
+  (version, build number, commit).
+- **API:** `GET /api/health` (no login) returns `version`, `buildNumber` and
+  `commit`. The API logs the same at startup.
+- **Host agent:** `gridops-host-agent --version` prints
+  `gridops-host-agent 0.1.3+build.412 (9d92a33)`, and the agent reports
+  `0.1.3+build.412` to GridOps at every handshake, so the Machines pages show
+  which build each machine runs. After you upgrade an agent, its build number
+  rises even though the version does not.
+
+`0.1.3+build.412` is the version with the build number as semver *build
+metadata*: still a valid semver string, still sorts as `0.1.3`, and the fleet
+protocol accepts it (it stores the agent version as opaque text, and
+compatibility is decided by the separate protocol version).
+
+### Building with a number
+
+`scripts/build-info.sh` is the one place the number is read. It prints
+`GRIDOPS_BUILD_NUMBER` and `GRIDOPS_COMMIT`, and fails with a message in a
+shallow clone or outside a git checkout (where the count would be wrong or
+missing) instead of inventing one. Variables already set in the environment win.
+
+```sh
+# Docker images: a build without a number stops right away.
+env $(scripts/build-info.sh) docker compose build
+# or export both into the shell once, then use compose as usual:
+eval "$(scripts/build-info.sh --export)"
+docker compose build api manager reconciler && docker compose up -d --no-deps api manager reconciler
+
+# Plain cargo and npm builds read git themselves, or take the variables:
+cargo build --release -p gridops-host-agent
+GRIDOPS_BUILD_NUMBER=412 GRIDOPS_COMMIT=9d92a33 cargo build --release -p gridops-host-agent
+```
+
+Docker builds have no `.git`, so the Dockerfile requires `GRIDOPS_BUILD_NUMBER`
+and `GRIDOPS_COMMIT` as build arguments (compose passes them from the
+environment) and refuses to build without them. Cargo and npm builds outside
+Docker fall back to git; with no git history they say `dev` / `build unknown`
+rather than guess. The release workflow counts the number once, in its
+`version` job, and gives it to every agent build and image build, so the
+artifacts of one run agree.
+
+Rebuilding the same commit gives the same number. To get a new number, commit.
+
 ## Runner requirements
 
 - **Linux:** any runner with the `self-hosted-linux` label, which every Linux

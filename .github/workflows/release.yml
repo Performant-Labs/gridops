@@ -29,12 +29,17 @@ jobs:
     runs-on: [self-hosted-linux]
     timeout-minutes: 5
     outputs:
+      build_number: ${{ steps.build.outputs.build_number }}
+      commit: ${{ steps.build.outputs.commit }}
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
       linux_agents: ${{ steps.version.outputs.linux_agents }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          # The build number counts the commits in the history.
+          fetch-depth: 0
 
       - name: Read the version
         id: version
@@ -57,6 +62,16 @@ jobs:
           fi
           echo "linux_agents=$agents" >> "$GITHUB_OUTPUT"
           echo "Version $version, publish: $publish"
+
+      # The build number is counted once, here, so every artifact of a run carries the same one. It never
+      # changes the version above: tags, installers and release assets are named by the version alone.
+      - name: Number the build
+        id: build
+        run: |
+          eval "$(scripts/build-info.sh --export)"
+          echo "build_number=$GRIDOPS_BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "commit=$GRIDOPS_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Build $GRIDOPS_BUILD_NUMBER ($GRIDOPS_COMMIT)"
 
   agent-linux:
     name: Agent (Linux ${{ matrix.arch }})
@@ -86,6 +101,9 @@ jobs:
           musl-gcc --version 2>&1 | head -1 || true
 
       - name: Build
+        env:
+          GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
+          GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
         run: cargo build --release --locked -p gridops-host-agent --target ${{ matrix.target }}
 
       - name: Check and stage
@@ -130,6 +148,9 @@ jobs:
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Build
+        env:
+          GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
+          GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
         run: |
           cargo build --release --locked -p gridops-host-agent -p gridops-tart-agent --target aarch64-apple-darwin
           cargo build --release --locked -p gridops-host-agent --target x86_64-apple-darwin
@@ -170,6 +191,8 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
           PUBLISH: ${{ needs.version.outputs.publish }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
+          GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
         run: |
           export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin"
           # A throwaway Docker config, so the registry login never lands in
@@ -194,9 +217,11 @@ jobs:
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
               --target "$target" \
+              --build-arg "GRIDOPS_BUILD_NUMBER=$GRIDOPS_BUILD_NUMBER" --build-arg "GRIDOPS_COMMIT=$GRIDOPS_COMMIT" \
               --tag "$image:$VERSION" --tag "$image:$minor" --tag "$image:latest" \
               --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
               --label "org.opencontainers.image.version=$VERSION" \
+              --label "org.opencontainers.image.revision=$GRIDOPS_COMMIT" \
               --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
               --annotation "index:org.opencontainers.image.description=GridOps $target" \
               $push .

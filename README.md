@@ -82,9 +82,12 @@ machine's OS and architecture, and it matches your GridOps version. See
 
 ```sh
 cp .env.example .env
-# Fill the required values, then:
+# Fill the required values, then build with the build number and start:
+eval "$(scripts/build-info.sh --export)"
 docker compose up --build -d
 ```
+
+Every build carries a build number (the commit count), shown in the bar at the top of the UI, in `GET /api/health` and in `gridops-host-agent --version`; the Docker build stops without one. See [docs/releasing.md](docs/releasing.md#version-and-build-number).
 
 Open `http://localhost:3000`. For a different public origin, set `GRIDOPS_BASE_URL` and configure the same URL in the GitHub App.
 
@@ -95,6 +98,7 @@ The published API/UI port binds to `127.0.0.1` by default. Set `GRIDOPS_BIND_ADD
 For local credentials already stored in `.env.local`:
 
 ```sh
+eval "$(scripts/build-info.sh --export)"
 GRIDOPS_ENV_FILE=.env.local docker compose --env-file .env.local up --build
 ```
 
@@ -129,6 +133,7 @@ npm run build
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+sh scripts/test-build-info.sh
 docker compose --env-file .env.local config
 ```
 

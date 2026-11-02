@@ -214,6 +214,31 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
 }
 
 #[tokio::test]
+async fn health_is_public_and_names_the_version_and_the_build() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let health: Value = fixture
+        .client
+        .get(format!("{}/api/health", fixture.base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        health["buildNumber"],
+        json!(gridops_core::build_info::build_number()),
+        "{health}"
+    );
+    assert_eq!(
+        health["commit"],
+        json!(gridops_core::build_info::commit()),
+        "{health}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn installer_is_public_and_points_at_this_deployment() -> Result<()> {
     let fixture = ApiFixture::start().await?;
 
@@ -242,6 +267,8 @@ async fn installer_is_public_and_points_at_this_deployment() -> Result<()> {
                 .any(|v| script.contains(v.as_str())),
             "{path} doesn't carry the version"
         );
+        // Installers pin the release version, which names a release asset; the build number never goes into it.
+        assert!(!script.contains("+build"), "{path} carries a build number");
     }
     // Windows is not a deployment target.
     let windows = fixture

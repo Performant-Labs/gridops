@@ -15,7 +15,8 @@ if (!/^\d+\.\d+\.\d+([-+].+)?$/.test(version ?? "")) {
 const owner = process.env.GRIDOPS_IMAGE_OWNER ?? "performant-labs";
 const source = readFileSync(new URL("../compose.yaml", import.meta.url), "utf8");
 let replaced = 0;
-const text = source.replace(/^ {4}build:\n {6}context: \.\n {6}target: ([a-z-]+)\n/gm, (_, target) => {
+// The published images are already built (and numbered), so the build-argument block at the top has no use in the release file.
+const text = source.replace(/^# Every image is built with a build number\.[\s\S]*?\n\n(?=services:)/m, "").replace(/^ {4}build:\n {6}context: \.\n {6}target: ([a-z-]+)\n(?: {6}args: \*build-args\n)?/gm, (_, target) => {
   replaced += 1;
   return `    image: ghcr.io/${owner}/gridops-${target}:\${GRIDOPS_VERSION:-${version}}\n`;
 });
