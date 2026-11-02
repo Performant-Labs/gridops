@@ -3,20 +3,26 @@
 
 /// Parses POSIX `df -Pk` output into total and available bytes of the first
 /// data row.
+///
+/// A row reads `<filesystem> <blocks> <used> <available> <capacity> <mount>`.
+/// The filesystem is whatever the kernel calls it (`/dev/sda1`, `overlay`,
+/// `tmpfs`, `pool/dataset`, `host:/export`), so the row is found by its three
+/// numbers followed by the capacity (`83%`, or `-` where a filesystem has none),
+/// not by the shape of the name.
 #[must_use]
 pub fn parse_df_blocks(output: &str) -> Option<(u64, u64)> {
     let line = output.lines().nth(1)?;
-    let mut fields = line.split_whitespace();
-    let filesystem = fields.next()?;
-    // A filesystem name starts with a slash or a drive/overlay style tag;
-    // anything else means the row is not machine-readable data.
-    if filesystem.starts_with('/') || filesystem.contains(':') {
-        let total: u64 = fields.next()?.parse().ok()?;
-        fields.next()?; // used
-        let available: u64 = fields.next()?.parse().ok()?;
-        return Some((total.saturating_mul(1024), available.saturating_mul(1024)));
-    }
-    None
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    (3..fields.len()).find_map(|capacity| {
+        let is_capacity = fields[capacity] == "-" || fields[capacity].ends_with('%');
+        if !is_capacity {
+            return None;
+        }
+        let total: u64 = fields[capacity - 3].parse().ok()?;
+        let _used: u64 = fields[capacity - 2].parse().ok()?;
+        let available: u64 = fields[capacity - 1].parse().ok()?;
+        Some((total.saturating_mul(1024), available.saturating_mul(1024)))
+    })
 }
 
 /// The total and free bytes of the filesystem holding `path`.
@@ -87,12 +93,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_filesystems_that_are_not_device_paths() {
+        let header = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n";
+        for (row, total, free) in [
+            // The root of a Docker container.
+            (
+                "overlay  506771172 326688324 180066464  65% /",
+                506_771_172_u64,
+                180_066_464_u64,
+            ),
+            ("tmpfs  1024 24 1000   3% /run", 1024, 1000),
+            (
+                "rpool/ROOT/ubuntu  900000 400000 500000  45% /",
+                900_000,
+                500_000,
+            ),
+            ("nas:/export/ci  2000 500 1500  25% /mnt/ci", 2000, 1500),
+            ("none  100 100 0  100% /", 100, 0),
+            ("fusefs  100 40 60  - /mnt/x", 100, 60),
+            (
+                "/dev/mapper/vg-root  100 40 60  40% /mnt/with space",
+                100,
+                60,
+            ),
+        ] {
+            assert_eq!(
+                parse_df_blocks(&format!("{header}{row}\n")),
+                Some((total * 1024, free * 1024)),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_output_that_is_not_a_data_row() {
         assert_eq!(parse_df_blocks(""), None);
         assert_eq!(
             parse_df_blocks("Filesystem 1024-blocks Used Available Capacity Mounted on\n"),
             None
         );
+        assert_eq!(
+            parse_df_blocks(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay - - - - /\n"
+            ),
+            None
+        );
+        assert_eq!(parse_df_blocks("header\nsomething 12 34 56 /\n"), None);
     }
 
     #[test]
