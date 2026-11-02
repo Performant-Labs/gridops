@@ -83,6 +83,10 @@ registry_token() {
 fail
 silent
 show-error
+retry = 5
+retry-all-errors
+connect-timeout = 15
+max-time = 60
 user = "${github_user}:${github_token}"
 url = "https://ghcr.io/token?scope=repository:${repository}:pull"
 CURL_CONFIG

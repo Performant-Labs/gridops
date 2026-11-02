@@ -73,10 +73,19 @@ if [ "$os" = linux ] && command -v systemctl >/dev/null 2>&1; then
   esac
 fi
 
+# A flaky network must not fail an install. curl retries only timeouts and
+# 5xx by default, so --retry-all-errors (curl 7.71+, probed so older curls
+# still work) makes it retry refused or reset connections and DNS failures
+# too. --connect-timeout bounds a connection attempt; --speed-limit/--speed-time
+# abort a download that stalls (under 1 KB/s for 30 s), which --retry then
+# repeats. The wget fallback gets a 30 s timeout (-T, also in BusyBox wget).
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
+  retry_all=""
+  if curl --help all 2>/dev/null | grep -q -e --retry-all-errors; then retry_all="--retry-all-errors"; fi
+  # shellcheck disable=SC2086
+  fetch() { curl -fsSL --retry 5 $retry_all --connect-timeout 15 --speed-limit 1000 --speed-time 30 -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget -q -O "$2" "$1"; }
+  fetch() { wget -q -T 30 -O "$2" "$1"; }
 else
   fail "curl or wget is required"
 fi

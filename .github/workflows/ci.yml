@@ -12,6 +12,17 @@ on:
 permissions:
   contents: read
 
+# Tolerate a flaky network. Every value is a ceiling on retrying; a healthy
+# network never reaches it.
+#  - CARGO_NET_RETRY (cargo's net.retry, default 3): how often cargo retries a
+#    possibly spurious network error, such as a failed crates.io download.
+#  - npm_config_fetch_retries (npm's fetch-retries, default 2): how often npm
+#    retries a failed registry fetch; its retry delays and timeouts stay default.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  npm_config_fetch_retries: 5
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -21,10 +32,11 @@ jobs:
     name: Web build, lint, and tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted-linux]
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Verify Node.js toolchain
         run: |
@@ -32,6 +44,7 @@ jobs:
           npm --version
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: npm ci --no-audit --no-fund
 
       - name: Build application
@@ -51,11 +64,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted-linux]
     timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: always
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Verify Rust toolchain
         run: |
