@@ -133,6 +133,18 @@ describe("queued jobs list", () => {
     expect(row?.querySelector("[data-missing='true']")).toBeNull();
   });
 
+  it("names the manual-mode pool a job waits on and says no runner will be started for it", () => {
+    render(createElement(QueuedJobsList, listProps({
+      items: [job({ id: 5, matchedPool: { id: "pool-m", name: "fixed-pool" }, waitingReason: "manual_pool" })],
+      total: 1,
+    })));
+    const [row] = rows();
+    expect(row?.getAttribute("data-reason")).toBe("manual_pool");
+    expect(row?.querySelector("a[href='/runner-pools/pool-m']")?.textContent).toBe("fixed-pool");
+    expect(row?.textContent).toContain("Manual pool, no runner started");
+    expect(row?.textContent).not.toContain("No matching pool");
+  });
+
   it("shows an unknown reason as plain text rather than failing", () => {
     render(createElement(QueuedJobsList, listProps({ items: [job({ id: 4, waitingReason: "unmatched_labels" })], total: 1 })));
     expect(rows()[0]?.textContent).toContain("Unmatched labels");

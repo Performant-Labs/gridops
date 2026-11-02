@@ -254,30 +254,163 @@ pub async fn queued_job_ownership(
 /// alternate between ticks on its own.
 async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
     let candidates = queued_job_candidates(database, false).await?;
-    Ok(assign_queued_jobs(candidates.into_iter().map(
-        |candidate| (candidate.job, candidate.pool, candidate.room),
-    )))
-}
-
-/// The owner of every job waiting to start that has one, for showing the queue
-/// to people: [`queued_job_ownership`] with two differences. Jobs GitHub lists
-/// as `waiting`, `pending` or `requested` count as well as `queued` ones, so
-/// the Overview counts the same statuses as the run list, and a pool whose
-/// provisioning circuit is open is passed over, since it can't start a runner
-/// until it is retried. The pools that did the scaling are not changed by
-/// either difference. A job with no entry has no pool that can serve it: none
-/// has its labels, or every one that does is paused, has autoscaling off or
-/// has an open circuit.
-pub async fn waiting_job_ownership(
-    database: &SqlitePool,
-) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
-    let candidates = queued_job_candidates(database, true).await?;
     Ok(assign_queued_jobs(
         candidates
             .into_iter()
-            .filter(|candidate| !candidate.circuit_open)
+            .filter(|candidate| candidate.standing.scaler_counts())
             .map(|candidate| (candidate.job, candidate.pool, candidate.room)),
     ))
+}
+
+/// What a pool that serves a job's repository and can run its labels does
+/// about the job. This is the one rule every view of the queue (the scaler,
+/// the Overview, the Queued jobs list and a run's page) uses, so none of them
+/// can disagree about whether a pool will run a job.
+///
+/// It follows what the reconciler does with the pool:
+///
+/// - `Paused`: the reconciler keeps no runner for it (its desired count is
+///   zero), so it runs nothing.
+/// - `Manual`: autoscaling is off. The reconciler keeps the pool at its
+///   desired count and never scales it for the queue (`maybe_scale_up` and
+///   `maybe_scale_down` return early, and the `workflow_job` webhook skips
+///   it), so nothing starts a runner for the job. GitHub can still give the
+///   job to one of the pool's own runners when one is free.
+/// - `CircuitOpen`: an autoscaling pool whose provisioning circuit is open; it
+///   starts no runner until it is retried.
+/// - `Scales`: an autoscaling pool that will start or free a runner for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PoolStanding {
+    Paused,
+    Manual,
+    CircuitOpen,
+    Scales,
+}
+
+impl PoolStanding {
+    /// A paused pool is paused whatever its mode; a manual pool never scales,
+    /// whether or not its circuit is open.
+    pub fn of(paused: bool, autoscaling_enabled: bool, circuit_open: bool) -> Self {
+        if paused {
+            Self::Paused
+        } else if !autoscaling_enabled {
+            Self::Manual
+        } else if circuit_open {
+            Self::CircuitOpen
+        } else {
+            Self::Scales
+        }
+    }
+
+    /// Whether the scaler counts the job for this pool. It does so whatever
+    /// the circuit, since the circuit only holds back the start.
+    fn scaler_counts(self) -> bool {
+        matches!(self, Self::Scales | Self::CircuitOpen)
+    }
+}
+
+/// Which pool a job waiting to start is shown under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WaitingJobOwner {
+    /// An autoscaling pool will start or free a runner for it.
+    Scaling(QueuedJobOwner),
+    /// No autoscaling pool can start a runner for it, but this manual-mode
+    /// pool can run it: it waits for one of the pool's own runners to be free,
+    /// and nothing starts one for it.
+    Manual { job_id: i64, pool_id: String },
+}
+
+impl WaitingJobOwner {
+    pub fn job_id(&self) -> i64 {
+        match self {
+            Self::Scaling(owner) => owner.job_id,
+            Self::Manual { job_id, .. } => *job_id,
+        }
+    }
+
+    pub fn pool_id(&self) -> &str {
+        match self {
+            Self::Scaling(owner) => &owner.pool_id,
+            Self::Manual { pool_id, .. } => pool_id,
+        }
+    }
+}
+
+/// A job waiting to start and every pool that serves its repository and can
+/// run its labels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaitingJobPools {
+    pub job_id: i64,
+    /// The pool it is shown under; `None` when no pool will run it (every
+    /// matching pool is paused or has an open circuit).
+    pub owner: Option<WaitingJobOwner>,
+    /// Every matching pool in the order ownership prefers them, with what it
+    /// does about the job.
+    pub matching: Vec<(String, PoolStanding)>,
+}
+
+/// Every job waiting to start that some pool matches, oldest first, with the
+/// pool it is shown under: this is the ownership for showing the queue to
+/// people. It differs from the scaler's ([`queued_job_ownership`]) in that
+/// jobs GitHub lists as `waiting`, `pending` or `requested` count as well as
+/// `queued` ones, so the Overview counts the same statuses as the run list,
+/// and a pool whose provisioning circuit is open is passed over, since it
+/// can't start a runner until it is retried. The pools that did the scaling
+/// are not changed by either difference.
+///
+/// A job goes to an autoscaling pool ([`PoolStanding::Scales`]) as the scaler
+/// hands jobs out. With none, it goes to the first matching manual-mode pool
+/// ([`PoolStanding::Manual`]): it matches that pool's labels, but nothing
+/// starts a runner for it. A job missing from the result, or with no owner,
+/// has no pool that will run it: none has its labels, or every one that does
+/// is paused or has an open circuit.
+pub async fn waiting_job_pools(database: &SqlitePool) -> Result<Vec<WaitingJobPools>, sqlx::Error> {
+    let candidates = queued_job_candidates(database, true).await?;
+    let mut owners = assign_queued_jobs(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.standing == PoolStanding::Scales)
+            .map(|candidate| (candidate.job, candidate.pool.clone(), candidate.room)),
+    )
+    .into_iter()
+    .map(|owner| (owner.job_id, owner))
+    .collect::<std::collections::HashMap<_, _>>();
+    let mut jobs = Vec::<WaitingJobPools>::new();
+    for candidate in candidates {
+        if jobs.last().is_none_or(|last| last.job_id != candidate.job) {
+            jobs.push(WaitingJobPools {
+                job_id: candidate.job,
+                owner: owners.remove(&candidate.job).map(WaitingJobOwner::Scaling),
+                matching: Vec::new(),
+            });
+        }
+        let Some(job) = jobs.last_mut() else { continue };
+        if job.owner.is_none() && candidate.standing == PoolStanding::Manual {
+            job.owner = Some(WaitingJobOwner::Manual {
+                job_id: candidate.job,
+                pool_id: candidate.pool.clone(),
+            });
+        }
+        job.matching.push((candidate.pool, candidate.standing));
+    }
+    Ok(jobs)
+}
+
+/// The autoscaling owner of every job waiting to start that has one; see
+/// [`waiting_job_pools`], whose `Scaling` owners these are. A job with no
+/// entry has no pool that will start a runner for it: none has its labels, or
+/// every one that does is paused, has autoscaling off or has an open circuit.
+pub async fn waiting_job_ownership(
+    database: &SqlitePool,
+) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
+    Ok(waiting_job_pools(database)
+        .await?
+        .into_iter()
+        .filter_map(|job| match job.owner {
+            Some(WaitingJobOwner::Scaling(owner)) => Some(owner),
+            _ => None,
+        })
+        .collect())
 }
 
 /// A pool that could run a queued job, with the room it has left.
@@ -285,11 +418,12 @@ struct QueuedJobCandidate {
     job: i64,
     pool: String,
     room: i64,
-    circuit_open: bool,
+    standing: PoolStanding,
 }
 
-/// Every (job, pool) pair where the pool could run the job, each job's pools
-/// together in the order [`queued_job_owners`] prefers them. With
+/// Every (job, pool) pair where the pool serves the job's repository and can
+/// run its labels, whatever its mode or pause, each job's pools together in
+/// the order [`queued_job_owners`] prefers them. With
 /// `every_waiting_status`, jobs that are `waiting`, `pending` or `requested`
 /// are included as well as `queued` ones.
 async fn queued_job_candidates(
@@ -298,13 +432,14 @@ async fn queued_job_candidates(
 ) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
     let rows = sqlx::query(concat!(
         r#"SELECT wj.id AS job_id,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
+          candidate.paused,candidate.autoscaling_enabled,
           candidate.max_count-(SELECT COUNT(*) FROM runners runner
             WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
               AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS room
           FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          JOIN runner_pools candidate ON candidate.autoscaling_enabled=1 AND candidate.paused=0 AND (
+          JOIN runner_pools candidate ON (
               EXISTS (SELECT 1 FROM runner_pool_repositories candidate_repo
                 WHERE candidate_repo.pool_id=candidate.id AND candidate_repo.repository_id=repo.id) OR
               candidate.repository_id=repo.id OR
@@ -344,7 +479,11 @@ async fn queued_job_candidates(
             job: row.get::<i64, _>("job_id"),
             pool: row.get::<String, _>("pool_id"),
             room: row.get::<i64, _>("room"),
-            circuit_open: row.get::<bool, _>("circuit_open"),
+            standing: PoolStanding::of(
+                row.get::<bool, _>("paused"),
+                row.get::<bool, _>("autoscaling_enabled"),
+                row.get::<bool, _>("circuit_open"),
+            ),
         })
         .collect())
 }
@@ -1393,6 +1532,74 @@ mod tests {
         for pool in ["paused", "manual", "newest"] {
             assert_eq!(owned(&database, pool).await?, Vec::<i64>::new());
         }
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_only_a_manual_pool_can_run_is_shown_under_it_but_never_scaled_for()
+    -> anyhow::Result<()> {
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}",
+            org_pool("paused", 1, 10),
+            org_pool("manual", 2, 10),
+            org_pool("tripped", 3, 10),
+            shared_jobs(100..102),
+        ))
+        .await?;
+        sqlx::raw_sql(
+            "UPDATE runner_pools SET paused=1 WHERE id='paused';
+             UPDATE runner_pools SET autoscaling_enabled=0 WHERE id='manual';
+             UPDATE runner_pools SET provision_circuit_open=1 WHERE id='tripped';",
+        )
+        .execute(&database)
+        .await?;
+
+        let jobs = waiting_job_pools(&database).await?;
+        assert_eq!(jobs.len(), 2);
+        for job in &jobs {
+            assert_eq!(
+                job.owner,
+                Some(WaitingJobOwner::Manual {
+                    job_id: job.job_id,
+                    pool_id: "manual".into()
+                })
+            );
+            assert_eq!(
+                job.matching,
+                vec![
+                    ("paused".into(), PoolStanding::Paused),
+                    ("manual".into(), PoolStanding::Manual),
+                    ("tripped".into(), PoolStanding::CircuitOpen),
+                ]
+            );
+        }
+        // Nothing starts a runner for them: no autoscaling owner for display,
+        // and the scaler still counts them only for the tripped pool.
+        assert!(waiting_job_ownership(&database).await?.is_empty());
+        assert_eq!(owned(&database, "manual").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "tripped").await?, vec![100, 101]);
+
+        // An autoscaling pool that can start a runner takes them from the
+        // manual pool.
+        sqlx::raw_sql("UPDATE runner_pools SET provision_circuit_open=0 WHERE id='tripped';")
+            .execute(&database)
+            .await?;
+        let owners = waiting_job_pools(&database)
+            .await?
+            .into_iter()
+            .filter_map(|job| job.owner)
+            .collect::<Vec<_>>();
+        assert_eq!(owners.len(), 2);
+        assert!(
+            owners
+                .iter()
+                .all(|owner| matches!(owner, WaitingJobOwner::Scaling(_))
+                    && owner.pool_id() == "tripped"),
+            "{owners:?}"
+        );
 
         database.close().await;
         fs::remove_dir_all(directory)?;

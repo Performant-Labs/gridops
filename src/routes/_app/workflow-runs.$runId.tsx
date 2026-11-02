@@ -10,6 +10,7 @@ import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, DialogClose, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
 import { type WorkflowRunDetail, getWorkflowRunDetailAction } from "~/features/operations/operations.functions";
+import { diagnosisCandidateLabel } from "~/features/operations/queued-job-diagnosis";
 import { MachineLink } from "~/features/runners/runner-row";
 import { JobLogViewer } from "~/features/workflow-runs/job-log-viewer";
 import { RunActionsMenu, isActiveRun } from "~/features/workflow-runs/run-actions";
@@ -169,7 +170,7 @@ function JobDiagnosis({ diagnosis }: { diagnosis: NonNullable<Job["diagnosis"]> 
             <div className="flex items-center gap-2" key={candidate.id}>
               {candidate.status === "ready" ? <CircleCheck className="size-3.5 shrink-0 text-success" /> : <CircleX className="size-3.5 shrink-0 text-faint" />}
               <Link className="font-medium hover:underline" params={{ poolId: candidate.id }} to="/runner-pools/$poolId">{candidate.name}</Link>
-              <span className="text-muted-foreground">{candidate.status === "ready" ? `${candidate.availableCapacity} slot${candidate.availableCapacity === 1 ? "" : "s"} available` : candidate.status.replaceAll("_", " ")}</span>
+              <span className={candidate.status === "manual" ? "text-warning" : "text-muted-foreground"}>{diagnosisCandidateLabel(candidate)}</span>
               <span className="tabular ml-auto text-faint">{candidate.busyRunners}/{candidate.activeRunners} busy · max {candidate.maximumRunners}</span>
             </div>
           ))}

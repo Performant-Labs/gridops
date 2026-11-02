@@ -25,10 +25,15 @@ export function runnerParts(metrics: Metrics) {
   ];
 }
 
-/** Jobs a pool can serve, then jobs no pool can; they add up to the Queued headline. */
+/**
+ * Jobs an autoscaling pool will start a runner for, jobs only a manual-mode pool can run (shown
+ * only when there are some), then jobs no pool will run; they add up to the Queued headline.
+ */
 export function queueParts(metrics: Metrics) {
+  const manual = metrics.queuedManual ?? 0;
   return [
     { label: "waiting for capacity", count: metrics.queuedWaiting },
+    ...(manual > 0 ? [{ label: "on a manual pool", count: manual }] : []),
     { label: "no matching pool", count: metrics.queuedUnmatched },
   ];
 }
@@ -50,10 +55,10 @@ export function metricTiles(metrics: Metrics): MetricTile[] {
   ];
 }
 
-/** Jobs no pool can ever serve need action, so they turn the tile red; plain waiting is a warning. */
-export function queuedTone(metrics: Pick<Metrics, "queuedWaiting" | "queuedUnmatched">): HealthTone {
+/** Jobs no pool can ever serve need action, so they turn the tile red; plain waiting, or waiting on a manual pool, is a warning. */
+export function queuedTone(metrics: Pick<Metrics, "queuedWaiting" | "queuedManual" | "queuedUnmatched">): HealthTone {
   if (metrics.queuedUnmatched > 0) return "danger";
-  return metrics.queuedWaiting > 0 ? "warning" : "success";
+  return metrics.queuedWaiting > 0 || (metrics.queuedManual ?? 0) > 0 ? "warning" : "success";
 }
 
 export function successTone(rate: number | null): HealthTone {

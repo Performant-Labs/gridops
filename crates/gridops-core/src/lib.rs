@@ -15,13 +15,14 @@ pub mod models;
 pub mod provisioning;
 
 pub use autoscaling::{
-    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, ProviderCapacity, QueuedJob, QueuedJobOwner,
-    RepositoryCapacity, assigned_queued_jobs, compatible_runner_provider, effective_runner_labels,
-    is_runner_system_label, next_runner_provider, next_runner_repository, pool_platform_labels,
-    provider_capacities, provider_capacity_deficit, provider_supports_labels,
-    queued_job_assignments, queued_job_ownership, repository_capacities,
-    repository_capacity_deficit, runner_arch_label, runner_supports_system_label,
-    runner_system_labels, scale_up_target, waiting_job_ownership,
+    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, PoolStanding, ProviderCapacity, QueuedJob,
+    QueuedJobOwner, RepositoryCapacity, WaitingJobOwner, WaitingJobPools, assigned_queued_jobs,
+    compatible_runner_provider, effective_runner_labels, is_runner_system_label,
+    next_runner_provider, next_runner_repository, pool_platform_labels, provider_capacities,
+    provider_capacity_deficit, provider_supports_labels, queued_job_assignments,
+    queued_job_ownership, repository_capacities, repository_capacity_deficit, runner_arch_label,
+    runner_supports_system_label, runner_system_labels, scale_up_target, waiting_job_ownership,
+    waiting_job_pools,
 };
 pub use bitbucket::{
     BitbucketClient, BitbucketRunner, BitbucketRunnerOAuthClient, BitbucketRunnerState,
