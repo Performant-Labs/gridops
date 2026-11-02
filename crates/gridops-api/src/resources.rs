@@ -44,6 +44,8 @@ const MAX_ARCHIVED_LOG_BYTES: i64 = 100 * 1_024 * 1_024;
 const MAX_ARCHIVED_LOG_VIEW_BYTES: u64 = 1_000_000;
 const MAX_STRUCTURED_LOG_BYTES: usize = 25 * 1_024 * 1_024;
 const DEFAULT_PAGE_SIZE: i64 = 25;
+/// Overview success rate window, reported to clients as `successRateWindowDays`.
+const SUCCESS_RATE_WINDOW_DAYS: i64 = 30;
 const FALLBACK_MANAGER_CPU_LIMIT: i64 = 2;
 const FALLBACK_MANAGER_MEMORY_LIMIT_MB: i64 = 2_048;
 
@@ -265,7 +267,7 @@ pub async fn overview(
         return Ok(Json(json!({
             "authenticated": false,
             "configuration": configuration,
-            "metrics": { "runners": 0, "online": 0, "busy": 0, "queuedJobs": 0, "successRate": null },
+            "metrics": { "runners": 0, "online": 0, "busy": 0, "queuedJobs": 0, "successRate": null, "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS, "successRateRuns": 0 },
             "slo": {
               "windowHours": 24,
               "queue": { "oldestSeconds": null, "p95Seconds": null },
@@ -277,10 +279,16 @@ pub async fn overview(
             "pools": [], "runs": [], "activity": [], "installations": 0,
         })));
     };
-    // Success rate is a current-health signal, not history: it covers the
-    // last seven days, and neutral outcomes (skipped) leave the denominator
-    // so they stop reading as failures.
-    let metrics_window_start = now_millis().saturating_sub(7 * 24 * 60 * 60 * 1_000);
+    // Success rate is a current-health signal, not history: it covers runs
+    // that completed in the last `SUCCESS_RATE_WINDOW_DAYS` days. Only
+    // conclusions that say whether the work succeeded are counted:
+    //   success                                  -> success
+    //   failure, startup_failure, timed_out      -> failure
+    //   skipped (never ran), cancelled (stopped by a person or superseded by
+    //   a newer run), action_required, neutral, stale, and runs with no
+    //   conclusion -> left out of both the numerator and the denominator.
+    let metrics_window_start =
+        now_millis().saturating_sub(SUCCESS_RATE_WINDOW_DAYS * 24 * 60 * 60 * 1_000);
     let metrics = sqlx::query(
         r#"SELECT
           COUNT(DISTINCT CASE WHEN r.deleted_at IS NULL THEN r.id END) AS runners,
@@ -292,8 +300,8 @@ pub async fn overview(
             WHERE ui2.user_id=? AND wj.status='queued' AND wr.status!='completed') AS queued_jobs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui3 ON ui3.installation_id=repo.installation_id
-            WHERE ui3.user_id=? AND wr.completed_at IS NOT NULL
-              AND wr.completed_at>=? AND wr.conclusion<>'skipped') AS completed_runs,
+            WHERE ui3.user_id=? AND wr.completed_at>=?
+              AND wr.conclusion IN ('success','failure','startup_failure','timed_out')) AS counted_runs,
           (SELECT COUNT(*) FROM workflow_runs wr JOIN repositories repo ON repo.id=wr.repository_id
             JOIN user_installations ui4 ON ui4.installation_id=repo.installation_id
             WHERE ui4.user_id=? AND wr.conclusion='success'
@@ -315,9 +323,9 @@ pub async fn overview(
     .bind(&user.id)
     .fetch_one(&state.database)
     .await?;
-    let completed = metrics.get::<i64, _>("completed_runs");
-    let success_rate = (completed > 0).then(|| {
-        ((metrics.get::<i64, _>("successful_runs") as f64 / completed as f64) * 1_000.0).round()
+    let counted_runs = metrics.get::<i64, _>("counted_runs");
+    let success_rate = (counted_runs > 0).then(|| {
+        ((metrics.get::<i64, _>("successful_runs") as f64 / counted_runs as f64) * 1_000.0).round()
             / 10.0
     });
     let now = now_millis();
@@ -540,6 +548,8 @@ pub async fn overview(
             "runners": metrics.get::<i64, _>("runners"), "online": metrics.get::<i64, _>("online"),
             "busy": metrics.get::<i64, _>("busy"), "queuedJobs": metrics.get::<i64, _>("queued_jobs"),
             "successRate": success_rate,
+            "successRateWindowDays": SUCCESS_RATE_WINDOW_DAYS,
+            "successRateRuns": counted_runs,
         },
         "slo": {
             "windowHours": 24,
