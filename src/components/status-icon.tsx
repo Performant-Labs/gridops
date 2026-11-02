@@ -30,11 +30,12 @@ export function healthTone(status: string | null | undefined): HealthTone {
   if (["active", "healthy", "online", "idle", "processed", "success", "ready", "connected", "verified", "configured"].includes(normalized)) return "success";
   if (["busy", "running", "in_progress", "starting", "scaling", "provisioning", "updating", "rebuilding"].includes(normalized)) return "progress";
   if (["paused", "draining", "waiting", "backoff", "queued", "received", "requested", "provisioning-paused", "pending", "required", "polling"].includes(normalized)) return "warning";
-  if (["failed", "failure", "error", "rejected", "dead", "blocked", "invalid", "offline", "suspended"].includes(normalized)) return "danger";
+  if (["failed", "failure", "error", "rejected", "dead", "blocked", "invalid", "offline", "suspended", "builtin-host-off"].includes(normalized)) return "danger";
   return "neutral";
 }
 
 export function statusLabel(status: string | null | undefined) {
+  if (status === "builtin-host-off") return "Cannot run: built-in runner host is off";
   const text = (status || "unknown").replaceAll(/[_-]/g, " ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }

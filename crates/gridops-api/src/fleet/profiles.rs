@@ -84,6 +84,16 @@ pub(super) async fn queue(
     }))
 }
 
+fn invalid_field(context: RequestContext, field: &'static str) -> FleetApiError {
+    match gridops_core::fleet::UpstreamText::new(field) {
+        Ok(field) => context.error_with_details(
+            ErrorCode::InvalidRequest,
+            gridops_core::fleet::protocol::browser::ErrorDetails::InvalidField { field },
+        ),
+        Err(_) => context.error(ErrorCode::InvalidRequest),
+    }
+}
+
 pub(super) async fn save_profile(
     State(state): State<AppState>,
     context: RequestContext,
@@ -92,6 +102,16 @@ pub(super) async fn save_profile(
     FleetJson(body): FleetJson<FleetSettingsInput>,
 ) -> Result<Json<ProfileResponse>, FleetApiError> {
     require_admin(&state, &context, user.principal()).await?;
+    // With the built-in runner host off, fleet machines are the only place a
+    // pool can run: it must run on them, and cannot be left to the host.
+    if !gridops_core::builtin_host::is_enabled(&state.database).await {
+        if body.placement != targets::Placement::Machines {
+            return Err(invalid_field(context, "placement"));
+        }
+        if !body.enabled {
+            return Err(invalid_field(context, "enabled"));
+        }
+    }
     let item = targets::save_pool_fleet(&state.database, &path.pool_id, &body)
         .await
         .map_err(|error| fleet_error(context, &error))?;

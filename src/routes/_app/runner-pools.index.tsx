@@ -1,3 +1,4 @@
+import { BUILTIN_HOST_OFF_LABEL, BUILTIN_HOST_OFF_STATE, isBuiltinHostOff } from "~/features/runner-pools/builtin-host";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Boxes, Plus } from "lucide-react";
 
@@ -34,7 +35,7 @@ const GROUPS = [
 
 function poolGroup(pool: RunnerPool): (typeof GROUPS)[number]["key"] {
   if (pool.paused || pool.state === "paused" || pool.state === "provisioning-paused") return "paused";
-  if (pool.provisionCircuitOpen || pool.failedRunners > 0 || pool.state === "blocked") return "attention";
+  if (pool.provisionCircuitOpen || pool.failedRunners > 0 || pool.state === "blocked" || isBuiltinHostOff(pool)) return "attention";
   if (pool.state === "waiting" || pool.state === "backoff") return "waiting";
   if (["scaling", "updating", "draining"].includes(pool.state) || pool.outdatedRunners > 0) return "changing";
   return "active";
@@ -83,7 +84,7 @@ function RunnerPoolsPage() {
 function PoolRow({ pool }: { pool: RunnerPool }) {
   const providers = pool.providers?.length ? pool.providers : [pool.provider];
   const destination = pool.scope === "repository" && pool.repositoryCount > 1 ? `${pool.repositoryCount} repositories` : pool.repository ?? pool.accountLogin;
-  const state = pool.paused ? "paused" : pool.state;
+  const state = pool.paused ? "paused" : isBuiltinHostOff(pool) ? BUILTIN_HOST_OFF_STATE : pool.state;
   return (
     <div className={cn(listRowClassName, "relative pr-2")}>
       <Link aria-label={`Open ${pool.name}`} className="absolute inset-0 outline-none" data-list-row="" params={{ poolId: pool.id }} to="/runner-pools/$poolId" />
@@ -94,6 +95,7 @@ function PoolRow({ pool }: { pool: RunnerPool }) {
         {pool.labels.slice(0, 2).map((label) => <Badge key={label} variant="outline">{label}</Badge>)}
         {pool.labels.length > 2 ? <span className="text-2xs text-faint">+{pool.labels.length - 2}</span> : null}
       </span>
+      {state === BUILTIN_HOST_OFF_STATE ? <Badge className="hidden lg:inline-flex" variant="destructive">{BUILTIN_HOST_OFF_LABEL}</Badge> : null}
       {pool.provisionCircuitOpen ? <Badge className="hidden lg:inline-flex" variant="destructive">Paused after {pool.provisionFailureCount} failures</Badge> : null}
       {pool.outdatedRunners > 0 ? <Badge className="hidden lg:inline-flex" dot="bg-warning">{pool.outdatedRunners} updating</Badge> : null}
       <span className="flex-1" />

@@ -1,3 +1,4 @@
+import { builtinHostOn, showsBuiltinGuardrails } from "~/features/runner-pools/builtin-host";
 import { Link, createFileRoute, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { LoaderCircle } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
@@ -284,10 +285,10 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           <SettingsRow description={includesTart ? "Whole cores, because this pool includes macOS." : "Applied to each Docker runner."} htmlFor="cpu-limit" label="CPU per runner">
             <UnitField unit="cores"><Input className="pr-12" id="cpu-limit" name="cpuLimit" onChange={(event) => setCpuLimit(Number(event.target.value))} required step={includesTart ? "1" : "0.25"} type="number" value={cpuLimit} /></UnitField>
           </SettingsRow>
-          <SettingsRow description="Checked against the host budget when each runner starts." htmlFor="memory-limit" label="Memory per runner">
+          <SettingsRow description={showsBuiltinGuardrails(pool.builtinRunnerHostEnabled) ? "Checked against the host budget when each runner starts." : "Reserved on the machine for each runner."} htmlFor="memory-limit" label="Memory per runner">
             <UnitField unit="MB"><Input className="pr-10" id="memory-limit" name="memoryLimitMb" onChange={(event) => setMemoryLimitMb(Number(event.target.value))} required step="256" type="number" value={memoryLimitMb} /></UnitField>
           </SettingsRow>
-          {resourceWarning ? (
+          {resourceWarning && showsBuiltinGuardrails(pool.builtinRunnerHostEnabled) ? (
             <div className="px-4 py-3">
               <HostCapacityWarning host={pool.runnerHost} warning={resourceWarning} />
             </div>
@@ -335,7 +336,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
         </SettingsSection>
 
         {/* Older Docker pools keep their image in `image`. */}
-        <FleetExecutionSection dockerImage={pool.dockerImage || (pool.provider === "docker" ? pool.image : "")} poolId={pool.id} />
+        <FleetExecutionSection builtinHostEnabled={builtinHostOn(pool.builtinRunnerHostEnabled)} dockerImage={pool.dockerImage || (pool.provider === "docker" ? pool.image : "")} poolId={pool.id} />
 
         {error ? <Callout title="Could not save" tone="danger">{error}</Callout> : null}
       </SettingsLayout>

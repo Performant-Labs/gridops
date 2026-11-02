@@ -1240,7 +1240,11 @@ pub async fn runner_pools(
     .bind(offset)
     .fetch_all(&state.database)
     .await?;
+    let blocked_pools = gridops_core::builtin_host::blocked_pool_ids(&state.database)
+        .await
+        .map_err(ApiError::Internal)?;
     let items = rows.iter().map(|row| json!({
+        "cannotRun": cannot_run(blocked_pools.contains(&row.get::<String,_>("id"))),
         "id": row.get::<String,_>("id"), "name": row.get::<String,_>("name"), "scope": row.get::<String,_>("scope"),
         "mode": row.get::<String,_>("mode"), "provider": row.get::<String,_>("provider"),
         "providers": json_array(row.get::<&str,_>("providers")),
@@ -1354,7 +1358,11 @@ pub async fn runner_pool(
         .collect::<Vec<_>>();
     let runner_host = manager_resource_capacity(&state).await;
     let (max_cpu_limit, max_memory_limit_mb) = (runner_host.cpu, runner_host.memory_mb);
-    Ok(Json(json!({
+    let builtin_enabled = builtin_host_enabled(&state).await;
+    let blocked = gridops_core::builtin_host::pool_blocked(&state.database, &pool_id)
+        .await
+        .map_err(ApiError::Internal)?;
+    let mut detail = json!({
         "id": pool_id,
         "installationId": pool.installation_id,
         "repositoryId": pool.repository_id,
@@ -1395,7 +1403,10 @@ pub async fn runner_pool(
         "provisionRetryAt": iso_optional(pool.provision_retry_at),
         "provisionCircuitOpen": pool.provision_circuit_open,
         "canManage": user.role == "admin" || pool.installation_permission == "admin",
-    })))
+    });
+    detail["builtinRunnerHostEnabled"] = json!(builtin_enabled);
+    detail["cannotRun"] = cannot_run(blocked);
+    Ok(Json(detail))
 }
 
 pub async fn runner_pool_events(
@@ -2285,6 +2296,7 @@ pub async fn runner_pool_options(
     Ok(Json(json!({
         "authenticated": true, "installations": installations, "repositories": [], "runnerGroups": [], "bitbucketConnections": bitbucket_connections,
         "installUrl": format!("https://github.com/apps/{app_slug}/installations/new"),
+        "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
         "defaults": runner_pool_defaults(state.config.runner_image(), &runner_host)
     })))
 }
@@ -2493,8 +2505,16 @@ pub async fn create_runner_pool(
         json!({ "name": input.name, "scope": input.scope, "providers": providers, "repositoryIds": repository_ids, "bitbucketConnectionIds": bitbucket_connections, "desiredCount": input.desired_count }),
     )
     .await?;
+    // A new pool has no fleet execution yet. With the built-in host off it
+    // has nowhere to run until it gets some, so start nothing and say so.
+    gridops_core::builtin_host::sync_pool_states(&state.database)
+        .await
+        .map_err(ApiError::Internal)?;
+    let blocked = gridops_core::builtin_host::pool_blocked(&state.database, &pool_id)
+        .await
+        .map_err(ApiError::Internal)?;
     let mut provisioned = Vec::new();
-    for _ in 0..input.desired_count {
+    for _ in 0..if blocked { 0 } else { input.desired_count } {
         match provision(&state, &user, &pool_id, None).await {
             Ok(runner) => provisioned.push(runner),
             Err(error) => provisioned
@@ -2503,7 +2523,9 @@ pub async fn create_runner_pool(
     }
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": pool_id, "provisioned": provisioned })),
+        Json(
+            json!({ "id": pool_id, "provisioned": provisioned, "cannotRun": cannot_run(blocked) }),
+        ),
     ))
 }
 
@@ -2634,10 +2656,19 @@ pub async fn runner_action(
     match input.action.as_str() {
         "delete" => delete_runner_resources(&state, &user, &runner).await?,
         "rebuild" => {
+            // Refuse before deleting: a rebuild starts a runner on this host.
+            if !builtin_host_enabled(&state).await {
+                return Err(builtin_host_refusal());
+            }
             delete_runner_resources(&state, &user, &runner).await?;
             provision(&state, &user, &runner.pool_id, runner.target_repository_id).await?;
         }
         "start" | "stop" | "pause" | "resume" | "restart" => {
+            if matches!(input.action.as_str(), "start" | "resume" | "restart")
+                && !builtin_host_enabled(&state).await
+            {
+                return Err(builtin_host_refusal());
+            }
             if runner.ephemeral && matches!(input.action.as_str(), "start" | "restart") {
                 return Err(ApiError::Conflict(
                     "Ephemeral runners cannot be started or restarted; rebuild the runner instead."
@@ -3203,6 +3234,7 @@ pub async fn settings(
                 "availableCpus": value.get("availableCpus"),
                 "totalMemoryMb": value.get("totalMemoryMb"),
                 "provisioningPaused": value.get("provisioningPaused"),
+                "builtinHost": value.get("builtinHost"),
                 "capacity": value.get("capacity"),
                 "disk": value.get("disk"),
             })
@@ -3290,6 +3322,7 @@ pub async fn settings(
             "githubSyncIntervalSeconds": stored_i64(&stored, "githubSyncIntervalSeconds", 60),
             "autoUpdateImages": stored.get("autoUpdateImages").and_then(Value::as_bool).unwrap_or(false),
             "provisioningPaused": stored.get("provisioningPaused").and_then(Value::as_bool).unwrap_or(false),
+            "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
         }, "user": { "id": user.id, "login": user.login, "role": user.role }, "users": users
     }})))
 }
@@ -3354,6 +3387,86 @@ pub async fn save_settings(
         "provisioningPaused": input.provisioning_paused,
     })).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinRunnerHostInput {
+    builtin_host_enabled: bool,
+}
+
+/// Turns the built-in runner host on or off. An administrator only. The
+/// change is stored, pushed to the runner manager so it enforces it too,
+/// applied to the pools that depend on the host, and audited with the figure
+/// before and after.
+pub async fn save_builtin_runner_host(
+    State(state): State<AppState>,
+    _same_origin: SameOrigin,
+    user: AuthUser,
+    Json(input): Json<BuiltinRunnerHostInput>,
+) -> ApiResult<Json<Value>> {
+    require_system_admin(&user)?;
+    let change = gridops_core::builtin_host::set_enabled(
+        &state.database,
+        &user.id,
+        input.builtin_host_enabled,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+    gridops_core::builtin_host::sync_pool_states(&state.database)
+        .await
+        .map_err(ApiError::Internal)?;
+    let policy = json!({
+        "provisioningPaused": setting_bool(&state, "provisioningPaused", false).await,
+        "builtinHostEnabled": change.after,
+    });
+    // The reconciler pushes the same policy every pass, so a manager that is
+    // down now catches up; it refuses to start runners until it has.
+    let manager_synced = manager_json(&state, Method::PUT, "v1/policy", Some(policy))
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "saved the built-in runner host setting but manager synchronization is pending");
+        })
+        .is_ok();
+    let affected_pools = if change.after {
+        Vec::new()
+    } else {
+        sqlx::query("SELECT id,name FROM runner_pools WHERE state=? ORDER BY name")
+            .bind(gridops_core::builtin_host::POOL_STATE)
+            .fetch_all(&state.database)
+            .await?
+            .iter()
+            .map(|row| json!({ "id": row.get::<String, _>("id"), "name": row.get::<String, _>("name") }))
+            .collect()
+    };
+    let runners_on_host = gridops_core::builtin_host::live_runner_count(&state.database)
+        .await
+        .map_err(ApiError::Internal)?;
+    if change.changed() {
+        audit(
+            &state,
+            &user,
+            "settings.builtin_runner_host_changed",
+            "system",
+            Some("gridops"),
+            json!({
+                "setting": gridops_core::builtin_host::SETTING_KEY,
+                "before": change.before,
+                "after": change.after,
+                "poolsWithoutFleetExecution": affected_pools.len(),
+                "runnersOnBuiltinHost": runners_on_host,
+            }),
+        )
+        .await?;
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "builtinRunnerHostEnabled": change.after,
+        "changed": change.changed(),
+        "managerSynced": manager_synced,
+        "cannotRunPools": affected_pools,
+        "runnersOnBuiltinHost": runners_on_host,
+    })))
 }
 
 pub async fn bitbucket_connections(
@@ -3785,7 +3898,15 @@ async fn provision(
     } else {
         None
     };
-    let providers = json_array(&pool.providers);
+    let mut providers = json_array(&pool.providers);
+    // This path starts runners through the manager on the host GridOps runs
+    // on, whatever the pool's fleet settings say. Docker is that host.
+    if !builtin_host_enabled(state).await {
+        providers.retain(|provider| provider != "docker");
+        if providers.is_empty() {
+            return Err(builtin_host_refusal());
+        }
+    }
     let labels = json_array(&pool.labels);
     let pending_bitbucket_connection = next_bitbucket_connection(state, pool_id).await?;
     let provider =
@@ -4121,10 +4242,17 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         .collect::<Vec<_>>();
     let mut provisioned = 0;
     let mut removed = 0;
+    // This action starts runners through the manager, on the host GridOps
+    // runs on. With that host off it starts none: the reconciler places the
+    // pool's runners on machines, and a pool without fleet execution is shown
+    // as unable to run.
+    let host_on = builtin_host_enabled(state).await;
     if active.len() < pool.desired_count as usize {
-        for _ in active.len()..pool.desired_count as usize {
-            provision(state, user, pool_id, None).await?;
-            provisioned += 1;
+        if host_on {
+            for _ in active.len()..pool.desired_count as usize {
+                provision(state, user, pool_id, None).await?;
+                provisioned += 1;
+            }
         }
     } else if active.len() > pool.desired_count as usize {
         let count = active.len() - pool.desired_count as usize;
@@ -4158,8 +4286,11 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         .bind(pool_id)
         .execute(&state.database)
         .await?;
+    gridops_core::builtin_host::sync_pool_states(&state.database)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok(
-        json!({ "ok": true, "desired": pool.desired_count, "active": final_active, "provisioned": provisioned, "removed": removed, "rotated": rotated, "outdated": outdated }),
+        json!({ "ok": true, "desired": pool.desired_count, "active": final_active, "provisioned": provisioned, "removed": removed, "rotated": rotated, "outdated": outdated, "builtinRunnerHostOff": !host_on }),
     )
 }
 
@@ -4936,6 +5067,14 @@ struct ManagerCapacity {
 }
 
 async fn manager_resource_capacity(state: &AppState) -> ManagerCapacity {
+    // With the built-in host off its budget governs nothing, so none is shown.
+    if !builtin_host_enabled(state).await {
+        return ManagerCapacity {
+            cpu: FALLBACK_MANAGER_CPU_LIMIT,
+            memory_mb: FALLBACK_MANAGER_MEMORY_LIMIT_MB,
+            host: Value::Null,
+        };
+    }
     let manager = manager_json(state, Method::GET, "v1/health", None)
         .await
         .ok();
@@ -5084,10 +5223,14 @@ async fn disk_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
             alerts.push(json!({
                 "level": level(alarm),
                 "title": "GridOps server disk is running out of space",
-                "detail": format!(
-                    "{} — the manager also stops admitting runners below its free-disk watermark",
+                "detail": if builtin_host_enabled(state).await {
+                    format!(
+                        "{} — the manager also stops admitting runners below its free-disk watermark",
+                        detail(total, free)
+                    )
+                } else {
                     detail(total, free)
-                ),
+                },
                 "href": "/settings/runner-host",
             }));
         }
@@ -5312,6 +5455,31 @@ fn active_status(status: &str) -> bool {
 
 fn stored_i64(values: &HashMap<String, Value>, key: &str, fallback: i64) -> i64 {
     values.get(key).and_then(Value::as_i64).unwrap_or(fallback)
+}
+
+async fn builtin_host_enabled(state: &AppState) -> bool {
+    gridops_core::builtin_host::is_enabled(&state.database).await
+}
+
+/// What a request that would start a runner on the built-in host is told
+/// while the host is off.
+fn builtin_host_refusal() -> ApiError {
+    ApiError::Refused {
+        code: gridops_core::builtin_host::DISABLED_CODE,
+        message: gridops_core::builtin_host::DISABLED_MESSAGE.into(),
+    }
+}
+
+/// Why a pool cannot run, or `null`: shown instead of leaving it stuck.
+fn cannot_run(blocked: bool) -> Value {
+    if blocked {
+        json!({
+            "code": gridops_core::builtin_host::DISABLED_CODE,
+            "message": gridops_core::builtin_host::POOL_REASON,
+        })
+    } else {
+        Value::Null
+    }
 }
 
 async fn setting_bool(state: &AppState, key: &str, fallback: bool) -> bool {

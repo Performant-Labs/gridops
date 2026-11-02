@@ -54,7 +54,7 @@ const SANDBOX_ID_LABEL: &str = "io.gridops.sandbox-id";
 const SANDBOX_NAME_PREFIX: &str = "gridops-agent-";
 /// Capacity leases for sandboxes are reserved under this pool through the
 /// ordinary `POST /v1/admissions` route.
-const SANDBOX_POOL_ID: &str = "gridops-agent";
+pub(super) const SANDBOX_POOL_ID: &str = "gridops-agent";
 const SANDBOX_PROVIDER: &str = "docker";
 const SANDBOX_WORKSPACE: &str = "/workspace";
 /// Root inside the sandbox, so uploaded root-owned files stay writable. Package
@@ -241,6 +241,7 @@ pub(super) async fn create_sandbox(
     Json(input): Json<CreateSandbox>,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
     input.validate()?;
+    state.builtin_host.require_docker()?;
     let _guard = state.provision_lock.lock().await;
     ensure_provisioning_enabled(&state)?;
     if input.network != state.limits.runner_network {
@@ -1412,6 +1413,7 @@ mod tests {
                 }),
                 reservations: Arc::new(Mutex::new(HashMap::new())),
                 provisioning_paused: Arc::new(AtomicBool::new(false)),
+                builtin_host: crate::builtin_host::BuiltinHost::new(true, Some(true)),
                 provision_lock: Arc::new(Mutex::new(())),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

@@ -18,6 +18,9 @@ pub enum ApiError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    /// A refusal a client can tell from other conflicts by its `code`.
+    #[error("{message}")]
+    Refused { code: &'static str, message: String },
     #[error("{0}")]
     PayloadTooLarge(String),
     #[error("{0}")]
@@ -34,6 +37,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
             Self::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
+            Self::Refused { message, .. } => (StatusCode::CONFLICT, message.clone()),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message.clone()),
             Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message.clone()),
             Self::Internal(error) => {
@@ -44,7 +48,11 @@ impl IntoResponse for ApiError {
                 )
             }
         };
-        (status, Json(json!({ "error": message }))).into_response()
+        let mut body = json!({ "error": message });
+        if let Self::Refused { code, .. } = &self {
+            body["code"] = json!(code);
+        }
+        (status, Json(body)).into_response()
     }
 }
 

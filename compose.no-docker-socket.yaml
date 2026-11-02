@@ -1,0 +1,16 @@
+# Runs the runner manager without the Docker socket, for an install whose
+# built-in runner host is off (Settings > Runner host) and that does not use
+# "Fix with agent": every runner then runs on an enrolled machine, and the
+# machine GridOps runs on gives no container access to the manager.
+#
+#   docker compose -f compose.yaml -f compose.no-docker-socket.yaml up -d
+#
+# The manager still answers health and the Tart macOS provider, but starts no
+# container on its own host: runners (even with the setting on) and agent
+# sandboxes are refused with `docker_unavailable`. Needs Docker Compose 2.24.4
+# or newer, for `!reset`. See docs/fleet-agent.md.
+services:
+  manager:
+    environment:
+      GRIDOPS_MANAGER_DOCKER: "off"
+    volumes: !reset []
