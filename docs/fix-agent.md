@@ -48,7 +48,11 @@ Progress streams into the job view, and a run can be cancelled at any point.
    never pushes the host past its limits. If the host is full, the run waits.
 3. The manager starts a sandbox container from `GRIDOPS_AGENT_SANDBOX_IMAGE`
    (the runner image by default). GridOps streams the failing commit's tarball
-   from GitHub into it and commits it as a local baseline.
+   from GitHub into it and commits it as a local baseline. The sandbox runs
+   on the manager's Docker host, which is the machine GridOps runs on. It is
+   not a runner, so the "built-in runner host" setting
+   ([fleet-agent.md](fleet-agent.md)) does not turn it off; it needs the
+   manager's Docker socket.
 4. The agent loop runs in the reconciler. The model reaches the sandbox only
    through tools: list, search, read and edit files, and run commands, which
    lets it reproduce the failure and check its fix.

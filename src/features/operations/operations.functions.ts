@@ -29,6 +29,8 @@ export type RunnerPool = {
   accountCount: number;
   totalRunners: number; onlineRunners: number; busyRunners: number; failedRunners: number;
   outdatedRunners: number; createdAt: string; canManage: boolean;
+  /** Set while the built-in runner host is off and the pool has no fleet execution to run on instead. */
+  cannotRun?: { code: string; message: string } | null;
 };
 
 /** The enrolled machine a fleet runner was placed on. */
@@ -127,6 +129,8 @@ export type SettingsPage = {
     manager: {
       ok: boolean; dockerVersion?: string; apiVersion?: string; hostName?: string; availableCpus?: number;
       totalMemoryMb?: number; provisioningPaused?: boolean; error?: string;
+      /** What the manager has been told about the built-in host, and whether it has Docker access at all. */
+      builtinHost?: { enabled: boolean | null; dockerAvailable: boolean };
       capacity?: {
         cpuBudget: number; memoryBudgetMb: number; maxRunners: number;
         active: { activeRunners: number; cpu: number; memoryMb: number };
@@ -135,7 +139,8 @@ export type SettingsPage = {
       disk?: { totalMb: number; availableMb: number; minimumFreeMb: number };
     };
     settings: { logRetentionDays: number; logStorageBudgetMb: number; webhookRetentionDays: number; auditRetentionDays: number;
-      reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean };
+      reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean;
+      builtinRunnerHostEnabled: boolean };
     user: { id: string; login: string; role: "admin" | "member" };
     users: Array<{ id: string; login: string; name: string | null; avatarUrl: string | null;
       role: "admin" | "member"; lastLoginAt: string; canDemote: boolean }>;

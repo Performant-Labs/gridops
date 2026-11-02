@@ -42,6 +42,7 @@ use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer, trace::Tra
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 use url::Url;
 
+mod builtin_host;
 mod sandbox;
 
 #[derive(Clone)]
@@ -53,6 +54,7 @@ struct ManagerState {
     shared_docker_socket: Option<SharedDockerSocket>,
     reservations: Arc<Mutex<HashMap<String, CapacityReservation>>>,
     provisioning_paused: Arc<AtomicBool>,
+    builtin_host: builtin_host::BuiltinHost,
     provision_lock: Arc<Mutex<()>>,
 }
 
@@ -438,6 +440,9 @@ impl CapacityRequest {
 #[serde(rename_all = "camelCase")]
 struct ManagerPolicy {
     provisioning_paused: bool,
+    /// Whether runners may start on this manager's own host. Callers that
+    /// predate the setting leave it out, which leaves it as it was.
+    builtin_host_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -707,17 +712,34 @@ async fn main() -> Result<()> {
     let socket =
         env::var("GRIDOPS_DOCKER_SOCKET").unwrap_or_else(|_| "/var/run/docker.sock".into());
     let bind = env::var("GRIDOPS_MANAGER_BIND").unwrap_or_else(|_| "127.0.0.1:8788".into());
+    // `GRIDOPS_MANAGER_DOCKER=off` runs the manager with no Docker socket at
+    // all: it keeps serving health and the Tart provider but starts nothing
+    // on its own host. Use it once the built-in runner host is off.
+    let docker_available = !env::var("GRIDOPS_MANAGER_DOCKER").is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "off" | "false" | "0" | "no"
+        )
+    });
     let docker = Docker::connect_with_socket(&socket, 120, API_DEFAULT_VERSION)
         .context("could not connect to Docker")?;
-    let info = docker
-        .info()
-        .await
-        .context("could not inspect Docker capacity")?;
-    let limits = ManagerLimits::from_environment(
-        info.name.clone().unwrap_or_default(),
-        info.ncpu.unwrap_or(1),
-        info.mem_total.unwrap_or(512 * 1_024 * 1_024),
-    )?;
+    let (host_name, ncpu, mem_total) = if docker_available {
+        let info = docker
+            .info()
+            .await
+            .context("could not inspect Docker capacity")?;
+        (
+            info.name.clone().unwrap_or_default(),
+            info.ncpu.unwrap_or(1),
+            info.mem_total.unwrap_or(512 * 1_024 * 1_024),
+        )
+    } else {
+        tracing::warn!(
+            "GRIDOPS_MANAGER_DOCKER=off: no runner or agent sandbox can start on this host"
+        );
+        (String::new(), 1, 512 * 1_024 * 1_024)
+    };
+    let limits = ManagerLimits::from_environment(host_name, ncpu, mem_total)?;
     let tart = tart_agent_from_environment()?;
     let shared_docker_socket = shared_docker_socket(
         env::var("GRIDOPS_RUNNER_DOCKER_SOCKET").ok(),
@@ -731,6 +753,7 @@ async fn main() -> Result<()> {
         max_runners = limits.max_runners,
         tart_enabled = tart.is_some(),
         docker_socket_shared = shared_docker_socket.is_some(),
+        docker_available,
         min_free_disk_mb = limits.min_free_disk_mb,
         provisioning_paused,
         "runner host guardrails initialized"
@@ -743,6 +766,7 @@ async fn main() -> Result<()> {
         shared_docker_socket,
         reservations: Arc::new(Mutex::new(HashMap::new())),
         provisioning_paused: Arc::new(AtomicBool::new(provisioning_paused)),
+        builtin_host: builtin_host::BuiltinHost::new(docker_available, None),
         provision_lock: Arc::new(Mutex::new(())),
     };
 
@@ -803,15 +827,6 @@ async fn health(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
 ) -> Result<Json<Value>, ManagerError> {
-    state.docker.ping().await?;
-    let version = state.docker.version().await?;
-    // `capacity` describes the Docker host only; Tart reports its own budget
-    // and usage under `providers.tart.health.capacity`.
-    // `active` includes agent sandboxes, which hold runner slots on this host;
-    // `agentSandboxes` breaks them out.
-    let usage = docker_active_usage(&state.docker).await?;
-    let reserved = reserved_capacity(&state, "docker").await;
-    let disk = disk_capacity(&state.limits)?;
     let (status, tart) = match &state.tart {
         Some(agent) => match tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await
         {
@@ -826,6 +841,28 @@ async fn health(
         },
         None => ("ok", json!({ "available": false, "configured": false })),
     };
+    let builtin_host = json!({
+        "enabled": state.builtin_host.setting(),
+        "dockerAvailable": state.builtin_host.docker_available(),
+    });
+    if !state.builtin_host.docker_available() {
+        // Running without Docker access: nothing on this host to measure.
+        return Ok(Json(json!({
+            "status": status,
+            "providers": { "docker": { "available": false }, "tart": tart },
+            "provisioningPaused": state.provisioning_paused.load(Ordering::Relaxed),
+            "builtinHost": builtin_host,
+        })));
+    }
+    state.docker.ping().await?;
+    let version = state.docker.version().await?;
+    // `capacity` describes the Docker host only; Tart reports its own budget
+    // and usage under `providers.tart.health.capacity`.
+    // `active` includes agent sandboxes, which hold runner slots on this host;
+    // `agentSandboxes` breaks them out.
+    let usage = docker_active_usage(&state.docker).await?;
+    let reserved = reserved_capacity(&state, "docker").await;
+    let disk = disk_capacity(&state.limits)?;
     Ok(Json(json!({
         "status": status,
         "dockerVersion": version.version,
@@ -835,6 +872,7 @@ async fn health(
         "availableCpus": state.limits.available_cpus,
         "totalMemoryMb": state.limits.total_memory_mb,
         "provisioningPaused": state.provisioning_paused.load(Ordering::Relaxed),
+        "builtinHost": builtin_host,
         "capacity": {
             "cpuBudget": state.limits.cpu_budget,
             "memoryBudgetMb": state.limits.memory_budget_mb,
@@ -859,7 +897,13 @@ async fn update_policy(
     state
         .provisioning_paused
         .store(input.provisioning_paused, Ordering::Relaxed);
-    Json(json!({ "provisioningPaused": input.provisioning_paused }))
+    if let Some(enabled) = input.builtin_host_enabled {
+        state.builtin_host.set(enabled);
+    }
+    Json(json!({
+        "provisioningPaused": input.provisioning_paused,
+        "builtinHostEnabled": state.builtin_host.setting(),
+    }))
 }
 
 async fn reserve_capacity(
@@ -868,6 +912,15 @@ async fn reserve_capacity(
     Json(input): Json<CapacityRequest>,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
     input.validate()?;
+    if input.provider == "docker" {
+        // Agent sandboxes reserve under their own pool and need Docker, not
+        // the built-in runner host; every other Docker admission is a runner.
+        if input.pool_id == sandbox::SANDBOX_POOL_ID {
+            state.builtin_host.require_docker()?;
+        } else {
+            state.builtin_host.require_runners()?;
+        }
+    }
     let _guard = state.provision_lock.lock().await;
     ensure_provisioning_enabled(&state)?;
     // Each provider is admitted against its own host. Tart VMs run on the Mac,
@@ -937,7 +990,13 @@ async fn list_runners(
         .all(true)
         .filters(&filters)
         .build();
-    let containers = state.docker.list_containers(Some(options)).await?;
+    // Without Docker access there are no containers to list; Tart runners are
+    // still reported so the reconciler keeps working.
+    let containers = if state.builtin_host.docker_available() {
+        state.docker.list_containers(Some(options)).await?
+    } else {
+        Vec::new()
+    };
     let mut runners = containers
         .into_iter()
         .map(|container| ManagedRunner {
@@ -1003,6 +1062,9 @@ async fn provision_runner(
     Json(mut input): Json<ProvisionRunner>,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
     input.validate()?;
+    if input.provider != "tart" {
+        state.builtin_host.require_runners()?;
+    }
     let _guard = state.provision_lock.lock().await;
     ensure_provisioning_enabled(&state)?;
     if input.network != state.limits.runner_network {
@@ -1221,6 +1283,11 @@ async fn control_runner(
         .map(Json);
     }
     validate_container_id(&container_id)?;
+    // Bringing a container back to life puts work on this host again.
+    if matches!(action.as_str(), "start" | "resume" | "restart") {
+        state.builtin_host.require_runners()?;
+    }
+    state.builtin_host.require_docker()?;
     let labels = managed_container_labels(&state.docker, &container_id).await?;
     if matches!(action.as_str(), "start" | "restart")
         && labels.get("io.gridops.mode").map(String::as_str) == Some("ephemeral")
@@ -1396,6 +1463,7 @@ async fn delete_runner(
         .map(Json);
     }
     validate_container_id(&container_id)?;
+    state.builtin_host.require_docker()?;
     managed_container_labels(&state.docker, &container_id).await?;
     state
         .docker

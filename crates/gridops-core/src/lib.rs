@@ -2,6 +2,7 @@ pub mod api_tokens;
 pub mod autoscaling;
 pub mod bitbucket;
 pub mod build_info;
+pub mod builtin_host;
 pub mod config;
 pub mod crypto;
 pub mod db;

@@ -30,6 +30,8 @@ mod agent;
 mod api_tokens;
 #[path = "fleet_http/budget.rs"]
 mod budget;
+#[path = "fleet_http/builtin_host.rs"]
+mod builtin_host;
 #[path = "fleet_http/disk_alerts.rs"]
 mod disk_alerts;
 #[path = "fleet_http/inventory.rs"]

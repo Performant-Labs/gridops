@@ -61,9 +61,15 @@ const defaults: ProfileInput = {
 };
 
 /** `dockerImage` is the pool's own Docker image: new Docker platforms start from it. */
-export function FleetExecutionSection({ poolId, dockerImage }: { poolId: string; dockerImage: string }) {
+export function FleetExecutionSection({ poolId, dockerImage, builtinHostEnabled = true }: {
+  poolId: string; dockerImage: string;
+  /** Off: machines are the only place the pool can run, so this is required and has no placement choice. */
+  builtinHostEnabled?: boolean;
+}) {
   const profile = useQuery({ queryKey: ["fleet", "profile", poolId], queryFn: ({ signal }) => getPoolProfile(poolId, signal) });
-  const description = <>When on, this pool’s runners can run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link>. Placement decides whether the built-in runner host is still used.</>;
+  const description = builtinHostEnabled
+    ? <>When on, this pool’s runners can run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link>. Placement decides whether the built-in runner host is still used.</>
+    : <>The built-in runner host is off, so this pool’s runners run on your <Link className="underline underline-offset-2" to="/fleet">machines</Link>. A pool without fleet execution cannot run.</>;
 
   if (profile.isPending) return <SettingsSection description={description} title="Fleet execution"><InlineLoading label="Loading…" /></SettingsSection>;
   if (profile.isError) {
@@ -82,7 +88,7 @@ export function FleetExecutionSection({ poolId, dockerImage }: { poolId: string;
     );
   }
   const item = profile.data.item;
-  return <ProfileEditor description={description} key={item ? item.platforms.map((platform) => `${platform.id}:${platform.revision}`).join(",") : "new"} poolDockerImage={dockerImage} poolId={poolId} profile={item} />;
+  return <ProfileEditor description={description} key={item ? item.platforms.map((platform) => `${platform.id}:${platform.revision}`).join(",") : "new"} poolDockerImage={dockerImage} poolId={poolId} profile={item} hostEnabled={builtinHostEnabled} />;
 }
 
 const waitingReason: Record<string, string> = {
@@ -146,19 +152,20 @@ const draftKey = () => `platform-${++nextKey}`;
 const platformName = (platform: PlatformInput) =>
   `${osLabels[platform.executionOs]} ${platform.architecture} · ${runtimeLabels[platform.runtimeKind]}`;
 
-function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
-  poolId: string; poolDockerImage: string; profile: Profile | null; description: ReactNode;
+function ProfileEditor({ poolId, poolDockerImage, profile, description, hostEnabled }: {
+  poolId: string; poolDockerImage: string; profile: Profile | null; description: ReactNode; hostEnabled: boolean;
 }) {
   const queryClient = useQueryClient();
   const images = defaultImages(poolDockerImage);
   const poolImage = poolDockerImage.trim();
   const initial = profile ?? defaults;
-  const [enabled, setEnabled] = useState(initial.enabled);
+  // With the built-in host off a pool can only run on machines: fleet execution is required.
+  const [enabled, setEnabled] = useState(hostEnabled ? initial.enabled : true);
   const [mode, setMode] = useState(initial.mode);
   const [cores, setCores] = useState(initial.cpuMillis / 1000);
   const [memoryMib, setMemoryMib] = useState(initial.memoryMib);
   const [diskGib, setDiskGib] = useState(initial.diskBytes / GIB);
-  const [placement, setPlacement] = useState(initial.placement);
+  const [placement, setPlacement] = useState(hostEnabled ? initial.placement : "machines");
   const [platforms, setPlatforms] = useState<PlatformDraft[]>(() =>
     (profile?.platforms ?? [newPlatform(images)]).map((platform) => ({ ...platform, key: draftKey() })));
   const [saving, setSaving] = useState(false);
@@ -201,7 +208,7 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
     setError(null);
     try {
       const saved = await savePoolProfile(poolId, {
-        enabled, placement, mode: native ? "ephemeral" : mode,
+        enabled: hostEnabled ? enabled : true, placement: hostEnabled ? placement : "machines", mode: native ? "ephemeral" : mode,
         cpuMillis: Math.round(cores * 1000), memoryMib, diskBytes: Math.round(diskGib * GIB),
         platforms: platforms.map((platform) => ({
           id: platform.id, runtimeKind: platform.runtimeKind, executionOs: platform.executionOs,
@@ -225,11 +232,11 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
     >
       {createPortal(<form aria-label="Fleet execution" id={FORM_ID} onSubmit={(event) => void submit(event)} />, document.body)}
       <SettingsRow
-        description={profile ? `Runs for ${profile.targetIds.length} ${profile.targetIds.length === 1 ? "repository or organization" : "repositories and organizations"}. Machines must be approved for them.` : "Saved settings take effect on the next runner."}
+        description={!hostEnabled ? "Required while the built-in runner host is off. Machines must be approved for this pool’s repositories." : profile ? `Runs for ${profile.targetIds.length} ${profile.targetIds.length === 1 ? "repository or organization" : "repositories and organizations"}. Machines must be approved for them.` : "Saved settings take effect on the next runner."}
         inline
         label="Run on machines"
       >
-        <Switch aria-label="Run on machines" checked={enabled} onCheckedChange={setEnabled} />
+        <Switch aria-label="Run on machines" checked={hostEnabled ? enabled : true} disabled={!hostEnabled} onCheckedChange={setEnabled} />
       </SettingsRow>
       {profile?.enabled ? <WaitingRunners poolId={poolId} /> : null}
       <div className="space-y-2 px-4 py-3">
@@ -320,6 +327,7 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
           </div>
         ))}
       </div>
+      {hostEnabled ? (
       <SettingsRow description="Where each new runner starts. When both have room, the built-in host goes first because it starts runners fastest. Windows and other platforms the host can’t run always go to machines." label="Placement">
         <SearchableSelect
           ariaLabel="Fleet placement"
@@ -333,6 +341,11 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description }: {
           value={placement}
         />
       </SettingsRow>
+      ) : (
+        <SettingsRow description="The built-in runner host is off, so every runner starts on an enrolled machine, as Windows and other platforms the host can’t run always did." label="Placement">
+          <span className="text-sm text-foreground">Machines only</span>
+        </SettingsRow>
+      )}
       <SettingsRow description={native ? "Native runners are always ephemeral, so this pool’s runners are too." : undefined} label="Mode">
         <SearchableSelect
           ariaLabel="Fleet runner mode"

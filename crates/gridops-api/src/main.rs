@@ -231,6 +231,10 @@ async fn main() -> Result<()> {
             get(resources::settings).put(resources::save_settings),
         )
         .route(
+            "/api/v1/settings/runner-host",
+            put(resources::save_builtin_runner_host),
+        )
+        .route(
             "/api/v1/platform-connections/bitbucket",
             get(resources::bitbucket_connections).post(resources::create_bitbucket_connection),
         )

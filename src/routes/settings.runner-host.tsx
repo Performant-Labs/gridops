@@ -1,10 +1,12 @@
-import { createFileRoute, getRouteApi } from "@tanstack/react-router";
+import { createFileRoute, getRouteApi, useRouter } from "@tanstack/react-router";
 import { DatabaseBackup, Server } from "lucide-react";
 
 import { Callout, EmptyState } from "~/components/page";
 import { SettingsLayout, SettingsSection, SettingsValue } from "~/components/settings-ui";
 import { StatusBadge } from "~/components/status-icon";
 import { buttonVariants } from "~/components/ui/button";
+import { BuiltinHostSection } from "~/features/runner-pools/builtin-host-section";
+import { showsBuiltinGuardrails } from "~/features/runner-pools/builtin-host";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings/runner-host")({
@@ -15,8 +17,10 @@ const settingsRoute = getRouteApi("/settings");
 
 function RunnerHostSettings() {
   const page = settingsRoute.useLoaderData();
+  const router = useRouter();
   if (!page.data) return <EmptyState description="Sign in to view runner host health." icon={Server} title="Runner host unavailable" />;
-  const { manager, configuration, user } = page.data;
+  const { manager, configuration, user, settings } = page.data;
+  const hostOn = showsBuiltinGuardrails(settings.builtinRunnerHostEnabled);
   const capacity = manager.capacity;
   const used = capacity ? {
     runners: capacity.active.activeRunners + capacity.reserved.activeRunners,
@@ -28,21 +32,34 @@ function RunnerHostSettings() {
   return (
     <SettingsLayout
       actions={user.role === "admin" ? <a className={buttonVariants({ size: "sm", variant: "outline" })} href="/api/backups/database"><DatabaseBackup />Download backup</a> : null}
-      description="The runner manager is the only service with Docker access; it admits each runner against these limits."
+      description={hostOn
+        ? "The runner manager is the only service with Docker access; it admits each runner against these limits."
+        : "The built-in runner host is off: GridOps starts no runner on the machine it runs on, and every pool runs on the enrolled machines under Fleet."}
       title="Runner host"
     >
+      <BuiltinHostSection
+        dockerAvailable={manager.builtinHost?.dockerAvailable ?? true}
+        enabled={hostOn}
+        isAdmin={user.role === "admin"}
+        managerSetting={manager.ok ? manager.builtinHost?.enabled : undefined}
+        onChanged={() => router.invalidate()}
+      />
       {!manager.ok ? <Callout title="The runner manager is unavailable" tone="danger">{manager.error ?? "GridOps cannot reach the manager service."}</Callout> : null}
 
       <SettingsSection title="Status">
         <SettingsValue label="Manager" value={<StatusBadge status={manager.ok ? "healthy" : "offline"} />} />
-        <SettingsValue label="Docker Engine" mono={Boolean(manager.dockerVersion)} value={manager.dockerVersion ?? "—"} />
-        <SettingsValue label="Docker API" mono={Boolean(manager.apiVersion)} value={manager.apiVersion ?? "—"} />
-        <SettingsValue label="Machine" value={manager.hostName || "—"} />
-        <SettingsValue label="Host" value={manager.availableCpus ? `${manager.availableCpus} CPUs · ${manager.totalMemoryMb ? `${Math.round(manager.totalMemoryMb / 1024)} GB memory` : "memory unknown"}` : "—"} />
+        {manager.builtinHost && !manager.builtinHost.dockerAvailable ? null : (
+          <>
+            <SettingsValue label="Docker Engine" mono={Boolean(manager.dockerVersion)} value={manager.dockerVersion ?? "—"} />
+            <SettingsValue label="Docker API" mono={Boolean(manager.apiVersion)} value={manager.apiVersion ?? "—"} />
+            <SettingsValue label="Machine" value={manager.hostName || "—"} />
+            <SettingsValue label="Host" value={manager.availableCpus ? `${manager.availableCpus} CPUs · ${manager.totalMemoryMb ? `${Math.round(manager.totalMemoryMb / 1024)} GB memory` : "memory unknown"}` : "—"} />
+          </>
+        )}
         <SettingsValue label="Provisioning" value={<StatusBadge status={manager.provisioningPaused ? "paused" : "active"} />} />
       </SettingsSection>
 
-      {capacity && used ? (
+      {hostOn && capacity && used ? (
         <SettingsSection description="Includes short-lived reservations for runners that are starting." title="Capacity">
           <Meter label="Runners" limit={capacity.maxRunners} used={used.runners} />
           <Meter label="CPU" limit={capacity.cpuBudget} unit="cores" used={Number(used.cpu.toFixed(1))} />
@@ -50,7 +67,7 @@ function RunnerHostSettings() {
         </SettingsSection>
       ) : null}
 
-      {disk ? (
+      {hostOn && disk ? (
         <SettingsSection description={`Provisioning stops when free space drops below ${Math.round(disk.minimumFreeMb / 1024)} GB.`} title="Disk">
           <Meter format={(value) => `${Math.round(value / 1024)}`} label="Used" limit={disk.totalMb} unit="GB" used={disk.totalMb - disk.availableMb} warnAt={(disk.totalMb - disk.minimumFreeMb) / disk.totalMb} />
           <SettingsValue label="Free" value={`${Math.round(disk.availableMb / 1024)} GB`} />

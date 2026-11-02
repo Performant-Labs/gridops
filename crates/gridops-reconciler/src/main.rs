@@ -1,4 +1,5 @@
 mod agent;
+mod builtin_host;
 mod fleet;
 
 use std::{
@@ -262,11 +263,18 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
         tracing::warn!(error = ?error, "fleet reconciliation pass failed");
     }
     let provisioning_paused = setting_bool(&app.database, "provisioningPaused", false).await;
+    let builtin_enabled = gridops_core::builtin_host::is_enabled(&app.database).await;
+    if let Err(error) = gridops_core::builtin_host::sync_pool_states(&app.database).await {
+        tracing::warn!(error = ?error, "could not update pools that depend on the built-in runner host");
+    }
     if let Err(error) = manager_request::<Value>(
         app,
         Method::PUT,
         "v1/policy",
-        Some(json!({ "provisioningPaused": provisioning_paused })),
+        Some(json!({
+            "provisioningPaused": provisioning_paused,
+            "builtinHostEnabled": builtin_enabled,
+        })),
     )
     .await
     {
@@ -291,7 +299,14 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
         .collect::<HashMap<_, _>>();
     let pools = load_pools(&app.database).await?;
     for pool in pools {
-        if let Err(error) = reconcile_pool(app, &pool, &container_states, provisioning_paused).await
+        if let Err(error) = reconcile_pool(
+            app,
+            &pool,
+            &container_states,
+            provisioning_paused,
+            builtin_enabled,
+        )
+        .await
         {
             tracing::error!(pool_id = %pool.id, pool = %pool.name, error = ?error, "pool reconciliation failed");
             system_event(
@@ -349,6 +364,7 @@ async fn reconcile_pool(
     pool: &Pool,
     container_states: &HashMap<String, String>,
     provisioning_paused: bool,
+    builtin_enabled: bool,
 ) -> Result<()> {
     let known_runners = runners(app, &pool.id).await?;
     for runner in &known_runners {
@@ -388,12 +404,42 @@ async fn reconcile_pool(
         delete_runner(app, pool, runner).await?;
     }
 
+    // With the built-in host off, idle runners on it are wound down; busy ones
+    // finish their job first. Nothing replaces them there.
+    let mut retired = 0;
+    if !builtin_enabled {
+        for runner in runners(app, &pool.id)
+            .await?
+            .iter()
+            .filter(|runner| builtin_host::retire_when_off(builtin_enabled, runner))
+        {
+            if delete_runner(app, pool, runner).await? {
+                retired += 1;
+            }
+        }
+    }
+    // A pool that only uses Docker and has no fleet platform has nowhere to
+    // run while the host is off.
+    let host_blocked = !builtin_enabled
+        && gridops_core::builtin_host::depends_on_host(&app.database, &pool.id).await?;
+    if host_blocked && pool.state != gridops_core::builtin_host::POOL_STATE && !pool.paused {
+        system_event(
+            app,
+            Some(&pool.id),
+            "warning",
+            "Cannot run: built-in runner host is off",
+            gridops_core::builtin_host::POOL_REASON,
+            json!({ "code": gridops_core::builtin_host::DISABLED_CODE }),
+        )
+        .await?;
+    }
+
     let retry_deferred = pool
         .provision_retry_at
         .is_some_and(|retry_at| retry_at > now_millis());
     // An open circuit carries a cool-down in `provision_retry_at`; once it
     // passes, one attempt probes whether the cause has cleared.
-    let provisioning_blocked = provisioning_paused || retry_deferred;
+    let provisioning_blocked = provisioning_paused || retry_deferred || host_blocked;
     let current = runners(app, &pool.id).await?;
     let mut rotated = 0;
     if !provisioning_blocked
@@ -436,7 +482,7 @@ async fn reconcile_pool(
     let mut capacity_deferred = false;
     if !provisioning_blocked && active.len() < desired as usize {
         for _ in active.len()..desired as usize {
-            let mut attempt = provision(app, pool).await?;
+            let mut attempt = provision(app, pool, builtin_enabled).await?;
             // An idle runner parked on a repository without work does not make
             // the host full: reclaim its slot and retry straight away.
             // Rebalancing waits for the pool to reach its desired size, which
@@ -449,7 +495,7 @@ async fn reconcile_pool(
                 let current = runners(app, &pool.id).await?;
                 if evict_surplus_runner(app, pool, &current, Some(provider)).await? > 0 {
                     rebalanced += 1;
-                    attempt = provision(app, pool).await?;
+                    attempt = provision(app, pool, builtin_enabled).await?;
                 }
             }
             match attempt {
@@ -491,6 +537,8 @@ async fn reconcile_pool(
             "paused"
         } else if provisioning_paused {
             "provisioning-paused"
+        } else if host_blocked {
+            gridops_core::builtin_host::POOL_STATE
         } else if pool.provision_circuit_open {
             "blocked"
         } else if capacity_deferred || (retry_deferred && pool.provision_failure_count == 0) {
@@ -509,14 +557,14 @@ async fn reconcile_pool(
         .execute(&app.database)
         .await?;
     record_capacity_sample(app, pool, &final_runners).await?;
-    if provisioned > 0 || removed > 0 || rotated > 0 || rebalanced > 0 {
+    if provisioned > 0 || removed > 0 || rotated > 0 || rebalanced > 0 || retired > 0 {
         system_event(
             app,
             Some(&pool.id),
             "info",
             "Pool reconciled",
-            &format!("Provisioned {provisioned}, removed {removed}, rotated {rotated}, rebalanced {rebalanced}, active {active_count}"),
-            json!({ "desired": desired, "active": active_count, "provisioned": provisioned, "removed": removed, "rotated": rotated, "rebalanced": rebalanced, "outdated": outdated_count }),
+            &format!("Provisioned {provisioned}, removed {removed}, rotated {rotated}, rebalanced {rebalanced}, retired from the built-in host {retired}, active {active_count}"),
+            json!({ "desired": desired, "active": active_count, "provisioned": provisioned, "removed": removed, "rotated": rotated, "rebalanced": rebalanced, "retiredFromBuiltinHost": retired, "outdated": outdated_count }),
         )
         .await?;
     }
@@ -1433,17 +1481,25 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
 
 /// Starts one runner for the pool, on the built-in host or a fleet machine as
 /// the pool's fleet platforms and placement say.
-async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
+async fn provision(
+    app: &Reconciler,
+    pool: &Pool,
+    builtin_enabled: bool,
+) -> Result<ProvisionAttempt> {
     use gridops_core::fleet::targets::Placement;
     let profiles = fleet::profiles(app, &pool.id).await?;
     let Some((profile, behind)) = fleet::choose_profile(app, pool, &profiles).await? else {
-        return provision_on_host(app, pool).await;
+        return provision_on_host(app, pool, builtin_enabled).await;
     };
+    // With the built-in host off a Linux platform runs on machines only,
+    // whatever placement was saved.
+    let os = profile.input.execution_os;
+    let placement = builtin_host::effective_placement(builtin_enabled, os, profile.input.placement);
     // A fleet runner without queued work only sits on a repository holding
     // machine capacity, and the desired count can stay high while a job no
     // platform can run stays queued. Above the pool's minimum, start fleet
     // runners only for platforms that are behind.
-    if !behind && profile.input.placement == Placement::Machines {
+    if !behind && placement == Placement::Machines {
         let active: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM runners WHERE pool_id=? AND deleted_at IS NULL
                AND status IN ('starting','online','idle','busy','paused','stopped')",
@@ -1455,21 +1511,22 @@ async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
             return Ok(ProvisionAttempt::NoDemand);
         }
     }
-    let host = fleet::host_serves(pool, profile);
-    match profile.input.placement {
+    let host =
+        fleet::host_serves(pool, profile) && builtin_host::host_may_serve(builtin_enabled, os);
+    match placement {
         Placement::Machines => fleet::provision(app, pool, &profiles, profile).await,
         Placement::MachinesFirst => {
             if !host || fleet::machine_ready(app, pool, profile).await? {
                 fleet::provision(app, pool, &profiles, profile).await
             } else {
-                provision_on_host(app, pool).await
+                provision_on_host(app, pool, builtin_enabled).await
             }
         }
         Placement::HostFirst => {
             if !host {
                 return fleet::provision(app, pool, &profiles, profile).await;
             }
-            let attempt = provision_on_host(app, pool).await?;
+            let attempt = provision_on_host(app, pool, builtin_enabled).await?;
             if matches!(attempt, ProvisionAttempt::Deferred { .. })
                 && fleet::machine_ready(app, pool, profile).await?
             {
@@ -1480,7 +1537,11 @@ async fn provision(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
     }
 }
 
-async fn provision_on_host(app: &Reconciler, pool: &Pool) -> Result<ProvisionAttempt> {
+async fn provision_on_host(
+    app: &Reconciler,
+    pool: &Pool,
+    builtin_enabled: bool,
+) -> Result<ProvisionAttempt> {
     let runner_id = uuid::Uuid::new_v4().to_string();
     let suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
     let runner_name = format!("{}-{suffix}", pool.name);
@@ -1496,6 +1557,11 @@ async fn provision_on_host(app: &Reconciler, pool: &Pool) -> Result<ProvisionAtt
     let mut providers = serde_json::from_str::<Vec<String>>(&pool.providers).unwrap_or_default();
     if providers.is_empty() {
         providers.push(pool.provider.clone());
+    }
+    // The manager would refuse Docker while the host is off; do not ask.
+    let providers = builtin_host::host_providers(builtin_enabled, providers);
+    if providers.is_empty() {
+        return Ok(ProvisionAttempt::NoDemand);
     }
     let labels = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
     let pending_bitbucket_connection = next_bitbucket_connection(app, &pool.id).await?;

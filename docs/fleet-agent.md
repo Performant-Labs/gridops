@@ -37,24 +37,91 @@ to exactly what the machine reports, never above. Lowering it below what
 runners already use never stops a running job; nothing new is placed until
 there is room again.
 
-### The host GridOps runs on
+### The host GridOps runs on: the built-in runner host
 
-The machine running GridOps itself can start runners two ways, and they are
+The machine GridOps itself runs on can start runners two ways, and they are
 accounted separately:
 
 - **Built-in runner host.** The runner manager starts runners through Docker on
   its own host. This host is not listed under Machines. Its budget is set on
   the manager (`GRIDOPS_RUNNER_CPU_BUDGET` and `GRIDOPS_RUNNER_MEMORY_BUDGET_MB`,
-  95% of the host by default) and shown under **Settings → Runner host**. The
-  capacity warning on pool settings names this host and links there.
+  95% of the host by default) and shown under **Settings → Runner host**.
 - **As a fleet machine.** Install the agent on that same host like any other
   machine, then approve and activate it. It then has a budget of its own on
   its machine page.
 
-Until the built-in runner host is retired, the two budgets draw on the same
-CPU and memory, so keep their sum within what you want GridOps to use on that
-host: lower the manager's budgets and set the machine's. A pool set to run
-**Only on machines** never starts runners on the built-in host.
+If the host that runs GridOps should do no CI work (it is usually the slowest
+machine and also serves other things), turn the built-in runner host **off**.
+
+#### Turning it off
+
+**Settings → Runner host → Use the built-in runner host** (administrators), or
+`PUT /api/v1/settings/runner-host` with `{"builtinHostEnabled": false}` as a
+signed-in administrator (cookie, same origin). `GET /api/v1/settings` reports it
+as `settings.builtinRunnerHostEnabled`. Each change is recorded in the audit
+log as `settings.builtin_runner_host_changed` with the value before and after
+and who made it.
+
+With it off:
+
+- The runner manager refuses to start, restart, resume or rebuild a runner on
+  its host (HTTP 409, code `builtin_runner_host_disabled`). So do the API's
+  rebuild, start, restart and resume actions, and the reconciler never asks.
+  The API's scale and reconcile actions start nothing; the reconciler places
+  runners on machines.
+- Pools run on machines only. A Linux platform ignores a saved placement of
+  *Wherever there's room* or *Machines first* (the saved value is kept and
+  applies again if you turn the host back on). Saving a pool's fleet settings
+  requires **Run on machines** and *Machines only*.
+- A pool that uses only Docker and has no fleet execution cannot run. It is
+  shown as **Cannot run: built-in runner host is off** (state
+  `builtin-host-off`; `cannotRun` on the pool in the API) instead of looking
+  healthy and waiting. Giving it fleet execution, or turning the host back on,
+  clears this within a reconcile pass.
+- Runners already on the host are not restarted. Idle ones are removed and busy
+  ones finish their job; nothing replaces them there.
+- The built-in host's capacity warning, budget and disk guardrail are not shown.
+- A pool that also has the Tart provider keeps starting its Tart (macOS)
+  runners, which run on a separate Mac, not on this host. Tart is not covered by
+  this setting. Neither are agent sandboxes ("Fix with agent"), which are not
+  runners; see [fix-agent.md](fix-agent.md). They still use the manager's
+  Docker access on this host.
+
+The manager treats the host as off until GridOps tells it otherwise, which the
+reconciler does at the start of every pass (and the API does when you change the
+setting). After the manager restarts, a built-in runner start is refused for up
+to one reconcile interval (30 seconds by default).
+
+#### What the setting starts as
+
+A fresh install starts with it **off**. An install that already has pools keeps
+working: the migration turns it **on** if any of these hold, and **off**
+otherwise:
+
+- a pool that uses only or also uses Docker has no enabled fleet execution;
+- a pool's enabled fleet execution has placement *Machines first* or *Wherever
+  there's room*;
+- a live runner has a container on the host.
+
+Check **Settings → Runner host** after upgrading; if it is on and you do not
+want it, turn it off there.
+
+#### Running the manager without the Docker socket
+
+By default the manager container mounts `/var/run/docker.sock`. It needs it for
+the built-in runner host, **and** for agent sandboxes ("Fix with agent"), so the
+mount stays in `compose.yaml`. If the host is off and you do not use "Fix with
+agent", drop the socket with the override file:
+
+```sh
+docker compose -f compose.yaml -f compose.no-docker-socket.yaml up -d
+```
+
+It sets `GRIDOPS_MANAGER_DOCKER=off` and removes the mount (Docker Compose
+2.24.4 or newer). The manager then still serves health and the Tart provider,
+reports that it has no Docker access under Settings → Runner host, and refuses
+anything that would start a container on its host (`docker_unavailable`), even
+if the setting is on. To go back, start the stack without the override.
 
 ## Install the agent
 

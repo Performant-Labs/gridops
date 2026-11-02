@@ -1,3 +1,4 @@
+import { BUILTIN_HOST_OFF_LABEL, isBuiltinHostOff } from "~/features/runner-pools/builtin-host";
 import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute, getRouteApi } from "@tanstack/react-router";
 import { Activity, ArrowRight, ChevronDown, Server } from "lucide-react";
@@ -28,7 +29,13 @@ function ProvisioningCallout({ pool }: { pool: RunnerPoolDetail }) {
   const retry = pool.provisionRetryAt ? new Date(pool.provisionRetryAt) : null;
   const when = retry ? `at ${retry.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "shortly";
   let content: { title: string; body: string; tone: "danger" | "warning" | "neutral" } | null = null;
-  if (pool.provisionCircuitOpen) {
+  if (isBuiltinHostOff(pool) && !pool.paused) {
+    content = {
+      title: BUILTIN_HOST_OFF_LABEL,
+      body: pool.cannotRun?.message ?? "The built-in runner host is off and this pool has no fleet execution. Turn on Run on machines in the pool’s settings.",
+      tone: "danger",
+    };
+  } else if (pool.provisionCircuitOpen) {
     content = { title: `Provisioning paused after ${pool.provisionFailureCount} consecutive failures`, body: `GridOps tries again ${when}. The Activity tab shows the failing step; use the pool menu to retry now.`, tone: "danger" };
   } else if (pool.provisionFailureCount > 0) {
     content = { title: "Provisioning is backing off", body: `The last ${pool.provisionFailureCount === 1 ? "attempt" : `${pool.provisionFailureCount} attempts`} failed. GridOps retries ${when}.`, tone: "warning" };

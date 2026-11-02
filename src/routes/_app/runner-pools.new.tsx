@@ -19,6 +19,8 @@ import {
   getInstallationRunnerGroups,
   getRunnerPoolRepositories,
 } from "~/features/runner-pools/runner-pools.functions";
+import { BuiltinHostOffNotice } from "~/features/runner-pools/builtin-host-off-notice";
+import { builtinHostOn } from "~/features/runner-pools/builtin-host";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { type RunnerHost, hostResourceWarning } from "~/features/runner-pools/resource-risk";
 
@@ -121,6 +123,8 @@ type RunnerPoolFormOptions = {
     runnerHost?: RunnerHost;
   };
   installUrl: string;
+  /** Off: a pool runs on enrolled machines only, so it needs fleet execution before it can start runners. */
+  builtinRunnerHostEnabled?: boolean;
 };
 
 type RunnerProvider = "docker" | "tart";
@@ -133,6 +137,7 @@ type AsyncOptions<T> =
 function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
   const createPool = createRunnerPoolAction;
   const navigate = useNavigate();
+  const hostOn = builtinHostOn(options.builtinRunnerHostEnabled);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scope, setScope] = useState<"repository" | "organization">("repository");
@@ -221,7 +226,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
     const form = new FormData(event.currentTarget);
 
     try {
-      await createPool({
+      const created = await createPool({
         data: {
           installationId: scope === "repository"
             ? selectedRepositories[0]?.installationId ?? 0
@@ -254,7 +259,9 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             : 1,
         },
       });
-      await navigate({ to: "/runner-pools" });
+      // With the built-in host off the new pool has nowhere to run until it is given fleet execution.
+      if (created.cannotRun) await navigate({ params: { poolId: created.id }, to: "/runner-pools/$poolId/settings" });
+      else await navigate({ to: "/runner-pools" });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Runner pool creation failed.");
     } finally {
@@ -267,6 +274,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
   return (
     <form className="contents" onSubmit={submit}>
       <SettingsLayout description="Choose where runners register, what they run on, and how far the pool may scale." title="New runner pool">
+        {hostOn ? null : <BuiltinHostOffNotice />}
         <SettingsSection description="Where this pool’s runners register." title="Destination">
           <SettingsRow description={scope === "repository" ? "Capacity shared across repositories, even from different accounts." : "Runners shared across one organization through a runner group."} label="Scope">
             <SearchableSelect
@@ -451,10 +459,10 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
           <SettingsRow description={includesTart ? "Whole cores, because this pool includes macOS." : "Applied to each Docker runner."} htmlFor="cpu-limit" label="CPU per runner">
             <UnitField unit="cores"><Input className="pr-12" id="cpu-limit" name="cpuLimit" onChange={(event) => setCpuLimit(Number(event.target.value))} required step={includesTart ? "1" : "0.25"} type="number" value={cpuLimit} /></UnitField>
           </SettingsRow>
-          <SettingsRow description="Checked against the host budget when each runner starts." htmlFor="memory-limit" label="Memory per runner">
+          <SettingsRow description={hostOn ? "Checked against the host budget when each runner starts." : "Reserved on the machine for each runner."} htmlFor="memory-limit" label="Memory per runner">
             <UnitField unit="MB"><Input className="pr-10" id="memory-limit" name="memoryLimitMb" onChange={(event) => setMemoryLimitMb(Number(event.target.value))} required step="256" type="number" value={memoryLimitMb} /></UnitField>
           </SettingsRow>
-          {resourceWarning ? (
+          {resourceWarning && hostOn ? (
             <div className="px-4 py-3">
               <HostCapacityWarning host={options.defaults.runnerHost} warning={resourceWarning} />
             </div>

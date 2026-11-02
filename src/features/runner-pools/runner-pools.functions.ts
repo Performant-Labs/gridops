@@ -5,6 +5,7 @@ import {
   parseUpdateRunnerPoolInput,
 } from "./schemas";
 import { api } from "~/lib/api";
+import type { CannotRun } from "./builtin-host";
 import type { RunnerHost } from "./resource-risk";
 
 type BaseOptions = {
@@ -37,6 +38,8 @@ export type RunnerPoolOptions = (BaseOptions & {
 }) | (BaseOptions & {
   authenticated: true;
   installUrl: string;
+  /** Off: pools run on enrolled machines only. */
+  builtinRunnerHostEnabled?: boolean;
   defaults: {
     provider: "docker" | "tart"; providers: Array<"docker" | "tart">; image: string; dockerImage: string; tartImage: string; macosRuntime: "vm" | "native"; labels: string[]; cpuLimit: number; memoryLimitMb: number;
     desiredCount: number; minCount: number; maxCount: number; autoscalingEnabled: boolean;
@@ -77,6 +80,10 @@ export type RunnerPoolDetail = {
   maxMemoryLimitMb?: number;
   /** The built-in runner host those limits belong to. */
   runnerHost?: RunnerHost;
+  /** Whether runners may start on the machine GridOps runs on. */
+  builtinRunnerHostEnabled?: boolean;
+  /** Set while the host is off and the pool has no fleet execution to run on instead. */
+  cannotRun?: { code: string; message: string } | null;
   runnerGroupId: number;
   paused: boolean;
   state: string;
@@ -117,7 +124,7 @@ export const getRunnerPoolRepositories = (signal?: AbortSignal) =>
 
 export function createRunnerPoolAction({ data }: { data: CreateRunnerPoolInput }) {
   const input = parseCreateRunnerPoolInput(data);
-  return api<{ id: string }>("/api/v1/runner-pools", { method: "POST", body: input });
+  return api<{ id: string; cannotRun?: CannotRun }>("/api/v1/runner-pools", { method: "POST", body: input });
 }
 
 export function updateRunnerPoolAction({ data }: { data: UpdateRunnerPoolInput & { poolId: string } }) {

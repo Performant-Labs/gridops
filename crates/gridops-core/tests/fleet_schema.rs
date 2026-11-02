@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use sqlx::{
     Row, SqlitePool,
     migrate::Migrator,
@@ -110,7 +110,18 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     let old_schema = schema(&db.pool).await?;
     let old_records = records(&db.pool, &tables).await?;
     MIGRATOR.run(&db.pool).await?;
-    assert_eq!(records(&db.pool, &tables).await?, old_records);
+    let mut new_records = records(&db.pool, &tables).await?;
+    // The one row an upgrade may add: whether the built-in runner host stays
+    // on. This legacy fixture has a Docker pool with a runner on the host, so
+    // it stays on. Every legacy row is otherwise untouched.
+    let added = new_records
+        .get_mut("settings")
+        .context("settings table")?
+        .extract_if(.., |record| record.contains("builtinRunnerHostEnabled"))
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 1, "one new settings row");
+    assert!(added[0].contains("\"true\""), "{}", added[0]);
+    assert_eq!(new_records, old_records);
     let new_schema = schema(&db.pool).await?;
     for (name, definition) in old_schema {
         assert_eq!(
@@ -145,7 +156,12 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     );
     // Reopening/rerunning the migration neither replays DDL nor loses history.
     MIGRATOR.run(&db.pool).await?;
-    assert_eq!(records(&db.pool, &tables).await?, old_records);
+    let mut rerun = records(&db.pool, &tables).await?;
+    rerun
+        .get_mut("settings")
+        .context("settings table")?
+        .retain(|record| !record.contains("builtinRunnerHostEnabled"));
+    assert_eq!(rerun, old_records);
     db.close().await
 }
 
