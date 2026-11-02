@@ -197,7 +197,7 @@ impl DockerRuntime {
             // over stdin instead), which fails before our Cmd runs. GitHub's own image has
             // no entrypoint, so this changes nothing there.
             "--entrypoint".into(),
-            "".into(),
+            String::new(),
             // Docker's own init reaps the job's orphaned processes, whatever the image
             // ships. dumb-init would do the same job, but GitHub's own image doesn't carry
             // that binary, so PID 1 duty falls to Docker's --init instead.

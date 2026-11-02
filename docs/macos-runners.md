@@ -147,4 +147,4 @@ Tart runners automatically advertise `self-hosted`, `macOS`, `ARM64`, and the po
 runs-on: [self-hosted, macOS, ARM64, macos-arm64]
 ```
 
-Docker runners advertise `self-hosted`, `Linux`, the host architecture, and the same pool name. GridOps only routes a queued job when every requested label matches one selected provider, so Linux and macOS jobs share the pool limit without consuming an incompatible runner slot.
+Docker runners advertise `self-hosted`, `Linux`, `self-hosted-linux`, the host architecture, and the same pool name. `self-hosted-linux` is built in: every Linux runner carries it whether or not its pool lists it, so a workflow asking for it can run on any Linux runner. GridOps only routes a queued job when every requested label matches one selected provider, so Linux and macOS jobs share the pool limit without consuming an incompatible runner slot.
