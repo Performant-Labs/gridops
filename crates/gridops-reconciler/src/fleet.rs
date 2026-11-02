@@ -594,8 +594,18 @@ fn runner_labels(
         gridops_core::fleet::Architecture::Arm64 => "ARM64",
     };
     let mut labels = vec!["self-hosted".to_owned(), os.to_owned(), arch.to_owned()];
+    if matches!(
+        prepare.execution_os,
+        gridops_core::fleet::ExecutionOs::Linux
+    ) {
+        labels.push(gridops_core::LINUX_RUNNER_LABEL.to_owned());
+    }
     for label in configured {
-        if !gridops_core::is_runner_system_label(label) && !labels.contains(label) {
+        if !gridops_core::is_runner_system_label(label)
+            && !labels
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(label))
+        {
             labels.push(label.clone());
         }
     }

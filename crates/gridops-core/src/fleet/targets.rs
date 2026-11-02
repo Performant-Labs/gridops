@@ -532,6 +532,7 @@ pub fn platform_supports_labels(
         label.eq_ignore_ascii_case("self-hosted")
             || label.eq_ignore_ascii_case(os)
             || label.eq_ignore_ascii_case(arch)
+            || (os == "linux" && label.eq_ignore_ascii_case(crate::LINUX_RUNNER_LABEL))
             || (!crate::is_runner_system_label(label)
                 && configured
                     .iter()
