@@ -366,3 +366,59 @@ describe("Pool settings: adding a provider asks for its image", () => {
     expect(await submitSettings()).toMatchObject({ providers: ["docker"], tartImage: "" });
   });
 });
+
+/**
+ * Native Tart clones no VM (#110's open question 2): the create form sends no
+ * Tart base VM for it, even though the field still holds the prefilled default
+ * while hidden, so a native pool stores none and switching it to Virtual
+ * machine later asks for one.
+ */
+describe("Native Tart: no base VM is stored", () => {
+  it("sends no Tart base VM for a native Tart pool", async () => {
+    await renderCreateForm({ providers: ["tart"] });
+    await choose("macOS execution", "Native on host");
+    expect(tartInput()).toBeNull();
+
+    const body = await submitCreate();
+    expect(body).toMatchObject({ provider: "tart", providers: ["tart"], macosRuntime: "native", image: "", tartImage: "", dockerImage: "" });
+  });
+
+  it("sends no Tart base VM for a native Tart pool that also uses Docker", async () => {
+    await renderCreateForm({ providers: ["docker", "tart"] });
+    await choose("macOS execution", "Native on host");
+
+    const body = await submitCreate();
+    expect(body).toMatchObject({
+      provider: "docker", providers: ["docker", "tart"], macosRuntime: "native",
+      image: "runner:default", dockerImage: "runner:default", tartImage: "",
+    });
+  });
+
+  it("still sends the base VM when the form is switched back to Virtual machine", async () => {
+    await renderCreateForm({ providers: ["tart"] });
+    await choose("macOS execution", "Native on host");
+    await choose("macOS execution", "Virtual machine");
+
+    const body = await submitCreate();
+    expect(body).toMatchObject({ macosRuntime: "vm", image: SERVER_DEFAULT_VM, tartImage: SERVER_DEFAULT_VM });
+  });
+
+  it("asks for a base VM, empty and required, when such a pool is switched to Virtual machine in Settings", async () => {
+    await renderSettings({
+      name: "macos-native", provider: "tart", providers: ["tart"], macosRuntime: "native",
+      image: "", dockerImage: "", tartImage: "",
+    });
+    expect(tartInput()).toBeNull();
+
+    await choose("macOS execution", "Virtual machine");
+    expect(tartInput()?.value).toBe("");
+    expect(tartInput()?.required).toBe(true);
+    expect(await submitSettings()).toBeNull();
+    expect(document.body.textContent).toContain("Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.");
+
+    const input = tartInput();
+    if (!input) throw new Error("No Tart base VM input");
+    type(input, "acme-xcode-26");
+    expect(await submitSettings()).toMatchObject({ provider: "tart", providers: ["tart"], macosRuntime: "vm", image: "acme-xcode-26", tartImage: "acme-xcode-26" });
+  });
+});

@@ -132,6 +132,58 @@ async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<b
     )
 }
 
+/// Clears this deployment's default images (`GRIDOPS_RUNNER_IMAGE` and
+/// `GRIDOPS_TART_RUNNER_IMAGE`) from the providers runner pools do not use,
+/// and returns how many pools it changed (issue #103).
+///
+/// Migration 0044 clears the built-in defaults, but earlier web forms stored
+/// whatever the deployment had configured, which a migration cannot know. Like
+/// 0044 this clears only an exact match of a default, only for a provider the
+/// pool does not use (neither `provider` nor in `providers`), and leaves
+/// `updated_at` and the configuration version alone: no runner used the value.
+/// A cleared image is `''` and the API stores none for an unused provider, so
+/// running it again at every start finds nothing more to do. An empty default
+/// clears nothing.
+pub async fn clear_unused_default_images(
+    pool: &SqlitePool,
+    docker_default: &str,
+    tart_default: &str,
+) -> Result<u64> {
+    let mut transaction = pool.begin().await?;
+    let mut changed = 0;
+    // A pool always uses its `provider`, so no pool has both images cleared
+    // and the two counts add up to pools.
+    for (statement, kind, default) in [
+        (
+            "UPDATE runner_pools SET tart_image=''
+              WHERE tart_image=? AND provider<>?
+                AND NOT EXISTS (SELECT 1 FROM json_each(runner_pools.providers) WHERE value=?)",
+            "tart",
+            tart_default,
+        ),
+        (
+            "UPDATE runner_pools SET docker_image=''
+              WHERE docker_image=? AND provider<>?
+                AND NOT EXISTS (SELECT 1 FROM json_each(runner_pools.providers) WHERE value=?)",
+            "docker",
+            docker_default,
+        ),
+    ] {
+        if default.is_empty() {
+            continue;
+        }
+        changed += sqlx::query(statement)
+            .bind(default)
+            .bind(kind)
+            .bind(kind)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+    }
+    transaction.commit().await?;
+    Ok(changed)
+}
+
 pub fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

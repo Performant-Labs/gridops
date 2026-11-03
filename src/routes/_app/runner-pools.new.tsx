@@ -244,7 +244,11 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             .split(",")
             .map((label) => label.trim())
             .filter(Boolean),
-          ...poolImages({ provider, providers, dockerImage, tartImage }),
+          // Native execution clones no VM and hides the field, so the prefilled
+          // default is not sent either: the pool stores no base VM, and
+          // switching it to Virtual machine later asks for one. (Settings keeps
+          // the base VM a native pool already has.)
+          ...poolImages({ provider, providers, dockerImage, tartImage: macosRuntime === "native" ? "" : tartImage }),
           macosRuntime,
           desiredCount: Number(form.get("desiredCount")),
           minCount: Number(form.get("minCount")),

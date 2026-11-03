@@ -37,6 +37,32 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 
 use crate::state::AppState;
 
+/// Clears this deployment's default images from the providers runner pools do
+/// not use (issue #103; migration 0044 covers the built-in defaults only). A
+/// failure is logged and the API starts anyway: the API already ignores such
+/// an image and drops it on the pool's next edit.
+async fn clear_unused_default_images(database: &sqlx::SqlitePool, config: &Config) {
+    match gridops_core::db::clear_unused_default_images(
+        database,
+        config.runner_image(),
+        &resources::default_tart_image(),
+    )
+    .await
+    {
+        Ok(0) => tracing::debug!(
+            "no runner pool holds this deployment's default image for a provider it does not use"
+        ),
+        Ok(pools) => tracing::info!(
+            pools,
+            "cleared this deployment's default images from providers runner pools do not use"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "could not clear this deployment's default images from providers runner pools do not use"
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -51,6 +77,7 @@ async fn main() -> Result<()> {
     config.validate_api()?;
     let database = connect_database(&config).await?;
     gridops_core::fleet::ensure_control_plane(&database).await?;
+    clear_unused_default_images(&database, &config).await;
     let vault = Vault::from_config(&config)?;
     let github = GitHubClient::new(config.clone())?;
     let bitbucket = BitbucketClient::new()?;

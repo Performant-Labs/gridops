@@ -228,3 +228,184 @@ async fn upgrading_clears_only_the_default_image_of_a_provider_a_pool_does_not_u
     let _ = std::fs::remove_dir_all(directory);
     Ok(())
 }
+
+/// A deployment's own defaults (`GRIDOPS_RUNNER_IMAGE`,
+/// `GRIDOPS_TART_RUNNER_IMAGE`), which migration 0044 cannot know. The web form
+/// sent them for every new pool, so a Docker-only pool there holds the custom
+/// Tart default and a Tart-only pool the custom Docker default.
+const CUSTOM_DOCKER: &str = "ghcr.io/acme/actions-runner:2";
+const CUSTOM_TART: &str = "acme-tahoe-base";
+
+async fn migrated() -> Result<(SqlitePool, PathBuf)> {
+    let (db, directory) = database().await?;
+    MIGRATOR.run(&db).await?;
+    Ok((db, directory))
+}
+
+#[tokio::test]
+async fn startup_clears_a_custom_default_only_from_a_provider_a_pool_does_not_use() -> Result<()> {
+    let (db, directory) = migrated().await?;
+    // Carries the custom defaults on the provider it does not use.
+    seed(
+        &db,
+        "docker-only",
+        "docker",
+        r#"["docker"]"#,
+        "runner:acme",
+        CUSTOM_TART,
+    )
+    .await?;
+    seed(
+        &db,
+        "tart-only",
+        "tart",
+        r#"["tart"]"#,
+        CUSTOM_DOCKER,
+        "acme-xcode-26",
+    )
+    .await?;
+    // Uses the provider: keeps the default, VM or native.
+    seed(&db, "tart-default", "tart", r#"["tart"]"#, "", CUSTOM_TART).await?;
+    seed(&db, "tart-native", "tart", r#"["tart"]"#, "", CUSTOM_TART).await?;
+    sqlx::query("UPDATE runner_pools SET macos_runtime='native' WHERE id='tart-native'")
+        .execute(&db)
+        .await?;
+    seed(
+        &db,
+        "mixed",
+        "docker",
+        r#"["docker","tart"]"#,
+        CUSTOM_DOCKER,
+        CUSTOM_TART,
+    )
+    .await?;
+    // Tart second in `providers`, and a legacy pool with only `provider`.
+    seed(
+        &db,
+        "tart-second",
+        "docker",
+        r#"["docker","tart"]"#,
+        "runner:acme",
+        CUSTOM_TART,
+    )
+    .await?;
+    seed(&db, "legacy-tart", "tart", "[]", CUSTOM_DOCKER, CUSTOM_TART).await?;
+    // Another value on an unused provider is not the default: kept.
+    seed(
+        &db,
+        "docker-own-vm",
+        "docker",
+        r#"["docker"]"#,
+        "runner:acme",
+        "acme-xcode-26",
+    )
+    .await?;
+    seed(
+        &db,
+        "tart-own-docker",
+        "tart",
+        r#"["tart"]"#,
+        "runner:acme",
+        "acme-xcode-26",
+    )
+    .await?;
+    // So is the built-in default when this deployment configured another one.
+    seed(
+        &db,
+        "docker-builtin-vm",
+        "docker",
+        r#"["docker"]"#,
+        "runner:acme",
+        DEFAULT_TART,
+    )
+    .await?;
+
+    let changed =
+        gridops_core::db::clear_unused_default_images(&db, CUSTOM_DOCKER, CUSTOM_TART).await?;
+    assert_eq!(changed, 3, "docker-only, tart-only and legacy-tart");
+
+    let expect = |image: &str, docker: &str, tart: &str| {
+        (image.to_owned(), docker.to_owned(), tart.to_owned(), 7)
+    };
+    assert_eq!(
+        images(&db, "docker-only").await?,
+        expect("runner:acme", "runner:acme", "")
+    );
+    assert_eq!(
+        images(&db, "tart-only").await?,
+        expect("acme-xcode-26", "", "acme-xcode-26")
+    );
+    assert_eq!(
+        images(&db, "legacy-tart").await?,
+        expect(CUSTOM_TART, "", CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "tart-default").await?,
+        expect(CUSTOM_TART, "", CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "tart-native").await?,
+        expect(CUSTOM_TART, "", CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "mixed").await?,
+        expect(CUSTOM_DOCKER, CUSTOM_DOCKER, CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "tart-second").await?,
+        expect("runner:acme", "runner:acme", CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "docker-own-vm").await?,
+        expect("runner:acme", "runner:acme", "acme-xcode-26")
+    );
+    assert_eq!(
+        images(&db, "tart-own-docker").await?,
+        expect("acme-xcode-26", "runner:acme", "acme-xcode-26")
+    );
+    assert_eq!(
+        images(&db, "docker-builtin-vm").await?,
+        expect("runner:acme", "runner:acme", DEFAULT_TART)
+    );
+    let versions: Vec<i64> =
+        sqlx::query_scalar("SELECT DISTINCT configuration_version FROM runner_pools")
+            .fetch_all(&db)
+            .await?;
+    assert_eq!(versions, vec![1], "no pool's runners are replaced");
+
+    // Every later start finds nothing to do.
+    assert_eq!(
+        gridops_core::db::clear_unused_default_images(&db, CUSTOM_DOCKER, CUSTOM_TART).await?,
+        0
+    );
+    assert_eq!(
+        images(&db, "docker-only").await?,
+        expect("runner:acme", "runner:acme", "")
+    );
+    db.close().await;
+    let _ = std::fs::remove_dir_all(directory);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_clears_nothing_when_a_default_is_set_empty() -> Result<()> {
+    let (db, directory) = migrated().await?;
+    seed(
+        &db,
+        "docker-only",
+        "docker",
+        r#"["docker"]"#,
+        "runner:acme",
+        "",
+    )
+    .await?;
+    seed(&db, "tart-only", "tart", r#"["tart"]"#, "", "acme-xcode-26").await?;
+    assert_eq!(
+        gridops_core::db::clear_unused_default_images(&db, "", "").await?,
+        0,
+        "an empty default matches the pools that already store none"
+    );
+    db.close().await;
+    let _ = std::fs::remove_dir_all(directory);
+    Ok(())
+}

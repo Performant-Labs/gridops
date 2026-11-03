@@ -454,3 +454,160 @@ async fn dropping_an_unused_image_does_not_replace_the_runners() -> Result<()> {
     assert_eq!(stored_images(&f, &id).await?.2, "");
     Ok(())
 }
+
+/// #110's open question 2: the create form sends no base VM for native Tart.
+/// The API accepts that, stores none, and asks for one when the pool is later
+/// switched to Virtual machine.
+#[tokio::test]
+async fn a_native_tart_pool_stores_no_base_vm() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+
+    // The create form's request for a native Tart pool.
+    let id = create(
+        &f,
+        &pool(
+            "macos-native",
+            &json!({"macosRuntime": "native", "image": "", "dockerImage": "", "tartImage": ""}),
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &id).await?,
+        (String::new(), String::new(), String::new())
+    );
+    let read = read_pool(&f, &id).await?;
+    assert_eq!(
+        (&read["macosRuntime"], &read["tartImage"]),
+        (&json!("native"), &json!(""))
+    );
+
+    edit_refused(
+        &f,
+        &id,
+        &edit_of(&read, &json!({"macosRuntime": "vm"}))?,
+        "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.",
+    )
+    .await?;
+    edit(
+        &f,
+        &id,
+        &edit_of(
+            &read,
+            &json!({"macosRuntime": "vm", "image": "acme-xcode-26", "tartImage": "acme-xcode-26"}),
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &id).await?,
+        (
+            "acme-xcode-26".into(),
+            String::new(),
+            "acme-xcode-26".into()
+        )
+    );
+    Ok(())
+}
+
+/// #110's open question 1: migration 0044 clears only the built-in defaults.
+/// A deployment with its own `GRIDOPS_RUNNER_IMAGE` and
+/// `GRIDOPS_TART_RUNNER_IMAGE` has those on providers its pools do not use;
+/// the API clears exactly those when it starts.
+#[tokio::test]
+async fn startup_clears_this_deployments_default_images_from_unused_providers() -> Result<()> {
+    const DOCKER: &str = "ghcr.io/acme/actions-runner:2";
+    const TART: &str = "acme-tahoe-base";
+    let mut f = Fixture::with_env(&[
+        ("GRIDOPS_RUNNER_IMAGE", DOCKER),
+        ("GRIDOPS_TART_RUNNER_IMAGE", TART),
+    ])
+    .await?;
+    // `fleet-pool` is Docker-only with `tart_image = 'macos'`: not the default.
+    seed_pool(&f).await?;
+    // Pools as an earlier version's web form stored them.
+    for (id, provider, image, docker_image, tart_image) in [
+        ("docker-only", "docker", "runner:acme", "runner:acme", TART),
+        (
+            "tart-only",
+            "tart",
+            "acme-xcode-26",
+            DOCKER,
+            "acme-xcode-26",
+        ),
+        ("tart-default", "tart", TART, "", TART),
+    ] {
+        sqlx::query(
+            "INSERT INTO runner_pools (id,installation_id,name,scope,provider,providers,labels,image,docker_image,tart_image,created_at,updated_at)
+             VALUES (?,1,?,'organization',?,json_array(?),'[]',?,?,?,1,7)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(provider)
+        .bind(provider)
+        .bind(image)
+        .bind(docker_image)
+        .bind(tart_image)
+        .execute(&f.database)
+        .await?;
+    }
+
+    f.restart(Duration::ZERO).await?;
+    assert_eq!(
+        stored_images(&f, "docker-only").await?,
+        ("runner:acme".into(), "runner:acme".into(), String::new())
+    );
+    assert_eq!(
+        stored_images(&f, "tart-only").await?,
+        (
+            "acme-xcode-26".into(),
+            String::new(),
+            "acme-xcode-26".into()
+        )
+    );
+    assert_eq!(
+        stored_images(&f, "tart-default").await?,
+        (TART.into(), String::new(), TART.into())
+    );
+    assert_eq!(
+        stored_images(&f, "fleet-pool").await?,
+        (
+            "runner:fixture".into(),
+            "runner:fixture".into(),
+            "macos".into()
+        )
+    );
+    let log_path = f.directory.join("api.log");
+    let log = || std::fs::read_to_string(&log_path);
+    // The log is coloured: drop the escape sequences before reading it.
+    let plain = |line: &str| {
+        let mut text = String::new();
+        let mut escape = false;
+        for character in line.chars() {
+            match (escape, character) {
+                (false, '\u{1b}') => escape = true,
+                (false, character) => text.push(character),
+                (true, 'm') => escape = false,
+                (true, _) => {}
+            }
+        }
+        text
+    };
+    let cleared = |log: &str| {
+        log.lines()
+            .map(plain)
+            .filter(|line| line.contains("cleared this deployment's default images"))
+            .collect::<Vec<_>>()
+    };
+    let lines = cleared(&log()?);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("pools=2"), "{lines:?}");
+
+    // The next start finds nothing more to clear.
+    f.restart(Duration::ZERO).await?;
+    assert_eq!(cleared(&log()?).len(), 1);
+    assert_eq!(
+        stored_images(&f, "tart-default").await?,
+        (TART.into(), String::new(), TART.into())
+    );
+    Ok(())
+}
