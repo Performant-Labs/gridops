@@ -44,8 +44,12 @@ use url::Url;
 
 mod builtin_host;
 #[cfg(test)]
+mod provision_lock_tests;
+#[cfg(test)]
 mod route_timeout_tests;
 mod sandbox;
+#[cfg(test)]
+mod stand_in_docker;
 mod vm_slots;
 
 #[derive(Clone)]
@@ -58,9 +62,39 @@ struct ManagerState {
     reservations: Arc<Mutex<HashMap<String, CapacityReservation>>>,
     provisioning_paused: Arc<AtomicBool>,
     builtin_host: builtin_host::BuiltinHost,
-    provision_lock: Arc<Mutex<()>>,
+    provision_locks: ProvisionLocks,
     /// The Tart host's macOS VM slot limit and the line for its slots.
     vm_slots: Arc<vm_slots::VmSlots>,
+}
+
+/// One start lock per provider. Each serialises the work that puts load on
+/// its own host: admission, which reads the host's usage and then adds a
+/// capacity lease, against the starts that turn leases into running
+/// runners, so an admission never reads a host's usage from before a start
+/// and its leases from after it. Docker admissions, runner starts, container
+/// start, resume and restart, and sandbox creation take the Docker lock; Tart
+/// admissions and runner starts take the Tart lock. Nothing either lock
+/// covers is read by the other provider: admission counts only its own
+/// provider's leases, the Mac's VM slots are Tart's alone, and the built-in
+/// host's budget and disk are Docker's alone. The capacity leases, which both
+/// providers keep in one map, have their own short lock (`reservations`).
+/// A Tart start holds the Tart lock for its whole call to the agent, which
+/// can take minutes, so Docker work no longer waits behind it.
+#[derive(Clone, Default)]
+struct ProvisionLocks {
+    docker: Arc<Mutex<()>>,
+    tart: Arc<Mutex<()>>,
+}
+
+impl ProvisionLocks {
+    /// Waits for `provider`'s start lock; anything but Tart is Docker.
+    async fn lock(&self, provider: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        if provider == "tart" {
+            self.tart.lock().await
+        } else {
+            self.docker.lock().await
+        }
+    }
 }
 
 /// The Docker host's engine, shared with runner containers so jobs can run
@@ -906,7 +940,7 @@ async fn main() -> Result<()> {
         reservations: Arc::new(Mutex::new(HashMap::new())),
         provisioning_paused: Arc::new(AtomicBool::new(provisioning_paused)),
         builtin_host: builtin_host::BuiltinHost::new(docker_available, None),
-        provision_lock: Arc::new(Mutex::new(())),
+        provision_locks: ProvisionLocks::default(),
         vm_slots: Arc::default(),
     };
 
@@ -939,9 +973,7 @@ fn router(state: ManagerState) -> Router {
             "/v1/runners",
             get(list_runners)
                 .layer(request_timeout(STANDARD_REQUEST_TIMEOUT))
-                .merge(post(provision_runner).layer(request_timeout(
-                    TART_PROVISION_TIMEOUT.saturating_add(Duration::from_mins(1)),
-                ))),
+                .merge(post(provision_runner).layer(request_timeout(PROVISION_ROUTE_TIMEOUT))),
         )
         // Creating a sandbox may first pull its image.
         .route(
@@ -981,14 +1013,28 @@ const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_mins(3);
 /// the two.
 const TART_PROVISION_TIMEOUT: Duration = Duration::from_mins(15);
 
-/// How long starting a runner on `provider` may take. A Docker runner keeps
-/// the standard limit it has always had; a Tart runner can wait for one of
-/// the Mac's VM slots, so it gets `TART_PROVISION_TIMEOUT`.
+/// How long starting a runner on `provider` may take. A Tart runner can wait
+/// for one of the Mac's VM slots, so it gets `TART_PROVISION_TIMEOUT`; a
+/// Docker runner may first pull its image, so it gets `DOCKER_START_TIMEOUT`.
 fn provision_time_limit(provider: &str) -> Duration {
     if provider == "tart" {
         TART_PROVISION_TIMEOUT
     } else {
-        STANDARD_REQUEST_TIMEOUT
+        DOCKER_START_TIMEOUT
+    }
+}
+
+/// The route's backstop for `POST /v1/runners`: a minute past the longer of
+/// the two limits the handler enforces, so the handler's own answer, which
+/// says what timed out, always comes first.
+const PROVISION_ROUTE_TIMEOUT: Duration =
+    longer(TART_PROVISION_TIMEOUT, DOCKER_START_TIMEOUT).saturating_add(Duration::from_mins(1));
+
+const fn longer(first: Duration, second: Duration) -> Duration {
+    if first.as_nanos() >= second.as_nanos() {
+        first
+    } else {
+        second
     }
 }
 
@@ -1180,7 +1226,7 @@ async fn reserve_capacity(
             state.builtin_host.require_runners()?;
         }
     }
-    let _guard = state.provision_lock.lock().await;
+    let _guard = state.provision_locks.lock(&input.provider).await;
     ensure_provisioning_enabled(&state)?;
     // Each provider is admitted against its own host. Tart VMs run on the Mac,
     // not inside the Docker host, and the agent enforces its own budget; adding
@@ -1381,7 +1427,7 @@ async fn provision_runner_in_time(
     if input.provider != "tart" {
         state.builtin_host.require_runners()?;
     }
-    let _guard = state.provision_lock.lock().await;
+    let _guard = state.provision_locks.lock(&input.provider).await;
     ensure_provisioning_enabled(&state)?;
     if input.network != state.limits.runner_network {
         return Err(ManagerError::Forbidden(
@@ -1613,7 +1659,7 @@ async fn control_runner(
         ));
     }
     let _guard = if matches!(action.as_str(), "start" | "resume" | "restart") {
-        Some(state.provision_lock.lock().await)
+        Some(state.provision_locks.lock("docker").await)
     } else {
         None
     };
@@ -1822,7 +1868,16 @@ async fn ensure_network(docker: &Docker, name: &str) -> Result<(), ManagerError>
 
 /// A first pull of a runner image can take minutes; Docker's default client timeout is two.
 const IMAGE_PULL_TIMEOUT: Duration = Duration::from_mins(10);
-const SANDBOX_CREATE_TIMEOUT: Duration = Duration::from_mins(12);
+/// What starting a container needs besides pulling its image: checking the
+/// network and the name, creating, starting and attaching to it. Each of those
+/// is one Docker call and usually takes seconds; two minutes is one call's
+/// client timeout (the manager connects to Docker with 120 seconds).
+const CONTAINER_START_ALLOWANCE: Duration = Duration::from_mins(2);
+/// How long starting a Docker runner or creating an agent sandbox may take:
+/// the image pull it may begin with, then the container start. The time spent
+/// waiting for the Docker start lock counts too.
+const DOCKER_START_TIMEOUT: Duration = IMAGE_PULL_TIMEOUT.saturating_add(CONTAINER_START_ALLOWANCE);
+const SANDBOX_CREATE_TIMEOUT: Duration = DOCKER_START_TIMEOUT;
 
 async fn ensure_image(docker: &Docker, image: &str, pull_image: bool) -> Result<(), ManagerError> {
     let puller = docker.clone().with_timeout(IMAGE_PULL_TIMEOUT);

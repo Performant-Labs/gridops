@@ -13,7 +13,7 @@ An Apple-silicon Mac runs at most two macOS VMs at once, whoever starts them. Be
 ```
 reconciler (one process, one pass at a time, pools in creation order)
   └─ provision_on_host ─ POST /v1/admissions ─▶ manager.reserve_capacity
-                                                 ├─ provision_lock (tokio Mutex)
+                                                 ├─ provision_lock (tokio Mutex; one per provider since 0.2.0)
                                                  ├─ Tart agent GET /v1/health → budget, active
                                                  ├─ reservations lock: enforce_capacity, insert lease (5 min TTL)
                          POST /v1/runners ──────▶ manager.provision_runner (provision_lock held)
@@ -53,14 +53,14 @@ The manager's admission is already the one place every Tart start passes through
 
 **[phase 1]** In `reserve_capacity`, for `provider: "tart"` and `runtime` other than `native` (the admission request now says which; a missing runtime counts as a VM, the safe reading):
 
-1. under `provision_lock`, fetch the agent's health once (budget, active runners, `vmSlots`);
+1. under `provision_lock` (the Tart start lock since 0.2.0, when each provider got its own), fetch the agent's health once (budget, active runners, `vmSlots`);
 2. under the reservations lock, run the existing CPU/memory/runner checks, then the slot check, then insert the lease, all in one critical section;
 3. slots in use = agent's `gridops` (GridOps VMs that are running) + `external.len()` + leases with `vm_slot: true` (starts in flight). Free = limit − in use.
 4. The queue (3) is asked with the number of starts that may go ahead now: the free slots, capped by the room left in GridOps's own Tart budget for a runner of this size (`GRIDOPS_TART_MAX_RUNNERS`, CPU, memory). If it admits the pool, the lease is created with `vm_slot: true`. Otherwise the answer is `429` with the pool's place in line: `vm_slot_busy` ("Waiting for a macOS VM slot: position p of n in the queue. u of l slots in use (GridOps runners: g; other software: e — name (user), …).") when the slots are what is short, or `host_capacity_exhausted` ("Waiting for room on the Tart host: position p of n in the queue." and the budget it hit) when GridOps's own budget is.
 
    *Why the budget is in the same line:* the agent's runner cap was 1 by default when this was written (2 since 0.2.0), and a cap of 1 or large VMs against the CPU and memory budget fill it before both slots are. Checked outside the queue, the pool the reconciler visits first would take every runner that frees and the other would starve exactly as before; a test pins this (`the_tart_runner_budget_does_not_let_a_later_pool_jump_the_line`).
 
-The VM slot lease is released when `POST /v1/runners` ends (success or failure), as every lease already is; from then on a successful VM is counted by the agent as running. Because the manager also holds `provision_lock` for the whole start, the lease and the running VM are never both visible to another admission.
+The VM slot lease is released when `POST /v1/runners` ends (success or failure), as every lease already is; from then on a successful VM is counted by the agent as running. Because the manager also holds `provision_lock` (the Tart start lock since 0.2.0) for the whole start, the lease and the running VM are never both visible to another admission.
 
 An agent that predates slot reporting is read as "every active runner is a VM, nobody else's VMs are visible", so the limit still holds for GridOps's own VMs.
 
