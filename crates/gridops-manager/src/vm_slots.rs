@@ -865,6 +865,8 @@ mod tests {
             agent_runners: Arc<std::sync::Mutex<(usize, usize)>>,
             /// The manager's capacity leases, to see when one is given back.
             reservations: Reservations,
+            /// The manager's start locks, to see when a start lets go of one.
+            provision_locks: crate::ProvisionLocks,
             start: Arc<StandInStart>,
             socket: std::path::PathBuf,
         }
@@ -937,6 +939,7 @@ mod tests {
                 ));
                 std::fs::write(&socket, "")?;
                 let reservations = Reservations::default();
+                let provision_locks = crate::ProvisionLocks::default();
                 let state = ManagerState {
                     docker: bollard::Docker::connect_with_socket(
                         &socket.to_string_lossy(),
@@ -969,7 +972,7 @@ mod tests {
                     reservations: Arc::clone(&reservations),
                     provisioning_paused: Arc::new(AtomicBool::new(false)),
                     builtin_host: BuiltinHost::new(false, Some(true)),
-                    provision_locks: crate::ProvisionLocks::default(),
+                    provision_locks: provision_locks.clone(),
                     vm_slots: Arc::default(),
                 };
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -981,6 +984,7 @@ mod tests {
                     agent_slots,
                     agent_runners,
                     reservations,
+                    provision_locks,
                     start,
                     socket,
                 })
@@ -1225,6 +1229,46 @@ mod tests {
                 0,
                 "the abandoned start still holds its lease"
             );
+            Ok(())
+        }
+
+        /// A start that finishes gives its lease back before it lets go of
+        /// the Tart start lock, even when the lease map is busy just then
+        /// (#108's follow-up). The next Tart admission waits on that lock, so
+        /// it can never find the finished start's lease still held. Only an
+        /// abandoned start hands the release to a background task.
+        #[tokio::test]
+        async fn a_finished_start_gives_its_lease_back_before_the_tart_lock_is_released()
+        -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            let lease = manager.lease_for("pool-a", "runner-a", 1).await?;
+            let booted = manager.start.booted.notified();
+            let start = tokio::spawn(manager.start_runner("pool-a", "runner-a", &lease));
+            booted.await;
+            // Someone (a Docker admission, say) holds the lease map just as
+            // the start finishes.
+            let leases = manager.reservations.lock().await;
+            manager.start.finish.notify_one();
+            let next_tart_work = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                manager.provision_locks.tart.lock(),
+            )
+            .await;
+            assert!(
+                next_tart_work.is_err(),
+                "the Tart start lock was let go while the start's lease was still held (held: {})",
+                leases.contains_key(&lease)
+            );
+            drop(next_tart_work);
+            drop(leases);
+            assert_eq!(start.await??.status().as_u16(), 201);
+            assert_eq!(manager.leases().await, 0);
+            // And the lock is let go once the lease is given back.
+            let _next = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                manager.provision_locks.tart.lock(),
+            )
+            .await?;
             Ok(())
         }
 
