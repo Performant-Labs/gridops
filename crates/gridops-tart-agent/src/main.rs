@@ -2625,7 +2625,9 @@ esac
                     Err(error) => return Err(error.into()),
                 }
             }
+            // The warm-up run is not a command the agent issued; forget it.
             let _ = fs::remove_file(dir.join("calls")).await;
+            let _ = fs::remove_file(dir.join("paths")).await;
             let state = AgentState {
                 token: SecretString::from("t".repeat(32)),
                 tart: Tart::new(binary, env::var_os("PATH").as_deref()),
