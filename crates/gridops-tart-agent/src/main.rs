@@ -414,7 +414,7 @@ async fn main() -> Result<()> {
         (1..=100).contains(&limits.max_runners),
         "GRIDOPS_TART_MAX_RUNNERS must be 1-100"
     );
-    let vm_slot_wait_seconds = env_value("GRIDOPS_TART_VM_SLOT_WAIT_SECONDS", 600_u64)?;
+    let vm_slot_wait_seconds = env_value("GRIDOPS_TART_VM_SLOT_WAIT_SECONDS", 180_u64)?;
     anyhow::ensure!(
         vm_slot_wait_seconds <= MAX_VM_SLOT_WAIT_SECONDS,
         "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be 0-{MAX_VM_SLOT_WAIT_SECONDS}"

@@ -123,10 +123,10 @@ macOS runs at most **two** macOS virtual machines at once on one Mac. The limit 
 The agent treats that as a reason to wait, not a failed start, so GridOps shares the slots with other software instead of competing with it. It keeps the cloned VM and retries `tart run`, after 2 seconds at first and then less often, up to every 30 seconds, until a slot frees up or the wait runs out:
 
 ```dotenv
-GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=600
+GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=180
 ```
 
-The default is 600 seconds and the maximum is 1800. `0` turns waiting off. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
+The default is 180 seconds (3 minutes) and the maximum is 1800. `0` turns waiting off. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
 
 While a runner waits:
 

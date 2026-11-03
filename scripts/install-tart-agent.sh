@@ -22,7 +22,7 @@ cpu_budget="${GRIDOPS_TART_CPU_BUDGET:-4}"
 memory_budget="${GRIDOPS_TART_MEMORY_BUDGET_MB:-6144}"
 max_runners="${GRIDOPS_TART_MAX_RUNNERS:-1}"
 min_free_disk="${GRIDOPS_TART_MIN_FREE_DISK_MB:-40960}"
-vm_slot_wait="${GRIDOPS_TART_VM_SLOT_WAIT_SECONDS:-600}"
+vm_slot_wait="${GRIDOPS_TART_VM_SLOT_WAIT_SECONDS:-180}"
 agent_token="${GRIDOPS_TART_AGENT_TOKEN:-}"
 
 if [[ -z "${tart_binary}" || ! -x "${tart_binary}" ]]; then
