@@ -217,3 +217,41 @@ async fn a_pool_waiting_for_a_vm_slot_shows_why() -> Result<()> {
     assert!(detail["provisionWaitReason"].is_null(), "{detail}");
     Ok(())
 }
+
+/// #102: a pool whose circuit is still open from earlier failures, waiting
+/// in the slot queue, is `waiting` (the reconciler puts the wait first). The
+/// API returns its reason, and still says the circuit is open.
+#[tokio::test]
+async fn a_pool_waiting_for_a_vm_slot_with_an_open_circuit_shows_why() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let reason = "Waiting for a macOS VM slot: position 1 of 1 in the queue. 2 of 2 slots in use (GridOps runners: 1; other software: 1 — runner-warm-1 (ci)).";
+    sqlx::query(
+        "UPDATE runner_pools SET state='waiting',provision_failure_count=3,provision_circuit_open=1,provision_retry_at=NULL WHERE id='fleet-pool'",
+    )
+    .execute(&f.database)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_pool_waits (pool_id,reason,updated_at) VALUES ('fleet-pool',?,1)",
+    )
+    .bind(reason)
+    .execute(&f.database)
+    .await?;
+    let detail: Value = admin(&f, reqwest::Method::GET, "/runner-pools/fleet-pool")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(detail["state"], "waiting", "{detail}");
+    assert_eq!(detail["provisionWaitReason"], reason);
+    assert_eq!(detail["provisionCircuitOpen"], true);
+    assert_eq!(detail["provisionFailureCount"], 3);
+    let list: Value = admin(&f, reqwest::Method::GET, "/runner-pools")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(list["items"][0]["provisionWaitReason"], reason);
+    assert_eq!(list["items"][0]["provisionCircuitOpen"], true);
+    Ok(())
+}

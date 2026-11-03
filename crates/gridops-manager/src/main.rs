@@ -1080,12 +1080,13 @@ async fn health(
                 // VMs being started now, and the line for them.
                 let vm_slots = match tart_capacity_from_health(&health) {
                     Ok(capacity) => {
-                        let starting = vm_slot_reservations(&state).await;
-                        state.vm_slots.report(
-                            &capacity.slot_usage(),
-                            starting,
-                            Some(capacity.max_runners),
-                        )
+                        let usage = capacity.slot_usage();
+                        let leases = vm_slot_reservations(&state).await;
+                        let starting =
+                            vm_slots::starting_vms(&usage, leases.iter().map(String::as_str));
+                        state
+                            .vm_slots
+                            .report(&usage, starting, Some(capacity.max_runners))
                     }
                     Err(_) => Value::Null,
                 };
@@ -1250,7 +1251,16 @@ async fn reserve_capacity(
     };
     let mut reservations = state.reservations.lock().await;
     reservations.retain(|_, reservation| reservation.expires_at > Instant::now());
-    let reserved = provider_reservations(&reservations, &input.provider);
+    // A Tart start whose VM the agent already reports running is in the
+    // agent's figures (its active runners and its VM slots) and is counted
+    // there, not again for its lease (#101).
+    let reserved = match &slot_usage {
+        Some(usage) => reservations_usage(reservations.values().filter(|reservation| {
+            reservation.provider == input.provider
+                && !(reservation.vm_slot && vm_slots::runs(usage, &reservation.runner_id))
+        })),
+        None => provider_reservations(&reservations, &input.provider),
+    };
     let requested = CapacityUsage {
         active_runners: 1,
         cpu: input.cpu_limit,
@@ -1262,14 +1272,18 @@ async fn reserve_capacity(
     // jump a pool that has waited longer.
     let vm_slot = input.needs_vm_slot();
     if vm_slot {
-        let starting = reservations
-            .values()
-            .filter(|reservation| reservation.vm_slot)
-            .count();
+        let usage = slot_usage.unwrap_or_default();
+        let starting = vm_slots::starting_vms(
+            &usage,
+            reservations
+                .values()
+                .filter(|reservation| reservation.vm_slot)
+                .map(|reservation| reservation.runner_id.as_str()),
+        );
         state.vm_slots.admit(
             &input.pool_id,
             input.reconcile_pass,
-            &slot_usage.unwrap_or_default(),
+            &usage,
             starting,
             &tart_budget_room(budget, active, reserved, requested),
         )?;
@@ -1434,10 +1448,14 @@ async fn provision_runner_in_time(
             "Runner containers may only join the configured GridOps runner network.".into(),
         ));
     }
-    let lease_id = input.capacity_lease.clone();
     validate_capacity_lease(&state, &input.lease_claim()).await?;
+    // Declared after the provider's start lock guard (the Tart lock for a Tart
+    // start), so it is dropped first: unless the lease map is busy at that
+    // moment (see `Drop` below), the lease is gone before the next admission
+    // for this provider can look.
+    let _lease = LeaseRelease::new(&state, &input.capacity_lease);
     if input.provider == "tart" {
-        let result = match &state.tart {
+        return match &state.tart {
             Some(agent) => {
                 let body = serde_json::to_value(&input)
                     .map_err(|error| ManagerError::Internal(error.into()))?;
@@ -1447,12 +1465,46 @@ async fn provision_runner_in_time(
             }
             None => Err(tart_provider_disabled()),
         };
-        state.reservations.lock().await.remove(&lease_id);
-        return result;
     }
-    let result = provision_runner_inner(&state, &mut input).await;
-    state.reservations.lock().await.remove(&lease_id);
-    result
+    provision_runner_inner(&state, &mut input).await
+}
+
+/// Gives a runner start's capacity lease back when the start ends, however it
+/// ends: started, failed, over its time limit, or abandoned by its caller. A
+/// caller that gives up closes the connection and the server drops the
+/// handler at whatever `.await` it had reached, so a release written after
+/// that `.await` never ran, and the lease held a slot and budget for its full
+/// five minutes on top of the VM it had started (#101).
+struct LeaseRelease {
+    reservations: Arc<Mutex<HashMap<String, CapacityReservation>>>,
+    lease_id: String,
+}
+
+impl LeaseRelease {
+    fn new(state: &ManagerState, lease_id: &str) -> Self {
+        Self {
+            reservations: Arc::clone(&state.reservations),
+            lease_id: lease_id.to_owned(),
+        }
+    }
+}
+
+impl Drop for LeaseRelease {
+    fn drop(&mut self) {
+        let lease_id = std::mem::take(&mut self.lease_id);
+        if let Ok(mut reservations) = self.reservations.try_lock() {
+            reservations.remove(&lease_id);
+            return;
+        }
+        // Someone holds the map for a moment; release it as soon as they let
+        // go. Without a runtime (it is shutting down) the map goes with it.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let reservations = Arc::clone(&self.reservations);
+            runtime.spawn(async move {
+                reservations.lock().await.remove(&lease_id);
+            });
+        }
+    }
 }
 
 async fn provision_runner_inner(
@@ -2120,14 +2172,15 @@ impl TartCapacity {
     }
 }
 
-/// Admissions holding a VM slot for a VM that is being started.
-async fn vm_slot_reservations(state: &ManagerState) -> usize {
+/// The runners of admissions holding a VM slot for a VM being started.
+async fn vm_slot_reservations(state: &ManagerState) -> Vec<String> {
     let mut reservations = state.reservations.lock().await;
     reservations.retain(|_, reservation| reservation.expires_at > Instant::now());
     reservations
         .values()
         .filter(|reservation| reservation.vm_slot)
-        .count()
+        .map(|reservation| reservation.runner_id.clone())
+        .collect()
 }
 
 async fn reserved_capacity(state: &ManagerState, provider: &str) -> CapacityUsage {
@@ -2140,15 +2193,23 @@ fn provider_reservations(
     reservations: &HashMap<String, CapacityReservation>,
     provider: &str,
 ) -> CapacityUsage {
-    reservations
-        .values()
-        .filter(|reservation| reservation.provider == provider)
-        .fold(CapacityUsage::default(), |mut usage, reservation| {
-            usage.active_runners += 1;
-            usage.cpu += reservation.cpu_limit;
-            usage.memory_mb = usage.memory_mb.saturating_add(reservation.memory_limit_mb);
-            usage
-        })
+    reservations_usage(
+        reservations
+            .values()
+            .filter(|reservation| reservation.provider == provider),
+    )
+}
+
+/// What `reservations` hold between them.
+fn reservations_usage<'a>(
+    reservations: impl Iterator<Item = &'a CapacityReservation>,
+) -> CapacityUsage {
+    reservations.fold(CapacityUsage::default(), |mut usage, reservation| {
+        usage.active_runners += 1;
+        usage.cpu += reservation.cpu_limit;
+        usage.memory_mb = usage.memory_mb.saturating_add(reservation.memory_limit_mb);
+        usage
+    })
 }
 
 fn tart_provider_disabled() -> ManagerError {

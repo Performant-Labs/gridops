@@ -1928,10 +1928,15 @@ struct ExternalVm {
 /// Who holds the Mac's VM slots. The slot limit itself is the control plane's
 /// (it is part of the host's budget in `GridOps`); this is what it counts.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VmSlotUsage {
     /// Slots `GridOps`'s own VMs hold: VM runners whose VM is running. A clone
     /// that is waiting for a slot holds none.
     gridops: usize,
+    /// The `GridOps` runner ids of those VMs, sorted. The manager holds a
+    /// lease for a start until the start request returns, and the VM runs
+    /// before that; with these it counts such a VM once, not for both (#101).
+    runner_ids: Vec<String>,
     /// Running VMs other software started, sorted by name.
     external: Vec<ExternalVm>,
     /// `processes` when the process list was read, `tart-list` when only this
@@ -2008,6 +2013,18 @@ fn vm_slot_usage(
         .iter()
         .filter(|vm| vms.get(**vm).is_some_and(|state| state == "running"))
         .count();
+    let mut runner_ids = records
+        .values()
+        .filter(|record| {
+            !record.is_native()
+                && vms
+                    .get(&record.vm_name)
+                    .is_some_and(|state| state == "running")
+        })
+        .map(|record| record.runner_id.clone())
+        .collect::<Vec<_>>();
+    runner_ids.sort();
+    runner_ids.dedup();
     let mut external = processes
         .unwrap_or_default()
         .iter()
@@ -2033,6 +2050,7 @@ fn vm_slot_usage(
     external.sort_by(|left, right| (&left.name, &left.user).cmp(&(&right.name, &right.user)));
     VmSlotUsage {
         gridops,
+        runner_ids,
         external,
         detection: if processes.is_some() {
             "processes"
@@ -3207,6 +3225,9 @@ admin     tart run
         ]);
         let usage = vm_slot_usage(&records, &vms, Some(&tart_run_processes(PS_OUTPUT)));
         assert_eq!(usage.gridops, 1);
+        // Which runners those are, so the manager stops counting a start's
+        // admission once its VM runs and counts the VM once (#101).
+        assert_eq!(usage.runner_ids, ["runner-tart-1"]);
         assert_eq!(
             usage.external,
             vec![
@@ -3248,6 +3269,7 @@ admin     tart run
         };
         let slots = &report["capacity"]["vmSlots"];
         assert_eq!(slots["gridops"], 0, "{report}");
+        assert_eq!(slots["runnerIds"], json!([]), "{report}");
         assert_eq!(
             slots["external"],
             json!([

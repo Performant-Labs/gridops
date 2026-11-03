@@ -33,6 +33,10 @@ pub(crate) const MAX_VM_SLOTS: usize = 2;
 pub(crate) struct AgentSlotUsage {
     /// Slots `GridOps`'s own VMs hold.
     pub(crate) gridops: usize,
+    /// The `GridOps` runners whose VMs those are. Absent from agents that
+    /// predate it.
+    #[serde(default)]
+    pub(crate) runner_ids: Option<Vec<String>>,
     /// Running VMs that other software started.
     #[serde(default)]
     pub(crate) external: Vec<ExternalVm>,
@@ -189,6 +193,37 @@ pub(crate) fn slots_in_use(usage: &AgentSlotUsage, starting: usize) -> usize {
         .gridops
         .saturating_add(usage.external.len())
         .saturating_add(starting)
+}
+
+/// Starts in flight that hold a slot the agent does not count yet: of the
+/// admissions holding a VM slot (`leases`, by runner), those whose VM the
+/// agent does not report running.
+///
+/// A VM start's lease lives from admission until `POST /v1/runners` returns,
+/// and the VM runs before that: Tart lists it running from boot, while the
+/// agent still sets up the runner inside it. Counting both is how the slots
+/// read `inUse 3` of 2 (#101). So once the agent names a runner's VM as
+/// running, that start's lease no longer counts, and each VM counts once,
+/// from admission through starting and running to stopping.
+///
+/// An agent that does not name its runners has every lease counted: a VM may
+/// then count twice for a moment, never not at all.
+pub(crate) fn starting_vms<'a>(
+    usage: &AgentSlotUsage,
+    leases: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    leases
+        .into_iter()
+        .filter(|runner_id| !runs(usage, runner_id))
+        .count()
+}
+
+/// Whether the agent already counts `runner_id`'s VM as running.
+pub(crate) fn runs(usage: &AgentSlotUsage, runner_id: &str) -> bool {
+    usage
+        .runner_ids
+        .as_deref()
+        .is_some_and(|running| running.iter().any(|id| id == runner_id))
 }
 
 impl VmSlots {
@@ -364,6 +399,7 @@ mod tests {
     fn usage(gridops: usize, external: &[(&str, Option<&str>)]) -> AgentSlotUsage {
         AgentSlotUsage {
             gridops,
+            runner_ids: None,
             external: external
                 .iter()
                 .map(|(name, user)| ExternalVm {
@@ -411,6 +447,59 @@ mod tests {
         assert_eq!(slots_in_use(&usage(1, &[]), 0), 1);
         assert_eq!(slots_in_use(&usage(0, &[("warm-1", Some("ci"))]), 0), 1);
         assert_eq!(slots_in_use(&usage(1, &[("warm-1", None)]), 1), 3);
+    }
+
+    /// What an agent that names its running VMs' runners reports.
+    fn running(runners: &[&str]) -> AgentSlotUsage {
+        AgentSlotUsage {
+            gridops: runners.len(),
+            runner_ids: Some(runners.iter().map(|id| (*id).to_owned()).collect()),
+            ..usage(0, &[])
+        }
+    }
+
+    fn in_use(usage: &AgentSlotUsage, leases: &[&str]) -> usize {
+        slots_in_use(usage, starting_vms(usage, leases.iter().copied()))
+    }
+
+    #[test]
+    fn a_vm_is_counted_once_from_its_admission_until_it_stops() {
+        // Admitted: the lease holds the slot; the agent has no VM yet.
+        assert_eq!(in_use(&running(&[]), &["runner-a"]), 1);
+        // Cloned and booting: the agent counts the VM only once Tart lists it
+        // running, so the lease still holds the slot.
+        assert_eq!(starting_vms(&running(&[]), ["runner-a"]), 1);
+        // Running while the start request has not returned yet (the runner is
+        // still being set up in the VM): the agent counts the VM, the lease
+        // no longer does. This is where `inUse 3` of 2 came from (#101).
+        assert_eq!(in_use(&running(&["runner-a"]), &["runner-a"]), 1);
+        assert_eq!(starting_vms(&running(&["runner-a"]), ["runner-a"]), 0);
+        // The start returned and its lease is gone.
+        assert_eq!(in_use(&running(&["runner-a"]), &[]), 1);
+        // Stopping: Tart lists the VM running until it has stopped.
+        assert_eq!(in_use(&running(&["runner-a"]), &[]), 1);
+        // Stopped: the slot is free.
+        assert_eq!(in_use(&running(&[]), &[]), 0);
+
+        // A second start admitted while the first VM runs and the first
+        // start's lease is still held: two slots, not three.
+        assert_eq!(
+            in_use(&running(&["runner-a"]), &["runner-a", "runner-b"]),
+            2
+        );
+        // A lease is matched to its own runner's VM only.
+        assert_eq!(in_use(&running(&["runner-c"]), &["runner-a"]), 2);
+    }
+
+    #[test]
+    fn an_agent_that_does_not_name_its_runners_has_every_lease_counted() {
+        // Older agents report only how many GridOps VMs run. The manager
+        // cannot tell which start they belong to, so it errs on the side of
+        // refusing: a VM may count twice for a moment, never not at all.
+        let usage = usage(1, &[]);
+        assert_eq!(usage.runner_ids, None);
+        assert_eq!(starting_vms(&usage, ["runner-a"]), 1);
+        assert_eq!(in_use(&usage, &["runner-a"]), 2);
     }
 
     #[test]
@@ -743,12 +832,26 @@ mod tests {
             sync::{Arc, atomic::AtomicBool},
         };
 
-        use axum::{Json, Router, routing::get};
+        use axum::{Json, Router, http::StatusCode, routing::get};
         use secrecy::SecretString;
         use serde_json::{Value, json};
-        use tokio::sync::Mutex;
+        use tokio::sync::{Mutex, Notify};
 
-        use crate::{ManagerLimits, ManagerState, TartAgent, builtin_host::BuiltinHost};
+        use crate::{
+            CapacityReservation, ManagerLimits, ManagerState, TartAgent, builtin_host::BuiltinHost,
+        };
+
+        type Reservations = Arc<Mutex<HashMap<String, CapacityReservation>>>;
+
+        /// How the stand-in agent answers `POST /v1/runners`: it boots the
+        /// VM (from then on its health lists the runner's VM as running),
+        /// says so on `booted`, and answers once `finish` is notified, as a
+        /// real start does after it has set up the runner inside the VM.
+        #[derive(Default)]
+        struct StandInStart {
+            booted: Notify,
+            finish: Notify,
+        }
 
         const TOKEN: &str = "vm-slot-test-token";
 
@@ -760,6 +863,9 @@ mod tests {
             agent_slots: Arc<std::sync::Mutex<Value>>,
             /// `(maxRunners, activeRunners)` in the agent's budget.
             agent_runners: Arc<std::sync::Mutex<(usize, usize)>>,
+            /// The manager's capacity leases, to see when one is given back.
+            reservations: Reservations,
+            start: Arc<StandInStart>,
             socket: std::path::PathBuf,
         }
 
@@ -767,7 +873,35 @@ mod tests {
             async fn start(slots: Value) -> anyhow::Result<Self> {
                 let agent_slots = Arc::new(std::sync::Mutex::new(slots));
                 let agent_runners = Arc::new(std::sync::Mutex::new((16_usize, 0_usize)));
-                let agent = Router::new().route(
+                let start = Arc::new(StandInStart::default());
+                let boot = {
+                    let agent_slots = Arc::clone(&agent_slots);
+                    let start = Arc::clone(&start);
+                    move |Json(body): Json<Value>| async move {
+                        let runner_id = body["runnerId"].as_str().unwrap_or_default().to_owned();
+                        {
+                            let mut slots = agent_slots
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            slots["gridops"] = json!(slots["gridops"].as_u64().unwrap_or(0) + 1);
+                            if let Some(ids) = slots["runnerIds"].as_array_mut() {
+                                ids.push(json!(runner_id));
+                            }
+                        }
+                        start.booted.notify_one();
+                        start.finish.notified().await;
+                        (
+                            StatusCode::CREATED,
+                            Json(json!({
+                                "id": "tart-1", "name": body["name"], "state": "running",
+                                "createdAt": "2026-11-03T00:00:00.000Z",
+                            })),
+                        )
+                    }
+                };
+                let agent = Router::new()
+                    .route("/v1/runners", axum::routing::post(boot))
+                    .route(
                     "/v1/health",
                     get({
                         let agent_slots = Arc::clone(&agent_slots);
@@ -802,6 +936,7 @@ mod tests {
                     uuid::Uuid::new_v4()
                 ));
                 std::fs::write(&socket, "")?;
+                let reservations = Reservations::default();
                 let state = ManagerState {
                     docker: bollard::Docker::connect_with_socket(
                         &socket.to_string_lossy(),
@@ -831,7 +966,7 @@ mod tests {
                         budget_origin: crate::BudgetOrigin::default(),
                     },
                     shared_docker_socket: None,
-                    reservations: Arc::new(Mutex::new(HashMap::new())),
+                    reservations: Arc::clone(&reservations),
                     provisioning_paused: Arc::new(AtomicBool::new(false)),
                     builtin_host: BuiltinHost::new(false, Some(true)),
                     provision_locks: crate::ProvisionLocks::default(),
@@ -845,8 +980,68 @@ mod tests {
                     base_url,
                     agent_slots,
                     agent_runners,
+                    reservations,
+                    start,
                     socket,
                 })
+            }
+
+            async fn leases(&self) -> usize {
+                self.reservations.lock().await.len()
+            }
+
+            /// The slots as the manager's health reports them.
+            async fn health_slots(&self) -> anyhow::Result<Value> {
+                let health = self
+                    .request(reqwest::Method::GET, "/v1/health")
+                    .send()
+                    .await?
+                    .json::<Value>()
+                    .await?;
+                Ok(health["providers"]["tart"]["vmSlots"].clone())
+            }
+
+            /// Admits a Tart VM runner `runner_id` for `pool` in pass `pass`
+            /// and answers its lease.
+            async fn lease_for(
+                &self,
+                pool: &str,
+                runner_id: &str,
+                pass: i64,
+            ) -> anyhow::Result<String> {
+                let response = self
+                    .request(reqwest::Method::POST, "/v1/admissions")
+                    .json(&json!({
+                        "runnerId": runner_id, "poolId": pool, "provider": "tart",
+                        "runtime": "vm", "cpuLimit": 2.0, "memoryLimitMb": 4096,
+                        "reconcilePass": pass,
+                    }))
+                    .send()
+                    .await?;
+                anyhow::ensure!(response.status().as_u16() == 201, "not admitted");
+                let body = response.json::<Value>().await?;
+                Ok(body["leaseId"].as_str().unwrap_or_default().to_owned())
+            }
+
+            /// Starts the runner the lease was given for, as the reconciler
+            /// does after admission.
+            fn start_runner(
+                &self,
+                pool: &str,
+                runner_id: &str,
+                lease: &str,
+            ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + use<>
+            {
+                self.request(reqwest::Method::POST, "/v1/runners")
+                    .json(&json!({
+                        "runnerId": runner_id, "poolId": pool,
+                        "name": format!("homelab-{runner_id}"),
+                        "image": "gridops-macos-tahoe-base", "mode": "ephemeral",
+                        "provider": "tart", "runtime": "vm", "platform": "github",
+                        "jitConfig": "j".repeat(64), "cpuLimit": 2.0, "memoryLimitMb": 4096,
+                        "network": "gridops-runners", "capacityLease": lease,
+                    }))
+                    .send()
             }
 
             fn set_agent_runners(&self, max_runners: usize, active: usize) {
@@ -914,6 +1109,123 @@ mod tests {
                 "external": external.iter().map(|name| json!({"name": name, "user": "ci", "source": "tart-process"})).collect::<Vec<_>>(),
                 "detection": "processes",
             })
+        }
+
+        /// What an agent that names the runners of its running VMs reports.
+        fn running(runner_ids: &[&str]) -> Value {
+            let mut slots = slots(runner_ids.len(), &[]);
+            slots["runnerIds"] = json!(runner_ids);
+            slots
+        }
+
+        /// #101's test: the start succeeded and the agent reports its VM
+        /// running before the manager has dropped the start's lease. That VM
+        /// takes one slot, not two, and with a limit of 2 the next pool is
+        /// admitted to the slot that is really free.
+        #[tokio::test]
+        async fn a_vm_the_agent_reports_running_is_not_counted_again_for_its_lease()
+        -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            manager.lease_for("pool-a", "runner-a", 1).await?;
+            let report = manager.health_slots().await?;
+            assert_eq!(
+                (report["inUse"].as_u64(), report["starting"].as_u64()),
+                (Some(1), Some(1)),
+                "{report}"
+            );
+
+            manager.set_agent_slots(running(&["runner-a"]));
+            let report = manager.health_slots().await?;
+            assert_eq!(report["inUse"], 1, "{report}");
+            assert_eq!(report["gridops"], 1, "{report}");
+            assert_eq!(report["starting"], 0, "{report}");
+            assert_eq!(report["free"], 1, "{report}");
+
+            let (status, code, message) = manager.admit("pool-b", Some("vm"), Some(1)).await?;
+            assert_eq!((status, code.as_str()), (201, ""), "{message}");
+            // Now both slots are taken: pool-a's VM and pool-b's start.
+            let (status, code, message) = manager.admit("pool-c", Some("vm"), Some(1)).await?;
+            assert_eq!((status, code.as_str()), (429, "vm_slot_busy"));
+            assert!(
+                message.contains("2 of 2 slots in use (GridOps runners: 2;"),
+                "{message}"
+            );
+            Ok(())
+        }
+
+        /// The same overlap in `GridOps`'s own budget on the Mac: the agent
+        /// counts the running VM among its active runners, so its lease is
+        /// not counted again against `GRIDOPS_TART_MAX_RUNNERS`.
+        #[tokio::test]
+        async fn a_vm_the_agent_reports_running_is_not_counted_again_in_the_tart_budget()
+        -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            manager.set_agent_runners(2, 0);
+            manager.lease_for("pool-a", "runner-a", 1).await?;
+            manager.set_agent_runners(2, 1);
+            manager.set_agent_slots(running(&["runner-a"]));
+            let (status, code, message) = manager.admit("pool-b", Some("vm"), Some(1)).await?;
+            assert_eq!((status, code.as_str()), (201, ""), "{message}");
+            // Two runners now: pool-a's VM and pool-b's start fill a budget of 2.
+            let (status, code, message) = manager.admit("pool-c", Some("vm"), Some(1)).await?;
+            assert_eq!(status, 429, "{message}");
+            assert!(!code.is_empty(), "{message}");
+            Ok(())
+        }
+
+        /// The same overlap as it happens: health is read while the start's
+        /// request to the agent is still open and its VM already runs (the
+        /// runner is being set up inside it). The VM counts once at every
+        /// moment, and the lease is gone when the start returns.
+        #[tokio::test]
+        async fn a_vm_counts_once_while_its_start_is_still_in_flight() -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            let lease = manager.lease_for("pool-a", "runner-a", 1).await?;
+            let booted = manager.start.booted.notified();
+            let start = tokio::spawn(manager.start_runner("pool-a", "runner-a", &lease));
+            booted.await;
+            let report = manager.health_slots().await?;
+            assert_eq!(report["inUse"], 1, "{report}");
+            assert_eq!(report["gridops"], 1, "{report}");
+            assert_eq!(report["starting"], 0, "{report}");
+
+            manager.start.finish.notify_one();
+            assert_eq!(start.await??.status().as_u16(), 201);
+            assert_eq!(manager.leases().await, 0);
+            let report = manager.health_slots().await?;
+            assert_eq!(
+                (report["inUse"].as_u64(), report["starting"].as_u64()),
+                (Some(1), Some(0)),
+                "{report}"
+            );
+            Ok(())
+        }
+
+        /// A caller that gives up on a start (a request limit of its own, a
+        /// restart) closes the connection, and the manager's handler is
+        /// dropped part way. The lease must still be given back, or it keeps
+        /// a slot for up to five minutes on top of the VM that is running.
+        #[tokio::test]
+        async fn a_start_its_caller_abandons_gives_its_lease_back() -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            let lease = manager.lease_for("pool-a", "runner-a", 1).await?;
+            let booted = manager.start.booted.notified();
+            let start = tokio::spawn(manager.start_runner("pool-a", "runner-a", &lease));
+            booted.await;
+            assert_eq!(manager.leases().await, 1);
+            start.abort();
+            let _ = start.await;
+            let mut waited = 0;
+            while manager.leases().await > 0 && waited < 100 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                waited += 1;
+            }
+            assert_eq!(
+                manager.leases().await,
+                0,
+                "the abandoned start still holds its lease"
+            );
+            Ok(())
         }
 
         #[tokio::test]

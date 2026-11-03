@@ -77,6 +77,19 @@ struct Pool {
     provision_failure_count: i64,
     provision_retry_at: Option<i64>,
     provision_circuit_open: bool,
+    /// The pool's last start was deferred (the host had no room, or the Mac
+    /// no VM slot) and nothing has happened to it since: a wait reason is
+    /// recorded in `runner_pool_waits`.
+    wait_recorded: bool,
+}
+
+impl Pool {
+    /// Whether the pool is pausing before its next start, after a failure,
+    /// in its circuit's cool-down, or after a deferred start.
+    fn retry_deferred(&self, now: i64) -> bool {
+        self.provision_retry_at
+            .is_some_and(|retry_at| retry_at > now)
+    }
 }
 
 #[derive(Clone, Debug, FromRow)]
@@ -356,7 +369,8 @@ async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
           p.runner_group_id,p.ephemeral,p.paused,
           p.autoscaling_enabled,p.queue_scale_factor,p.idle_timeout_minutes,p.configuration_version,
-          p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open FROM runner_pools p
+          p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,
+          EXISTS(SELECT 1 FROM runner_pool_waits w WHERE w.pool_id=p.id) AS wait_recorded FROM runner_pools p
           JOIN installations i ON i.id=p.installation_id
           WHERE p.state != 'deleting' ORDER BY p.created_at"#,
     )
@@ -439,9 +453,7 @@ async fn reconcile_pool(
         .await?;
     }
 
-    let retry_deferred = pool
-        .provision_retry_at
-        .is_some_and(|retry_at| retry_at > now_millis());
+    let retry_deferred = pool.retry_deferred(now_millis());
     // An open circuit carries a cool-down in `provision_retry_at`; once it
     // passes, one attempt probes whether the cause has cleared.
     let provisioning_blocked = provisioning_paused || retry_deferred || host_blocked;
@@ -546,35 +558,17 @@ async fn reconcile_pool(
         .iter()
         .filter(|runner| runner_needs_update(pool, runner))
         .count();
-    let state = if pool.paused {
-        "paused"
-    } else if provisioning_paused {
-        "provisioning-paused"
-    } else if host_blocked {
-        gridops_core::builtin_host::POOL_STATE
-    } else if pool.provision_circuit_open {
-        "blocked"
-    } else if capacity_deferred || (retry_deferred && pool.provision_failure_count == 0) {
-        "waiting"
-    } else if retry_deferred {
-        "backoff"
-    } else if outdated_count > 0 {
-        "updating"
-    } else if active_count > desired as usize {
-        "draining"
-    } else {
-        "active"
-    };
-    sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
-        .bind(state)
-        .bind(now_millis())
-        .bind(&pool.id)
-        .execute(&app.database)
-        .await?;
-    // The wait reason is kept only while the pool is waiting.
-    if state != "waiting" {
-        set_pool_wait_reason(&app.database, &pool.id, None).await?;
-    }
+    let state = pool_state(&PassOutcome {
+        provisioning_paused,
+        host_blocked,
+        capacity_deferred,
+        retry_deferred,
+        outdated: outdated_count,
+        active: active_count,
+        desired: usize::try_from(desired).unwrap_or_default(),
+        ..PassOutcome::for_pool(pool, now_millis())
+    });
+    finish_pool_pass(&app.database, &pool.id, state).await?;
     record_capacity_sample(app, pool, &final_runners).await?;
     if provisioned > 0 || removed > 0 || rotated > 0 || rebalanced > 0 || retired > 0 {
         system_event(
@@ -586,6 +580,87 @@ async fn reconcile_pool(
             json!({ "desired": desired, "active": active_count, "provisioned": provisioned, "removed": removed, "rotated": rotated, "rebalanced": rebalanced, "retiredFromBuiltinHost": retired, "outdated": outdated_count }),
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// What a pass found, for the state the pool is shown in.
+#[derive(Clone, Copy, Debug, Default)]
+struct PassOutcome {
+    paused: bool,
+    provisioning_paused: bool,
+    host_blocked: bool,
+    circuit_open: bool,
+    failure_count: i64,
+    /// This pass's start was deferred: no room on the host, or no VM slot.
+    capacity_deferred: bool,
+    /// The pool is pausing before its next start (see `Pool::retry_deferred`).
+    retry_deferred: bool,
+    /// The pool's last start, in an earlier pass, was deferred.
+    wait_recorded: bool,
+    outdated: usize,
+    active: usize,
+    desired: usize,
+}
+
+impl PassOutcome {
+    /// What the pool row says; the pass fills in what it found.
+    fn for_pool(pool: &Pool, now: i64) -> Self {
+        Self {
+            paused: pool.paused,
+            circuit_open: pool.provision_circuit_open,
+            failure_count: pool.provision_failure_count,
+            retry_deferred: pool.retry_deferred(now),
+            wait_recorded: pool.wait_recorded,
+            ..Self::default()
+        }
+    }
+}
+
+/// The state a pool is shown in at the end of a pass.
+///
+/// A real block comes first: the pool is paused, provisioning is paused, or
+/// the built-in host it depends on is off. Then a wait: the pool's latest
+/// start was deferred, in this pass or (while it pauses before asking again)
+/// in an earlier one. A wait is not a failure, so it is shown whatever the
+/// pool's earlier failures, even with its circuit open (#102): the circuit
+/// stays open, and the pool page says so, until a start succeeds or fails.
+/// Only then do an open circuit (`blocked`) and a failure's pause (`backoff`).
+fn pool_state(outcome: &PassOutcome) -> &'static str {
+    let waiting = outcome.capacity_deferred
+        || (outcome.retry_deferred && (outcome.failure_count == 0 || outcome.wait_recorded));
+    if outcome.paused {
+        "paused"
+    } else if outcome.provisioning_paused {
+        "provisioning-paused"
+    } else if outcome.host_blocked {
+        gridops_core::builtin_host::POOL_STATE
+    } else if waiting {
+        "waiting"
+    } else if outcome.circuit_open {
+        "blocked"
+    } else if outcome.retry_deferred {
+        "backoff"
+    } else if outcome.outdated > 0 {
+        "updating"
+    } else if outcome.active > outcome.desired {
+        "draining"
+    } else {
+        "active"
+    }
+}
+
+/// Stores the state the pass ended in; the wait reason is kept only while
+/// the pool is waiting.
+async fn finish_pool_pass(database: &SqlitePool, pool_id: &str, state: &str) -> Result<()> {
+    sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
+        .bind(state)
+        .bind(now_millis())
+        .bind(pool_id)
+        .execute(database)
+        .await?;
+    if state != "waiting" {
+        set_pool_wait_reason(database, pool_id, None).await?;
     }
     Ok(())
 }
@@ -2002,7 +2077,7 @@ async fn provision_on_host(
                 reason: Some(message),
             });
         }
-        record_provision_failure(app, pool).await?;
+        record_provision_failure(&app.database, pool).await?;
         return Err(error);
     }
     sqlx::query(
@@ -2746,7 +2821,7 @@ async fn set_pool_wait_reason(
     Ok(())
 }
 
-async fn record_provision_failure(app: &Reconciler, pool: &Pool) -> Result<()> {
+async fn record_provision_failure(database: &SqlitePool, pool: &Pool) -> Result<()> {
     let attempts = pool.provision_failure_count.saturating_add(1);
     let (circuit_open, delay_ms) = provision_failure_policy(attempts);
     let retry_at = now_millis().saturating_add(delay_ms);
@@ -2759,11 +2834,14 @@ async fn record_provision_failure(app: &Reconciler, pool: &Pool) -> Result<()> {
     .bind(if circuit_open { "blocked" } else { "backoff" })
     .bind(now_millis())
     .bind(&pool.id)
-    .execute(&app.database)
+    .execute(database)
     .await?;
+    // A start that failed ends any wait before it: the pause now is the
+    // failure's, and the pool is shown backing off or blocked.
+    set_pool_wait_reason(database, &pool.id, None).await?;
     if circuit_open && !pool.provision_circuit_open {
-        system_event(
-            app,
+        pool_event(
+            database,
             Some(&pool.id),
             "error",
             "Provisioning circuit opened",
@@ -2964,6 +3042,7 @@ mod tests {
             provision_failure_count: 0,
             provision_retry_at: None,
             provision_circuit_open: false,
+            wait_recorded: false,
         }
     }
 
@@ -3338,6 +3417,7 @@ mod tests {
     }
 
     const VM_SLOT_BUSY: &str = "runner manager request failed (429 Too Many Requests) [vm_slot_busy]: Waiting for a macOS VM slot: position 2 of 2 in the queue. 2 of 2 slots in use (GridOps runners: 1; other software: 1 — runner-warm-1 (ci)).";
+    const VM_SLOT_UNAVAILABLE: &str = "runner manager request failed (503 Service Unavailable) [vm_slot_unavailable]: no macOS VM slot became free within 180 seconds; the Mac allows two VMs at once, including VMs of other software";
 
     #[test]
     fn a_start_refused_for_lack_of_a_vm_slot_is_deferred_not_failed() {
@@ -3446,6 +3526,248 @@ mod tests {
             events, 1,
             "one event when the wait begins, not one per pass"
         );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    // ---- The state a waiting pool is shown in (#102) ----
+
+    #[test]
+    fn a_pool_whose_start_waits_for_capacity_is_waiting_whatever_its_failures() {
+        let refused_for_a_slot = PassOutcome {
+            capacity_deferred: true,
+            ..PassOutcome::default()
+        };
+        assert_eq!(pool_state(&refused_for_a_slot), "waiting");
+        // Earlier failures, and a circuit opened by them, do not hide it.
+        for (failure_count, circuit_open) in [(1, false), (2, false), (3, true), (7, true)] {
+            let outcome = PassOutcome {
+                circuit_open,
+                failure_count,
+                ..refused_for_a_slot
+            };
+            assert_eq!(pool_state(&outcome), "waiting", "{outcome:?}");
+        }
+        // Nor during the half-minute pause after a deferred start (the Tart
+        // agent's own slot wait ran out): the pool is still waiting.
+        for (failure_count, circuit_open) in [(0, false), (2, false), (3, true)] {
+            let pausing = PassOutcome {
+                circuit_open,
+                failure_count,
+                retry_deferred: true,
+                wait_recorded: true,
+                ..PassOutcome::default()
+            };
+            assert_eq!(pool_state(&pausing), "waiting", "{pausing:?}");
+        }
+    }
+
+    #[test]
+    fn a_wait_does_not_hide_a_real_block_and_a_failure_is_not_a_wait() {
+        let waiting = PassOutcome {
+            capacity_deferred: true,
+            failure_count: 3,
+            circuit_open: true,
+            ..PassOutcome::default()
+        };
+        let paused = PassOutcome {
+            paused: true,
+            ..waiting
+        };
+        assert_eq!(pool_state(&paused), "paused");
+        let provisioning_paused = PassOutcome {
+            provisioning_paused: true,
+            ..waiting
+        };
+        assert_eq!(pool_state(&provisioning_paused), "provisioning-paused");
+        let host_off = PassOutcome {
+            host_blocked: true,
+            ..waiting
+        };
+        assert_eq!(
+            pool_state(&host_off),
+            gridops_core::builtin_host::POOL_STATE
+        );
+
+        // After a failure the pool backs off, or its circuit cools down.
+        let backing_off = PassOutcome {
+            retry_deferred: true,
+            failure_count: 1,
+            ..PassOutcome::default()
+        };
+        assert_eq!(pool_state(&backing_off), "backoff");
+        let cooling_down = PassOutcome {
+            retry_deferred: true,
+            failure_count: 3,
+            circuit_open: true,
+            ..PassOutcome::default()
+        };
+        assert_eq!(pool_state(&cooling_down), "blocked");
+        // An open circuit with no start waiting (nothing asked this pass) is blocked.
+        let idle = PassOutcome {
+            failure_count: 3,
+            circuit_open: true,
+            ..PassOutcome::default()
+        };
+        assert_eq!(pool_state(&idle), "blocked");
+        // A pause set by a deferral with no failures behind it stays waiting.
+        let deferred = PassOutcome {
+            retry_deferred: true,
+            ..PassOutcome::default()
+        };
+        assert_eq!(pool_state(&deferred), "waiting");
+        assert_eq!(pool_state(&PassOutcome::default()), "active");
+    }
+
+    async fn seed_macos_pool(
+        database: &SqlitePool,
+        failures: i64,
+        circuit_open: bool,
+    ) -> Result<()> {
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO runner_pools (id,installation_id,name,scope,image,created_at,updated_at)
+              VALUES ('pool-1',1,'macos','organization','runner:latest',1,1);
+            "#,
+        )
+        .execute(database)
+        .await?;
+        // The circuit's cool-down has passed, so this pass probes again.
+        sqlx::query(
+            "UPDATE runner_pools SET provision_failure_count=?,provision_circuit_open=?,provision_retry_at=NULL,state=? WHERE id='pool-1'",
+        )
+        .bind(failures)
+        .bind(circuit_open)
+        .bind(if circuit_open { "blocked" } else { "backoff" })
+        .execute(database)
+        .await?;
+        Ok(())
+    }
+
+    /// One reconciler pass for a pool whose start is deferred with `reason`,
+    /// ending as `reconcile_pool` ends it.
+    async fn pass_deferred_with(database: &SqlitePool, reason: &str) -> Result<()> {
+        let pool = load_pools(database).await?.remove(0);
+        defer_pool_capacity(database, &pool, Some(reason), None).await?;
+        let outcome = PassOutcome {
+            capacity_deferred: true,
+            ..PassOutcome::for_pool(&pool, now_millis())
+        };
+        finish_pool_pass(database, &pool.id, pool_state(&outcome)).await
+    }
+
+    /// One pass in which the pool asks for nothing (it is pausing).
+    async fn pass_without_a_start(database: &SqlitePool) -> Result<()> {
+        let pool = load_pools(database).await?.remove(0);
+        let outcome = PassOutcome::for_pool(&pool, now_millis());
+        finish_pool_pass(database, &pool.id, pool_state(&outcome)).await
+    }
+
+    async fn waiting_events(database: &SqlitePool) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runner_events WHERE pool_id='pool-1' AND event='Runner provisioning waiting'",
+        )
+        .fetch_one(database)
+        .await?)
+    }
+
+    /// #102's test: a pool whose circuit is still open from earlier failures
+    /// waits in the Mac's VM slot queue. It is shown waiting, with its place
+    /// in line, on every pass; the wait counts as no failure, and the circuit
+    /// stays open until a start succeeds or fails.
+    #[tokio::test]
+    async fn a_pool_with_an_open_circuit_waiting_for_a_vm_slot_shows_waiting_and_why() -> Result<()>
+    {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-slot-wait-circuit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        seed_macos_pool(&database, 3, true).await?;
+
+        for _ in 0..3 {
+            pass_deferred_with(&database, VM_SLOT_BUSY).await?;
+            let (state, failures, circuit_open, retry_at, reason) = pool_row(&database).await?;
+            assert_eq!(state, "waiting");
+            assert!(
+                reason.as_deref().is_some_and(
+                    |reason| reason.starts_with("Waiting for a macOS VM slot: position 2 of 2")
+                ),
+                "{reason:?}"
+            );
+            assert_eq!(
+                (failures, circuit_open),
+                (3, true),
+                "a wait is not a failure"
+            );
+            assert_eq!(retry_at, None, "the pool asks again on the next pass");
+        }
+        assert_eq!(
+            waiting_events(&database).await?,
+            1,
+            "one event when the wait begins"
+        );
+
+        // The agent's own slot wait ran out: the pool pauses half a minute
+        // and is still waiting, with its reason, through the pause.
+        pass_deferred_with(&database, VM_SLOT_UNAVAILABLE).await?;
+        pass_without_a_start(&database).await?;
+        let (state, failures, circuit_open, retry_at, reason) = pool_row(&database).await?;
+        assert_eq!(state, "waiting");
+        assert!(reason.is_some_and(|reason| reason.starts_with("no macOS VM slot became free")));
+        assert_eq!((failures, circuit_open), (3, true));
+        assert!(retry_at.is_some());
+
+        // A start that then fails ends the wait: the circuit cools down again.
+        let pool = load_pools(&database).await?.remove(0);
+        record_provision_failure(&database, &pool).await?;
+        pass_without_a_start(&database).await?;
+        let (state, failures, circuit_open, _, reason) = pool_row(&database).await?;
+        assert_eq!(
+            (state.as_str(), failures, circuit_open),
+            ("blocked", 4, true)
+        );
+        assert_eq!(reason, None);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// The same with earlier failures but no open circuit: through the pause
+    /// after a deferred start it is waiting, not backing off.
+    #[tokio::test]
+    async fn a_pool_with_earlier_failures_waiting_for_a_vm_slot_is_waiting_not_backing_off()
+    -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-slot-wait-failures-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        seed_macos_pool(&database, 1, false).await?;
+
+        pass_deferred_with(&database, VM_SLOT_BUSY).await?;
+        let (state, failures, _, _, reason) = pool_row(&database).await?;
+        assert_eq!((state.as_str(), failures), ("waiting", 1));
+        assert!(reason.is_some());
+
+        pass_deferred_with(&database, VM_SLOT_UNAVAILABLE).await?;
+        pass_without_a_start(&database).await?;
+        let (state, failures, _, _, reason) = pool_row(&database).await?;
+        assert_eq!((state.as_str(), failures), ("waiting", 1));
+        assert!(reason.is_some_and(|reason| reason.starts_with("no macOS VM slot became free")));
+
+        // A failure's own backoff is still shown as backoff.
+        let pool = load_pools(&database).await?.remove(0);
+        record_provision_failure(&database, &pool).await?;
+        pass_without_a_start(&database).await?;
+        let (state, failures, _, _, reason) = pool_row(&database).await?;
+        assert_eq!((state.as_str(), failures), ("backoff", 2));
+        assert_eq!(reason, None);
 
         database.close().await;
         fs::remove_dir_all(directory)?;
