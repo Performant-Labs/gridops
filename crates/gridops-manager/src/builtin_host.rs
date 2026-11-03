@@ -177,7 +177,7 @@ mod tests {
                 reservations: std::sync::Arc::new(Mutex::new(HashMap::new())),
                 provisioning_paused: std::sync::Arc::new(AtomicBool::new(false)),
                 builtin_host: BuiltinHost::new(docker, setting),
-                provision_lock: std::sync::Arc::new(Mutex::new(())),
+                provision_locks: crate::ProvisionLocks::default(),
                 vm_slots: std::sync::Arc::default(),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

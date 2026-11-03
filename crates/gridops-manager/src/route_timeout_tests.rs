@@ -121,7 +121,7 @@ async fn manager_in_front_of(agent: Url) -> anyhow::Result<String> {
         )]))),
         provisioning_paused: Arc::new(AtomicBool::new(false)),
         builtin_host: builtin_host::BuiltinHost::new(false, None),
-        provision_lock: Arc::new(Mutex::new(())),
+        provision_locks: ProvisionLocks::default(),
         vm_slots: Arc::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -281,7 +281,123 @@ async fn any_timed_out_request_says_what_timed_out() -> anyhow::Result<()> {
 }
 
 #[test]
-fn docker_runner_starts_keep_the_standard_limit() {
-    assert_eq!(provision_time_limit("docker"), Duration::from_mins(3));
+fn a_docker_runner_start_has_time_for_its_image_pull() {
+    // The pull may take `IMAGE_PULL_TIMEOUT`, and the container start
+    // follows it.
+    assert_eq!(IMAGE_PULL_TIMEOUT, Duration::from_mins(10));
+    assert_eq!(provision_time_limit("docker"), Duration::from_mins(12));
+    assert!(provision_time_limit("docker") > IMAGE_PULL_TIMEOUT);
+    assert_eq!(SANDBOX_CREATE_TIMEOUT, provision_time_limit("docker"));
     assert_eq!(provision_time_limit("tart"), Duration::from_mins(15));
+    // The route's backstop leaves the handler time to say what timed out.
+    assert_eq!(PROVISION_ROUTE_TIMEOUT, Duration::from_mins(16));
+}
+
+const DOCKER_LEASE: &str = "lease-docker-1";
+
+/// The real manager router in front of `docker`, a stand-in engine, holding a
+/// capacity lease for the Docker runner that `docker_runner_request` starts.
+async fn manager_in_front_of_docker(docker: &std::path::Path) -> anyhow::Result<String> {
+    let state = ManagerState {
+        docker: Docker::connect_with_socket(
+            &docker.to_string_lossy(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )?,
+        tart: None,
+        token: SecretString::from(TOKEN),
+        limits: ManagerLimits {
+            host_name: "docker-host".into(),
+            available_cpus: 8.0,
+            total_memory_mb: 16_384,
+            cpu_budget: 6.0,
+            memory_budget_mb: 12_288,
+            max_runners: 3,
+            // No disk floor: these tests are not about the host's disk.
+            min_free_disk_mb: 0,
+            min_free_disk_percent: 0,
+            runner_network: "gridops-runners".into(),
+            log_max_size: "20m".into(),
+            log_max_files: 5,
+            runner_pids_limit: 1_024,
+            runner_swap_percent: 100,
+            budget_origin: BudgetOrigin::default(),
+        },
+        shared_docker_socket: None,
+        reservations: Arc::new(Mutex::new(HashMap::from([(
+            DOCKER_LEASE.to_owned(),
+            CapacityReservation {
+                runner_id: "runner-docker-1".into(),
+                pool_id: "pool-docker".into(),
+                provider: "docker".into(),
+                cpu_limit: 2.0,
+                memory_limit_mb: 2_048,
+                vm_slot: false,
+                // Wall-clock time, which paused tokio time does not move.
+                expires_at: Instant::now() + Duration::from_mins(5),
+            },
+        )]))),
+        provisioning_paused: Arc::new(AtomicBool::new(false)),
+        builtin_host: builtin_host::BuiltinHost::new(true, Some(true)),
+        provision_locks: ProvisionLocks::default(),
+        vm_slots: Arc::default(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let app = router(state);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok(base_url)
+}
+
+fn docker_runner_request() -> Value {
+    json!({
+        "runnerId": "runner-docker-1",
+        "poolId": "pool-docker",
+        "name": "pool-docker-abcd1234",
+        "image": "runner:fixture",
+        "mode": "ephemeral",
+        "provider": "docker",
+        "platform": "github",
+        "jitConfig": "j".repeat(64),
+        "cpuLimit": 2.0,
+        "memoryLimitMb": 2_048,
+        "network": "gridops-runners",
+        "capacityLease": DOCKER_LEASE,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_docker_runner_start_with_a_long_image_pull_still_starts() -> anyhow::Result<()> {
+    // The image is not on the host, and pulling it takes nine and a half
+    // minutes: well past the three minutes a Docker start used to get, inside
+    // the pull's own ten.
+    let images = crate::stand_in_docker::Images {
+        pull: Some(Duration::from_secs(570)),
+        ..Default::default()
+    };
+    let docker = crate::stand_in_docker::start(images.clone())?;
+    let manager = manager_in_front_of_docker(&docker).await?;
+    let started = tokio::time::Instant::now();
+    let (status, text) = on_test_clock(&images.pulling, async {
+        let response = reqwest::Client::new()
+            .post(format!("{manager}/v1/runners"))
+            .bearer_auth(TOKEN)
+            .json(&docker_runner_request())
+            .send()
+            .await?;
+        let status = response.status();
+        anyhow::Ok((status, response.text().await?))
+    })
+    .await?;
+    let _ = std::fs::remove_file(&docker);
+    let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    assert_eq!(body["id"], crate::stand_in_docker::CONTAINER_ID, "{body}");
+    // The clock moved for the pull, and only for it.
+    assert!(
+        (570..=571).contains(&started.elapsed().as_secs()),
+        "{:?}",
+        started.elapsed()
+    );
+    Ok(())
 }
