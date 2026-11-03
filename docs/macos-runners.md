@@ -103,6 +103,12 @@ launchctl print "gui/${UID}/dev.gridops.tart-agent"
 tail -f ~/.gridops/tart-agent/logs/agent.log
 ```
 
+Tart starts `softnet` by looking it up on its own PATH, and launchd gives an agent only `/usr/bin:/bin:/usr/sbin:/sbin` unless told otherwise. The installer therefore writes a `PATH` into the launchd agent that starts with the directories it found Tart and Softnet in, and the agent itself puts Tart's directory, and Softnet's when it finds it next to Tart, on its PATH or in Homebrew's `bin` directory, at the front of the PATH of every `tart` command. Its log states that PATH when it starts. To upgrade an agent installed before this, run `./scripts/install-tart-agent.sh` again with the same settings; it rewrites the launchd agent and restarts it.
+
+### Troubleshooting
+
+- **`Error: InitializationFailed(why: "softnet not found in PATH")`**, which GridOps shows as `tart run exited (exit status: 1) before the guest agent became ready`: Tart could not find `softnet` on the agent's PATH. Every start fails this way, and three in a row open the pool's provisioning circuit for a cool-down. Run `command -v softnet` in a shell to check that Softnet is installed, then re-run `./scripts/install-tart-agent.sh` so the launchd agent gets a PATH that includes its directory.
+
 ## Host guardrails
 
 The Tart agent independently enforces a CPU budget, memory budget, runner-count ceiling, and minimum free-disk reserve before cloning a VM. Conservative defaults are:
