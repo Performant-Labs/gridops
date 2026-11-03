@@ -290,6 +290,25 @@ async fn startup_clears_a_custom_default_only_from_a_provider_a_pool_does_not_us
     )
     .await?;
     seed(&db, "legacy-tart", "tart", "[]", CUSTOM_DOCKER, CUSTOM_TART).await?;
+    // The same two cases for Docker.
+    seed(
+        &db,
+        "docker-second",
+        "tart",
+        r#"["tart","docker"]"#,
+        CUSTOM_DOCKER,
+        "acme-xcode-26",
+    )
+    .await?;
+    seed(
+        &db,
+        "legacy-docker",
+        "docker",
+        "[]",
+        CUSTOM_DOCKER,
+        CUSTOM_TART,
+    )
+    .await?;
     // Another value on an unused provider is not the default: kept.
     seed(
         &db,
@@ -322,7 +341,10 @@ async fn startup_clears_a_custom_default_only_from_a_provider_a_pool_does_not_us
 
     let changed =
         gridops_core::db::clear_unused_default_images(&db, CUSTOM_DOCKER, CUSTOM_TART).await?;
-    assert_eq!(changed, 3, "docker-only, tart-only and legacy-tart");
+    assert_eq!(
+        changed, 4,
+        "docker-only, tart-only, legacy-tart and legacy-docker"
+    );
 
     let expect = |image: &str, docker: &str, tart: &str| {
         (image.to_owned(), docker.to_owned(), tart.to_owned(), 7)
@@ -342,6 +364,14 @@ async fn startup_clears_a_custom_default_only_from_a_provider_a_pool_does_not_us
     assert_eq!(
         images(&db, "tart-default").await?,
         expect(CUSTOM_TART, "", CUSTOM_TART)
+    );
+    assert_eq!(
+        images(&db, "legacy-docker").await?,
+        expect(CUSTOM_DOCKER, CUSTOM_DOCKER, "")
+    );
+    assert_eq!(
+        images(&db, "docker-second").await?,
+        expect("acme-xcode-26", CUSTOM_DOCKER, "acme-xcode-26")
     );
     assert_eq!(
         images(&db, "tart-native").await?,
