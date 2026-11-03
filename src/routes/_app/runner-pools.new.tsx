@@ -23,6 +23,7 @@ import { BuiltinHostOffNotice } from "~/features/runner-pools/builtin-host-off-n
 import { builtinHostOn } from "~/features/runner-pools/builtin-host";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { type RunnerHost, hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 
 export const Route = createFileRoute("/_app/runner-pools/new")({
   loader: () => getCreateRunnerPoolOptions(),
@@ -439,9 +440,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             </SettingsRow>
           ) : null}
           {includesTart && macosRuntime === "vm" ? (
-            <SettingsRow description={bitbucketConnectionIds.length ? "Use the prepared Bitbucket runner image for this pool." : "A stopped, prepared Tart VM that each runner clones. xcodebuild needs an Xcode-ready VM."} htmlFor="tart-image" label="Tart base VM">
-              <Input className="font-mono text-xs" id="tart-image" name="tartImage" onChange={(event) => setTartImage(event.target.value)} required value={tartImage} />
-            </SettingsRow>
+            <TartBaseVmRow bitbucket={bitbucketConnectionIds.length > 0} onChange={setTartImage} value={tartImage} />
           ) : null}
           <SettingsRow description={bitbucketConnectionIds.length ? "Comma-separated. Bitbucket labels may use lowercase letters, numbers, and dots." : "Comma-separated. OS and architecture labels are added automatically."} htmlFor="pool-labels" label="Additional labels">
             <Input id="pool-labels" name="labels" onChange={(event) => setLabels(event.target.value)} placeholder={bitbucketConnectionIds.length ? "build, release.ios" : providers.length > 1 ? "build, release" : provider === "tart" ? "xcode, apple-silicon" : "docker, build"} value={labels} />

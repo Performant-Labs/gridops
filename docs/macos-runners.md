@@ -48,6 +48,8 @@ Interrupted segmented pulls resume from `~/Library/Caches/GridOps/tart-images`. 
 
 Use an `-xcode` Tart image instead when workflows require a preinstalled Xcode toolchain. The pool's **Tart base VM** field must contain the local prepared VM name, not the remote OCI reference.
 
+When you create a pool in **Runner pools → New pool** and select **macOS · Tart** under **Providers** with **macOS execution** set to **Virtual machine**, the form asks for the **Tart base VM**. It starts with the control plane's `GRIDOPS_TART_RUNNER_IMAGE` (or `gridops-macos-tahoe-base`); replace it with the pool's own prepared VM before you select **Create pool**, because a new pool starts runners as soon as it is saved and a matching queued job clones whatever VM the pool names. **Native on host** clones no VM, so the field is hidden. A pool with both Docker and Tart asks for a Docker image and a Tart base VM. Change it later in the pool's **Settings → Tart base VM**.
+
 ## Network isolation
 
 GridOps starts VMs without graphics, audio, clipboard sharing, or shared host directories. It supports two Tart network modes:
@@ -94,7 +96,7 @@ GRIDOPS_TART_AGENT_URL=http://host.docker.internal:8790
 GRIDOPS_TART_AGENT_TOKEN=<same independently generated token>
 ```
 
-Restart the manager after changing these values. Its health response reports Docker and Tart independently, and the pool form will offer **Tart · macOS ARM64**.
+Restart the manager after changing these values. Its health response reports Docker and Tart independently, and the pool form will offer **macOS · Tart** under **Providers**.
 
 The installer builds `gridops-tart-agent`, installs it under `~/.gridops/tart-agent/bin`, and registers a per-user launchd agent. Inspect its status and logs with:
 
@@ -169,7 +171,7 @@ Starting a runner by hand from the GridOps UI or API is different: the GridOps A
 A project that keeps its own runner VMs on the Mac (for example one pre-warmed idle VM per slot) holds both slots whether or not a job runs. Until it moves, GridOps sees its `tart run` VMs and counts them; to share the slots fairly, move it onto a GridOps pool:
 
 1. **Prepare its image.** If the project has its own base VM, prepare it with `scripts/prepare-tart-runner-image.sh` (it must contain the GitHub Actions runner at `GRIDOPS_TART_RUNNER_ROOT`) under a name in the agent's Tart home, or clone it there with `tart clone`. Phase 1 of the design uses one Tart home per agent; reading another home's images is a later phase.
-2. **Create a pool for it.** Provider **Tart · macOS ARM64**, the prepared image as its **Tart base VM**, scoped to the project's repositories (one pool per client), minimum 0 so it holds no slot while idle, and its own label, for example `runs-on: [self-hosted, macOS, ARM64, project-macos]`.
+2. **Create a pool for it.** Provider **macOS · Tart** with **macOS execution** set to **Virtual machine**, the prepared image as its **Tart base VM**, scoped to the project's repositories (one pool per client), minimum 0 so it holds no slot while idle, and its own label, for example `runs-on: [self-hosted, macOS, ARM64, project-macos]`.
 3. **Switch its workflows** to the new label and check that a job runs on a GridOps runner.
 4. **Retire its own runners.** Stop its warm-VM scripts and services (launchd agents or cron jobs), `tart stop` and `tart delete` its runner VMs, and remove its self-hosted runner registrations in GitHub. Its slots are then GridOps's to share.
 5. **Check** that `providers.tart.vmSlots.external` in the runner manager's health no longer lists its VMs.

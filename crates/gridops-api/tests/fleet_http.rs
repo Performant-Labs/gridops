@@ -46,6 +46,8 @@ mod macos_vm_slots;
 mod placement;
 #[path = "fleet_http/pool_capacity.rs"]
 mod pool_capacity;
+#[path = "fleet_http/pool_images.rs"]
+mod pool_images;
 #[path = "fleet_http/query.rs"]
 mod query;
 #[path = "fleet_http/recovery.rs"]

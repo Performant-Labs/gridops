@@ -1018,7 +1018,7 @@
       "post": {
         "tags": ["pools"],
         "summary": "Create a runner pool",
-        "description": "The body and its validation are exactly the web form's (`CreateRunnerPool`); a validation error is `400 { \"error\": \"...\" }` with the form's message, a duplicate name `409`. The owner must administer the pool's installation (or repositories), as in the browser; Bitbucket connections need a system administrator. A token request is not origin-checked. Audited as `runner_pool.created`, naming the token. Starts `desiredCount` runners as the form does.",
+        "description": "The body and its validation are exactly the web form's (`CreateRunnerPool`); a validation error is `400 { \"error\": \"...\" }` with the form's message, a duplicate name `409`. The owner must administer the pool's installation (or repositories), as in the browser; Bitbucket connections need a system administrator. A token request is not origin-checked. Audited as `runner_pool.created`, naming the token. Starts `desiredCount` runners as the form does. A pool that includes Tart clones the Tart base VM in `tartImage` (when Tart is the primary provider and `tartImage` is left out, `image` is used); the server default from `/api/v1/runner-pools/options` is never substituted. `image` and the primary provider's `dockerImage` or `tartImage`, when both are sent, must be the same value, or the request is refused with `400`.",
         "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
         "responses": {
