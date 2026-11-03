@@ -46,6 +46,7 @@ mod builtin_host;
 #[cfg(test)]
 mod route_timeout_tests;
 mod sandbox;
+mod vm_slots;
 
 #[derive(Clone)]
 struct ManagerState {
@@ -58,6 +59,8 @@ struct ManagerState {
     provisioning_paused: Arc<AtomicBool>,
     builtin_host: builtin_host::BuiltinHost,
     provision_lock: Arc<Mutex<()>>,
+    /// The Tart host's macOS VM slot limit and the line for its slots.
+    vm_slots: Arc<vm_slots::VmSlots>,
 }
 
 /// The Docker host's engine, shared with runner containers so jobs can run
@@ -147,6 +150,9 @@ struct TartCapacity {
     memory_budget_mb: i64,
     max_runners: usize,
     active: CapacityUsage,
+    /// Who holds the Mac's VM slots; absent from agents that predate it.
+    #[serde(default)]
+    vm_slots: Option<vm_slots::AgentSlotUsage>,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +162,8 @@ struct CapacityReservation {
     provider: String,
     cpu_limit: f64,
     memory_limit_mb: i64,
+    /// Holds one of the Tart host's macOS VM slots until the VM is started.
+    vm_slot: bool,
     expires_at: Instant,
 }
 
@@ -456,6 +464,15 @@ struct CapacityRequest {
     provider: String,
     cpu_limit: f64,
     memory_limit_mb: i64,
+    /// For Tart, "vm" (the default) needs one of the Mac's VM slots;
+    /// "native" runs on the host and needs none. Docker ignores it, whatever
+    /// it says.
+    #[serde(default)]
+    runtime: Option<String>,
+    /// The reconciler pass asking, which keeps a waiting pool's place in the
+    /// line for VM slots. Starts from the web app send none.
+    #[serde(default)]
+    reconcile_pass: Option<i64>,
 }
 
 impl CapacityRequest {
@@ -479,7 +496,22 @@ impl CapacityRequest {
                 "Runner provider must be Docker or Tart.".into(),
             ));
         }
+        if self.provider == "tart"
+            && self
+                .runtime
+                .as_deref()
+                .is_some_and(|runtime| !matches!(runtime, "vm" | "native"))
+        {
+            return Err(ManagerError::BadRequest(
+                "Runner runtime must be vm or native.".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Whether the runner is a Tart VM, which takes one of the Mac's slots.
+    fn needs_vm_slot(&self) -> bool {
+        self.provider == "tart" && self.runtime.as_deref() != Some("native")
     }
 }
 
@@ -493,6 +525,10 @@ struct ManagerPolicy {
     /// The host's budget as set in `GridOps`; a `null` figure falls back to
     /// the manager's own. Left out (older callers), it stays as it was.
     builtin_host_budget: Option<builtin_host::Budget>,
+    /// The Tart host's macOS VM slots, as set in `GridOps`. Left out (older
+    /// callers), the limit stays as it was.
+    #[serde(default)]
+    tart_vm_slots: Option<usize>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -871,6 +907,7 @@ async fn main() -> Result<()> {
         provisioning_paused: Arc::new(AtomicBool::new(provisioning_paused)),
         builtin_host: builtin_host::BuiltinHost::new(docker_available, None),
         provision_lock: Arc::new(Mutex::new(())),
+        vm_slots: Arc::default(),
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -992,7 +1029,21 @@ async fn health(
     let (status, tart) = match &state.tart {
         Some(agent) => match tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await
         {
-            Ok(health) => ("ok", json!({ "available": true, "health": health })),
+            Ok(health) => {
+                // The slots as admission counts them: the agent's view plus
+                // VMs being started now, and the line for them.
+                let vm_slots = match tart_capacity_from_health(&health) {
+                    Ok(capacity) => {
+                        let starting = vm_slot_reservations(&state).await;
+                        state.vm_slots.report(&capacity.slot_usage(), starting)
+                    }
+                    Err(_) => Value::Null,
+                };
+                (
+                    "ok",
+                    json!({ "available": true, "health": health, "vmSlots": vm_slots }),
+                )
+            }
             Err(error) => {
                 tracing::warn!(error = ?error, "Tart agent health check failed");
                 (
@@ -1067,11 +1118,26 @@ async fn update_policy(
             "The built-in host's budget must be above zero; leave a figure null to use the manager's own.".into(),
         ));
     }
+    if let Some(slots) = input.tart_vm_slots
+        && !(1..=vm_slots::MAX_VM_SLOTS).contains(&slots)
+    {
+        return Err(ManagerError::BadRequest(format!(
+            "The Tart host's macOS VM slots must be 1 to {}; macOS runs at most {} macOS VMs at once.",
+            vm_slots::MAX_VM_SLOTS,
+            vm_slots::MAX_VM_SLOTS
+        )));
+    }
     state
         .provisioning_paused
         .store(input.provisioning_paused, Ordering::Relaxed);
     if let Some(enabled) = input.builtin_host_enabled {
         state.builtin_host.set(enabled);
+    }
+    if let Some(slots) = input.tart_vm_slots
+        && slots != state.vm_slots.limit()
+    {
+        state.vm_slots.set_limit(slots)?;
+        tracing::info!(vm_slots = slots, "Tart host macOS VM slot limit changed");
     }
     if let Some(budget) = input.builtin_host_budget
         && budget != state.builtin_host.budget()
@@ -1091,6 +1157,7 @@ async fn update_policy(
         "provisioningPaused": input.provisioning_paused,
         "builtinHostEnabled": state.builtin_host.setting(),
         "builtinHostBudget": state.effective_budget().to_json(),
+        "tartVmSlots": state.vm_slots.limit(),
     })))
 }
 
@@ -1114,31 +1181,50 @@ async fn reserve_capacity(
     // Each provider is admitted against its own host. Tart VMs run on the Mac,
     // not inside the Docker host, and the agent enforces its own budget; adding
     // them to the Docker budget starved Linux runners of capacity.
-    let (budget, active, disk) = if input.provider == "tart" {
+    let (budget, active, disk, slot_usage) = if input.provider == "tart" {
         let agent = state.tart.as_ref().ok_or_else(tart_provider_disabled)?;
-        let (budget, active) = tart_capacity(agent).await?;
-        (budget, active, None)
+        let capacity = tart_capacity(agent).await?;
+        (
+            capacity.budget(),
+            capacity.active,
+            None,
+            Some(capacity.slot_usage()),
+        )
     } else {
         (
             state.docker_budget(),
             docker_active_capacity(&state.docker).await?,
             Some(disk_capacity(&state.limits)?),
+            None,
         )
     };
     let mut reservations = state.reservations.lock().await;
     reservations.retain(|_, reservation| reservation.expires_at > Instant::now());
     let reserved = provider_reservations(&reservations, &input.provider);
-    enforce_capacity(
-        budget,
-        active,
-        reserved,
-        CapacityUsage {
-            active_runners: 1,
-            cpu: input.cpu_limit,
-            memory_mb: input.memory_limit_mb,
-        },
-        disk,
-    )?;
+    let requested = CapacityUsage {
+        active_runners: 1,
+        cpu: input.cpu_limit,
+        memory_mb: input.memory_limit_mb,
+    };
+    // A Tart VM waits in the one line for the Mac, for a VM slot or for room
+    // in GridOps's own budget there, under the same lock as the reservation,
+    // so two pools cannot both take the last and the pool asked first cannot
+    // jump a pool that has waited longer.
+    let vm_slot = input.needs_vm_slot();
+    if vm_slot {
+        let starting = reservations
+            .values()
+            .filter(|reservation| reservation.vm_slot)
+            .count();
+        state.vm_slots.admit(
+            &input.pool_id,
+            input.reconcile_pass,
+            &slot_usage.unwrap_or_default(),
+            starting,
+            &tart_budget_room(budget, active, reserved, requested),
+        )?;
+    }
+    enforce_capacity(budget, active, reserved, requested, disk)?;
     let lease_id = uuid::Uuid::new_v4().to_string();
     reservations.insert(
         lease_id.clone(),
@@ -1148,6 +1234,7 @@ async fn reserve_capacity(
             provider: input.provider,
             cpu_limit: input.cpu_limit,
             memory_limit_mb: input.memory_limit_mb,
+            vm_slot,
             expires_at: Instant::now() + Duration::from_mins(5),
         },
     );
@@ -1940,21 +2027,48 @@ async fn containers_usage(
     Ok(usage)
 }
 
-async fn tart_capacity(agent: &TartAgent) -> Result<(CapacityBudget, CapacityUsage), ManagerError> {
+async fn tart_capacity(agent: &TartAgent) -> Result<TartCapacity, ManagerError> {
     let health = tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await?;
+    tart_capacity_from_health(&health)
+}
+
+fn tart_capacity_from_health(health: &Value) -> Result<TartCapacity, ManagerError> {
     let capacity = health.get("capacity").cloned().ok_or_else(|| {
         ManagerError::Internal(anyhow::anyhow!("Tart agent health omitted capacity"))
     })?;
-    let capacity = serde_json::from_value::<TartCapacity>(capacity)
-        .map_err(|error| ManagerError::Internal(error.into()))?;
-    Ok((
+    serde_json::from_value::<TartCapacity>(capacity)
+        .map_err(|error| ManagerError::Internal(error.into()))
+}
+
+impl TartCapacity {
+    fn budget(&self) -> CapacityBudget {
         CapacityBudget {
-            cpu: capacity.cpu_budget,
-            memory_mb: capacity.memory_budget_mb,
-            max_runners: capacity.max_runners,
-        },
-        capacity.active,
-    ))
+            cpu: self.cpu_budget,
+            memory_mb: self.memory_budget_mb,
+            max_runners: self.max_runners,
+        }
+    }
+
+    /// Who holds the slots. An agent that predates slot reporting is taken
+    /// to run every active runner in a VM and to see no other software's.
+    fn slot_usage(&self) -> vm_slots::AgentSlotUsage {
+        self.vm_slots
+            .clone()
+            .unwrap_or_else(|| vm_slots::AgentSlotUsage {
+                gridops: self.active.active_runners,
+                ..vm_slots::AgentSlotUsage::default()
+            })
+    }
+}
+
+/// Admissions holding a VM slot for a VM that is being started.
+async fn vm_slot_reservations(state: &ManagerState) -> usize {
+    let mut reservations = state.reservations.lock().await;
+    reservations.retain(|_, reservation| reservation.expires_at > Instant::now());
+    reservations
+        .values()
+        .filter(|reservation| reservation.vm_slot)
+        .count()
 }
 
 async fn reserved_capacity(state: &ManagerState, provider: &str) -> CapacityUsage {
@@ -2050,6 +2164,43 @@ fn ensure_disk_capacity(limits: &ManagerLimits) -> Result<(), ManagerError> {
         });
     }
     Ok(())
+}
+
+/// How many more runners the size of `requested` the budget has room for, or
+/// none with the reason it gives.
+fn tart_budget_room(
+    budget: CapacityBudget,
+    active: CapacityUsage,
+    reserved: CapacityUsage,
+    requested: CapacityUsage,
+) -> vm_slots::BudgetRoom {
+    if let Err(refusal) = enforce_capacity(budget, active, reserved, requested, None) {
+        let refusal = match refusal {
+            ManagerError::Guardrail { message, .. } => message,
+            _ => "GridOps's own budget on the Tart host is full.".into(),
+        };
+        return vm_slots::BudgetRoom {
+            room: 0,
+            refusal: Some(refusal),
+        };
+    }
+    let runners = budget.max_runners.saturating_sub(
+        active
+            .active_runners
+            .saturating_add(reserved.active_runners),
+    );
+    let cpu = ((budget.cpu - active.cpu - reserved.cpu + f64::EPSILON) / requested.cpu)
+        .floor()
+        .max(0.0) as usize;
+    let memory = usize::try_from(
+        (budget.memory_mb - active.memory_mb - reserved.memory_mb).max(0)
+            / requested.memory_mb.max(1),
+    )
+    .unwrap_or(0);
+    vm_slots::BudgetRoom {
+        room: runners.min(cpu).min(memory),
+        refusal: None,
+    }
 }
 
 /// `disk` is `None` for providers whose host enforces its own disk reserve.
@@ -2430,6 +2581,7 @@ mod tests {
             provider: provider.into(),
             cpu_limit: 2.0,
             memory_limit_mb: 2_048,
+            vm_slot: false,
             expires_at: Instant::now() + Duration::from_mins(5),
         };
         let reservations = HashMap::from([

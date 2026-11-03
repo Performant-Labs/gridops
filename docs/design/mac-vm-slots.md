@@ -1,6 +1,6 @@
 # Design: GridOps owns a Mac's macOS VM slots
 
-Issue: [#95](https://github.com/Performant-Labs/gridops/issues/95). Related: #86 and #87 (the slot wait in the Tart agent), #94 (the wait does not fit the manager's route timeout), #80 (a release needs a macOS runner).
+Issue: [#95](https://github.com/Performant-Labs/gridops/issues/95). Related: #86 and #87 (the slot wait in the Tart agent), #94 and #96 (making that wait fit the manager's time limit), #80 (a release needs a macOS runner).
 
 Status: **phase 1 is implemented** (marked **[phase 1]** below). Everything else is the plan.
 
@@ -109,7 +109,7 @@ Its own `tart run` processes (including a retry during the safety-net wait) are 
 
 ## 6. The #87 wait becomes a safety net
 
-**[phase 1]** Admission now refuses starts while the slots are full, so the agent's `tart run` retry loop only covers two cases: the race between admission and `tart run` (other software starting a VM in those seconds) and VMs the agent cannot see. Its default (180 s) and maximum are unchanged here; making it fit the manager's route timeout is #94, handled separately. Recommended after #94: a short wait (for example 60 s). A timeout is deferred, not counted (section 4).
+**[phase 1]** Admission now refuses starts while the slots are full, so the agent's `tart run` retry loop only covers two cases: the race between admission and `tart run` (other software starting a VM in those seconds) and VMs the agent cannot see. Its default (180 s) and maximum are not changed here; #94 (fixed in #96) made the wait fit inside the manager's time limit for a macOS start (a 600 s maximum, against the manager's 900 s). Now that admission holds starts back, a shorter wait (for example 60 s) is enough; that is left to the operator. A timeout is deferred, not counted (section 4).
 
 ## 7. Several clients, several images, VM stores
 
@@ -149,7 +149,7 @@ In `docs/macos-runners.md` ("Moving another project's macOS CI onto GridOps"): p
 - Reconciler: `vm_slot_busy` and `vm_slot_unavailable` deferred, never counted; no 30 s pause for `vm_slot_busy` or a Tart `host_capacity_exhausted`; the wait reason (`runner_pool_waits`, migration 0042) shown on the pool page.
 - Docs: `docs/macos-runners.md` updated, with the migration guide.
 
-**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue); optional weights and priority with aging; shorten the safety-net wait once #94 lands.
+**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue); optional weights and priority with aging; decide whether to shorten the safety-net wait's default.
 
 **Phase 3.** Several Tart hosts (a `tart_hosts` table with per-host slots and queue); several VM stores per agent (`GRIDOPS_TART_IMAGE_SOURCES`).
 

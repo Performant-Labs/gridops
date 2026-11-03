@@ -40,6 +40,8 @@ mod disk_alerts;
 mod host_delete;
 #[path = "fleet_http/inventory.rs"]
 mod inventory;
+#[path = "fleet_http/macos_vm_slots.rs"]
+mod macos_vm_slots;
 #[path = "fleet_http/placement.rs"]
 mod placement;
 #[path = "fleet_http/pool_capacity.rs"]

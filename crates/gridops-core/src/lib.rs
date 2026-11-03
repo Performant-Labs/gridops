@@ -13,6 +13,7 @@ pub mod github;
 pub mod job_log;
 pub mod models;
 pub mod provisioning;
+pub mod tart_host;
 
 pub use autoscaling::{
     LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, PoolStanding, ProviderCapacity, QueuedJob,

@@ -37,6 +37,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 struct AgentState {
     token: SecretString,
     tart: Tart,
+    /// `ps`, to find VMs other software runs on the Mac.
+    ps_binary: PathBuf,
     home: PathBuf,
     runner_root: String,
     bitbucket_runner_root: String,
@@ -548,6 +550,7 @@ async fn main() -> Result<()> {
     let state = AgentState {
         token: SecretString::from(token),
         tart,
+        ps_binary: PathBuf::from("/bin/ps"),
         home,
         runner_root,
         bitbucket_runner_root,
@@ -628,6 +631,8 @@ async fn health(
     let vms = tart_vms(&state).await?;
     let active = active_capacity(&state, &vms).await;
     let disk = disk_capacity(&state).await?;
+    let processes = tart_run_process_list(&state).await;
+    let vm_slots = vm_slot_usage(&*state.records.read().await, &vms, processes.as_deref());
     Ok(Json(json!({
         "status": "ok",
         "provider": "tart",
@@ -646,6 +651,7 @@ async fn health(
             "memoryBudgetMb": state.limits.memory_budget_mb,
             "maxRunners": state.limits.max_runners,
             "active": active,
+            "vmSlots": vm_slots,
         },
         "disk": disk,
     })))
@@ -1896,6 +1902,158 @@ async fn active_capacity(state: &AgentState, vms: &HashMap<String, String>) -> C
         })
 }
 
+/// A macOS VM running on this Mac that this agent did not start. It takes one
+/// of the Mac's VM slots all the same, so the control plane counts it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct ExternalVm {
+    /// The VM's name as `tart run` was given it, or as Tart lists it.
+    name: String,
+    /// The user running it, when the process list says.
+    user: Option<String>,
+    /// How it was seen: `tart-process`, a `tart run` process of any user and
+    /// any Tart home; or `tart-list`, a running VM in this agent's Tart home.
+    source: &'static str,
+}
+
+/// Who holds the Mac's VM slots. The slot limit itself is the control plane's
+/// (it is part of the host's budget in `GridOps`); this is what it counts.
+#[derive(Debug, Serialize)]
+struct VmSlotUsage {
+    /// Slots `GridOps`'s own VMs hold: VM runners whose VM is running. A clone
+    /// that is waiting for a slot holds none.
+    gridops: usize,
+    /// Running VMs other software started, sorted by name.
+    external: Vec<ExternalVm>,
+    /// `processes` when the process list was read, `tart-list` when only this
+    /// agent's Tart home could be seen.
+    detection: &'static str,
+}
+
+/// `tart run` options that take a value, so the value is not read as the VM.
+const TART_RUN_VALUE_OPTIONS: &[&str] = &[
+    "--dir",
+    "--disk",
+    "--rosetta",
+    "--net-bridged",
+    "--net-softnet-allow",
+    "--net-softnet-block",
+    "--net-softnet-expose",
+    "--root-disk-opts",
+    "--serial-path",
+];
+
+/// The `(user, VM name)` of every `tart run` in `ps -axww -o user=,args=`
+/// output, once each: a shell that runs `tart run` lists the same VM again.
+/// The VM is the last argument that is neither an option nor an option's value.
+fn tart_run_processes(ps_output: &str) -> Vec<(String, String)> {
+    let mut found = Vec::<(String, String)>::new();
+    for line in ps_output.lines() {
+        let mut words = line.split_whitespace();
+        let Some(user) = words.next() else { continue };
+        let words = words.collect::<Vec<_>>();
+        let Some(tart) = words
+            .iter()
+            .position(|word| *word == "tart" || word.ends_with("/tart"))
+        else {
+            continue;
+        };
+        if words.get(tart + 1) != Some(&"run") {
+            continue;
+        }
+        let mut vm = None;
+        let mut takes_value = false;
+        for word in &words[tart + 2..] {
+            if takes_value {
+                takes_value = false;
+            } else if word.starts_with('-') {
+                takes_value = !word.contains('=') && TART_RUN_VALUE_OPTIONS.contains(word);
+            } else {
+                vm = Some(*word);
+            }
+        }
+        let Some(vm) = vm else { continue };
+        let entry = (user.to_owned(), vm.to_owned());
+        if !found.contains(&entry) {
+            found.push(entry);
+        }
+    }
+    found
+}
+
+/// Counts the slots `GridOps`'s VMs hold and names every other running VM:
+/// `tart run` processes (any user, any Tart home) and VMs this agent's Tart
+/// home lists as running, that are not one of this agent's runners.
+/// `processes` is `None` when the process list could not be read.
+fn vm_slot_usage(
+    records: &HashMap<String, TartRecord>,
+    vms: &HashMap<String, String>,
+    processes: Option<&[(String, String)]>,
+) -> VmSlotUsage {
+    let own = records
+        .values()
+        .filter(|record| !record.is_native())
+        .map(|record| record.vm_name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let gridops = own
+        .iter()
+        .filter(|vm| vms.get(**vm).is_some_and(|state| state == "running"))
+        .count();
+    let mut external = processes
+        .unwrap_or_default()
+        .iter()
+        .filter(|(_, vm)| !own.contains(vm.as_str()))
+        .map(|(user, vm)| ExternalVm {
+            name: vm.clone(),
+            user: Some(user.clone()),
+            source: "tart-process",
+        })
+        .collect::<Vec<_>>();
+    for (name, state) in vms {
+        if state == "running"
+            && !own.contains(name.as_str())
+            && !external.iter().any(|vm| &vm.name == name)
+        {
+            external.push(ExternalVm {
+                name: name.clone(),
+                user: None,
+                source: "tart-list",
+            });
+        }
+    }
+    external.sort_by(|left, right| (&left.name, &left.user).cmp(&(&right.name, &right.user)));
+    VmSlotUsage {
+        gridops,
+        external,
+        detection: if processes.is_some() {
+            "processes"
+        } else {
+            "tart-list"
+        },
+    }
+}
+
+/// Every `tart run` process on the Mac, or `None` when `ps` fails, in which
+/// case only this agent's Tart home is seen.
+async fn tart_run_process_list(state: &AgentState) -> Option<Vec<(String, String)>> {
+    let output = Command::new(&state.ps_binary)
+        .args(["-axww", "-o", "user=,args="])
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            Some(tart_run_processes(&String::from_utf8_lossy(&output.stdout)))
+        }
+        Ok(output) => {
+            tracing::warn!(status = %output.status, "could not list processes; VMs of other software outside this Tart home are not counted");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(error = ?error, "could not list processes; VMs of other software outside this Tart home are not counted");
+            None
+        }
+    }
+}
+
 async fn tart_vms(state: &AgentState) -> Result<HashMap<String, String>, AgentError> {
     let output = state
         .tart
@@ -2587,12 +2745,41 @@ case "$1" in
   clone)
     if [ -f "$dir/slow-clone" ]; then sleep "$(cat "$dir/slow-clone")"; fi
     exit 0 ;;
-  list) echo '[]' ;;
+  list) cat "$dir/list.json" 2>/dev/null || echo '[]' ;;
   *) exit 0 ;;
 esac
 "#;
 
+    /// Stands in for `ps`: prints `ps-output`, or fails given `ps-broken`.
+    const FAKE_PS: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+[ -f "$dir/ps-broken" ] && exit 1
+cat "$dir/ps-output" 2>/dev/null
+exit 0
+"#;
+
     const CLONE: &str = "gridops-homelab-abcd1234";
+
+    /// Writes an executable script from a short-lived `sh`, so this process
+    /// never holds it open for writing. Written here, a child that another
+    /// test thread forks at that moment would inherit the open file, and
+    /// running the script would then fail with "Text file busy".
+    async fn install_script(path: &FsPath, contents: &str) -> Result<()> {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()?;
+        let mut stdin = child.stdin.take().context("script stdin")?;
+        stdin.write_all(contents.as_bytes()).await?;
+        drop(stdin);
+        anyhow::ensure!(
+            child.wait().await?.success(),
+            "could not write {}",
+            path.display()
+        );
+        Ok(())
+    }
 
     struct FakeTart {
         dir: PathBuf,
@@ -2628,9 +2815,12 @@ esac
             // The warm-up run is not a command the agent issued; forget it.
             let _ = fs::remove_file(dir.join("calls")).await;
             let _ = fs::remove_file(dir.join("paths")).await;
+            let ps = dir.join("ps");
+            install_script(&ps, FAKE_PS).await?;
             let state = AgentState {
                 token: SecretString::from("t".repeat(32)),
                 tart: Tart::new(binary, env::var_os("PATH").as_deref()),
+                ps_binary: ps,
                 home,
                 runner_root: "/Users/admin/actions-runner".into(),
                 bitbucket_runner_root: "/Users/admin/atlassian-bitbucket-pipelines-runner".into(),
@@ -2894,6 +3084,145 @@ esac
             anyhow::bail!("the runner did not start once the slot was free")
         };
         assert!(tart.state.slot_waiters.is_empty());
+        Ok(())
+    }
+
+    // ---- Who holds the Mac's VM slots (#95) ----
+    //
+    // The control plane owns the slot budget; the agent says how many slots
+    // GridOps' own VMs hold and which VMs other software runs.
+
+    const PS_OUTPUT: &str = "\
+admin     /opt/homebrew/Cellar/tart/2.30.0/tart.app/Contents/MacOS/tart run --no-graphics --no-audio gridops-homelab-abcd1234
+ci        /opt/homebrew/Cellar/tart/2.30.0/tart.app/Contents/MacOS/tart run --no-graphics --dir src:/tmp/x runner-warm-1
+ci        /bin/sh -c tart run runner-warm-1
+ci        /Applications/My Tools/tart run --net-softnet runner-warm-2
+admin     /usr/bin/vim /tmp/tart run.txt
+admin     /opt/homebrew/bin/tart list --format json
+admin     tart run
+";
+
+    fn external(name: &str, user: Option<&str>, source: &'static str) -> ExternalVm {
+        ExternalVm {
+            name: name.into(),
+            user: user.map(ToOwned::to_owned),
+            source,
+        }
+    }
+
+    #[test]
+    fn finds_tart_run_processes_of_any_user_and_names_their_vms() {
+        assert_eq!(
+            tart_run_processes(PS_OUTPUT),
+            vec![
+                ("admin".to_owned(), "gridops-homelab-abcd1234".to_owned()),
+                ("ci".to_owned(), "runner-warm-1".to_owned()),
+                ("ci".to_owned(), "runner-warm-2".to_owned()),
+            ]
+        );
+        assert!(tart_run_processes("").is_empty());
+    }
+
+    fn vm_record(id: &str, vm_name: &str, runtime: &str) -> TartRecord {
+        TartRecord {
+            id: id.into(),
+            runner_id: format!("runner-{id}"),
+            pool_id: "pool-1".into(),
+            name: vm_name.trim_start_matches("gridops-").into(),
+            vm_name: vm_name.into(),
+            image: "gridops-macos-tahoe-base".into(),
+            cpu_limit: 3.0,
+            memory_limit_mb: 6_144,
+            created_at: "2026-11-03T00:00:00.000Z".into(),
+            runtime: runtime.into(),
+            root: None,
+        }
+    }
+
+    #[test]
+    fn slot_usage_counts_gridops_vms_and_names_every_other_running_vm() {
+        let records = HashMap::from([
+            (
+                "tart-1".to_owned(),
+                vm_record("tart-1", "gridops-homelab-abcd1234", "vm"),
+            ),
+            // Cloned and waiting for a slot: holds none.
+            (
+                "tart-2".to_owned(),
+                vm_record("tart-2", "gridops-homelab-waiting1", "vm"),
+            ),
+            ("tart-3".to_owned(), vm_record("tart-3", "", "native")),
+        ]);
+        let vms = HashMap::from([
+            ("gridops-homelab-abcd1234".to_owned(), "running".to_owned()),
+            ("gridops-homelab-waiting1".to_owned(), "stopped".to_owned()),
+            ("runner-warm-3".to_owned(), "running".to_owned()),
+            ("runner-warm-2".to_owned(), "running".to_owned()),
+            ("gridops-macos-tahoe-base".to_owned(), "stopped".to_owned()),
+        ]);
+        let usage = vm_slot_usage(&records, &vms, Some(&tart_run_processes(PS_OUTPUT)));
+        assert_eq!(usage.gridops, 1);
+        assert_eq!(
+            usage.external,
+            vec![
+                external("runner-warm-1", Some("ci"), "tart-process"),
+                external("runner-warm-2", Some("ci"), "tart-process"),
+                external("runner-warm-3", None, "tart-list"),
+            ]
+        );
+        assert_eq!(usage.detection, "processes");
+
+        // Without a process list only this Tart home's running VMs are seen.
+        let usage = vm_slot_usage(&records, &vms, None);
+        assert_eq!(usage.gridops, 1);
+        assert_eq!(
+            usage.external,
+            vec![
+                external("runner-warm-2", None, "tart-list"),
+                external("runner-warm-3", None, "tart-list"),
+            ]
+        );
+        assert_eq!(usage.detection, "tart-list");
+    }
+
+    #[tokio::test]
+    async fn health_reports_the_slots_gridops_holds_and_the_vms_of_other_software() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag(
+            "list.json",
+            r#"[{"Name":"runner-warm-3","State":"running"},{"Name":"gridops-macos-tahoe-base","State":"stopped"}]"#,
+        )
+        .await?;
+        tart.flag(
+            "ps-output",
+            "ci  /opt/homebrew/bin/tart run --no-graphics runner-warm-1\n",
+        )
+        .await?;
+        let Ok(Json(report)) = health(State(tart.state.clone()), AgentAuth).await else {
+            anyhow::bail!("health failed")
+        };
+        let slots = &report["capacity"]["vmSlots"];
+        assert_eq!(slots["gridops"], 0, "{report}");
+        assert_eq!(
+            slots["external"],
+            json!([
+                {"name": "runner-warm-1", "user": "ci", "source": "tart-process"},
+                {"name": "runner-warm-3", "user": null, "source": "tart-list"},
+            ])
+        );
+        assert_eq!(slots["detection"], "processes");
+
+        // A process list that cannot be read still reports what Tart lists.
+        tart.flag("ps-broken", "").await?;
+        let Ok(Json(report)) = health(State(tart.state.clone()), AgentAuth).await else {
+            anyhow::bail!("health failed")
+        };
+        let slots = &report["capacity"]["vmSlots"];
+        assert_eq!(
+            slots["external"],
+            json!([{"name": "runner-warm-3", "user": null, "source": "tart-list"}])
+        );
+        assert_eq!(slots["detection"], "tart-list");
         Ok(())
     }
 }

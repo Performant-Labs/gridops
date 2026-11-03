@@ -161,7 +161,8 @@ pub async fn set_budget(
 }
 
 /// The body of the runner manager's `PUT /v1/policy`: whether provisioning is
-/// paused, whether the built-in host may be used, and its budget. The budget
+/// paused, whether the built-in host may be used, its budget, and the Tart
+/// host's macOS VM slots (`crate::tart_host`). The budget
 /// is always sent, with `null` for a figure that is not set, so clearing it
 /// here returns the manager to its own figures.
 pub async fn manager_policy(database: &SqlitePool, provisioning_paused: bool) -> Value {
@@ -169,6 +170,7 @@ pub async fn manager_policy(database: &SqlitePool, provisioning_paused: bool) ->
         "provisioningPaused": provisioning_paused,
         "builtinHostEnabled": is_enabled(database).await,
         "builtinHostBudget": budget(database).await,
+        "tartVmSlots": crate::tart_host::vm_slots(database).await,
     })
 }
 

@@ -94,6 +94,8 @@ export type RunnerPoolDetail = {
   provisionFailureCount: number;
   provisionRetryAt: string | null;
   provisionCircuitOpen: boolean;
+  /** Why the pool is waiting, in the runner manager's words; null when it is not. Absent from an older server. */
+  provisionWaitReason?: string | null;
   canManage: boolean;
 };
 

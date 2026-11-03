@@ -279,6 +279,7 @@ async fn execute_run(app: &Reconciler, run_id: &str) -> Result<()> {
         &sandbox_id,
         SANDBOX_POOL_ID,
         "docker",
+        "container",
         shape.cpu_limit,
         shape.memory_limit_mb,
     )

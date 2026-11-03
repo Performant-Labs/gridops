@@ -178,6 +178,7 @@ mod tests {
                 provisioning_paused: std::sync::Arc::new(AtomicBool::new(false)),
                 builtin_host: BuiltinHost::new(docker, setting),
                 provision_lock: std::sync::Arc::new(Mutex::new(())),
+                vm_slots: std::sync::Arc::default(),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let base_url = format!("http://{}", listener.local_addr()?);

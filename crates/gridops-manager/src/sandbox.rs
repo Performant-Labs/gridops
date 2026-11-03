@@ -1065,6 +1065,7 @@ mod tests {
             provider: "docker".into(),
             cpu_limit: 2.0,
             memory_limit_mb: 2_048,
+            vm_slot: false,
             expires_at: Instant::now() + Duration::from_mins(5),
         };
         assert!(input.lease_claim().matches(&reservation));
@@ -1416,6 +1417,7 @@ mod tests {
                 provisioning_paused: Arc::new(AtomicBool::new(false)),
                 builtin_host: crate::builtin_host::BuiltinHost::new(true, Some(true)),
                 provision_lock: Arc::new(Mutex::new(())),
+                vm_slots: Arc::default(),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let base_url = format!("http://{}", listener.local_addr()?);
@@ -1534,6 +1536,7 @@ mod tests {
             provider: "docker".into(),
             cpu_limit: 2.0,
             memory_limit_mb: 2_048,
+            vm_slot: false,
             expires_at: Instant::now() + Duration::from_mins(5),
         };
         manager
