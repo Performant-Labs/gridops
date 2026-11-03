@@ -251,8 +251,15 @@ impl VmSlots {
         }
     }
 
-    /// The slots as the manager's health reports them.
-    pub(crate) fn report(&self, usage: &AgentSlotUsage, starting: usize) -> Value {
+    /// The slots as the manager's health reports them. `agent_max_runners`
+    /// is the Tart agent's own cap on `GridOps` runners (`maxRunners` in its
+    /// health); a cap below the slot limit is reported as a warning.
+    pub(crate) fn report(
+        &self,
+        usage: &AgentSlotUsage,
+        starting: usize,
+        agent_max_runners: Option<usize>,
+    ) -> Value {
         let limit = self.limit();
         let in_use = slots_in_use(usage, starting);
         let queue = self
@@ -277,8 +284,25 @@ impl VmSlots {
             "external": usage.external,
             "detection": usage.detection,
             "queue": queue,
+            "agentMaxRunners": agent_max_runners,
+            "warning": agent_cap_warning(limit, agent_max_runners),
         })
     }
+}
+
+/// Says so when the Tart agent's own cap on `GridOps` runners
+/// (`GRIDOPS_TART_MAX_RUNNERS`) is below the slot limit. The lower of the two
+/// wins: the manager would admit a start that the agent then turns away, so
+/// `GridOps` uses fewer slots than it is set to. A cap at or above the limit
+/// needs no warning, since the limit governs then.
+pub(crate) fn agent_cap_warning(limit: usize, agent_max_runners: Option<usize>) -> Option<String> {
+    let cap = agent_max_runners?;
+    (cap < limit).then(|| {
+        format!(
+            "The Tart agent allows {cap} runner{} (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to {limit}, so GridOps uses at most {cap} of them. Raise GRIDOPS_TART_MAX_RUNNERS to {limit} and run the Tart agent installer again, or set the slots to {cap}.",
+            if cap == 1 { "" } else { "s" }
+        )
+    })
 }
 
 /// Why a start waits for room in `GridOps`'s own Tart budget.
@@ -677,13 +701,37 @@ mod tests {
             0,
             &BudgetRoom::unlimited(),
         );
-        let report = slots.report(&usage(1, &[("warm-1", Some("ci"))]), 0);
+        let report = slots.report(&usage(1, &[("warm-1", Some("ci"))]), 0, Some(2));
         assert_eq!(report["limit"], 2);
         assert_eq!(report["inUse"], 2);
         assert_eq!(report["free"], 0);
         assert_eq!(report["external"][0]["name"], "warm-1");
         assert_eq!(report["queue"][0]["poolId"], "pool-a");
         assert_eq!(report["queue"][0]["position"], 1);
+        assert_eq!(report["agentMaxRunners"], 2);
+        assert!(report["warning"].is_null(), "{report}");
+    }
+
+    #[test]
+    fn an_agent_cap_below_the_slot_limit_is_reported_and_one_at_or_above_it_is_not() {
+        let slots = VmSlots::default();
+        assert_eq!(
+            agent_cap_warning(2, Some(1)).as_deref(),
+            Some(
+                "The Tart agent allows 1 runner (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to 2, so GridOps uses at most 1 of them. Raise GRIDOPS_TART_MAX_RUNNERS to 2 and run the Tart agent installer again, or set the slots to 1."
+            )
+        );
+        let report = slots.report(&usage(0, &[]), 0, Some(1));
+        assert_eq!(report["agentMaxRunners"], 1);
+        assert_eq!(report["warning"], json!(agent_cap_warning(2, Some(1))));
+        for cap in [Some(2), Some(16)] {
+            assert_eq!(agent_cap_warning(2, cap), None, "{cap:?}");
+        }
+        assert!(slots.set_limit(1).is_ok(), "one slot is a valid limit");
+        assert_eq!(agent_cap_warning(1, Some(1)), None);
+        assert!(slots.report(&usage(0, &[]), 0, Some(1))["warning"].is_null());
+        // Nothing to compare with when the agent's cap is unknown.
+        assert_eq!(agent_cap_warning(2, None), None);
     }
 
     // ---- Through the manager's admission route, against a stand-in agent ----
@@ -993,6 +1041,11 @@ mod tests {
             assert_eq!(report["limit"], 1, "{health}");
             assert_eq!(report["starting"], 1);
             assert_eq!(report["queue"][0]["poolId"], "pool-b");
+            assert_eq!(report["agentMaxRunners"], 16);
+            assert!(
+                report["warning"].is_null(),
+                "a higher agent cap is fine: {report}"
+            );
 
             // A policy that says nothing about slots leaves the limit alone.
             let response = manager
@@ -1006,8 +1059,53 @@ mod tests {
             Ok(())
         }
 
-        /// `GRIDOPS_TART_MAX_RUNNERS` is 1 by default: `GridOps`'s own budget
-        /// on the Mac is full before both slots are. The pool that asks first
+        #[tokio::test]
+        async fn health_warns_when_the_agents_cap_is_below_the_slot_limit() -> anyhow::Result<()> {
+            let manager = TestManager::start(slots(0, &[])).await?;
+            let vm_slots = || async {
+                let health = manager
+                    .request(reqwest::Method::GET, "/v1/health")
+                    .send()
+                    .await?
+                    .json::<Value>()
+                    .await?;
+                anyhow::Ok(health["providers"]["tart"]["vmSlots"].clone())
+            };
+            let set_limit = |slots: usize| {
+                manager
+                    .request(reqwest::Method::PUT, "/v1/policy")
+                    .json(&json!({"provisioningPaused": false, "tartVmSlots": slots}))
+                    .send()
+            };
+
+            // An agent installed with the old default of one runner, against
+            // the default two slots: the lower of the two wins, so say so.
+            manager.set_agent_runners(1, 0);
+            let report = vm_slots().await?;
+            assert_eq!(report["limit"], 2, "{report}");
+            assert_eq!(report["agentMaxRunners"], 1);
+            assert_eq!(
+                report["warning"],
+                "The Tart agent allows 1 runner (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to 2, so GridOps uses at most 1 of them. Raise GRIDOPS_TART_MAX_RUNNERS to 2 and run the Tart agent installer again, or set the slots to 1."
+            );
+
+            // They agree.
+            manager.set_agent_runners(2, 0);
+            assert!(vm_slots().await?["warning"].is_null());
+            set_limit(1).await?.error_for_status()?;
+            manager.set_agent_runners(1, 0);
+            let report = vm_slots().await?;
+            assert_eq!(report["limit"], 1, "{report}");
+            assert!(report["warning"].is_null(), "{report}");
+
+            // The agent allows more than the slots: the slot limit governs.
+            manager.set_agent_runners(2, 0);
+            assert!(vm_slots().await?["warning"].is_null());
+            Ok(())
+        }
+
+        /// `GridOps`'s own budget on the Mac (`GRIDOPS_TART_MAX_RUNNERS`, 1
+        /// here) can be full before both slots are. The pool that asks first
         /// on every pass still cannot take the next runner from the pool that
         /// has waited longer.
         #[tokio::test]

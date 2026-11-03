@@ -22,12 +22,20 @@ struct FakeManager {
 
 impl FakeManager {
     async fn start() -> Result<Self> {
+        Self::with_health(json!({"status": "ok", "providers": {}})).await
+    }
+
+    /// A manager whose `GET /v1/health` answers `health`.
+    async fn with_health(health: Value) -> Result<Self> {
         let policies = Arc::new(Mutex::new(Vec::<Value>::new()));
         let app =
             Router::new()
                 .route(
                     "/v1/health",
-                    get(|| async { Json(json!({"status": "ok", "providers": {}})) }),
+                    get(move || {
+                        let health = health.clone();
+                        async move { Json(health) }
+                    }),
                 )
                 .route(
                     "/v1/policy",
@@ -126,6 +134,47 @@ async fn the_vm_slot_limit_is_a_gridops_setting_pushed_to_the_manager() -> Resul
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(shown(&f).await?, json!(1));
     assert_eq!(manager.last_policy().context("policy")?["tartVmSlots"], 1);
+    Ok(())
+}
+
+/// The manager's view of the Tart host's slots, which it reports when the
+/// Tart agent's own runner cap is below the slot limit.
+#[tokio::test]
+async fn settings_show_the_tart_agents_cap_next_to_the_slot_limit() -> Result<()> {
+    let warning = "The Tart agent allows 1 runner (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to 2, so GridOps uses at most 1 of them. Raise GRIDOPS_TART_MAX_RUNNERS to 2 and run the Tart agent installer again, or set the slots to 1.";
+    let manager = FakeManager::with_health(json!({
+        "status": "ok",
+        "providers": {"tart": {"available": true, "vmSlots": {
+            "limit": 2, "inUse": 0, "free": 2, "gridops": 0, "starting": 0,
+            "external": [], "detection": "processes", "queue": [],
+            "agentMaxRunners": 1, "warning": warning,
+        }}},
+    }))
+    .await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    let settings: Value = admin(&f, reqwest::Method::GET, "/settings")
+        .send()
+        .await?
+        .json()
+        .await?;
+    let slots = &settings["data"]["manager"]["tartVmSlots"];
+    assert_eq!(slots["agentMaxRunners"], 1, "{settings}");
+    assert_eq!(slots["limit"], 2);
+    assert_eq!(slots["warning"], warning);
+    assert_eq!(settings["data"]["settings"]["macosVmSlots"], 2);
+
+    // No Tart agent: nothing to compare with.
+    let manager = FakeManager::start().await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    let settings: Value = admin(&f, reqwest::Method::GET, "/settings")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(
+        settings["data"]["manager"]["tartVmSlots"].is_null(),
+        "{settings}"
+    );
     Ok(())
 }
 

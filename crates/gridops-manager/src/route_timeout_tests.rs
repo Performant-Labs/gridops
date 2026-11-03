@@ -181,8 +181,9 @@ fn no_slot_body() -> String {
 #[tokio::test(start_paused = true)]
 async fn the_default_slot_wait_reaches_the_caller_as_vm_slot_unavailable() -> anyhow::Result<()> {
     // What a real run did: the clone took about 4 s, then the agent waited
-    // its default 180 s for a slot (now counted from the start request) and
-    // spent a few seconds on its last `tart run`. The manager must still be
+    // 180 s for a slot (its default then; 60 s since 0.2.0, so the default
+    // now fails sooner than this), counted from the start request, and spent
+    // a few seconds on its last `tart run`. The manager must still be
     // listening when the agent says why the start failed.
     let (status, body, _) = start_tart_runner(
         Duration::from_secs(186),

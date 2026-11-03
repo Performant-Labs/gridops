@@ -507,7 +507,7 @@ async fn main() -> Result<()> {
     let limits = AgentLimits {
         cpu_budget: env_value("GRIDOPS_TART_CPU_BUDGET", 4.0)?,
         memory_budget_mb: env_value("GRIDOPS_TART_MEMORY_BUDGET_MB", 6_144)?,
-        max_runners: env_value("GRIDOPS_TART_MAX_RUNNERS", 1)?,
+        max_runners: env_value("GRIDOPS_TART_MAX_RUNNERS", DEFAULT_MAX_RUNNERS)?,
         min_free_disk_mb: env_value("GRIDOPS_TART_MIN_FREE_DISK_MB", 40_960)?,
     };
     anyhow::ensure!(
@@ -1340,8 +1340,18 @@ const GUEST_BOOT_TIMEOUT: Duration = Duration::from_mins(3);
 /// manager's own part of the request: waiting for its turn and the network.
 const START_ALLOWANCE: Duration = Duration::from_mins(2);
 
-/// `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` when it is not set.
-const DEFAULT_VM_SLOT_WAIT_SECONDS: u64 = 180;
+/// `GRIDOPS_TART_MAX_RUNNERS` when it is not set: macOS runs two macOS VMs at
+/// once, and the runner manager arbitrates them between pools and other
+/// software (the "macOS VM slots on the Tart host" setting), so this cap does
+/// not need to hold `GridOps` to one of them.
+const DEFAULT_MAX_RUNNERS: usize = 2;
+
+/// `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` when it is not set. The runner manager
+/// admits a VM start only while a slot is free and keeps the rest waiting in
+/// its fair queue, so this wait only covers the race between admission and
+/// `tart run` and VMs the agent cannot see; a short one keeps pools waiting in
+/// that queue rather than in here.
+const DEFAULT_VM_SLOT_WAIT_SECONDS: u64 = 60;
 
 /// Longest `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`. The wait counts from the start
 /// request, so it includes the clone. A slot can free up at its very end, and
@@ -2552,6 +2562,41 @@ mod tests {
             "vm_slot_wait=\"${{GRIDOPS_TART_VM_SLOT_WAIT_SECONDS:-{DEFAULT_VM_SLOT_WAIT_SECONDS}}}\""
         )));
         assert!(installer.contains(&format!("(( vm_slot_wait > {MAX_VM_SLOT_WAIT_SECONDS} ))")));
+    }
+
+    #[test]
+    fn the_defaults_are_two_runners_and_a_sixty_second_slot_wait() {
+        // macOS runs two VMs at once and the manager arbitrates them (#98),
+        // so the agent's own cap no longer has to hold GridOps to one; the
+        // fair queue does the waiting, so the agent's wait is a short safety
+        // net.
+        assert_eq!(DEFAULT_MAX_RUNNERS, 2);
+        assert_eq!(DEFAULT_VM_SLOT_WAIT_SECONDS, 60);
+        let installer = include_str!("../../../scripts/install-tart-agent.sh");
+        assert!(installer.contains(&format!(
+            "max_runners=\"${{GRIDOPS_TART_MAX_RUNNERS:-{DEFAULT_MAX_RUNNERS}}}\""
+        )));
+        // Where the defaults are written down for operators.
+        for (name, text) in [
+            (".env.example", include_str!("../../../.env.example")),
+            (
+                "docs/macos-runners.md",
+                include_str!("../../../docs/macos-runners.md"),
+            ),
+        ] {
+            assert!(
+                text.contains(&format!(
+                    "\nGRIDOPS_TART_MAX_RUNNERS={DEFAULT_MAX_RUNNERS}\n"
+                )),
+                "{name} states another GRIDOPS_TART_MAX_RUNNERS default"
+            );
+            assert!(
+                text.contains(&format!(
+                    "\nGRIDOPS_TART_VM_SLOT_WAIT_SECONDS={DEFAULT_VM_SLOT_WAIT_SECONDS}\n"
+                )),
+                "{name} states another GRIDOPS_TART_VM_SLOT_WAIT_SECONDS default"
+            );
+        }
     }
 
     #[test]

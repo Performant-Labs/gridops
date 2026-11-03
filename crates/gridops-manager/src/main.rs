@@ -1035,7 +1035,11 @@ async fn health(
                 let vm_slots = match tart_capacity_from_health(&health) {
                     Ok(capacity) => {
                         let starting = vm_slot_reservations(&state).await;
-                        state.vm_slots.report(&capacity.slot_usage(), starting)
+                        state.vm_slots.report(
+                            &capacity.slot_usage(),
+                            starting,
+                            Some(capacity.max_runners),
+                        )
                     }
                     Err(_) => Value::Null,
                 };
