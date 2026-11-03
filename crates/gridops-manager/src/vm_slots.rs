@@ -292,9 +292,10 @@ impl VmSlots {
 
 /// Says so when the Tart agent's own cap on `GridOps` runners
 /// (`GRIDOPS_TART_MAX_RUNNERS`) is below the slot limit. The lower of the two
-/// wins: the manager would admit a start that the agent then turns away, so
-/// `GridOps` uses fewer slots than it is set to. A cap at or above the limit
-/// needs no warning, since the limit governs then.
+/// wins: admission counts the cap as part of `GridOps`'s own Tart budget, so a
+/// pool waits for room on the Tart host while a slot is free, and the slot
+/// limit alone does not show why. A cap at or above the limit needs no
+/// warning, since the limit governs then.
 pub(crate) fn agent_cap_warning(limit: usize, agent_max_runners: Option<usize>) -> Option<String> {
     let cap = agent_max_runners?;
     (cap < limit).then(|| {

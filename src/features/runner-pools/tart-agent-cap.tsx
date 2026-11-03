@@ -5,8 +5,9 @@ import { Input } from "~/components/ui/input";
 /**
  * The warning for a Tart agent whose own runner cap (`GRIDOPS_TART_MAX_RUNNERS`, its health's
  * `capacity.maxRunners`) is below the "macOS VM slots on the Tart host" setting. The lower of the
- * two wins: the runner manager admits a start and the agent turns it away. A cap at or above the
- * setting needs no warning, and neither does a deployment without a Tart agent.
+ * two wins: the runner manager counts the cap in GridOps's own Tart budget at admission, so a pool
+ * waits for room on the Tart host while a slot is free. A cap at or above the setting needs no
+ * warning, and neither does a deployment without a Tart agent.
  */
 export function tartAgentCapWarning(
   slots: number | undefined,
@@ -16,7 +17,7 @@ export function tartAgentCapWarning(
   const runners = `${agentMaxRunners} runner${agentMaxRunners === 1 ? "" : "s"}`;
   return {
     title: `The Tart agent allows ${runners}; slots are set to ${slots}`,
-    body: `GridOps uses at most ${agentMaxRunners} of the Mac's ${slots} slots: the runner manager admits a start that the agent then turns away. `
+    body: `GridOps uses at most ${agentMaxRunners} of the Mac's ${slots} slots, so a pool can wait for room on the Tart host while a slot is free. `
       + `Raise GRIDOPS_TART_MAX_RUNNERS to ${slots} on the Mac and run scripts/install-tart-agent.sh again, or set the slots to ${agentMaxRunners}.`,
   };
 }

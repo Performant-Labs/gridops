@@ -39,6 +39,7 @@ describe("tartAgentCapWarning", () => {
     const warning = tartAgentCapWarning(2, 1);
     expect(warning?.title).toBe("The Tart agent allows 1 runner; slots are set to 2");
     expect(warning?.body).toContain("GridOps uses at most 1 of the Mac's 2 slots");
+    expect(warning?.body).toContain("a pool can wait for room on the Tart host while a slot is free");
     expect(warning?.body).toContain("Raise GRIDOPS_TART_MAX_RUNNERS to 2");
   });
 
