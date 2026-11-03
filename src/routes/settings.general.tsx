@@ -38,6 +38,7 @@ function GeneralSettings() {
         githubSyncIntervalSeconds: Number(form.get("githubSyncIntervalSeconds")),
         autoUpdateImages: form.get("autoUpdateImages") === "on",
         provisioningPaused: form.get("provisioningPaused") === "on",
+        ...(form.has("macosVmSlots") ? { macosVmSlots: Number(form.get("macosVmSlots")) } : {}),
       } });
       toast.success("Policy saved.");
       await router.invalidate();
@@ -56,6 +57,7 @@ function GeneralSettings() {
           <SettingsValue label="Refresh runner images" value={settings.autoUpdateImages ? "On" : "Off"} />
           <SettingsValue label="Reconcile interval" value={`${settings.reconcileIntervalSeconds} seconds`} />
           <SettingsValue label="GitHub polling interval" value={`${settings.githubSyncIntervalSeconds} seconds`} />
+          {settings.macosVmSlots ? <SettingsValue label="macOS VM slots on the Tart host" value={`${settings.macosVmSlots}`} /> : null}
         </SettingsSection>
         <SettingsSection title="Retention">
           <SettingsValue label="Runner logs" value={`${settings.logRetentionDays} days · ${settings.logStorageBudgetMb.toLocaleString()} MB`} />
@@ -82,6 +84,11 @@ function GeneralSettings() {
           <SettingsRow description="Workflow state polling, used alongside or instead of webhooks." htmlFor="github-sync" label="GitHub polling interval">
             <UnitField unit="seconds"><Input className="pr-16" defaultValue={settings.githubSyncIntervalSeconds} id="github-sync" max={3600} min={30} name="githubSyncIntervalSeconds" required type="number" /></UnitField>
           </SettingsRow>
+          {settings.macosVmSlots ? (
+            <SettingsRow description="How many macOS VMs GridOps lets run at once on the Tart Mac, counting VMs other software runs there. macOS allows at most two; waiting pools get a free slot in turn." htmlFor="macos-vm-slots" label="macOS VM slots on the Tart host">
+              <UnitField unit="VMs"><Input className="pr-12" defaultValue={settings.macosVmSlots} id="macos-vm-slots" max={2} min={1} name="macosVmSlots" required type="number" /></UnitField>
+            </SettingsRow>
+          ) : null}
         </SettingsSection>
 
         <SettingsSection description="Older records are pruned automatically." title="Retention">

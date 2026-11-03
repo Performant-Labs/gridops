@@ -15,6 +15,7 @@ import { getRunnersPage } from "~/features/operations/operations.functions";
 import type { RunnerPoolDetail } from "~/features/runner-pools/runner-pools.functions";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { PoolEventTable, usePoolEvents } from "~/features/runner-pools/pool-events";
+import { waitingNotice } from "~/features/runner-pools/waiting-notice";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { useRefreshInterval } from "~/lib/use-refresh-interval";
@@ -42,7 +43,7 @@ function ProvisioningCallout({ pool }: { pool: RunnerPoolDetail }) {
   } else if (pool.provisionFailureCount > 0) {
     content = { title: "Provisioning is backing off", body: `The last ${pool.provisionFailureCount === 1 ? "attempt" : `${pool.provisionFailureCount} attempts`} failed. GridOps retries ${when}.`, tone: "warning" };
   } else if (pool.state === "waiting") {
-    content = { title: "Waiting for host capacity", body: `The runner host is at its safe limit. GridOps starts more runners as capacity frees up, next check ${when}.`, tone: "neutral" };
+    content = { ...waitingNotice(pool, when), tone: "neutral" };
   }
   if (!content) return null;
   return (

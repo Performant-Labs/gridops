@@ -122,6 +122,7 @@ struct PoolAccess {
     provision_failure_count: i64,
     provision_retry_at: Option<i64>,
     provision_circuit_open: bool,
+    provision_wait_reason: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -250,6 +251,9 @@ pub struct SystemSettings {
     github_sync_interval_seconds: i64,
     auto_update_images: bool,
     provisioning_paused: bool,
+    /// The Tart host's macOS VM slots. Left out, it stays as it is.
+    #[serde(default)]
+    macos_vm_slots: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1239,6 +1243,7 @@ pub async fn runner_pools(
           p.docker_image,p.tart_image,p.macos_runtime,p.desired_count,p.min_count,
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,p.paused,p.state,
           p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,i.account_login,
+          (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason,
           CASE WHEN NOT EXISTS (
             SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
               AND NOT EXISTS (SELECT 1 FROM user_installations manage
@@ -1288,6 +1293,7 @@ pub async fn runner_pools(
         "provisionFailureCount": row.get::<i64,_>("provision_failure_count"),
         "provisionRetryAt": iso_optional(row.try_get::<Option<i64>,_>("provision_retry_at").ok().flatten()),
         "provisionCircuitOpen": row.get::<bool,_>("provision_circuit_open"),
+        "provisionWaitReason": row.try_get::<Option<String>,_>("provision_wait_reason").ok().flatten(),
         "repository": row.try_get::<Option<String>,_>("repository").ok().flatten(), "repositoryCount": row.get::<i64,_>("repository_count"),
         "accountCount": row.get::<i64,_>("account_count"), "totalRunners": row.get::<i64,_>("total_runners"),
         "onlineRunners": row.get::<i64,_>("online_runners"), "busyRunners": row.get::<i64,_>("busy_runners"),
@@ -1433,6 +1439,7 @@ pub async fn runner_pool(
         "provisionFailureCount": pool.provision_failure_count,
         "provisionRetryAt": iso_optional(pool.provision_retry_at),
         "provisionCircuitOpen": pool.provision_circuit_open,
+        "provisionWaitReason": pool.provision_wait_reason,
         "canManage": user.role == "admin" || pool.installation_permission == "admin",
     });
     detail["builtinRunnerHostEnabled"] = json!(builtin_enabled);
@@ -3370,6 +3377,7 @@ pub async fn settings(
             "provisioningPaused": stored.get("provisioningPaused").and_then(Value::as_bool).unwrap_or(false),
             "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
             "builtinRunnerHostBudget": gridops_core::builtin_host::budget(&state.database).await,
+            "macosVmSlots": gridops_core::tart_host::vm_slots(&state.database).await,
         }, "user": { "id": user.id, "login": user.login, "role": user.role }, "users": users
     }})))
 }
@@ -3392,7 +3400,17 @@ pub async fn save_settings(
             "Retention or reconciliation settings are outside the supported range.".into(),
         ));
     }
-    let values = [
+    if input
+        .macos_vm_slots
+        .is_some_and(|slots| !gridops_core::tart_host::valid_vm_slots(slots))
+    {
+        return Err(ApiError::BadRequest(format!(
+            "The Tart host's macOS VM slots must be 1 to {}; macOS runs at most {} macOS VMs at once.",
+            gridops_core::tart_host::MAX_VM_SLOTS,
+            gridops_core::tart_host::MAX_VM_SLOTS
+        )));
+    }
+    let mut values = vec![
         ("logRetentionDays", json!(input.log_retention_days)),
         ("logStorageBudgetMb", json!(input.log_storage_budget_mb)),
         ("webhookRetentionDays", json!(input.webhook_retention_days)),
@@ -3408,6 +3426,9 @@ pub async fn save_settings(
         ("autoUpdateImages", json!(input.auto_update_images)),
         ("provisioningPaused", json!(input.provisioning_paused)),
     ];
+    if let Some(slots) = input.macos_vm_slots {
+        values.push((gridops_core::tart_host::VM_SLOTS_KEY, json!(slots)));
+    }
     let now = now_millis();
     let mut transaction = state.database.begin().await?;
     for (key, value) in values {
@@ -3419,7 +3440,10 @@ pub async fn save_settings(
         &state,
         Method::PUT,
         "v1/policy",
-        Some(json!({ "provisioningPaused": input.provisioning_paused })),
+        Some(json!({
+            "provisioningPaused": input.provisioning_paused,
+            "tartVmSlots": gridops_core::tart_host::vm_slots(&state.database).await,
+        })),
     )
     .await
     {
@@ -3432,6 +3456,7 @@ pub async fn save_settings(
         "githubSyncIntervalSeconds": input.github_sync_interval_seconds,
         "autoUpdateImages": input.auto_update_images,
         "provisioningPaused": input.provisioning_paused,
+        "macosVmSlots": input.macos_vm_slots,
     })).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -4160,6 +4185,7 @@ async fn provision(
         &runner_id,
         pool_id,
         &provider,
+        runtime,
         pool.cpu_limit,
         pool.memory_limit_mb,
     )
@@ -4699,7 +4725,8 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
       p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
-      p.provision_retry_at,p.provision_circuit_open
+      p.provision_retry_at,p.provision_circuit_open,
+      (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason
       FROM runner_pools p JOIN installations i ON i.id=p.installation_id
       LEFT JOIN repositories repo ON repo.id=p.repository_id
       WHERE p.id=?
@@ -4806,9 +4833,12 @@ async fn reserve_runner_capacity(
     runner_id: &str,
     pool_id: &str,
     provider: &str,
+    runtime: &str,
     cpu_limit: f64,
     memory_limit_mb: i64,
 ) -> ApiResult<String> {
+    // No reconciler pass: a start from here does not join the line for the
+    // Tart host's VM slots, and is refused while a pool waits for one.
     let response = manager_json(
         state,
         Method::POST,
@@ -4817,6 +4847,7 @@ async fn reserve_runner_capacity(
             "runnerId": runner_id,
             "poolId": pool_id,
             "provider": provider,
+            "runtime": runtime,
             "cpuLimit": cpu_limit,
             "memoryLimitMb": memory_limit_mb,
         })),

@@ -27,6 +27,8 @@ export type RunnerPool = {
   desiredCount: number; minCount: number; maxCount: number; cpuLimit: number; memoryLimitMb: number;
   paused: boolean; state: string; accountLogin: string; repository: string | null; repositoryCount: number;
   provisionFailureCount: number; provisionRetryAt: string | null; provisionCircuitOpen: boolean;
+  /** Why the pool is waiting, in the runner manager's words; absent from an older server. */
+  provisionWaitReason?: string | null;
   accountCount: number;
   totalRunners: number; onlineRunners: number; busyRunners: number; failedRunners: number;
   outdatedRunners: number; createdAt: string; canManage: boolean;
@@ -163,7 +165,9 @@ export type SettingsPage = {
       reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean;
       builtinRunnerHostEnabled: boolean;
       /** The built-in host's budget as set in GridOps; absent from an older server. */
-      builtinRunnerHostBudget?: BuiltinHostBudget };
+      builtinRunnerHostBudget?: BuiltinHostBudget;
+      /** The Tart host's macOS VM slots (1 or 2); absent from an older server. */
+      macosVmSlots?: number };
     user: { id: string; login: string; role: "admin" | "member" };
     users: Array<{ id: string; login: string; name: string | null; avatarUrl: string | null;
       role: "admin" | "member"; lastLoginAt: string; canDemote: boolean }>;
@@ -210,6 +214,7 @@ export const getWebhookPayloadAction = ({ data }: { data: { deliveryId: string }
 export const saveSettingsAction = ({ data }: { data: {
   logRetentionDays: number; logStorageBudgetMb: number; webhookRetentionDays: number; auditRetentionDays: number;
   reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean;
+  macosVmSlots?: number;
 } }) => api<{ ok: true }>("/api/v1/settings", { method: "PUT", body: data });
 export const updateUserRoleAction = ({ data }: { data: { userId: string; role: "admin" | "member" } }) =>
   api<{ ok: true }>(`/api/v1/users/${encodeURIComponent(data.userId)}/role`, { method: "PUT", body: { role: data.role } });

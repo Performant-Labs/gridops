@@ -4,6 +4,10 @@ mod fleet;
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     time::Duration,
 };
 
@@ -35,6 +39,9 @@ struct Reconciler {
     bitbucket: BitbucketClient,
     vault: Vault,
     http: reqwest::Client,
+    /// The pass under way (its start, in milliseconds), sent with admissions
+    /// so a pool waiting for a macOS VM slot keeps its place in line.
+    pass: Arc<AtomicI64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -178,6 +185,7 @@ async fn main() -> Result<()> {
         http: reqwest::Client::builder()
             .user_agent("GridOps reconciler/0.1")
             .build()?,
+        pass: Arc::default(),
     };
 
     tracing::info!("GridOps Rust reconciler started");
@@ -189,6 +197,7 @@ async fn main() -> Result<()> {
     tokio::spawn(github_sync_worker(reconciler.clone()));
     loop {
         let started_at = now_millis();
+        reconciler.pass.store(started_at, Ordering::Relaxed);
         let started = std::time::Instant::now();
         if let Err(error) = reconcile(&reconciler).await {
             tracing::error!(error = ?error, "reconciliation pass failed");
@@ -496,8 +505,17 @@ async fn reconcile_pool(
             match attempt {
                 ProvisionAttempt::Provisioned => provisioned += 1,
                 ProvisionAttempt::NoDemand => break,
-                ProvisionAttempt::Deferred { reason, .. } => {
-                    defer_pool_capacity(app, pool, reason.as_deref()).await?;
+                ProvisionAttempt::Deferred {
+                    reason,
+                    full_provider,
+                } => {
+                    defer_pool_capacity(
+                        &app.database,
+                        pool,
+                        reason.as_deref(),
+                        full_provider.as_deref(),
+                    )
+                    .await?;
                     capacity_deferred = true;
                     break;
                 }
@@ -527,30 +545,35 @@ async fn reconcile_pool(
         .iter()
         .filter(|runner| runner_needs_update(pool, runner))
         .count();
+    let state = if pool.paused {
+        "paused"
+    } else if provisioning_paused {
+        "provisioning-paused"
+    } else if host_blocked {
+        gridops_core::builtin_host::POOL_STATE
+    } else if pool.provision_circuit_open {
+        "blocked"
+    } else if capacity_deferred || (retry_deferred && pool.provision_failure_count == 0) {
+        "waiting"
+    } else if retry_deferred {
+        "backoff"
+    } else if outdated_count > 0 {
+        "updating"
+    } else if active_count > desired as usize {
+        "draining"
+    } else {
+        "active"
+    };
     sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
-        .bind(if pool.paused {
-            "paused"
-        } else if provisioning_paused {
-            "provisioning-paused"
-        } else if host_blocked {
-            gridops_core::builtin_host::POOL_STATE
-        } else if pool.provision_circuit_open {
-            "blocked"
-        } else if capacity_deferred || (retry_deferred && pool.provision_failure_count == 0) {
-            "waiting"
-        } else if retry_deferred {
-            "backoff"
-        } else if outdated_count > 0 {
-            "updating"
-        } else if active_count > desired as usize {
-            "draining"
-        } else {
-            "active"
-        })
+        .bind(state)
         .bind(now_millis())
         .bind(&pool.id)
         .execute(&app.database)
         .await?;
+    // The wait reason is kept only while the pool is waiting.
+    if state != "waiting" {
+        set_pool_wait_reason(&app.database, &pool.id, None).await?;
+    }
     record_capacity_sample(app, pool, &final_runners).await?;
     if provisioned > 0 || removed > 0 || rotated > 0 || rebalanced > 0 || retired > 0 {
         system_event(
@@ -1599,6 +1622,7 @@ async fn provision_on_host(
         &runner_id,
         &pool.id,
         &provider,
+        runtime,
         pool.cpu_limit,
         pool.memory_limit_mb,
     )
@@ -1815,6 +1839,7 @@ async fn provision_on_host(
     .bind(&pool.id)
     .execute(&app.database)
     .await?;
+    set_pool_wait_reason(&app.database, &pool.id, None).await?;
     system_audit(
         app,
         "runner.provisioned",
@@ -2384,6 +2409,7 @@ async fn reserve_runner_capacity(
     runner_id: &str,
     pool_id: &str,
     provider: &str,
+    runtime: &str,
     cpu_limit: f64,
     memory_limit_mb: i64,
 ) -> Result<CapacityAdmission> {
@@ -2395,8 +2421,10 @@ async fn reserve_runner_capacity(
             "runnerId": runner_id,
             "poolId": pool_id,
             "provider": provider,
+            "runtime": runtime,
             "cpuLimit": cpu_limit,
             "memoryLimitMb": memory_limit_mb,
+            "reconcilePass": app.pass.load(Ordering::Relaxed),
         })),
     )
     .await;
@@ -2429,12 +2457,18 @@ async fn release_runner_capacity(app: &Reconciler, lease_id: &str) {
     }
 }
 
+/// Manager refusals that mean "not now" rather than a fault: the pool waits
+/// and they never count towards its provisioning circuit. Lacking a macOS VM
+/// slot is one, whether admission refused the start (`vm_slot_busy`) or the
+/// Tart agent's safety-net wait ran out (`vm_slot_unavailable`, #95).
 fn deferred_manager_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     [
         "[host_capacity_exhausted]",
         "[host_disk_guardrail]",
         "[provisioning_paused]",
+        "[vm_slot_busy]",
+        "[vm_slot_unavailable]",
     ]
     .iter()
     .any(|code| message.contains(code))
@@ -2444,23 +2478,63 @@ fn host_capacity_exhausted(reason: Option<&str>) -> bool {
     reason.is_some_and(|reason| reason.contains("[host_capacity_exhausted]"))
 }
 
-async fn defer_pool_capacity(app: &Reconciler, pool: &Pool, reason: Option<&str>) -> Result<()> {
-    let retry_at = now_millis().saturating_add(30_000);
+/// How a pool waits when its next runner was deferred.
+#[derive(Debug, PartialEq, Eq)]
+struct PoolWait {
+    /// When to ask again; `None` asks on the very next pass.
+    retry_after_ms: Option<i64>,
+    /// The manager's reason, without the transport prefix, for the pool page.
+    reason: Option<String>,
+}
+
+/// A Tart VM start refused for lack of one of the Mac's VM slots, or of room
+/// in `GridOps`'s own budget on the Mac (`full_provider` is `tart`), asks again
+/// on the next pass, so the pool keeps its place in the manager's line for
+/// the Mac (a pool that misses a whole pass leaves it). Other waits pause
+/// half a minute.
+fn pool_wait(reason: Option<&str>, full_provider: Option<&str>) -> PoolWait {
+    let in_tart_line = reason.is_some_and(|reason| reason.contains("[vm_slot_busy]"))
+        || (full_provider == Some("tart") && host_capacity_exhausted(reason));
+    let retry_after_ms = if in_tart_line { None } else { Some(30_000) };
+    PoolWait {
+        retry_after_ms,
+        reason: reason.map(|reason| {
+            reason
+                .split_once("]: ")
+                .map_or(reason, |(_, message)| message)
+                .chars()
+                .take(2_000)
+                .collect()
+        }),
+    }
+}
+
+async fn defer_pool_capacity(
+    database: &SqlitePool,
+    pool: &Pool,
+    reason: Option<&str>,
+    full_provider: Option<&str>,
+) -> Result<()> {
+    let wait = pool_wait(reason, full_provider);
+    let retry_at = wait
+        .retry_after_ms
+        .map(|delay| now_millis().saturating_add(delay));
     sqlx::query(
         "UPDATE runner_pools SET state='waiting',provision_retry_at=?,updated_at=? WHERE id=?",
     )
     .bind(retry_at)
     .bind(now_millis())
     .bind(&pool.id)
-    .execute(&app.database)
+    .execute(database)
     .await?;
+    set_pool_wait_reason(database, &pool.id, wait.reason.as_deref()).await?;
     if pool.state != "waiting" {
         let mut metadata = json!({ "retryAt": retry_at });
         if let Some(reason) = reason {
             metadata["reason"] = Value::String(reason.chars().take(2_000).collect());
         }
-        system_event(
-            app,
+        pool_event(
+            database,
             Some(&pool.id),
             "warning",
             "Runner provisioning waiting",
@@ -2468,6 +2542,34 @@ async fn defer_pool_capacity(app: &Reconciler, pool: &Pool, reason: Option<&str>
             metadata,
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// Records why the pool waits, or clears it with `None`.
+async fn set_pool_wait_reason(
+    database: &SqlitePool,
+    pool_id: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    match reason {
+        Some(reason) => {
+            sqlx::query(
+                "INSERT INTO runner_pool_waits (pool_id,reason,updated_at) VALUES (?,?,?)
+                 ON CONFLICT(pool_id) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at",
+            )
+            .bind(pool_id)
+            .bind(reason)
+            .bind(now_millis())
+            .execute(database)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM runner_pool_waits WHERE pool_id=?")
+                .bind(pool_id)
+                .execute(database)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -2596,6 +2698,17 @@ async fn system_event(
     message: &str,
     metadata: Value,
 ) -> Result<()> {
+    pool_event(&app.database, pool_id, level, event, message, metadata).await
+}
+
+async fn pool_event(
+    database: &SqlitePool,
+    pool_id: Option<&str>,
+    level: &str,
+    event: &str,
+    message: &str,
+    metadata: Value,
+) -> Result<()> {
     sqlx::query("INSERT INTO runner_events (id,pool_id,level,event,message,metadata,created_at) VALUES (?,?,?,?,?,?,?)")
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(pool_id)
@@ -2604,7 +2717,7 @@ async fn system_event(
         .bind(message)
         .bind(metadata.to_string())
         .bind(now_millis())
-        .execute(&app.database)
+        .execute(database)
         .await?;
     Ok(())
 }
@@ -3037,18 +3150,134 @@ mod tests {
     }
 
     #[test]
-    fn a_tart_start_that_found_no_vm_slot_counts_as_a_failed_start() {
-        // The Tart agent has already waited for one of the Mac's VM slots by
-        // the time it says this, so it is a failed start, not a full host to
-        // defer for: it must reach the provisioning circuit like any other.
+    fn a_tart_start_that_found_no_vm_slot_is_deferred_not_counted_as_a_failed_start() {
+        // Changed by #95 (it asserted the opposite after #87): the Tart agent
+        // says this after its safety-net wait found every VM slot taken. A
+        // start that waited for a slot is not a fault, so it is deferred like
+        // a full host and never reaches the provisioning circuit.
         let no_slot = anyhow::anyhow!(
             "runner manager request failed (503 Service Unavailable) [vm_slot_unavailable]: no macOS VM slot became free within 600 seconds; the Mac allows two VMs at once, including VMs of other software"
         );
-        assert!(!deferred_manager_error(&no_slot));
+        assert!(deferred_manager_error(&no_slot));
         assert!(!host_capacity_exhausted(Some(&no_slot.to_string())));
         assert!(deferred_manager_error(&anyhow::anyhow!(
             "runner manager request failed (429 Too Many Requests) [host_capacity_exhausted]: Tart host budget would be exceeded"
         )));
+    }
+
+    const VM_SLOT_BUSY: &str = "runner manager request failed (429 Too Many Requests) [vm_slot_busy]: Waiting for a macOS VM slot: position 2 of 2 in the queue. 2 of 2 slots in use (GridOps runners: 1; other software: 1 — runner-warm-1 (ci)).";
+
+    #[test]
+    fn a_start_refused_for_lack_of_a_vm_slot_is_deferred_not_failed() {
+        assert!(deferred_manager_error(&anyhow::anyhow!(VM_SLOT_BUSY)));
+        // A busy slot is not a full CPU or memory budget: idle runners of the
+        // pool are not evicted for it.
+        assert!(!host_capacity_exhausted(Some(VM_SLOT_BUSY)));
+    }
+
+    #[test]
+    fn a_pool_waiting_for_a_vm_slot_asks_again_next_pass_to_keep_its_place() {
+        let wait = pool_wait(Some(VM_SLOT_BUSY), None);
+        assert_eq!(wait.retry_after_ms, None);
+        assert_eq!(
+            wait.reason.as_deref(),
+            Some(
+                "Waiting for a macOS VM slot: position 2 of 2 in the queue. 2 of 2 slots in use (GridOps runners: 1; other software: 1 — runner-warm-1 (ci))."
+            )
+        );
+        // A Tart VM refused because GridOps's own budget on the Mac is full
+        // waits in the same line, so it asks again next pass too.
+        let tart_budget = "runner manager request failed (429 Too Many Requests) [host_capacity_exhausted]: Waiting for room on the Tart host: position 1 of 2 in the queue. Host runner limit reached (2/1 including reservations).";
+        assert_eq!(
+            pool_wait(Some(tart_budget), Some("tart")).retry_after_ms,
+            None
+        );
+        // Other waits keep their half-minute pause.
+        let full = pool_wait(
+            Some(
+                "runner manager request failed (429 Too Many Requests) [host_capacity_exhausted]: Host runner limit reached (5/4 including reservations).",
+            ),
+            Some("docker"),
+        );
+        assert_eq!(full.retry_after_ms, Some(30_000));
+        assert_eq!(
+            full.reason.as_deref(),
+            Some("Host runner limit reached (5/4 including reservations).")
+        );
+        let no_slot_after_waiting = pool_wait(
+            Some(
+                "runner manager request failed (503 Service Unavailable) [vm_slot_unavailable]: no macOS VM slot became free within 180 seconds; the Mac allows two VMs at once, including VMs of other software",
+            ),
+            None,
+        );
+        assert_eq!(no_slot_after_waiting.retry_after_ms, Some(30_000));
+        assert_eq!(pool_wait(None, None).reason, None);
+    }
+
+    async fn pool_row(
+        database: &SqlitePool,
+    ) -> Result<(String, i64, bool, Option<i64>, Option<String>)> {
+        let row = sqlx::query(
+            "SELECT p.state,p.provision_failure_count,p.provision_circuit_open,p.provision_retry_at,w.reason AS provision_wait_reason
+             FROM runner_pools p LEFT JOIN runner_pool_waits w ON w.pool_id=p.id WHERE p.id='pool-1'",
+        )
+        .fetch_one(database)
+        .await?;
+        Ok((
+            row.get("state"),
+            row.get("provision_failure_count"),
+            row.get("provision_circuit_open"),
+            row.get("provision_retry_at"),
+            row.get("provision_wait_reason"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_vm_slot_never_opens_the_provisioning_circuit_and_says_why() -> Result<()>
+    {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-vm-slot-wait-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO runner_pools (id,installation_id,name,scope,image,created_at,updated_at)
+              VALUES ('pool-1',1,'macos','organization','runner:latest',1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+
+        // Many passes in a row find no slot: far more than the three failures
+        // that open the circuit.
+        for _ in 0..6 {
+            let pool = load_pools(&database).await?.remove(0);
+            defer_pool_capacity(&database, &pool, Some(VM_SLOT_BUSY), None).await?;
+        }
+        let (state, failures, circuit_open, retry_at, reason) = pool_row(&database).await?;
+        assert_eq!(state, "waiting");
+        assert_eq!((failures, circuit_open), (0, false));
+        assert_eq!(retry_at, None, "the pool asks again on the next pass");
+        assert!(
+            reason.as_deref().is_some_and(
+                |reason| reason.starts_with("Waiting for a macOS VM slot: position 2 of 2")
+            ),
+            "{reason:?}"
+        );
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runner_events WHERE pool_id='pool-1' AND event='Runner provisioning waiting'",
+        )
+        .fetch_one(&database)
+        .await?;
+        assert_eq!(
+            events, 1,
+            "one event when the wait begins, not one per pass"
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[test]

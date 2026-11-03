@@ -377,6 +377,8 @@ async fn the_manager_policy_carries_the_setting_and_the_budget() -> Result<()> {
             "provisioningPaused": false,
             "builtinHostEnabled": false,
             "builtinHostBudget": {"cpuMillis": null, "memoryMib": null},
+            // The Tart host's macOS VM slots go with the policy too (#95).
+            "tartVmSlots": 2,
         })
     );
     builtin_host::set_enabled(&db, "admin", true).await?;
@@ -396,7 +398,17 @@ async fn the_manager_policy_carries_the_setting_and_the_budget() -> Result<()> {
             "provisioningPaused": true,
             "builtinHostEnabled": true,
             "builtinHostBudget": {"cpuMillis": 8000, "memoryMib": null},
+            "tartVmSlots": 2,
         })
+    );
+    sqlx::query("INSERT INTO settings (key,value,updated_at) VALUES (?,?,1)")
+        .bind(gridops_core::tart_host::VM_SLOTS_KEY)
+        .bind("1")
+        .execute(&db)
+        .await?;
+    assert_eq!(
+        builtin_host::manager_policy(&db, true).await["tartVmSlots"],
+        1
     );
     Ok(())
 }

@@ -114,6 +114,7 @@ async fn manager_in_front_of(agent: Url) -> anyhow::Result<String> {
                 provider: "tart".into(),
                 cpu_limit: 4.0,
                 memory_limit_mb: 4_096,
+                vm_slot: true,
                 // Wall-clock time, which paused tokio time does not move.
                 expires_at: Instant::now() + Duration::from_mins(5),
             },
@@ -121,6 +122,7 @@ async fn manager_in_front_of(agent: Url) -> anyhow::Result<String> {
         provisioning_paused: Arc::new(AtomicBool::new(false)),
         builtin_host: builtin_host::BuiltinHost::new(false, None),
         provision_lock: Arc::new(Mutex::new(())),
+        vm_slots: Arc::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base_url = format!("http://{}", listener.local_addr()?);
