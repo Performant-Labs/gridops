@@ -8,14 +8,16 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
-## 0.1.5 - 2026-11-02
+## 0.1.5 - 2026-11-03
 
 ### Upgrading
 
-- Three database migrations run when the services start on the new version:
+- Four database migrations run when the services start on the new version:
   `0039` (the built-in runner host setting), `0040` (`fleet_hosts.deleted_at`,
-  for deleting machines) and `0041` (three columns on `workload_intents` and
-  two indexes, for retrying failed starts). (#68, #71, #74)
+  for deleting machines), `0041` (three columns on `workload_intents` and
+  two indexes, for retrying failed starts) and `0042` (a new table,
+  `runner_pool_waits`, for why a pool waits for a macOS VM slot; no existing
+  table changes). (#68, #71, #74, #98)
 - **The built-in runner host can be turned off, and migration `0039` picks its
   first value.** It stays **on** if anything may still use it: a pool that can
   start Docker runners and has no enabled fleet profile, an enabled fleet
@@ -47,12 +49,26 @@ Known problems in the current release are in the README's
   without a macOS agent. The control plane images and `compose.release.yaml`
   now have their own variable, `RELEASE_IMAGES`, and are built only when it is
   `true`. (#83)
+- **Reinstall the Tart agent on the Mac from this version** with
+  `scripts/install-tart-agent.sh`. It now reports the macOS VMs other software
+  runs, which the runner manager counts against the Mac's slots (an older agent
+  is read as "every active runner is a VM"), and the installer writes a `PATH`
+  into the launchd agent so Tart finds Softnet. The new agent binary alone
+  already fixes the `PATH`; the rest needs the new manager too. (#87, #93, #98)
 - Tart runners wait for a free macOS VM slot for up to
-  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` (default 180, maximum 1800, `0` turns the
-  wait off). It is a setting of the Tart agent on the Mac: set it before
+  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` (default 180, maximum **600**, `0` turns
+  the wait off). It is a setting of the Tart agent on the Mac: set it before
   running `scripts/install-tart-agent.sh`, which writes it into the launchd
-  agent. The new behaviour needs the Tart agent reinstalled from this
-  version. (#87)
+  agent. The agent and the installer refuse a value above 600, which is the
+  most that fits inside the runner manager's 15-minute limit for a Tart runner
+  start. With #98 this wait is only a safety net: the runner manager now
+  decides who gets a slot before the agent is asked. (#87, #96, #98)
+- New setting **Settings → General → macOS VM slots on the Tart host** (`macosVmSlots`, 1 or 2,
+  default 2): how many macOS VMs may run on the Tart host at once, counting
+  VMs started by other software. Upgrade the API, runner manager and
+  reconciler together; the reconciler sends the value to the manager on every
+  pass. Raise the Tart agent's own `GRIDOPS_TART_MAX_RUNNERS` (default 1) to 2
+  if GridOps should be able to use both slots. (#98)
 - Placement failures are counted from this version on; failures from before
   the upgrade are not in the new counts. (#67)
 - **A request with an `Authorization: Bearer …` header to a route that needs a
@@ -118,6 +134,18 @@ Known problems in the current release are in the README's
     credential and the built-in runner host settings stay browser-only.
 - A **Who may call what** table in `docs/fleet-api.md` covers every route, and
   tests check it against the router and the OpenAPI file. (#90)
+- **GridOps decides who gets a Mac's two macOS VM slots** (phase 1 of #95).
+  The runner manager admits a Tart VM start only when a slot is free, counting
+  GridOps's running VMs, starts in progress and the VMs other software runs on
+  the Mac. Every pool waits in one first-come, first-served line for the Mac,
+  and a pool that just got a slot goes to the back, so pools take turns. A
+  waiting pool shows **Waiting for a macOS VM slot** with its place in line
+  and who holds the slots, on the pool page and as `provisionWaitReason`; the
+  runner manager's health shows the slots and the line under
+  `providers.tart.vmSlots`. Waiting is not a failure and never counts towards
+  the provisioning circuit. The design and the later phases are in
+  `docs/design/mac-vm-slots.md`, and `docs/macos-runners.md` has a guide for
+  moving another project's macOS CI onto GridOps. (#98)
 
 ### Changed
 
@@ -134,7 +162,12 @@ Known problems in the current release are in the README's
 - A Tart runner whose Mac already runs two macOS VMs waits for a slot instead
   of failing; after the wait it fails with `vm_slot_unavailable` and a clear
   message. Other `tart run` failures now fail as soon as `tart run` exits.
-  Fixes #86. (#87)
+  Fixes #86. (#87) Since #98 the wait's timeout (`vm_slot_unavailable`), like
+  a refused admission (`vm_slot_busy`), is deferred and no longer counts as a
+  failed start. (#98)
+- The runner manager allows a Tart runner start 15 minutes (Docker runner
+  starts keep 3), and the Tart agent's slot wait counts from when the start
+  request reaches it, clone included. (#96)
 - `install.sh`, the CI and release workflows, the Dockerfiles and the Tart
   image scripts retry transient network errors and time out hung steps. A
   wrong version in `install.sh` now fails after about 30 seconds of retries
@@ -147,6 +180,15 @@ Known problems in the current release are in the README's
 - An agent that reconnects while its Docker engine is unreachable is no longer
   refused with `409 revision_conflict`; a missing runtime identity is not a
   conflict, and the recorded one is kept. Fixes #84. (#85)
+- A Tart runner using Softnet networking no longer fails with `softnet not
+  found in PATH` when the Tart agent runs under launchd: every `tart` command
+  gets a `PATH` that starts with Tart's and Softnet's directories. Fixes #92.
+  (#93)
+- A Tart runner start that waited for a VM slot no longer ends in an empty
+  `408 Request Timeout`: the runner manager's limit now fits the agent's wait,
+  so the agent's `503 vm_slot_unavailable` and its message reach the operator,
+  and any request the manager does time out answers with a body that says
+  what timed out. Fixes #94. (#96)
 
 ### Internal
 
@@ -155,6 +197,12 @@ Known problems in the current release are in the README's
   and fails rather than publish without a required build. (#83)
 - A regression test that a pool keeps a full pool's jobs across reconcile
   ticks (#42). (#70)
+- `scripts/test-install-tart-agent.sh` runs the Tart agent installer against
+  stand-ins and checks the launchd plist it writes; it is not yet run by CI.
+  (#93)
+- The Tart agent's end-to-end tests no longer fail now and then with `Text
+  file busy` when another test forks while the fake `tart` script is being
+  written. (#96, #98)
 
 ## 0.1.4 - 2026-11-02
 
