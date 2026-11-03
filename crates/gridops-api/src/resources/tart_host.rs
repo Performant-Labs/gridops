@@ -51,10 +51,13 @@ pub async fn tart_host(
     let health = match manager_json(&state, Method::GET, "v1/health", None).await {
         Ok(health) => health,
         // Without the manager there is no telling whether a Tart agent is
-        // configured, let alone what it holds.
+        // configured, let alone what it holds. The error itself stays in the
+        // log: every signed-in user and `pools:read` token reads this answer,
+        // and a request error names the manager's internal address.
         Err(error) => {
+            tracing::warn!(error = %error, "Tart host card: runner manager health failed");
             return Ok(Json(json!({
-                "tartAgent": "unknown", "message": error.to_string(),
+                "tartAgent": "unknown", "message": "The runner manager could not be reached.",
                 "slotSetting": slot_setting, "slots": null,
             })));
         }

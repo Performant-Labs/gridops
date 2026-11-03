@@ -2181,7 +2181,6 @@ impl TartCapacity {
     }
 }
 
-/// The runners of admissions holding a VM slot for a VM being started.
 /// The live admissions holding a VM slot, as `(runner, pool)`.
 async fn vm_slot_reservations(state: &ManagerState) -> Vec<(String, String)> {
     let mut reservations = state.reservations.lock().await;

@@ -143,7 +143,7 @@ describe("TartHostCard", () => {
   it("is hidden without a Tart agent, when the manager cannot be asked, and before data arrives", async () => {
     for (const host of [
       example("no Tart agent is configured"),
-      tartHostSchema.parse({ tartAgent: "unknown", message: "Runner manager request failed (502).", slotSetting: 2, slots: null }),
+      tartHostSchema.parse({ tartAgent: "unknown", message: "The runner manager could not be reached.", slotSetting: 2, slots: null }),
       tartHostSchema.parse({ authenticated: false, tartAgent: "unknown", message: null, slotSetting: null, slots: null }),
       null,
     ]) {

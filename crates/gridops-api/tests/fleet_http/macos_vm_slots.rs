@@ -405,13 +405,27 @@ async fn the_tart_host_card_lists_every_slot_in_use_even_unnamed() -> Result<()>
 /// agent; the answer says so, with the reason, and the slot setting.
 #[tokio::test]
 async fn the_tart_host_card_says_when_the_runner_manager_cannot_be_asked() -> Result<()> {
+    // A manager that does not answer (nothing listens on port 9). Any
+    // signed-in user and any `pools:read` token reads this message, so it
+    // must not carry the request error, which names the runner manager's
+    // internal address.
+    let unreachable = Fixture::with_manager("http://127.0.0.1:9").await?;
+    let body = tart_host(&unreachable).await?;
+    assert_eq!(body["tartAgent"], "unknown", "{body}");
+    assert_eq!(
+        body["message"], "The runner manager could not be reached.",
+        "{body}"
+    );
+    assert!(!body.to_string().contains("127.0.0.1"), "{body}");
+    assert_eq!(body["slotSetting"], 2);
+    assert!(body["slots"].is_null());
+
+    // A manager GridOps has no token for: the same answer.
     let f = Fixture::new().await?;
     let body = tart_host(&f).await?;
     assert_eq!(body["tartAgent"], "unknown", "{body}");
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| !message.is_empty()),
+    assert_eq!(
+        body["message"], "The runner manager could not be reached.",
         "{body}"
     );
     assert_eq!(body["slotSetting"], 2);

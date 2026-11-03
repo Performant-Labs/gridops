@@ -353,7 +353,7 @@
             "enum": ["available", "unavailable", "not_configured", "unknown"],
             "description": "`available`: the manager read the Tart agent's health. `unavailable`: a Tart agent is configured but the manager cannot reach it. `not_configured`: the manager has no Tart agent. `unknown`: the runner manager itself could not be asked (or the caller is signed out)."
           },
-          "message": { "type": ["string", "null"], "description": "Why the agent is `unavailable` or `unknown`; otherwise `null`." },
+          "message": { "type": ["string", "null"], "description": "For `unavailable`, the runner manager's reason. For `unknown` (signed in), always `The runner manager could not be reached.`: the request error, which can name the manager's internal address, is only logged. Otherwise `null`." },
           "slotSetting": { "type": ["integer", "null"], "minimum": 1, "maximum": 2, "description": "The GridOps setting \"macOS VM slots on the Tart host\" (`macosVmSlots`). The manager's `slots.limit` follows it once the reconciler has sent the policy." },
           "slots": {
             "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/TartHostSlots" }],
