@@ -69,8 +69,11 @@ for dir in "${path_dirs[@]}" /usr/bin /bin /usr/sbin /sbin; do
   fi
 done
 
-if [[ ! "${vm_slot_wait}" =~ '^[0-9]+$' ]] || (( vm_slot_wait > 1800 )); then
-  print -u2 "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be a whole number of seconds from 0 to 1800."
+# The runner manager waits 900 seconds for a macOS runner start; after the wait
+# the agent needs up to 300 more to boot the VM and start the runner. The agent
+# refuses a longer wait at startup too.
+if [[ ! "${vm_slot_wait}" =~ '^[0-9]{1,4}$' ]] || (( vm_slot_wait > 600 )); then
+  print -u2 "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS is ${vm_slot_wait}, but it must be a whole number of seconds from 0 to 600: the runner manager waits 900 seconds for a macOS runner start, and after the wait the agent needs up to 300 seconds to boot the VM and start the runner."
   exit 1
 fi
 if [[ ! "${bind}" =~ '^[A-Za-z0-9.:-]+$' ]]; then

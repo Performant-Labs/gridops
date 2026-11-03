@@ -43,6 +43,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 use url::Url;
 
 mod builtin_host;
+#[cfg(test)]
+mod route_timeout_tests;
 mod sandbox;
 
 #[derive(Clone)]
@@ -216,6 +218,11 @@ enum ManagerError {
         code: String,
         message: String,
     },
+    /// A request that ran out of time, with what timed out.
+    TimedOut {
+        code: &'static str,
+        message: String,
+    },
     Internal(anyhow::Error),
 }
 
@@ -235,6 +242,7 @@ impl IntoResponse for ManagerError {
             }
             Self::Guardrail { code, message } => (StatusCode::TOO_MANY_REQUESTS, code, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
+            Self::TimedOut { code, message } => (StatusCode::REQUEST_TIMEOUT, code, message),
             Self::Upstream {
                 status,
                 code,
@@ -765,6 +773,12 @@ async fn tart_agent_value(
         .map_err(|error| ManagerError::Internal(error.into()))?;
     if !status.is_success() {
         let payload = serde_json::from_str::<Value>(&text).ok();
+        let message = payload
+            .as_ref()
+            .and_then(|value| value.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or(&text)
+            .trim();
         return Err(ManagerError::Upstream {
             status,
             code: payload
@@ -773,14 +787,14 @@ async fn tart_agent_value(
                 .and_then(Value::as_str)
                 .unwrap_or("tart_agent_error")
                 .to_owned(),
-            message: payload
-                .as_ref()
-                .and_then(|value| value.get("error"))
-                .and_then(Value::as_str)
-                .unwrap_or(&text)
-                .chars()
-                .take(2_000)
-                .collect(),
+            // An empty reason would reach the operator as nothing at all.
+            message: if message.is_empty() {
+                format!(
+                    "the Tart agent answered {status} without saying why; see its log on the Mac"
+                )
+            } else {
+                message.chars().take(2_000).collect()
+            },
         });
     }
     serde_json::from_str(&text).map_err(|error| ManagerError::Internal(error.into()))
@@ -871,7 +885,6 @@ fn router(state: ManagerState) -> Router {
         .route("/v1/policy", put(update_policy))
         .route("/v1/admissions", post(reserve_capacity))
         .route("/v1/admissions/{lease_id}", delete(release_capacity))
-        .route("/v1/runners", get(list_runners).post(provision_runner))
         .route("/v1/runners/{container_id}", delete(delete_runner))
         .route("/v1/runners/{container_id}/logs", get(logs))
         .route("/v1/runners/{container_id}/{action}", post(control_runner))
@@ -879,15 +892,25 @@ fn router(state: ManagerState) -> Router {
             "/v1/sandboxes/{sandbox_id}",
             delete(sandbox::delete_sandbox),
         )
-        .layer(request_timeout(Duration::from_mins(3)));
+        .layer(request_timeout(STANDARD_REQUEST_TIMEOUT));
     // Agent commands and repository uploads outlive the standard timeout, so
     // each carries its own ceiling instead.
     let long_running = Router::new()
+        // Starting a runner sets its own limit by provider, inside the
+        // handler (see `provision_time_limit`); this only backs it up.
+        .route(
+            "/v1/runners",
+            get(list_runners)
+                .layer(request_timeout(STANDARD_REQUEST_TIMEOUT))
+                .merge(post(provision_runner).layer(request_timeout(
+                    TART_PROVISION_TIMEOUT.saturating_add(Duration::from_mins(1)),
+                ))),
+        )
         // Creating a sandbox may first pull its image.
         .route(
             "/v1/sandboxes",
             get(sandbox::list_sandboxes)
-                .layer(request_timeout(Duration::from_mins(3)))
+                .layer(request_timeout(STANDARD_REQUEST_TIMEOUT))
                 .merge(
                     post(sandbox::create_sandbox).layer(request_timeout(SANDBOX_CREATE_TIMEOUT)),
                 ),
@@ -904,12 +927,62 @@ fn router(state: ManagerState) -> Router {
     standard
         .merge(long_running)
         .with_state(state)
+        .layer(axum::middleware::from_fn(explain_timeouts))
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
 }
 
+/// How long most manager requests may take.
+const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_mins(3);
+
+/// How long a Tart runner start may take, from the request reaching the
+/// manager to the agent's answer. The Tart agent fits its whole start inside
+/// this: it refuses a `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` above 600, and after
+/// that wait, which counts from its own start request, it needs at most three
+/// minutes to boot the VM and a little to start the runner. Keep it in step
+/// with `MANAGER_TART_START_TIMEOUT` in the Tart agent, whose tests compare
+/// the two.
+const TART_PROVISION_TIMEOUT: Duration = Duration::from_mins(15);
+
+/// How long starting a runner on `provider` may take. A Docker runner keeps
+/// the standard limit it has always had; a Tart runner can wait for one of
+/// the Mac's VM slots, so it gets `TART_PROVISION_TIMEOUT`.
+fn provision_time_limit(provider: &str) -> Duration {
+    if provider == "tart" {
+        TART_PROVISION_TIMEOUT
+    } else {
+        STANDARD_REQUEST_TIMEOUT
+    }
+}
+
 fn request_timeout(timeout: Duration) -> TimeoutLayer {
     TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
+
+/// Gives a request that ran out of time a body that says so. The timeout
+/// layers answer `408` with no body, which reached operators as an empty
+/// error; a `408` a handler produced already explains itself.
+async fn explain_timeouts(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = tokio::time::Instant::now();
+    let response = next.run(request).await;
+    if response.status() != StatusCode::REQUEST_TIMEOUT
+        || axum::body::HttpBody::size_hint(response.body()).exact() != Some(0)
+    {
+        return response;
+    }
+    ManagerError::TimedOut {
+        code: "request_timeout",
+        message: format!(
+            "the runner manager stopped {method} {path} after {} seconds, its time limit for that request",
+            started.elapsed().as_secs()
+        ),
+    }
+    .into_response()
 }
 
 async fn health(
@@ -1173,8 +1246,45 @@ fn runner_cap_add() -> Vec<String> {
 
 async fn provision_runner(
     State(state): State<ManagerState>,
+    auth: ManagerAuth,
+    Json(input): Json<ProvisionRunner>,
+) -> Result<(StatusCode, Json<Value>), ManagerError> {
+    let limit = provision_time_limit(&input.provider);
+    let provider = input.provider.clone();
+    let lease_id = input.capacity_lease.clone();
+    if let Ok(result) =
+        tokio::time::timeout(limit, provision_runner_in_time(state.clone(), auth, input)).await
+    {
+        return result;
+    }
+    // Abandoned part way: give the capacity back as finishing would have.
+    state.reservations.lock().await.remove(&lease_id);
+    let seconds = limit.as_secs();
+    Err(if provider == "tart" {
+        tracing::warn!(
+            seconds,
+            "the Tart agent did not finish a runner start in time"
+        );
+        ManagerError::TimedOut {
+            code: "tart_start_timeout",
+            message: format!(
+                "the Tart agent did not finish starting the macOS runner within {seconds} seconds, the runner manager's limit for a Tart runner start; see the Tart agent's log on the Mac"
+            ),
+        }
+    } else {
+        ManagerError::TimedOut {
+            code: "runner_start_timeout",
+            message: format!(
+                "the runner manager did not finish starting the {provider} runner within {seconds} seconds, its limit for a runner start"
+            ),
+        }
+    })
+}
+
+async fn provision_runner_in_time(
+    state: ManagerState,
     _auth: ManagerAuth,
-    Json(mut input): Json<ProvisionRunner>,
+    mut input: ProvisionRunner,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
     input.validate()?;
     if input.provider != "tart" {

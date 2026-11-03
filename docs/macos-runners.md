@@ -132,7 +132,9 @@ The agent treats that as a reason to wait, not a failed start, so GridOps shares
 GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=180
 ```
 
-The default is 180 seconds (3 minutes) and the maximum is 1800. `0` turns waiting off. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
+The wait counts from when the runner start request reaches the agent, so cloning the VM is part of it. The default is 180 seconds (3 minutes) and the maximum is 600 (10 minutes). `0` turns waiting off. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
+
+The maximum follows from how long the runner manager waits for a macOS runner start: 900 seconds (15 minutes), counted from when the request reaches the manager. A slot can free up at the very end of the wait, and the VM then still has up to 180 seconds to boot and some time to start the runner, so the agent keeps 300 seconds back: 600 + 300 = 900. With a longer wait the manager would give up first and the start would fail as a timeout instead of saying no slot became free, so the agent refuses to start with a value above 600, and so does the installer, each saying why. If a start ever does outlast the manager's 900 seconds, for example because cloning the base VM took that long, it fails with `the Tart agent did not finish starting the macOS runner within 900 seconds, ...` (code `tart_start_timeout`). Docker runner starts keep the manager's standard 180-second limit.
 
 While a runner waits:
 
@@ -142,7 +144,9 @@ While a runner waits:
 
 If no slot frees up in time, the agent deletes the clone and the start fails with `no macOS VM slot became free within N seconds; the Mac allows two VMs at once, including VMs of other software`. GridOps records that as the runner's failure reason and counts it like any other failed start: three in a row open the pool's provisioning circuit for a cool-down. Any other `tart run` failure ends the start at once, without waiting, and the agent's log shows Tart's own message.
 
-The wait happens inside the runner start request, as cloning and booting already do. The reconciler waits for that request before moving on, and the manager starts no other runner meanwhile, so a long wait also delays the rest of their work. Keep the setting close to how long other software's VMs usually hold a slot.
+The wait happens inside the runner start request, as cloning and booting already do. The reconciler waits for that request, with no time limit of its own, before moving on, and the manager starts no other runner meanwhile, so a long wait also delays the rest of their work. Keep the setting close to how long other software's VMs usually hold a slot.
+
+Starting a runner by hand from the GridOps UI or API is different: the GridOps API gives each request 30 seconds to answer, so a macOS runner that has to wait for a slot, or takes longer than that to clone and boot, is better left to the reconciler.
 
 Each macOS runner receives only a short-lived GitHub JIT configuration over stdin. It is never placed in a command-line argument or persisted by the Tart agent. When the job ends, the VM is stopped; the reconciler deletes the clone and its retained management record. The base VM remains stopped and unchanged.
 
