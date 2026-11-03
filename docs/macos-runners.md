@@ -116,6 +116,28 @@ GRIDOPS_TART_MIN_FREE_DISK_MB=40960
 
 These are native-host limits, separate from the Docker container limits. The central manager also includes active Tart capacity when admitting any new runner, so Docker and macOS work cannot independently claim the same CPU envelope.
 
+### Sharing the Mac's two VM slots
+
+macOS runs at most **two** macOS virtual machines at once on one Mac. The limit is system wide: VMs started by other software on the same Mac, such as another project's CI runner VMs, take the same two slots. `GRIDOPS_TART_MAX_RUNNERS` only limits GridOps's own runners, and the agent cannot see other software's VMs, so a slot can be taken when GridOps starts a VM. Tart then fails with `The number of VMs exceeds the system limit`.
+
+The agent treats that as a reason to wait, not a failed start, so GridOps shares the slots with other software instead of competing with it. It keeps the cloned VM and retries `tart run`, after 2 seconds at first and then less often, up to every 30 seconds, until a slot frees up or the wait runs out:
+
+```dotenv
+GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=180
+```
+
+The default is 180 seconds (3 minutes) and the maximum is 1800. `0` turns waiting off. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
+
+While a runner waits:
+
+- the agent's log (`~/.gridops/tart-agent/logs/agent.log`) says every macOS VM slot is in use and that it is waiting, and says again when a slot frees up and the VM starts;
+- the agent's runner list (`GET /v1/runners`, which the manager passes on) shows the runner with state `created` and status `waiting for a free macOS VM slot since <time>`;
+- in GridOps the runner stays **starting**. Waiting is not a failure, so it does not count towards the pool's provisioning failures.
+
+If no slot frees up in time, the agent deletes the clone and the start fails with `no macOS VM slot became free within N seconds; the Mac allows two VMs at once, including VMs of other software`. GridOps records that as the runner's failure reason and counts it like any other failed start: three in a row open the pool's provisioning circuit for a cool-down. Any other `tart run` failure ends the start at once, without waiting, and the agent's log shows Tart's own message.
+
+The wait happens inside the runner start request, as cloning and booting already do. The reconciler waits for that request before moving on, and the manager starts no other runner meanwhile, so a long wait also delays the rest of their work. Keep the setting close to how long other software's VMs usually hold a slot.
+
 Each macOS runner receives only a short-lived GitHub JIT configuration over stdin. It is never placed in a command-line argument or persisted by the Tart agent. When the job ends, the VM is stopped; the reconciler deletes the clone and its retained management record. The base VM remains stopped and unchanged.
 
 ## What a release needs from the macOS runner

@@ -22,6 +22,7 @@ cpu_budget="${GRIDOPS_TART_CPU_BUDGET:-4}"
 memory_budget="${GRIDOPS_TART_MEMORY_BUDGET_MB:-6144}"
 max_runners="${GRIDOPS_TART_MAX_RUNNERS:-1}"
 min_free_disk="${GRIDOPS_TART_MIN_FREE_DISK_MB:-40960}"
+vm_slot_wait="${GRIDOPS_TART_VM_SLOT_WAIT_SECONDS:-180}"
 agent_token="${GRIDOPS_TART_AGENT_TOKEN:-}"
 
 if [[ -z "${tart_binary}" || ! -x "${tart_binary}" ]]; then
@@ -45,6 +46,10 @@ if [[ "${network_mode}" == "softnet" ]]; then
     print -u2 "Then: sudo chmod u+s ${softnet_binary}"
     exit 1
   fi
+fi
+if [[ ! "${vm_slot_wait}" =~ '^[0-9]+$' ]] || (( vm_slot_wait > 1800 )); then
+  print -u2 "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be a whole number of seconds from 0 to 1800."
+  exit 1
 fi
 if [[ ! "${bind}" =~ '^[A-Za-z0-9.:-]+$' ]]; then
   print -u2 "GRIDOPS_TART_AGENT_BIND contains unsupported characters."
@@ -81,6 +86,7 @@ sed \
   -e "s|__MEMORY_BUDGET__|$(escape_sed "${memory_budget}")|g" \
   -e "s|__MAX_RUNNERS__|$(escape_sed "${max_runners}")|g" \
   -e "s|__MIN_FREE_DISK__|$(escape_sed "${min_free_disk}")|g" \
+  -e "s|__VM_SLOT_WAIT__|$(escape_sed "${vm_slot_wait}")|g" \
   -e "s|__STDOUT_LOG__|$(escape_sed "${agent_home}/logs/agent.log")|g" \
   -e "s|__STDERR_LOG__|$(escape_sed "${agent_home}/logs/agent.error.log")|g" \
   "${plist_source}" > "${plist_target}"

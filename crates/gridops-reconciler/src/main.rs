@@ -2997,6 +2997,21 @@ mod tests {
     }
 
     #[test]
+    fn a_tart_start_that_found_no_vm_slot_counts_as_a_failed_start() {
+        // The Tart agent has already waited for one of the Mac's VM slots by
+        // the time it says this, so it is a failed start, not a full host to
+        // defer for: it must reach the provisioning circuit like any other.
+        let no_slot = anyhow::anyhow!(
+            "runner manager request failed (503 Service Unavailable) [vm_slot_unavailable]: no macOS VM slot became free within 600 seconds; the Mac allows two VMs at once, including VMs of other software"
+        );
+        assert!(!deferred_manager_error(&no_slot));
+        assert!(!host_capacity_exhausted(Some(&no_slot.to_string())));
+        assert!(deferred_manager_error(&anyhow::anyhow!(
+            "runner manager request failed (429 Too Many Requests) [host_capacity_exhausted]: Tart host budget would be exceeded"
+        )));
+    }
+
+    #[test]
     fn deferred_github_cleanup_uses_bounded_backoff() {
         assert_eq!(github_cleanup_backoff_ms(1), 30_000);
         assert_eq!(github_cleanup_backoff_ms(2), 60_000);
