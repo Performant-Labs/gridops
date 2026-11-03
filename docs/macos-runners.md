@@ -48,6 +48,8 @@ Interrupted segmented pulls resume from `~/Library/Caches/GridOps/tart-images`. 
 
 Use an `-xcode` Tart image instead when workflows require a preinstalled Xcode toolchain. The pool's **Tart base VM** field must contain the local prepared VM name, not the remote OCI reference.
 
+When you create a pool in **Runner pools → New pool** and select **macOS · Tart** under **Providers** with **macOS execution** set to **Virtual machine**, the form asks for the **Tart base VM**. It starts with the control plane's `GRIDOPS_TART_RUNNER_IMAGE` (or `gridops-macos-tahoe-base`); replace it with the pool's own prepared VM before you select **Create pool**, because a new pool starts runners as soon as it is saved and a matching queued job clones whatever VM the pool names. **Native on host** clones no VM, so the field is hidden. A pool with both Docker and Tart asks for a Docker image and a Tart base VM. Change it later in the pool's **Settings → Tart base VM**.
+
 ## Network isolation
 
 GridOps starts VMs without graphics, audio, clipboard sharing, or shared host directories. It supports two Tart network modes:
@@ -94,7 +96,7 @@ GRIDOPS_TART_AGENT_URL=http://host.docker.internal:8790
 GRIDOPS_TART_AGENT_TOKEN=<same independently generated token>
 ```
 
-Restart the manager after changing these values. Its health response reports Docker and Tart independently, and the pool form will offer **Tart · macOS ARM64**.
+Restart the manager after changing these values. Its health response reports Docker and Tart independently, and the pool form will offer **macOS · Tart** under **Providers**.
 
 The installer builds `gridops-tart-agent`, installs it under `~/.gridops/tart-agent/bin`, and registers a per-user launchd agent. Inspect its status and logs with:
 

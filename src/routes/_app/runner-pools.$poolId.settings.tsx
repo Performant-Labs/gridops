@@ -15,6 +15,7 @@ import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import {
   type RepositoryOption,
   type RunnerGroupOption,
@@ -265,9 +266,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             </SettingsRow>
           ) : null}
           {includesTart && macosRuntime === "vm" ? (
-            <SettingsRow description="A stopped, prepared Tart VM that each runner clones. xcodebuild needs an Xcode-ready VM." htmlFor="tart-image" label="Tart base VM">
-              <Input className="font-mono text-xs" id="tart-image" onChange={(event) => setTartImage(event.target.value)} required value={tartImage} />
-            </SettingsRow>
+            <TartBaseVmRow bitbucket={pool.bitbucketConnectionIds.length > 0} onChange={setTartImage} value={tartImage} />
           ) : null}
           <SettingsRow description="Comma-separated. self-hosted, OS, architecture, and the pool name are added automatically." htmlFor="pool-labels" label="Additional labels">
             <Input id="pool-labels" name="labels" onChange={(event) => setLabels(event.target.value)} placeholder="gpu, large" value={labels} />

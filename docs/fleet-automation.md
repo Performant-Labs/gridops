@@ -347,6 +347,12 @@ curl -sS -X DELETE "$GRIDOPS_URL/api/v1/runner-pools/$POOL_ID" \
   -H "Authorization: Bearer $GRIDOPS_API_TOKEN"
 ```
 
+For a pool that includes Tart, `tartImage` is the Tart base VM each runner
+clones (a local VM name on the Mac); with Tart as the only or first provider
+`image` may carry it instead. When both `image` and the primary provider's
+`tartImage` or `dockerImage` are sent they must be equal, so a body built from
+`.defaults` must replace `tartImage` too, not only `image`.
+
 A validation error is `400 {"error": "..."}` with the form's message, a
 duplicate name `409`, and removing a pool that still has runners on fleet
 machines `409` until they stop. Creating a pool starts its `desiredCount`

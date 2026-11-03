@@ -149,6 +149,12 @@ impl CreateRunnerPool {
             self.max_count,
         )?;
         validate_macos_runtime(&self.macos_runtime, &self.selected_providers())?;
+        validate_primary_image(
+            &self.provider,
+            &self.image,
+            &self.docker_image,
+            &self.tart_image,
+        )?;
         if repositories.len() > 1_000
             || repositories.iter().any(|repository_id| *repository_id <= 0)
         {
@@ -448,6 +454,31 @@ fn selected_image(kind: &str, provider: &str, image: &str, configured: &str) -> 
     }
 }
 
+/// A create request names the primary provider's image twice, as `image` and
+/// as `dockerImage` or `tartImage`, but only the provider-specific field is
+/// stored when it is sent. Two different values would keep one silently, for
+/// example the server's default Tart base VM instead of the one in `image`,
+/// so they must agree (or the provider-specific field be left out).
+fn validate_primary_image(
+    provider: &str,
+    image: &str,
+    docker_image: &str,
+    tart_image: &str,
+) -> Result<(), String> {
+    let (field, configured) = if provider == "tart" {
+        ("tartImage", tart_image)
+    } else {
+        ("dockerImage", docker_image)
+    };
+    if configured.is_empty() || configured == image {
+        Ok(())
+    } else {
+        Err(format!(
+            "image and {field} name different images for the primary provider; send the same value in both, or leave {field} out."
+        ))
+    }
+}
+
 fn valid_image(image: &str) -> bool {
     image.trim() == image && !image.is_empty() && image.len() <= 300
 }
@@ -524,6 +555,48 @@ mod tests {
         assert!(multi_repository.validate().is_err());
         multi_repository.max_count = 2;
         assert!(multi_repository.validate().is_ok());
+    }
+
+    /// A create request names the primary provider's image twice: `image`
+    /// and `tartImage` (or `dockerImage`). Only the provider-specific field is
+    /// stored, so a request whose two values disagree would silently clone a
+    /// VM the caller did not ask for (issue #97). It is refused instead.
+    #[test]
+    fn refuses_a_create_whose_image_and_primary_provider_image_disagree() {
+        let mut tart = pool();
+        tart.provider = "tart".into();
+        tart.providers = vec!["tart".into()];
+        tart.image = "acme-xcode-26".into();
+        tart.tart_image = "acme-xcode-26".into();
+        assert!(tart.validate().is_ok());
+        assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
+
+        // Omitting tartImage keeps working: `image` is the Tart base VM.
+        tart.tart_image = String::new();
+        assert!(tart.validate().is_ok());
+        assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
+
+        // The server default left in tartImage next to the VM the caller
+        // meant in `image` is a contradiction, not a choice.
+        tart.tart_image = "gridops-macos-tahoe-base".into();
+        assert_eq!(
+            tart.validate(),
+            Err("image and tartImage name different images for the primary provider; send the same value in both, or leave tartImage out.".into())
+        );
+
+        let mut docker = pool();
+        docker.image = "ghcr.io/acme/runner:2".into();
+        assert_eq!(
+            docker.validate(),
+            Err("image and dockerImage name different images for the primary provider; send the same value in both, or leave dockerImage out.".into())
+        );
+
+        // A secondary provider's image is independent of `image`.
+        let mut mixed = pool();
+        mixed.providers = vec!["docker".into(), "tart".into()];
+        mixed.tart_image = "acme-xcode-26".into();
+        assert!(mixed.validate().is_ok());
+        assert_eq!(mixed.selected_tart_image(), "acme-xcode-26");
     }
 
     #[test]
