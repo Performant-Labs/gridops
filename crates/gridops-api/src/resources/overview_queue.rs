@@ -117,6 +117,8 @@ pub(super) struct QueueBreakdown {
     /// Waiting and manual jobs by the pool they are under.
     pub by_pool: HashMap<String, i64>,
     pub oldest_waiting_millis: Option<i64>,
+    /// The job that has waited `oldest_waiting_millis`.
+    pub oldest_waiting_job: Option<i64>,
     /// Unmatched jobs asking for labels no pool has, most jobs first.
     pub missing_labels: Vec<MissingLabels>,
     /// Unmatched jobs that ask for no missing label: every pool that could run
@@ -216,7 +218,10 @@ pub(super) fn split_queue(
             breakdown.waiting += 1;
             *breakdown.by_pool.entry(pool.clone()).or_default() += 1;
             let age = now.saturating_sub(job.created_at);
-            breakdown.oldest_waiting_millis = breakdown.oldest_waiting_millis.max(Some(age));
+            if breakdown.oldest_waiting_millis < Some(age) {
+                breakdown.oldest_waiting_millis = Some(age);
+                breakdown.oldest_waiting_job = Some(job.id);
+            }
             continue;
         }
         if let Some(pool) = manual.get(&job.id) {

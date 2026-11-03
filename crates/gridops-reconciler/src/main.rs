@@ -14,11 +14,12 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
 use gridops_core::{
-    BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowRun, JitRequest,
-    ProviderCapacity, RepositoryCapacity, RunnerTarget, Vault, WorkflowJobPage, WorkflowRunPage,
-    assigned_queued_jobs, associate_runner_with_job, connect_database, effective_runner_labels,
-    next_runner_provider, next_runner_repository, now_millis, provider_capacities,
-    provider_capacity_deficit, repository_capacities, repository_capacity_deficit, scale_up_target,
+    BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowJob,
+    GitHubWorkflowRun, JitRequest, ProviderCapacity, RepositoryCapacity, RunnerTarget, Vault,
+    WorkflowJobPage, WorkflowRunPage, assigned_queued_jobs, associate_runner_with_job,
+    connect_database, effective_runner_labels, next_runner_provider, next_runner_repository,
+    now_millis, provider_capacities, provider_capacity_deficit, repository_capacities,
+    repository_capacity_deficit, scale_up_target,
 };
 use reqwest::{Method, StatusCode};
 use secrecy::ExposeSecret as _;
@@ -697,8 +698,27 @@ const FLEET_IDLE_EVICTION_GRACE_MS: i64 = 2 * 60 * 1_000;
 /// fleet runners alone, and the fleet scheduler queues rather than reporting a
 /// full host, so without this idle runners hold a machine indefinitely.
 async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> {
-    let now = now_millis();
-    let idle: Option<String> = sqlx::query_scalar(
+    let Some(idle) = idle_fleet_runner_to_evict(&app.database, &pool.id, now_millis()).await?
+    else {
+        return Ok(false);
+    };
+    let current = runners(app, &pool.id).await?;
+    let Some(runner) = current.iter().find(|runner| runner.id == idle) else {
+        return Ok(false);
+    };
+    tracing::info!(pool = %pool.id, runner = %runner.name, "evicting an idle fleet runner for queued work");
+    delete_runner(app, pool, runner).await
+}
+
+/// The idle fleet runner of `pool_id` that [`evict_idle_fleet_runner`] would
+/// release: one parked at least the grace period on a repository with no
+/// queued job for its OS, while fleet work in the pool waits.
+async fn idle_fleet_runner_to_evict(
+    database: &SqlitePool,
+    pool_id: &str,
+    now: i64,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
         r#"SELECT r.id FROM runners r
           WHERE r.pool_id=? AND r.status IN ('online','idle') AND r.busy=0 AND r.updated_at<?
             AND EXISTS (SELECT 1 FROM workload_intents own WHERE own.workload_id=r.id)
@@ -712,19 +732,10 @@ async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> 
                                         AND instr(lower(job.labels),'"macos"')=0)))
           ORDER BY r.updated_at LIMIT 1"#,
     )
-    .bind(&pool.id)
+    .bind(pool_id)
     .bind(now - FLEET_IDLE_EVICTION_GRACE_MS)
-    .fetch_optional(&app.database)
-    .await?;
-    let Some(idle) = idle else {
-        return Ok(false);
-    };
-    let current = runners(app, &pool.id).await?;
-    let Some(runner) = current.iter().find(|runner| runner.id == idle) else {
-        return Ok(false);
-    };
-    tracing::info!(pool = %pool.id, runner = %runner.name, "evicting an idle fleet runner for queued work");
-    delete_runner(app, pool, runner).await
+    .fetch_optional(database)
+    .await?)
 }
 
 /// Deletes one idle runner that has no work, when a repository or provider is
@@ -1028,7 +1039,7 @@ async fn maybe_sync_github(app: &Reconciler) -> Result<()> {
             tracing::warn!(repository = %repository.full_name, error = ?error, "GitHub workflow polling failed for repository");
         }
     }
-    Ok(())
+    confirm_open_jobs(app, &mut tokens).await
 }
 
 /// Populates `repositories` for an organization-scoped pool's installation.
@@ -1328,7 +1339,8 @@ async fn upsert_workflow_run(
               head_sha=excluded.head_sha,actor_login=excluded.actor_login,html_url=excluded.html_url,
               started_at=excluded.started_at,completed_at=excluded.completed_at,
               github_created_at=excluded.github_created_at,
-              github_updated_at=excluded.github_updated_at,updated_at=excluded.updated_at"#,
+              github_updated_at=excluded.github_updated_at,updated_at=excluded.updated_at
+            WHERE excluded.run_attempt>=workflow_runs.run_attempt"#,
         )
         .bind(run.id)
         .bind(repository_id)
@@ -1353,11 +1365,18 @@ async fn upsert_workflow_run(
         .bind(updated_at)
         .bind(now)
         .bind(now)
-        .execute(connection)
+        .execute(&mut *connection)
         .await?;
+    // A newer attempt means the earlier ones are over (#33).
+    gridops_core::finish_earlier_attempts(&mut *connection, run.id, now).await?;
     Ok(())
 }
 
+/// Records every job of `run_id` as GitHub lists it, the jobs of earlier
+/// attempts included (`filter=all`). With GitHub's default, only the newest
+/// attempt's jobs are listed, so after a re-run an earlier attempt's job whose
+/// completion had been missed was never seen again and stayed queued or in
+/// progress (#33).
 async fn sync_run_jobs(
     app: &Reconciler,
     repository: &Repository,
@@ -1369,7 +1388,7 @@ async fn sync_run_jobs(
             .github
             .get(
                 &format!(
-                    "/repos/{}/{}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}",
+                    "/repos/{}/{}/actions/runs/{run_id}/jobs?filter=all&per_page=100&page={page}",
                     repository.owner, repository.name
                 ),
                 token,
@@ -1379,40 +1398,13 @@ async fn sync_run_jobs(
         let now = now_millis();
         let jobs = &response.jobs;
         retry_when_busy(|| async move {
-        let mut transaction = app.database.begin().await?;
-        for job in jobs {
-            sqlx::query(
-                r#"INSERT INTO workflow_jobs (
-                  id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,
-                  runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,name=excluded.name,
-                  status=excluded.status,conclusion=excluded.conclusion,runner_id=excluded.runner_id,
-                  runner_name=excluded.runner_name,runner_group_id=excluded.runner_group_id,
-                  runner_group_name=excluded.runner_group_name,labels=excluded.labels,
-                  html_url=excluded.html_url,started_at=excluded.started_at,
-                  completed_at=excluded.completed_at,updated_at=excluded.updated_at"#,
-            )
-            .bind(job.id)
-            .bind(job.run_id)
-            .bind(&job.name)
-            .bind(&job.status)
-            .bind(&job.conclusion)
-            .bind(job.runner_id)
-            .bind(&job.runner_name)
-            .bind(job.runner_group_id)
-            .bind(&job.runner_group_name)
-            .bind(serde_json::to_string(&job.labels)?)
-            .bind(&job.html_url)
-            .bind(parse_github_date(job.started_at.as_deref()))
-            .bind(parse_github_date(job.completed_at.as_deref()))
-            .bind(parse_github_date(job.started_at.as_deref()).unwrap_or(now))
-            .bind(now)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
-        anyhow::Ok(())
+            let mut transaction = app.database.begin().await?;
+            for job in jobs {
+                upsert_workflow_job(&mut transaction, job, now).await?;
+            }
+            gridops_core::finish_earlier_attempts(&mut *transaction, run_id, now).await?;
+            transaction.commit().await?;
+            anyhow::Ok(())
         })
         .await?;
         for job in &response.jobs {
@@ -1428,6 +1420,186 @@ async fn sync_run_jobs(
         }
         if final_page {
             break;
+        }
+    }
+    Ok(())
+}
+
+/// Records a job as GitHub reported it at `now`.
+async fn upsert_workflow_job(
+    connection: &mut SqliteConnection,
+    job: &GitHubWorkflowJob,
+    now: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO workflow_jobs (
+          id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,
+          runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,name=excluded.name,
+          status=excluded.status,conclusion=excluded.conclusion,runner_id=excluded.runner_id,
+          runner_name=excluded.runner_name,runner_group_id=excluded.runner_group_id,
+          runner_group_name=excluded.runner_group_name,labels=excluded.labels,
+          html_url=excluded.html_url,started_at=excluded.started_at,
+          completed_at=excluded.completed_at,updated_at=excluded.updated_at"#,
+    )
+    .bind(job.id)
+    .bind(job.run_id)
+    .bind(&job.name)
+    .bind(&job.status)
+    .bind(&job.conclusion)
+    .bind(job.runner_id)
+    .bind(&job.runner_name)
+    .bind(job.runner_group_id)
+    .bind(&job.runner_group_name)
+    .bind(serde_json::to_string(&job.labels)?)
+    .bind(&job.html_url)
+    .bind(parse_github_date(job.started_at.as_deref()))
+    .bind(parse_github_date(job.completed_at.as_deref()))
+    .bind(parse_github_date(job.started_at.as_deref()).unwrap_or(now))
+    .bind(now)
+    .execute(&mut *connection)
+    .await?;
+    gridops_core::record_job_report(&mut *connection, job.id, job.run_attempt, now).await?;
+    Ok(())
+}
+
+/// How long a job may be open with no word from GitHub before the job check
+/// asks GitHub about it, and how long before it asks again: the age at which
+/// the Overview raises "Jobs have been waiting for over five minutes", so the
+/// job that alert names has been confirmed with GitHub by the time it shows,
+/// or within a sync of it. Webhooks and the poll keep jobs of the runs they
+/// see confirmed, so in a healthy queue the check asks about almost nothing.
+const JOB_CHECK_AGE_MS: i64 = 5 * 60 * 1_000;
+
+/// Most jobs the check asks GitHub about per sync, one request each. At the
+/// default sync interval (60 s) that is at most 600 requests an hour, 1,200
+/// at the shortest (30 s), against the 5,000 an hour an installation token is
+/// allowed at least; the requests are made one after another, never in
+/// parallel. A backlog of stale rows clears at this rate too.
+const JOB_CHECK_LIMIT: i64 = 10;
+
+#[derive(Debug, FromRow)]
+struct UnconfirmedJob {
+    id: i64,
+    installation_id: i64,
+    owner: String,
+    name: String,
+}
+
+/// Open jobs GitHub has said nothing about for [`JOB_CHECK_AGE_MS`] and that
+/// were not asked about within it either, at most `limit`: jobs of unfinished
+/// runs before jobs of finished ones (only the first can hold up the queue),
+/// waiting jobs before running ones, oldest first, so the job the queue alert
+/// names is checked first.
+async fn unconfirmed_open_jobs(
+    database: &SqlitePool,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<UnconfirmedJob>> {
+    let before = now - JOB_CHECK_AGE_MS;
+    Ok(sqlx::query_as::<_, UnconfirmedJob>(
+        r#"SELECT wj.id,repo.installation_id,repo.owner,repo.name
+           FROM workflow_jobs wj
+           JOIN workflow_runs wr ON wr.id=wj.run_id
+           JOIN repositories repo ON repo.id=wr.repository_id
+           JOIN installations i ON i.id=repo.installation_id
+           LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
+           WHERE wj.status<>'completed' AND i.suspended_at IS NULL
+             AND wj.created_at<? AND COALESCE(sync.confirmed_at,0)<?
+             AND COALESCE(sync.checked_at,0)<?
+           ORDER BY CASE WHEN wr.status<>'completed' THEN 0 ELSE 1 END,
+             CASE WHEN wj.status='in_progress' THEN 1 ELSE 0 END,
+             wj.created_at,wj.id
+           LIMIT ?"#,
+    )
+    .bind(before)
+    .bind(before)
+    .bind(before)
+    .bind(limit)
+    .fetch_all(database)
+    .await?)
+}
+
+/// Asks GitHub (`GET /repos/{owner}/{repo}/actions/jobs/{id}`) about open jobs
+/// it has not reported on lately and records the answer (#33, #34). This
+/// catches what the source fix cannot: a completion missed for any other
+/// reason, rows recorded before attempts were stored, and runs the poll no
+/// longer lists. A job GitHub no longer has (404) can never run and is
+/// cancelled, as a deleted run's jobs are. `tokens` caches installation tokens
+/// for the sync.
+async fn confirm_open_jobs(
+    app: &Reconciler,
+    tokens: &mut HashMap<i64, Option<String>>,
+) -> Result<()> {
+    let jobs = unconfirmed_open_jobs(&app.database, now_millis(), JOB_CHECK_LIMIT).await?;
+    for job in jobs {
+        let token = if let Some(token) = tokens.get(&job.installation_id) {
+            token.clone()
+        } else {
+            let token = installation_token(app, job.installation_id)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(installation_id = job.installation_id, error = ?error, "no GitHub token to check open jobs with");
+                    None
+                });
+            tokens.insert(job.installation_id, token.clone());
+            token
+        };
+        let Some(token) = token else {
+            continue;
+        };
+        let now = now_millis();
+        sqlx::query(
+            "INSERT INTO workflow_job_sync (job_id,checked_at) VALUES (?,?)
+             ON CONFLICT(job_id) DO UPDATE SET checked_at=excluded.checked_at",
+        )
+        .bind(job.id)
+        .bind(now)
+        .execute(&app.database)
+        .await?;
+        let result = app
+            .github
+            .get::<GitHubWorkflowJob>(
+                &format!("/repos/{}/{}/actions/jobs/{}", job.owner, job.name, job.id),
+                &token,
+            )
+            .await;
+        match result {
+            Ok(remote) => {
+                let mut connection = app.database.acquire().await?;
+                upsert_workflow_job(&mut connection, &remote, now).await?;
+                gridops_core::finish_earlier_attempts(&mut *connection, remote.run_id, now).await?;
+                drop(connection);
+                associate_runner_with_job(
+                    &app.database,
+                    remote.id,
+                    &remote.status,
+                    remote.runner_id,
+                    remote.runner_name.as_deref(),
+                    now,
+                )
+                .await?;
+                tracing::info!(job_id = job.id, status = %remote.status, "checked an open job with GitHub");
+            }
+            Err(error) if github_not_found(&error) => {
+                sqlx::query(
+                    "UPDATE workflow_jobs SET status='completed',conclusion=COALESCE(conclusion,'cancelled'),completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND status<>'completed'",
+                )
+                .bind(now)
+                .bind(now)
+                .bind(job.id)
+                .execute(&app.database)
+                .await?;
+                gridops_core::record_job_report(&app.database, job.id, None, now).await?;
+                tracing::info!(
+                    job_id = job.id,
+                    "cancelled an open job GitHub no longer has"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(job_id = job.id, error = ?error, "could not check an open job with GitHub");
+            }
         }
     }
     Ok(())
@@ -3501,6 +3673,394 @@ mod tests {
                 .map(|capacity| provider_capacity_deficit(capacity, 1))
                 .sum::<i64>(),
             1
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// A fake GitHub: answers each path-and-query in `routes` with its JSON
+    /// and anything else with 404, and keeps every request it got, in order.
+    async fn fake_github(
+        routes: Vec<(String, Value)>,
+    ) -> Result<(String, Arc<std::sync::Mutex<Vec<String>>>)> {
+        let routes = Arc::new(routes.into_iter().collect::<HashMap<_, _>>());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let routes = Arc::clone(&routes);
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let path = uri
+                    .path_and_query()
+                    .map_or_else(|| uri.path().to_owned(), ToString::to_string);
+                recorded
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(path.clone());
+                match routes.get(&path) {
+                    Some(body) => (axum::http::StatusCode::OK, axum::Json(body.clone())),
+                    None => (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(json!({ "message": "Not Found" })),
+                    ),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok((url, seen))
+    }
+
+    /// A reconciler whose GitHub is the fake at `github_url`.
+    fn reconciler_with_github(database: SqlitePool, github_url: &str) -> Result<Reconciler> {
+        let config = Config::from_env()?.with_github_api_url(reqwest::Url::parse(github_url)?);
+        Ok(Reconciler {
+            github: GitHubClient::new(config.clone())?,
+            config,
+            database,
+            bitbucket: BitbucketClient::new()?,
+            vault: Vault::new([0; 32], b"reconciler-test".to_vec()),
+            http: reqwest::Client::new(),
+            pass: Arc::default(),
+        })
+    }
+
+    fn github_job(
+        id: i64,
+        run_id: i64,
+        attempt: i64,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> Value {
+        json!({
+            "id": id, "run_id": run_id, "run_attempt": attempt, "name": format!("build-{id}"),
+            "status": status, "conclusion": conclusion, "labels": ["self-hosted", "linux"],
+            "html_url": format!("https://github.com/octo/app/actions/runs/{run_id}/job/{id}"),
+            "started_at": "2026-11-01T14:00:00Z",
+            "completed_at": conclusion.map(|_| "2026-11-01T14:08:00Z"),
+        })
+    }
+
+    const REPAIR_BASE: &str = r#"
+        INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+          VALUES (1,1,'octo','Organization','Organization','all',1,1);
+        INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+          VALUES (10,1,'octo','app','octo/app',0,'main','https://github.com/octo/app',1,1,1);
+    "#;
+
+    async fn job_state(
+        database: &SqlitePool,
+        id: i64,
+    ) -> Result<(String, Option<String>, Option<i64>, Option<i64>)> {
+        Ok(sqlx::query_as(
+            "SELECT job.status,job.conclusion,sync.run_attempt,sync.confirmed_at
+               FROM workflow_jobs job LEFT JOIN workflow_job_sync sync ON sync.job_id=job.id
+              WHERE job.id=?",
+        )
+        .bind(id)
+        .fetch_one(database)
+        .await?)
+    }
+
+    /// #33 through the poll: GitHub lists only the newest attempt's jobs
+    /// unless asked for all of them, so an attempt-1 job whose completion was
+    /// missed (here a row from before attempts were stored) stayed queued.
+    #[tokio::test]
+    async fn a_poll_after_a_rerun_records_how_the_earlier_attempt_ended() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-rerun-poll-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            r#"{REPAIR_BASE}
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (41,10,'CI',7,1,'push','in_progress','abc','https://github.com/octo/app/actions/runs/41',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (401,41,'build-401','queued','["self-hosted","linux"]','https://github.com/octo/app/actions/runs/41/job/401',1,1);
+            "#
+        )))
+        .execute(&database)
+        .await?;
+        let run = json!({
+            "id": 41, "workflow_id": 3, "name": "CI", "run_number": 7, "run_attempt": 2,
+            "event": "push", "status": "in_progress", "conclusion": null, "head_branch": "main",
+            "head_sha": "abc", "html_url": "https://github.com/octo/app/actions/runs/41",
+            "run_started_at": "2026-11-01T15:00:00Z", "created_at": "2026-11-01T14:00:00Z",
+            "updated_at": "2026-11-01T15:00:00Z",
+        });
+        let (url, _) = fake_github(vec![
+            (
+                "/repos/octo/app/actions/runs?per_page=50".into(),
+                json!({ "workflow_runs": [run] }),
+            ),
+            (
+                "/repos/octo/app/actions/runs/41/jobs?filter=latest&per_page=100&page=1".into(),
+                json!({ "jobs": [github_job(402, 41, 2, "queued", None)] }),
+            ),
+            (
+                "/repos/octo/app/actions/runs/41/jobs?filter=all&per_page=100&page=1".into(),
+                json!({ "jobs": [
+                    github_job(401, 41, 1, "completed", Some("failure")),
+                    github_job(402, 41, 2, "queued", None),
+                ] }),
+            ),
+        ])
+        .await?;
+        let app = reconciler_with_github(database.clone(), &url)?;
+        let repository = Repository {
+            id: 10,
+            installation_id: 1,
+            owner: "octo".into(),
+            name: "app".into(),
+            full_name: "octo/app".into(),
+        };
+
+        sync_repository_workflows(&app, &repository, "installation-token").await?;
+
+        let (status, conclusion, attempt, confirmed) = job_state(&database, 401).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref(), attempt),
+            ("completed", Some("failure"), Some(1))
+        );
+        assert!(confirmed.is_some());
+        let (status, _, attempt, _) = job_state(&database, 402).await?;
+        assert_eq!((status.as_str(), attempt), ("queued", Some(2)));
+        // The only job waiting is the live attempt's.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM workflow_jobs WHERE status='queued' ORDER BY id"
+            )
+            .fetch_all(&database)
+            .await?,
+            [402]
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// #33 and #34: jobs open for longer than the check age without word from
+    /// GitHub are asked about one by one, the oldest queued job of an
+    /// unfinished run first, and GitHub's answer is recorded.
+    #[tokio::test]
+    async fn the_job_check_asks_github_about_the_oldest_unconfirmed_jobs_first() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-job-check-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let now = now_millis();
+        let ago = |minutes: i64| now - minutes * 60_000;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            r#"{REPAIR_BASE}
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES
+              (50,10,'CI',1,1,'push','in_progress',NULL,'a','https://github.com/octo/app/actions/runs/50',1,1,1,1),
+              (51,10,'CI',2,1,'push','completed','success','b','https://github.com/octo/app/actions/runs/51',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES
+              (501,50,'phantom','queued','[]','u',{a501},{a501}),
+              (502,50,'waiting','queued','[]','u',{a502},{a502}),
+              (503,50,'running','in_progress','[]','u',{a503},{a503}),
+              (504,50,'just heard of','queued','[]','u',{a504},{a504}),
+              (505,50,'just asked','queued','[]','u',{a505},{a505}),
+              (506,51,'orphan','queued','[]','u',{a506},{a506}),
+              (507,50,'new','queued','[]','u',{a507},{a507});
+            -- 501 was recorded before GridOps kept when GitHub reported a job.
+            INSERT INTO workflow_job_sync (job_id,confirmed_at,checked_at)
+              VALUES
+              (502,{a502},NULL),
+              (503,{c503},NULL),
+              (504,{c504},NULL),
+              (505,{a505},{k505}),
+              (506,{a506},NULL),
+              (507,{a507},NULL);
+            "#,
+            a501 = ago(180),
+            a502 = ago(120),
+            a503 = ago(240),
+            c503 = ago(60),
+            a504 = ago(60),
+            c504 = ago(1),
+            a505 = ago(10),
+            k505 = ago(1),
+            a506 = ago(300),
+            a507 = ago(2),
+        )))
+        .execute(&database)
+        .await?;
+        let (url, seen) = fake_github(vec![
+            (
+                "/repos/octo/app/actions/jobs/501".into(),
+                github_job(501, 50, 1, "completed", Some("failure")),
+            ),
+            (
+                "/repos/octo/app/actions/jobs/502".into(),
+                github_job(502, 50, 1, "queued", None),
+            ),
+            (
+                "/repos/octo/app/actions/jobs/506".into(),
+                github_job(506, 51, 1, "completed", Some("cancelled")),
+            ),
+        ])
+        .await?;
+        let app = reconciler_with_github(database.clone(), &url)?;
+
+        // The cap holds: two at a time, the oldest queued job first.
+        assert_eq!(
+            unconfirmed_open_jobs(&database, now, 2)
+                .await?
+                .iter()
+                .map(|job| job.id)
+                .collect::<Vec<_>>(),
+            [501, 502]
+        );
+
+        let mut tokens = HashMap::from([(1, Some("installation-token".to_owned()))]);
+        confirm_open_jobs(&app, &mut tokens).await?;
+
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                "/repos/octo/app/actions/jobs/501",
+                "/repos/octo/app/actions/jobs/502",
+                "/repos/octo/app/actions/jobs/503",
+                "/repos/octo/app/actions/jobs/506",
+            ]
+        );
+        // GitHub finished the phantom long ago: its real outcome is recorded.
+        let (status, conclusion, attempt, confirmed) = job_state(&database, 501).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref(), attempt),
+            ("completed", Some("failure"), Some(1))
+        );
+        assert!(confirmed.is_some_and(|at| at >= now));
+        // A job GitHub still has queued stays queued, confirmed just now.
+        let (status, _, _, confirmed) = job_state(&database, 502).await?;
+        assert_eq!(status, "queued");
+        assert!(confirmed.is_some_and(|at| at >= now));
+        // A job GitHub no longer has can never run.
+        let (status, conclusion, _, _) = job_state(&database, 503).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref()),
+            ("completed", Some("cancelled"))
+        );
+        let (status, conclusion, _, _) = job_state(&database, 506).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref()),
+            ("completed", Some("cancelled"))
+        );
+        // Jobs GitHub reported on, or was asked about, recently, and new
+        // jobs, were not asked about.
+        for id in [504, 505, 507] {
+            assert_eq!(job_state(&database, id).await?.0, "queued");
+        }
+
+        // Nothing is asked again before the check age has passed.
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        confirm_open_jobs(&app, &mut tokens).await?;
+        assert!(
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// A phantom queued job kept an idle fleet runner from being released for
+    /// queued fleet work, since its repository seemed to have work for its
+    /// OS. Once the newer attempt finishes the earlier attempt's job, the
+    /// runner is the one released.
+    #[tokio::test]
+    async fn an_idle_fleet_runner_is_released_once_a_stale_earlier_attempt_is_finished()
+    -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-rerun-eviction-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+            INSERT INTO runner_pools (id,installation_id,name,scope,image,created_at,updated_at)
+              VALUES ('pool-1',1,'linux','organization','runner:latest',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (7,1,'octo-org','app','octo-org/app',0,'main','https://github.com/octo-org/app',1,1,1);
+            INSERT INTO pool_execution_profiles (id,pool_id,name,runtime_kind,execution_os,architecture,mode,image,cpu_millis,memory_mib,disk_bytes,created_at,updated_at)
+              VALUES ('40000000-0000-4000-8000-000000000001','pool-1','linux','docker','linux','x64','ephemeral','runner:latest',2000,2048,0,1,1);
+            INSERT INTO fleet_ci_targets (id,kind,canonical_key,installation_id,repository_id)
+              VALUES ('30000000-0000-4000-8000-000000000001','github_repository','github:repository:1:7',1,7);
+            INSERT INTO profile_ci_targets (profile_id,target_id,enabled)
+              VALUES ('40000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',1);
+            INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,os,architecture,status,busy,ephemeral,configuration_version,runtime,created_at,updated_at)
+              VALUES ('62000000-0000-4000-8000-000000000001','pool-1',7,'linux-1','docker','github','linux','X64','online',0,1,1,'vm',1,1);
+            INSERT INTO fleet_operations (id,principal_kind,principal_scope,kind,idempotency_key,request_hash,status,created_at,updated_at)
+              VALUES
+              ('62000000-0000-4000-8000-000000000001','reconciler','controller:reconciler','submit_workload','runner:62000000-0000-4000-8000-000000000001','hash','succeeded',1,1),
+              ('62000000-0000-4000-8000-000000000002','reconciler','controller:reconciler','submit_workload','runner:62000000-0000-4000-8000-000000000002','hash','queued',1,1);
+            INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,expected_profile_revision,status,created_at,updated_at)
+              VALUES
+              ('62000000-0000-4000-8000-000000000001','62000000-0000-4000-8000-000000000001',1,'ci_runner','pool-1','40000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',NULL,1,'admitted',1,1),
+              ('62000000-0000-4000-8000-000000000002','62000000-0000-4000-8000-000000000002',1,'ci_runner','pool-1','40000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',NULL,1,'queued',1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (60,7,'CI',3,1,'push','in_progress','abc','https://github.com/octo-org/app/actions/runs/60',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (601,60,'build','queued','["self-hosted","linux"]','https://github.com/octo-org/app/actions/runs/60/job/601',1,1);
+            INSERT INTO workflow_job_sync (job_id,run_attempt,confirmed_at) VALUES (601,1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+        let now = now_millis();
+        // The attempt-1 job, still listed as queued, holds the runner.
+        assert_eq!(
+            idle_fleet_runner_to_evict(&database, "pool-1", now).await?,
+            None
+        );
+
+        // The poll sees attempt 2 of the run.
+        let mut transaction = database.begin().await?;
+        upsert_workflow_run(
+            &mut transaction,
+            7,
+            GitHubWorkflowRun {
+                id: 60,
+                workflow_id: Some(3),
+                name: Some("CI".into()),
+                display_title: None,
+                run_number: 3,
+                run_attempt: 2,
+                event: "push".into(),
+                status: "in_progress".into(),
+                conclusion: None,
+                head_branch: Some("main".into()),
+                head_sha: "abc".into(),
+                actor: None,
+                html_url: "https://github.com/octo-org/app/actions/runs/60".into(),
+                run_started_at: Some("2026-11-01T15:00:00Z".into()),
+                created_at: "2026-11-01T14:00:00Z".into(),
+                updated_at: "2026-11-01T15:00:00Z".into(),
+            },
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        assert_eq!(job_state(&database, 601).await?.0, "completed");
+        assert_eq!(
+            idle_fleet_runner_to_evict(&database, "pool-1", now)
+                .await?
+                .as_deref(),
+            Some("62000000-0000-4000-8000-000000000001")
         );
 
         database.close().await;

@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AttentionAlerts, alertDetail } from "../src/features/dashboard/attention-alerts";
-import type { OverviewAlert } from "../src/features/dashboard/types";
+import type { OverviewAlert, QueuedJobReference } from "../src/features/dashboard/types";
 import { formatDateTime } from "../src/lib/utils";
 
 declare global {
@@ -31,6 +31,25 @@ const waiting: OverviewAlert = {
   title: "1 provisioning circuit is open",
   detail: "GridOps is pausing repeated failed runner starts until the pool is retried.",
   href: "/runner-pools",
+};
+
+const job: QueuedJobReference = {
+  id: 124871467579,
+  name: "build",
+  repository: "octo/app",
+  workflow: "CI",
+  htmlUrl: "https://github.com/octo/app/actions/runs/41308143263/job/124871467579",
+  status: "queued",
+  queuedAt: "2026-11-01T14:00:00.000Z",
+  confirmedAt: "2026-11-01T21:20:00.000Z",
+};
+
+const queueWait: OverviewAlert = {
+  level: "warning",
+  title: "Jobs have been waiting for over five minutes",
+  detail: "7h 22m: build in octo/app (CI).",
+  href: "/queued-jobs",
+  job,
 };
 
 let container: HTMLDivElement;
@@ -82,6 +101,29 @@ describe("needs attention", () => {
       ],
     }));
     expect(links().map((link) => link.getAttribute("href"))).toEqual(["/fleet", "/settings/runner-host"]);
+  });
+
+  it("says when GitHub last reported the queued job the alert names, in the reader's time", () => {
+    expect(alertDetail(queueWait, (iso) => `<${iso}>`)).toBe(
+      "7h 22m: build in octo/app (CI). GitHub last reported it queued at <2026-11-01T21:20:00.000Z>.",
+    );
+    expect(alertDetail({ ...queueWait, job: { ...job, confirmedAt: null } }, () => "never")).toBe(
+      "7h 22m: build in octo/app (CI). Not yet confirmed with GitHub.",
+    );
+  });
+
+  it("links the queue alert to the queue and its job to GitHub, without nesting the links", () => {
+    render(createElement(AttentionAlerts, { alerts: [queueWait] }));
+    const [queue, github] = links();
+    expect(links()).toHaveLength(2);
+    expect(queue?.getAttribute("href")).toBe("/queued-jobs");
+    expect(queue?.textContent).toContain("Jobs have been waiting for over five minutes");
+    expect(queue?.textContent).toContain(`GitHub last reported it queued at ${formatDateTime(job.confirmedAt ?? "")}`);
+    expect(github?.getAttribute("href")).toBe(job.htmlUrl);
+    expect(github?.getAttribute("target")).toBe("_blank");
+    expect(github?.getAttribute("rel")).toBe("noreferrer");
+    expect(github?.textContent).toBe("build · octo/app · CI");
+    expect(container.querySelector("a a")).toBeNull();
   });
 
   it("says nothing needs attention when there are no alerts", () => {

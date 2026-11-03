@@ -53,7 +53,12 @@ export type DashboardOverview = {
   };
   slo: {
     windowHours: number;
-    queue: { oldestSeconds: number | null; p95Seconds: number | null };
+    queue: {
+      oldestSeconds: number | null;
+      /** The job that has waited `oldestSeconds`; null when the queue is clear, and older servers omit it. */
+      oldestJob?: QueuedJobReference | null;
+      p95Seconds: number | null;
+    };
     startLatency: { sampleSize: number; p50Seconds: number | null; p95Seconds: number | null };
     /** Fleet runner starts by phase; older servers omit it. */
     runnerStarts?: {
@@ -118,6 +123,27 @@ export type OverviewAlert = {
   until?: string;
   /** A page in the app; a machine's own alerts link to its page. */
   href: "/queued-jobs" | "/workflow-runs" | "/runner-pools" | "/webhooks" | "/fleet" | "/settings/runner-host" | `/fleet/machines/${string}`;
+  /** The job the alert is about: set on "Jobs have been waiting for over five minutes", for the oldest of them. */
+  job?: QueuedJobReference | null;
+};
+
+/** A queued job the Overview names, and when GitHub last reported on it. */
+export type QueuedJobReference = {
+  id: number;
+  name: string;
+  /** `owner/name`. */
+  repository: string;
+  workflow: string;
+  /** The job on GitHub. */
+  htmlUrl: string;
+  /** As GitHub last reported it: `queued`, `waiting`, `pending` or `requested`. */
+  status: string;
+  queuedAt: string;
+  /**
+   * When GitHub last reported the job's status, by a webhook, a poll or the reconciler's check of jobs
+   * open for over five minutes; null for a job recorded before GridOps kept this.
+   */
+  confirmedAt: string | null;
 };
 
 export type MachinePerformance = {

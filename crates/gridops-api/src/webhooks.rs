@@ -15,8 +15,9 @@ use crate::{
     state::AppState,
 };
 use gridops_core::{
-    assigned_queued_jobs, associate_runner_with_job, compatible_runner_provider, now_millis,
-    provider_capacities, provider_capacity_deficit, scale_up_target,
+    assigned_queued_jobs, associate_runner_with_job, compatible_runner_provider,
+    finish_earlier_attempts, now_millis, provider_capacities, provider_capacity_deficit,
+    record_job_report, scale_up_target,
 };
 
 const MAX_WEBHOOK_BYTES: usize = 25 * 1024 * 1024;
@@ -526,7 +527,8 @@ async fn process_workflow_run(state: &AppState, payload: &Map<String, Value>) ->
           head_sha=excluded.head_sha,actor_login=excluded.actor_login,html_url=excluded.html_url,
           started_at=excluded.started_at,completed_at=excluded.completed_at,
           github_created_at=excluded.github_created_at,
-          github_updated_at=excluded.github_updated_at,updated_at=excluded.updated_at"#,
+          github_updated_at=excluded.github_updated_at,updated_at=excluded.updated_at
+        WHERE excluded.run_attempt>=workflow_runs.run_attempt"#,
     )
     .bind(id)
     .bind(repository_id)
@@ -553,6 +555,7 @@ async fn process_workflow_run(state: &AppState, payload: &Map<String, Value>) ->
     .bind(now)
     .execute(&state.database)
     .await?;
+    finish_earlier_attempts(&state.database, id, now).await?;
     Ok(())
 }
 
@@ -605,6 +608,20 @@ async fn process_workflow_job(
     .bind(now)
     .execute(database)
     .await?;
+    record_job_report(database, id, i64_value(job, "run_attempt"), now).await?;
+    // A job of a newer attempt means the earlier attempts are over (#33); a
+    // late event of an earlier attempt is finished again, and says nothing
+    // about a runner or the queue now.
+    finish_earlier_attempts(database, run_id, now).await?;
+    if status != "completed"
+        && sqlx::query_scalar::<_, String>("SELECT status FROM workflow_jobs WHERE id=?")
+            .bind(id)
+            .fetch_one(database)
+            .await?
+            == "completed"
+    {
+        return Ok(());
+    }
     let runner = associate_runner_with_job(
         database,
         id,
@@ -1035,6 +1052,117 @@ mod tests {
             placeholder.get::<String, _>("html_url"),
             "https://github.com/iamngoni/gridops/actions/runs/21"
         );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// #33: a re-run keeps the run id. When a job of attempt 2 arrives, the
+    /// attempt-1 job whose completion was missed is finished instead of
+    /// staying queued, and a late redelivery of its old event cannot bring it
+    /// back.
+    #[tokio::test]
+    async fn a_newer_attempts_job_finishes_the_earlier_attempts_open_jobs() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-webhook-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo','User','User','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (10,1,'octo','app','octo/app',0,'main','https://github.com/octo/app',1,1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (20,10,'CI',1,1,'push','in_progress','abc','https://github.com/octo/app/actions/runs/20',1,1,1,1);
+            INSERT INTO runner_pools (id,installation_id,repository_id,name,scope,labels,image,desired_count,max_count,created_at,updated_at)
+              VALUES ('pool-1',1,10,'linux','repository','["linux"]','runner:latest',0,10,1,1);
+            INSERT INTO runners (id,pool_id,name,status,created_at,updated_at)
+              VALUES ('runner-1','pool-1','linux-runner','online',1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+        let job = |id: i64, attempt: Option<i64>, status: &str| {
+            let mut job = json!({
+                "id": id, "run_id": 20, "name": format!("build-{id}"), "status": status,
+                "labels": ["self-hosted", "linux"],
+                "html_url": format!("https://github.com/octo/app/actions/runs/20/job/{id}"),
+            });
+            if let Some(attempt) = attempt {
+                job["run_attempt"] = json!(attempt);
+            }
+            json!({ "repository": { "id": 10 }, "workflow_job": job })
+        };
+        let deliver = |payload: Value| {
+            let database = database.clone();
+            async move {
+                let payload = payload
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("test payload is not an object"))?;
+                process_workflow_job(&database, Some("queued"), &payload).await?;
+                anyhow::Ok(())
+            }
+        };
+        let status = |id: i64| {
+            sqlx::query_as::<_, (String, Option<String>, Option<i64>, Option<i64>)>(
+                "SELECT job.status,job.conclusion,sync.run_attempt,sync.confirmed_at
+                   FROM workflow_jobs job LEFT JOIN workflow_job_sync sync ON sync.job_id=job.id
+                  WHERE job.id=?",
+            )
+            .bind(id)
+            .fetch_one(&database)
+        };
+
+        deliver(job(30, Some(1), "queued")).await?;
+        let (queued, _, attempt, confirmed) = status(30).await?;
+        assert_eq!((queued.as_str(), attempt), ("queued", Some(1)));
+        let confirmed_at_first = confirmed.ok_or_else(|| anyhow::anyhow!("not confirmed"))?;
+
+        // Attempt 2 starts while the attempt-1 job is still listed as queued.
+        deliver(job(31, Some(2), "queued")).await?;
+        let (finished, conclusion, _, confirmed) = status(30).await?;
+        assert_eq!(finished, "completed");
+        // GitHub did not say how it ended, so no outcome is made up, and the
+        // time GitHub last reported it stays what it was.
+        assert_eq!(conclusion, None);
+        assert_eq!(confirmed, Some(confirmed_at_first));
+        assert_eq!(status(31).await?.0, "queued");
+
+        // A late redelivery of the attempt-1 event does not reopen it, nor
+        // ask for capacity, nor tie up a runner; an event without an attempt
+        // keeps the one already known.
+        let desired = || {
+            sqlx::query_scalar::<_, i64>("SELECT desired_count FROM runner_pools WHERE id='pool-1'")
+                .fetch_one(&database)
+        };
+        let desired_before = desired().await?;
+        deliver(job(30, Some(1), "queued")).await?;
+        assert_eq!(status(30).await?.0, "completed");
+        assert_eq!(desired().await?, desired_before);
+        let mut late_start = job(30, Some(1), "in_progress");
+        late_start["workflow_job"]["runner_name"] = json!("linux-runner");
+        deliver(late_start).await?;
+        assert_eq!(status(30).await?.0, "completed");
+        let busy = sqlx::query_scalar::<_, bool>("SELECT busy FROM runners WHERE id='runner-1'")
+            .fetch_one(&database)
+            .await?;
+        assert!(!busy);
+        deliver(job(31, None, "queued")).await?;
+        assert_eq!(status(31).await?.2, Some(2));
+
+        // A job recorded before attempts were stored is left to the
+        // reconciler's check with GitHub.
+        sqlx::raw_sql(
+            "UPDATE workflow_jobs SET status='queued' WHERE id=30;
+             UPDATE workflow_job_sync SET run_attempt=NULL WHERE job_id=30;",
+        )
+        .execute(&database)
+        .await?;
+        deliver(job(32, Some(3), "queued")).await?;
+        assert_eq!(status(30).await?.0, "queued");
+        assert_eq!(status(31).await?.0, "completed");
 
         database.close().await;
         fs::remove_dir_all(directory)?;

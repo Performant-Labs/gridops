@@ -10,6 +10,7 @@ use url::Url;
 #[derive(Clone)]
 pub struct Config(Arc<Inner>);
 
+#[derive(Clone)]
 struct Inner {
     base_url: Url,
     database_path: PathBuf,
@@ -137,6 +138,15 @@ impl Config {
     /// Where GitHub's REST API answers. Tests point it at a local fake.
     pub fn github_api_url(&self) -> &Url {
         &self.0.github_api_url
+    }
+    /// This configuration with GitHub's REST API at `url`, for a process
+    /// that talks to a fake GitHub in its tests without changing its
+    /// environment.
+    #[must_use]
+    pub fn with_github_api_url(&self, url: Url) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.github_api_url = url;
+        Self(Arc::new(inner))
     }
     pub fn webhook_delivery_active(&self) -> bool {
         self.0.github_webhook_active.unwrap_or_else(|| {

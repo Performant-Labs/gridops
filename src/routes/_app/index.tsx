@@ -1,6 +1,6 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowRight, ArrowUpRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow, Zap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 
 import { AsyncActionButton } from "~/components/async-action-button";
@@ -16,6 +16,7 @@ import { isTerminalAgentStatus } from "~/features/agent/agent-state";
 import { type AgentRunListItem, getAgentRunsPage } from "~/features/agent/agent.functions";
 import { getCapacityHistory, getDashboardOverview, getQueuedJobsPage } from "~/features/dashboard/dashboard.functions";
 import { AttentionAlerts } from "~/features/dashboard/attention-alerts";
+import { OldestQueuedJob } from "~/features/dashboard/queued-job-reference";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
 import { metricTiles } from "~/features/dashboard/metric-tiles";
@@ -414,7 +415,7 @@ function AttentionSection({ data }: { data: DashboardOverview }) {
     <section className="space-y-3">
       <SectionHeading actions={<span className="text-xs text-faint">Last {windowHours}h</span>}>Service level</SectionHeading>
       <div className="grid grid-cols-3 overflow-hidden rounded-lg border border-border">
-        <SloCell hint={queue.p95Seconds === null ? "Queue is clear" : `p95 ${formatSeconds(queue.p95Seconds)}`} label="Oldest queued" to="/queued-jobs" value={formatSeconds(queue.oldestSeconds)} />
+        <SloCell footer={<OldestQueuedJob job={queue.oldestJob} />} hint={queue.p95Seconds === null ? "Queue is clear" : `p95 ${formatSeconds(queue.p95Seconds)}`} label="Oldest queued" to="/queued-jobs" value={formatSeconds(queue.oldestSeconds)} />
         <SloCell className="border-l" hint={startLatency.sampleSize ? phrases([`p95 ${formatSeconds(startLatency.p95Seconds)}`, `${startLatency.sampleSize} starts`]) : "No starts"} label="Start latency" value={formatSeconds(startLatency.p50Seconds)} />
         <SloCell className="border-l" hint={failures.length ? phrases(failures.map((item) => `${item.count} ${failureLabel(item.reason)}`)) : "None"} label="Failures" value={String(failures.reduce((total, item) => total + item.count, 0))} />
       </div>
@@ -474,7 +475,8 @@ function RunnerStarts({ starts, pass }: { starts: NonNullable<DashboardOverview[
   );
 }
 
-function SloCell({ label, value, hint, className, to }: { label: string; value: string; hint: string; className?: string; to?: "/queued-jobs" }) {
+/** One service-level figure. `footer` goes under it, outside its link, so it may hold links of its own. */
+function SloCell({ label, value, hint, className, to, footer }: { label: string; value: string; hint: string; className?: string; to?: "/queued-jobs"; footer?: ReactNode }) {
   const content = (
     <>
       <div className="truncate text-xs text-muted-foreground">{label}</div>
@@ -482,10 +484,18 @@ function SloCell({ label, value, hint, className, to }: { label: string; value: 
       <div className="mt-0.5 line-clamp-2 text-2xs text-faint" title={hint}>{hint}</div>
     </>
   );
+  if (to && footer) {
+    return (
+      <div className={cn("min-w-0", className)}>
+        <Link className="block min-w-0 px-3 pt-3 pb-1 transition-colors hover:bg-hover" to={to}>{content}</Link>
+        <div className="px-3 pb-3">{footer}</div>
+      </div>
+    );
+  }
   return to ? (
     <Link className={cn("block min-w-0 px-3 py-3 transition-colors hover:bg-hover", className)} to={to}>{content}</Link>
   ) : (
-    <div className={cn("min-w-0 px-3 py-3", className)}>{content}</div>
+    <div className={cn("min-w-0 px-3 py-3", className)}>{content}{footer}</div>
   );
 }
 
