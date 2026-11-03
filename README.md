@@ -104,13 +104,13 @@ GRIDOPS_ENV_FILE=.env.local docker compose --env-file .env.local up --build
 
 Only `manager` receives `/var/run/docker.sock`. Runner containers do not receive it. The API and reconciler share the `gridops-data` volume for SQLite and retained logs.
 
-The manager is the authoritative capacity boundary. Before GitHub runner credentials are issued, the API or reconciler reserves a short-lived capacity lease; container creation consumes that lease and revalidates the configured runner network and disk watermark. By default GridOps reserves 25% of Docker-host CPU and memory, stops admitting runners below 10 GB of free disk (10% of the disk on disks under 100 GB), limits runner logs to five 20 MB files, and derives a conservative global runner count from a 2 CPU / 2 GB runner shape. Override the `GRIDOPS_RUNNER_*` and `GRIDOPS_MIN_FREE_DISK_*` values from `.env.example` when the Docker host has a deliberately different envelope.
+The manager is the authoritative capacity boundary. Before GitHub runner credentials are issued, the API or reconciler reserves a short-lived capacity lease; container creation consumes that lease and revalidates the configured runner network and disk watermark. By default runners may use 95% of the Docker host's CPU and memory, GridOps stops admitting runners below 10 GB of free disk (10% of the disk on disks under 100 GB), limits runner logs to five 20 MB files, and derives a global runner count from a 2 CPU / 2 GB runner shape. Set the CPU and memory budget under **Settings → Runner host → Budget**; the `GRIDOPS_RUNNER_*` values from `.env.example` are only the fallback for a figure not set there. Override the `GRIDOPS_MIN_FREE_DISK_*` values when the Docker host has a deliberately different envelope. To keep CI work off the host GridOps runs on, turn the built-in runner host off on the same page ([docs/fleet-agent.md](docs/fleet-agent.md)).
 
 Apple Silicon hosts may additionally run ephemeral macOS pools through Tart. The provider is optional and remains disabled unless both its URL and bearer token are configured. See [docs/macos-runners.md](docs/macos-runners.md) for image preparation, native-agent installation, isolation, and capacity limits.
 
 ## Known issues
 
-Last reviewed for v0.1.4. What changed in each release is in the
+Last reviewed for v0.1.5. What changed in each release is in the
 [changelog](CHANGELOG.md).
 
 - A workflow re-run can leave the previous attempt's jobs shown as queued or in
@@ -119,23 +119,20 @@ Last reviewed for v0.1.4. What changed in each release is in the
 - The "waiting for over five minutes" alert is not checked against GitHub, so
   it can name a job that GitHub no longer has queued
   ([#34](https://github.com/Performant-Labs/gridops/issues/34)).
-- The run page can say a pool with autoscaling off matches a queued job, while
-  the Overview counts that job as having no matching pool
-  ([#63](https://github.com/Performant-Labs/gridops/issues/63)).
 - The runner host built into GridOps and fleet machines have separate budgets
   that draw on the same hardware if the host is both. Keep the sum within what
-  you want GridOps to use
+  you want GridOps to use; both budgets are now set in GridOps, and the
+  built-in host can be turned off under **Settings → Runner host**
   ([#60](https://github.com/Performant-Labs/gridops/issues/60)).
-- A retired or duplicate machine cannot be deleted from the Fleet page
-  ([#55](https://github.com/Performant-Labs/gridops/issues/55)).
 - API tokens are not rate limited
   ([#19](https://github.com/Performant-Labs/gridops/issues/19)).
-- Releases from this repository publish the Linux x64 agent and `install.sh`
-  only. The macOS and Linux arm64 agents, the container images and
-  `compose.release.yaml` are built only when the repository variables
-  `RELEASE_MACOS` and `RELEASE_LINUX_ARM64` are `true`, so the download links in
-  [Install](#install), which point at the upstream project, do not give you
-  this repository's build.
+- Releases from this repository publish the Linux x64 agent, the macOS agents
+  and `install.sh`. The container images, `compose.release.yaml` and
+  `env.example` are built only when the repository variable `RELEASE_IMAGES`
+  is `true`, and the Linux arm64 agent only when `RELEASE_LINUX_ARM64` is
+  `true` ([#80](https://github.com/Performant-Labs/gridops/issues/80)). The
+  download links in [Install](#install) point at the upstream project, so
+  they do not give you this repository's build.
 
 ## Develop
 
