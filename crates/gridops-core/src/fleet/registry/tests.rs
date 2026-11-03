@@ -34,6 +34,8 @@ mod delete_tests;
 mod fault_tests;
 #[path = "invariants_tests.rs"]
 mod invariants_tests;
+#[path = "retire_tests.rs"]
+mod retire_tests;
 
 fn inventory_digest() -> String {
     URL_SAFE_NO_PAD.encode([7_u8; 32])

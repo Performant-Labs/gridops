@@ -1466,6 +1466,45 @@
     }
   },
   {
+    "name": "a bearer token on a route that does not accept tokens",
+    "schema": "error",
+    "valid": true,
+    "body": {
+      "code": "token_not_accepted",
+      "message": "This route does not accept API tokens",
+      "requestId": "00000009-0000-4000-8000-000000000006",
+      "details": null
+    }
+  },
+  {
+    "name": "a refused token retire names every reason",
+    "schema": "error",
+    "valid": true,
+    "body": {
+      "code": "host_not_retirable",
+      "message": "Machine cannot be retired with an API token yet",
+      "requestId": "00000009-0000-4000-8000-000000000007",
+      "details": {
+        "kind": "retire_blocked",
+        "reasons": ["lifecycle_active", "recently_seen", "live_placement"]
+      }
+    }
+  },
+  {
+    "name": "a delete blocker is not a retire blocker",
+    "schema": "error",
+    "valid": false,
+    "body": {
+      "code": "host_not_retirable",
+      "message": "Machine cannot be retired with an API token yet",
+      "requestId": "00000009-0000-4000-8000-000000000008",
+      "details": {
+        "kind": "retire_blocked",
+        "reasons": ["not_retired"]
+      }
+    }
+  },
+  {
     "name": "unknown error detail kind is rejected",
     "schema": "error",
     "valid": false,

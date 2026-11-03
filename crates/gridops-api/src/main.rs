@@ -1,3 +1,4 @@
+mod access;
 mod agent;
 mod auth;
 mod error;
@@ -16,6 +17,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{HeaderName, HeaderValue, Method, Request, StatusCode, header},
+    middleware,
     routing::{any, delete, get, post, put},
 };
 use gridops_core::{BitbucketClient, Config, GitHubClient, Vault, connect_database};
@@ -83,36 +85,108 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .merge(fleet::router())
         .merge(fleet::operation_router())
+        .merge(public_routes())
+        .merge(token_routes())
+        .merge(session_routes())
+        .route("/api/{*path}", any(not_found))
+        .route("/auth/{*path}", any(not_found))
+        .nest_service("/assets", assets)
+        .fallback_service(spa)
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
+        .layer(PropagateRequestIdLayer::new(request_id.clone()))
+        .layer(SetRequestIdLayer::new(request_id, MakeRequestUuid))
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            header::AUTHORIZATION,
+            header::COOKIE,
+        ]))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(CompressionLayer::new())
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("content-security-policy"),
+                    HeaderValue::from_static(
+                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com https://github.com; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com",
+                    ),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("cross-origin-opener-policy"),
+                    HeaderValue::from_static("same-origin"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("permissions-policy"),
+                    HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::REFERRER_POLICY,
+                    HeaderValue::from_static("strict-origin-when-cross-origin"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("x-frame-options"),
+                    HeaderValue::from_static("DENY"),
+                )),
+        )
+        .layer(CatchPanicLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(origin)
+                .allow_credentials(true)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    HeaderName::from_static("x-csrf-token"),
+                    HeaderName::from_static("idempotency-key"),
+                ])
+                .expose_headers([HeaderName::from_static("x-request-id")]),
+        );
+
+    let listener = tokio::net::TcpListener::bind(config.api_bind()).await?;
+    tracing::info!(
+        address = %config.api_bind(),
+        version = gridops_core::build_info::FULL_VERSION,
+        commit = gridops_core::build_info::COMMIT,
+        "GridOps Rust API listening"
+    );
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
+}
+
+/// Routes that never authenticate a user; an `Authorization` header has no
+/// effect on them. See "Who may call what" in `docs/fleet-api.md`.
+fn public_routes() -> Router<AppState> {
+    Router::new()
         .route("/api/health", get(resources::health))
         .route("/api/v1/openapi.json", get(fleet::openapi::get))
         .route("/install.sh", get(install::shell))
-        .route("/api/v1/auth/session", get(auth::session))
-        .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/auth/github", get(oauth::begin))
         .route("/api/v1/auth/github/callback", get(oauth::callback))
-        .route("/api/v1/auth/logout", post(auth::logout))
-        .route(
-            "/api/v1/users/{user_id}/role",
-            put(auth::update_user_role),
-        )
         .route("/api/v1/webhooks/github", post(webhooks::receive))
         .route("/auth/github", get(oauth::begin))
         .route("/auth/github/callback", get(oauth::callback))
-        .route("/auth/logout", post(auth::logout))
         .route(
             "/auth/github-app/manifest/callback",
             get(github_app::manifest_callback),
         )
         .route("/api/webhooks/github", post(webhooks::receive))
-        .route("/api/v1/overview", get(resources::overview))
+}
+
+/// Runner-pool routes: a browser session exactly as before, or a scoped API
+/// token (`pools:read`, `pools:manage`) through the `access` extractors.
+fn token_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/api/v1/overview/capacity",
             get(resources::capacity_history),
         )
-        .route("/api/v1/overview/queued-jobs", get(resources::queued_jobs))
-        .route("/api/v1/search", get(resources::search))
-        .route("/api/v1/repositories", get(resources::repositories))
-        .route("/api/v1/repositories/sync", post(oauth::sync))
         .route(
             "/api/v1/runner-pools",
             get(resources::runner_pools).post(resources::create_runner_pool),
@@ -143,6 +217,23 @@ async fn main() -> Result<()> {
             "/api/v1/runner-pools/{pool_id}/events",
             get(resources::runner_pool_events),
         )
+}
+
+/// Routes that need a signed-in browser session and take no API token. A
+/// bearer token is refused with `403 token_not_accepted` before the handler
+/// runs, so it is never answered as if the caller were signed out.
+fn session_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/auth/session", get(auth::session))
+        .route("/api/v1/auth/me", get(auth::me))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/users/{user_id}/role", put(auth::update_user_role))
+        .route("/auth/logout", post(auth::logout))
+        .route("/api/v1/overview", get(resources::overview))
+        .route("/api/v1/overview/queued-jobs", get(resources::queued_jobs))
+        .route("/api/v1/search", get(resources::search))
+        .route("/api/v1/repositories", get(resources::repositories))
+        .route("/api/v1/repositories/sync", post(oauth::sync))
         .route(
             "/api/v1/runner-pools/{pool_id}/action",
             post(resources::runner_pool_action),
@@ -253,76 +344,7 @@ async fn main() -> Result<()> {
         )
         .route("/api/v1/backups/database", get(resources::database_backup))
         .route("/api/backups/database", get(resources::database_backup))
-        .route("/api/{*path}", any(not_found))
-        .route("/auth/{*path}", any(not_found))
-        .nest_service("/assets", assets)
-        .fallback_service(spa)
-        .with_state(state)
-        .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
-        .layer(PropagateRequestIdLayer::new(request_id.clone()))
-        .layer(SetRequestIdLayer::new(request_id, MakeRequestUuid))
-        .layer(SetSensitiveRequestHeadersLayer::new([
-            header::AUTHORIZATION,
-            header::COOKIE,
-        ]))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
-        ))
-        .layer(CompressionLayer::new())
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetResponseHeaderLayer::overriding(
-                    HeaderName::from_static("content-security-policy"),
-                    HeaderValue::from_static(
-                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com https://github.com; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com",
-                    ),
-                ))
-                .layer(SetResponseHeaderLayer::overriding(
-                    HeaderName::from_static("cross-origin-opener-policy"),
-                    HeaderValue::from_static("same-origin"),
-                ))
-                .layer(SetResponseHeaderLayer::overriding(
-                    HeaderName::from_static("permissions-policy"),
-                    HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
-                ))
-                .layer(SetResponseHeaderLayer::overriding(
-                    header::REFERRER_POLICY,
-                    HeaderValue::from_static("strict-origin-when-cross-origin"),
-                ))
-                .layer(SetResponseHeaderLayer::overriding(
-                    header::X_CONTENT_TYPE_OPTIONS,
-                    HeaderValue::from_static("nosniff"),
-                ))
-                .layer(SetResponseHeaderLayer::overriding(
-                    HeaderName::from_static("x-frame-options"),
-                    HeaderValue::from_static("DENY"),
-                )),
-        )
-        .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(origin)
-                .allow_credentials(true)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    HeaderName::from_static("x-csrf-token"),
-                    HeaderName::from_static("idempotency-key"),
-                ])
-                .expose_headers([HeaderName::from_static("x-request-id")]),
-        );
-
-    let listener = tokio::net::TcpListener::bind(config.api_bind()).await?;
-    tracing::info!(
-        address = %config.api_bind(),
-        version = gridops_core::build_info::FULL_VERSION,
-        commit = gridops_core::build_info::COMMIT,
-        "GridOps Rust API listening"
-    );
-    axum::serve(listener, app.into_make_service()).await?;
-    Ok(())
+        .route_layer(middleware::from_fn(access::refuse_bearer))
 }
 
 async fn not_found(_: Request<axum::body::Body>) -> StatusCode {

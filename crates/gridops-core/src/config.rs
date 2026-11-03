@@ -33,7 +33,13 @@ struct Inner {
     web_root: PathBuf,
     manager_bind: String,
     fleet_allow_loopback_http: bool,
+    token_retire_min_offline_minutes: u64,
 }
+
+/// How long a machine must have been silent before an API token may retire
+/// it, by default, and the range an operator may set.
+pub const TOKEN_RETIRE_MIN_OFFLINE_MINUTES_DEFAULT: u64 = 15;
+const TOKEN_RETIRE_MIN_OFFLINE_MINUTES_RANGE: std::ops::RangeInclusive<u64> = 2..=10_080;
 
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -81,6 +87,9 @@ impl Config {
                 .unwrap_or_else(|_| "127.0.0.1:8788".into()),
             fleet_allow_loopback_http: optional_bool("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP")?
                 .unwrap_or(false),
+            token_retire_min_offline_minutes: token_retire_min_offline_minutes(
+                optional("GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES").as_deref(),
+            )?,
         })))
     }
 
@@ -165,6 +174,28 @@ impl Config {
     pub fn manager_bind(&self) -> &str {
         &self.0.manager_bind
     }
+
+    /// The quiet period an API-token retire requires, in milliseconds
+    /// (`GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES`, default 15 minutes).
+    pub fn token_retire_min_offline_millis(&self) -> i64 {
+        i64::try_from(self.0.token_retire_min_offline_minutes)
+            .unwrap_or(i64::MAX / 60_000)
+            .saturating_mul(60_000)
+    }
+}
+
+fn token_retire_min_offline_minutes(value: Option<&str>) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(TOKEN_RETIRE_MIN_OFFLINE_MINUTES_DEFAULT);
+    };
+    match value.trim().parse::<u64>() {
+        Ok(minutes) if TOKEN_RETIRE_MIN_OFFLINE_MINUTES_RANGE.contains(&minutes) => Ok(minutes),
+        _ => bail!(
+            "GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES must be a whole number of minutes from {} to {}",
+            TOKEN_RETIRE_MIN_OFFLINE_MINUTES_RANGE.start(),
+            TOKEN_RETIRE_MIN_OFFLINE_MINUTES_RANGE.end()
+        ),
+    }
 }
 
 use secrecy::ExposeSecret;
@@ -215,6 +246,23 @@ fn validate_fleet_endpoint(url: &Url, allow_loopback_http: bool) -> Result<()> {
 #[cfg(test)]
 mod fleet_endpoint_tests {
     use super::*;
+
+    #[test]
+    fn token_retire_quiet_period_defaults_and_rejects_values_out_of_range() -> Result<()> {
+        assert_eq!(token_retire_min_offline_minutes(None)?, 15);
+        assert_eq!(token_retire_min_offline_minutes(Some("2"))?, 2);
+        assert_eq!(token_retire_min_offline_minutes(Some(" 120 "))?, 120);
+        assert_eq!(token_retire_min_offline_minutes(Some("10080"))?, 10_080);
+        // Below the 90-second offline threshold, above a week, or not a
+        // whole number: refused at startup rather than silently clamped.
+        for value in ["0", "1", "10081", "-5", "1.5", "15m", "fifteen", ""] {
+            assert!(
+                token_retire_min_offline_minutes(Some(value)).is_err(),
+                "{value:?} was accepted"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn fleet_endpoint_requires_tls_except_explicit_literal_loopback() -> Result<()> {

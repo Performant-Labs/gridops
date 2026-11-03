@@ -159,6 +159,19 @@ describe("API token form validation", () => {
     expect(validateTokenForm({ name: "x", scopes: ["fleet:read"], days: "1" }).ok).toBe(true);
   });
 
+  it("offers the pool and retire scopes after the v1 scopes, in the server's stored order", () => {
+    expect(validateTokenForm({
+      name: "pool-bot", scopes: ["pools:manage", "fleet:retire", "pools:read", "fleet:read"], days: "3",
+    })).toEqual({
+      ok: true, request: { name: "pool-bot", scopes: ["fleet:read", "fleet:retire", "pools:read", "pools:manage"], expiresInDays: 3 },
+    });
+    expect(apiTokenListSchema.safeParse({ items: [{ ...token, scopes: ["fleet:retire", "pools:read", "pools:manage"] }] }).success)
+      .toBe(true);
+    for (const scopes of [["pools:write"], ["fleet:admin"], ["pools"]]) {
+      expect(createApiTokenRequestSchema.safeParse({ ...request, scopes }).success, scopes.join()).toBe(false);
+    }
+  });
+
   it("reports each invalid field", () => {
     expect(validateTokenForm(emptyTokenForm)).toEqual({ ok: false, errors: {
       name: "Enter a name.", scopes: "Choose at least one scope.",

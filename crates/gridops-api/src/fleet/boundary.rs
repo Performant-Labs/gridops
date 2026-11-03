@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::FutureExt as _;
-use gridops_core::api_tokens::{ApiTokenScope, ApiTokenService};
+use gridops_core::api_tokens::{ApiTokenScope, ApiTokenService, AuthenticatedApiToken};
 use gridops_core::fleet::{UpstreamText, authorization::Principal, protocol::browser::ErrorCode};
 use serde::de::DeserializeOwned;
 
@@ -112,6 +112,62 @@ impl RouteScope for Operate {
     const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetOperate);
 }
 
+/// Retiring a machine. A token is additionally held to the registry's
+/// guard rails; a session is not.
+pub(super) struct Retire;
+impl RouteScope for Retire {
+    const REQUIRED: Option<ApiTokenScope> = Some(ApiTokenScope::FleetRetire);
+}
+
+/// Whether any `Authorization` header uses the `Bearer` scheme, whatever
+/// follows it. A route that does not take tokens refuses such a request with
+/// `token_not_accepted` before anything else, without looking the token up,
+/// so the refusal says nothing about whether the token is valid. Other
+/// schemes (a proxy's `Basic`, say) are not bearer tokens and keep the
+/// behaviour each route always had.
+pub(crate) fn has_bearer_scheme(headers: &HeaderMap) -> bool {
+    headers.get_all(header::AUTHORIZATION).iter().any(|value| {
+        let value = value.as_bytes();
+        value.len() >= 6
+            && value[..6].eq_ignore_ascii_case(b"bearer")
+            && value.get(6).is_none_or(|next| next.is_ascii_whitespace())
+    })
+}
+
+/// The `403 token_not_accepted` refusal, in the fleet error envelope, for
+/// routes outside the fleet router.
+pub(crate) fn token_not_accepted() -> Response {
+    RequestContext::new()
+        .error(ErrorCode::TokenNotAccepted)
+        .into_response()
+}
+
+/// A refusal in the fleet error envelope, for routes outside the fleet router.
+pub(crate) struct Refusal(FleetApiError);
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        self.0.into_response()
+    }
+}
+
+/// Authenticate a bearer token for a route outside the fleet router that
+/// requires `required`. Same rules, refusals and audit as a fleet route.
+pub(crate) async fn authenticate_scoped_token(
+    parts: &Parts,
+    state: &AppState,
+    required: ApiTokenScope,
+) -> Result<AuthenticatedApiToken, Refusal> {
+    authenticate_token(parts, state, required)
+        .await
+        .map_err(Refusal)
+}
+
+/// A fleet-envelope refusal with `code` and no details.
+pub(crate) fn refusal(code: ErrorCode) -> Refusal {
+    Refusal(RequestContext::new().error(code))
+}
+
 /// Parse the `Authorization: Bearer gat_...` header of a token request.
 /// Mirrors the agent `bearer()` rules: no cookie alongside, exactly one
 /// header, case-insensitive scheme, exact charset and length.
@@ -134,17 +190,74 @@ pub(super) fn token_bearer(headers: &HeaderMap) -> Option<&str> {
     .then_some(token)
 }
 
-/// Resolve a browser request's credential and principal. Cookie-only routes
-/// reject every `Authorization` header. Scoped routes accept either the
-/// cookie path (unchanged) or a token that holds the route's scope; every
-/// authentication failure is the same `unauthenticated`, and a scope miss is
-/// `forbidden` naming the scope.
+/// Authenticate a bearer token that must hold `required`: exactly one
+/// well-formed `Authorization: Bearer gat_...` header and no cookie, a live
+/// token of an existing user, and the scope. Every authentication failure is
+/// the same `unauthenticated`; a scope miss is `forbidden` naming the scope,
+/// audited (rate-capped). Success bumps `last_used_at` (throttled). The
+/// owner's live role is checked by the caller: the registry for fleet
+/// routes, the pool extractors for pool routes.
+async fn authenticate_token(
+    parts: &Parts,
+    state: &AppState,
+    required: ApiTokenScope,
+) -> Result<AuthenticatedApiToken, FleetApiError> {
+    let context = context(parts);
+    let token =
+        token_bearer(&parts.headers).ok_or_else(|| context.error(ErrorCode::Unauthenticated))?;
+    let service = ApiTokenService::new(state.database.clone());
+    let authenticated = service.authenticate(token).await.map_err(|error| {
+        if matches!(error, gridops_core::api_tokens::ApiTokenError::Database(_)) {
+            context.error(ErrorCode::DependencyUnavailable)
+        } else {
+            // Unknown, malformed, expired, revoked and ownerless all
+            // look alike.
+            context.error(ErrorCode::Unauthenticated)
+        }
+    })?;
+    if !authenticated.scopes.contains(&required) {
+        // The denial lands in the audit trail, rate-capped per token;
+        // a failure to record it never changes the refusal.
+        if let Err(error) = service
+            .record_denial(
+                &authenticated.token_id,
+                Some(&authenticated.user_id),
+                parts.method.as_str(),
+                parts.uri.path(),
+                required.as_str(),
+            )
+            .await
+        {
+            tracing::warn!(request_id = %context.id(), kind = ?error, "api token denial audit failed");
+        }
+        let required_scope = UpstreamText::new(required.as_str())
+            .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
+        return Err(context.error_with_details(
+            ErrorCode::Forbidden,
+            gridops_core::fleet::protocol::browser::ErrorDetails::Scope { required_scope },
+        ));
+    }
+    // A successful authentication bumps `last_used_at`, throttled to one
+    // write per token per minute inside the service.
+    if let Err(error) = service.record_use(&authenticated.token_id).await {
+        tracing::warn!(request_id = %context.id(), kind = ?error, "api token use recording failed");
+    }
+    Ok(authenticated)
+}
+
+/// Resolve a browser request's credential and principal. A cookie-only
+/// route refuses a bearer token as `token_not_accepted` and any other
+/// `Authorization` header as `unauthenticated`. Scoped routes accept either
+/// the cookie path (unchanged) or a token that holds the route's scope.
 async fn resolve_user<S: RouteScope>(
     parts: &mut Parts,
     state: &AppState,
     refresh_activity: bool,
 ) -> Result<Principal, FleetApiError> {
     let context = context(parts);
+    if S::REQUIRED.is_none() && has_bearer_scheme(&parts.headers) {
+        return Err(context.error(ErrorCode::TokenNotAccepted));
+    }
     let authorizations = parts.headers.get_all(header::AUTHORIZATION).iter();
     let authorization_count = authorizations.count();
     if authorization_count > 1 {
@@ -152,52 +265,13 @@ async fn resolve_user<S: RouteScope>(
     }
     if authorization_count == 1 {
         let Some(required) = S::REQUIRED else {
-            // Cookie-only route: any Authorization header is refused.
+            // Cookie-only route: any other Authorization header is refused.
             return Err(context.error(ErrorCode::Unauthenticated));
         };
-        let token = token_bearer(&parts.headers)
-            .ok_or_else(|| context.error(ErrorCode::Unauthenticated))?;
-        let service = ApiTokenService::new(state.database.clone());
-        let authenticated = service.authenticate(token).await.map_err(|error| {
-            if matches!(error, gridops_core::api_tokens::ApiTokenError::Database(_)) {
-                context.error(ErrorCode::DependencyUnavailable)
-            } else {
-                // Unknown, malformed, expired, revoked and ownerless all
-                // look alike.
-                context.error(ErrorCode::Unauthenticated)
-            }
-        })?;
-        if !authenticated.scopes.contains(&required) {
-            // The denial lands in the audit trail, rate-capped per token;
-            // a failure to record it never changes the refusal.
-            if let Err(error) = service
-                .record_denial(
-                    &authenticated.token_id,
-                    Some(&authenticated.user_id),
-                    parts.method.as_str(),
-                    parts.uri.path(),
-                    required.as_str(),
-                )
-                .await
-            {
-                tracing::warn!(request_id = %context.id(), kind = ?error, "api token denial audit failed");
-            }
-            let required_scope = UpstreamText::new(required.as_str())
-                .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
-            return Err(context.error_with_details(
-                ErrorCode::Forbidden,
-                gridops_core::fleet::protocol::browser::ErrorDetails::Scope { required_scope },
-            ));
-        }
-        let token_id = authenticated.token_id.clone();
-        // A successful authentication bumps `last_used_at`, throttled to one
-        // write per token per minute inside the service.
-        if let Err(error) = service.record_use(&token_id).await {
-            tracing::warn!(request_id = %context.id(), kind = ?error, "api token use recording failed");
-        }
+        let authenticated = authenticate_token(parts, state, required).await?;
         return Ok(Principal::ApiToken {
             user_id: authenticated.user_id,
-            token_id,
+            token_id: authenticated.token_id,
             token_name: authenticated.name,
         });
     }
@@ -298,10 +372,15 @@ impl<S: RouteScope> FromRequestParts<AppState> for FleetWriteUser<S> {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let context = context(parts);
+        // A bearer token on a cookie-only route is refused first, and
+        // clearly, whatever else the request carries.
+        if S::REQUIRED.is_none() && has_bearer_scheme(&parts.headers) {
+            return Err(context.error(ErrorCode::TokenNotAccepted));
+        }
         // The ambient cookie credential needs the exact-`Origin` check before
         // anything else, exactly as before. A scoped route's bearer request
         // carries no ambient credential and skips it; a cookie-only route
-        // checks `Origin` first even when an `Authorization` header is
+        // checks `Origin` first even when another `Authorization` header is
         // present, preserving the original ordering.
         let bearer_candidate =
             S::REQUIRED.is_some() && parts.headers.contains_key(header::AUTHORIZATION);
@@ -424,6 +503,37 @@ mod tests {
         let error: FleetErrorResponse = serde_json::from_slice(&body)?;
         assert_eq!(error.code, ErrorCode::DependencyUnavailable);
         assert_eq!(error.request_id.to_string(), id);
+        Ok(())
+    }
+
+    #[test]
+    fn bearer_scheme_is_recognised_whatever_follows_it() -> anyhow::Result<()> {
+        let mut headers = HeaderMap::new();
+        assert!(!has_bearer_scheme(&headers));
+        for value in [
+            "Bearer gat_AAAA",
+            "bearer x",
+            "BEARER\tx",
+            "Bearer",
+            "Bearer  two-spaces",
+        ] {
+            headers.insert(header::AUTHORIZATION, value.parse()?);
+            assert!(has_bearer_scheme(&headers), "{value:?}");
+        }
+        for value in [
+            "Basic cHJveHk6cGFzcw==",
+            "Bearerx",
+            "Token abc",
+            "Bear er",
+            "",
+        ] {
+            headers.insert(header::AUTHORIZATION, value.parse()?);
+            assert!(!has_bearer_scheme(&headers), "{value:?}");
+        }
+        // One bearer among several headers is still a bearer request.
+        headers.insert(header::AUTHORIZATION, "Basic cHJveHk6cGFzcw==".parse()?);
+        headers.append(header::AUTHORIZATION, "Bearer x".parse()?);
+        assert!(has_bearer_scheme(&headers));
         Ok(())
     }
 

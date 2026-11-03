@@ -13,9 +13,13 @@ table says so — with a scoped API token: `Authorization: Bearer gat_...`.
 A request carrying both a cookie and a bearer token is refused. Agent
 routes (`/api/v1/fleet/agent/...`) use exactly one
 `Authorization: Bearer <host credential>` header and cannot reach browser
-routes; a token is never a host credential and vice versa. See
-[the automation guide](fleet-automation.md) for tokens, scopes and
-bot-driven enrollment.
+routes; a token is never a host credential and vice versa. A bearer token
+sent to a route that does not take tokens is refused with
+`403 token_not_accepted`, never answered as a signed-out caller. The table
+below lists the fleet routes; [Who may call what](#who-may-call-what) lists
+every route GridOps serves, including the runner-pool routes that take a
+token. See [the automation guide](fleet-automation.md) for tokens, scopes and
+bot-driven automation.
 
 | Method | Path | Caller | Purpose |
 |---|---|---|---|
@@ -36,6 +40,7 @@ bot-driven enrollment.
 | GET | `/api/v1/fleet/enrollments/{enrollment_id}` | browser, `fleet:enroll` | Enrollment status |
 | POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | browser, `fleet:enroll` | Revoke an unused code |
 | POST | `/api/v1/fleet/hosts/{host_id}/approve` | browser, `fleet:approve` | Approve a pending host |
+| POST | `/api/v1/fleet/hosts/{host_id}/retire` | browser, `fleet:retire` (guard rails) | Retire a host (see [Retiring a machine](#retiring-a-machine)) |
 | POST | `/api/v1/fleet/hosts/{host_id}/lifecycle` | browser, `fleet:operate` | Set host intent (active, paused, draining, maintenance) |
 | PUT | `/api/v1/fleet/hosts/{host_id}/budget` | browser, `fleet:operate` | Set the machine's physical budget (CPU, memory, disk), up to what it reports |
 | POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | browser, `fleet:operate` | Turn a runtime on or off |
@@ -46,7 +51,6 @@ bot-driven enrollment.
 | GET | `/api/v1/fleet/api-tokens` | browser (cookie only) | List own API tokens |
 | POST | `/api/v1/fleet/api-tokens/{token_id}/revoke` | browser (cookie only) | Revoke an API token |
 | POST | `/api/v1/fleet/hosts/{host_id}/recover` | browser (cookie only) | Approve explicit host recovery |
-| POST | `/api/v1/fleet/hosts/{host_id}/retire` | browser (cookie only) | Retire a host |
 | POST | `/api/v1/fleet/hosts/{host_id}/credentials/rotate` | browser (cookie only) | Request credential rotation |
 | GET | `/api/v1/operations/{operation_id}` | browser, `fleet:read` | Durable operation status |
 | POST | `/api/v1/fleet/agent/enroll` | agent | Consume an enrollment code |
@@ -66,6 +70,170 @@ Replaying a key
 with the same body returns the original result; a different body returns
 `idempotency_conflict`. Writes that change an existing record carry the
 expected revision and fail with `revision_conflict` when it has moved.
+
+## Who may call what
+
+This table is authoritative for every route the server registers, fleet or
+not. `crates/gridops-api/tests/fleet_http/token_access.rs` reads it and checks
+each row against the running server, and a unit test checks that it lists
+exactly the routes the router registers and exactly the token-capable routes
+of the OpenAPI document.
+
+- **Session**: `required` means a signed-in browser session (the
+  `gridops_session` cookie) is needed when no token is used; `optional` means
+  a caller without one gets a `200` signed-out body (`"authenticated": false`
+  or empty data), which the web app relies on. `—`: the route never reads a
+  session (public, the GitHub OAuth and webhook endpoints, the host agent).
+- **Token scope**: the scope a bearer token must hold. `—`: the route takes
+  no API token.
+- **Origin check** applies to cookie requests only. `exact`: a cookie write
+  needs exactly one `Origin` header equal to the configured base URL (fleet
+  routes). `foreign refused`: a cookie request whose `Origin` names another
+  site is refused with `403`; a request without `Origin` passes (the legacy
+  web-app routes). A token request carries no ambient credential and is never
+  origin-checked.
+- **A bearer token gets** what any `Authorization: Bearer …` header gets on
+  the route, valid or not:
+  - `accepted`: authenticated as the token's owner, if the token is live,
+    holds the scope, and its owner is still an administrator; otherwise
+    `401 unauthenticated` (unknown, malformed, expired or revoked token, or a
+    cookie sent with it) or `403 forbidden` (missing scope, named in
+    `details.requiredScope`, or an owner who is no longer an administrator).
+  - `403 token_not_accepted`: refused before the handler runs, whether the
+    token is valid or not and whether a cookie is also present. The route
+    never answers a token as if the caller were signed out. An
+    `Authorization` header with another scheme (for example `Basic` from a
+    proxy in front of GridOps) is ignored by the web-app routes, as before,
+    and refused as `401 unauthenticated` by the fleet routes, as before.
+  - `ignored`: the route does not authenticate users at all; the header has
+    no effect.
+  - `401 unauthenticated`: a host-agent route; it takes only a host
+    credential, never an API token.
+
+Token management, recovering a machine, rotating its credential, repairing
+unconfirmed starts, reading agent logs, pool actions (pause, resume, scale,
+retry, reconcile), the audit log, settings and platform connections stay
+cookie-only on purpose. Paths not listed here answer `404`.
+
+| Method | Path | Session | Token scope | Origin check | A bearer token gets |
+|---|---|---|---|---|---|
+| GET | `/api/health` | — | — | — | ignored |
+| GET | `/api/v1/openapi.json` | — | — | — | ignored |
+| GET | `/install.sh` | — | — | — | ignored |
+| GET | `/api/v1/auth/github` | — | — | — | ignored |
+| GET | `/api/v1/auth/github/callback` | — | — | — | ignored |
+| GET | `/auth/github` | — | — | — | ignored |
+| GET | `/auth/github/callback` | — | — | — | ignored |
+| GET | `/auth/github-app/manifest/callback` | — | — | — | ignored |
+| POST | `/api/v1/webhooks/github` | — | — | — | ignored |
+| POST | `/api/webhooks/github` | — | — | — | ignored |
+| GET | `/api/v1/auth/session` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/auth/me` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/auth/logout` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/auth/logout` | required | — | foreign refused | 403 `token_not_accepted` |
+| PUT | `/api/v1/users/{user_id}/role` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/overview` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/overview/capacity` | optional | `pools:read` | — | accepted |
+| GET | `/api/v1/overview/queued-jobs` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/search` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/repositories` | optional | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/repositories/sync` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/runner-pools` | optional | `pools:read` | — | accepted |
+| POST | `/api/v1/runner-pools` | required | `pools:manage` | foreign refused | accepted |
+| GET | `/api/v1/runner-pools/options` | optional | `pools:read` | — | accepted |
+| GET | `/api/v1/runner-pools/repositories` | required | `pools:read` | — | accepted |
+| GET | `/api/v1/installations/{installation_id}/runner-groups` | required | `pools:read` | — | accepted |
+| GET | `/api/v1/installations/{installation_id}/repositories` | required | `pools:read` | — | accepted |
+| GET | `/api/v1/runner-pools/{pool_id}` | required | `pools:read` | — | accepted |
+| PUT | `/api/v1/runner-pools/{pool_id}` | required | `pools:manage` | foreign refused | accepted |
+| DELETE | `/api/v1/runner-pools/{pool_id}` | required | `pools:manage` | foreign refused | accepted |
+| GET | `/api/v1/runner-pools/{pool_id}/events` | required | `pools:read` | — | accepted |
+| POST | `/api/v1/runner-pools/{pool_id}/action` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/runners` | optional | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/runners/{runner_id}/action` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/runners/{runner_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/runners/{runner_id}/logs/stream` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/workflow-runs` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/workflow-runs/{run_id}` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/workflow-runs/{run_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/workflow-runs/{run_id}/action` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/workflow-jobs/{job_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/workflow-jobs/{job_id}/agent-runs` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/agent-runs` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/agent-runs/{run_id}` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/agent-runs/{run_id}/cancel` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/settings/ai` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/settings/ai/api-key` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/settings/ai/oauth/start` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/settings/ai/oauth/complete` | required | — | foreign refused | 403 `token_not_accepted` |
+| DELETE | `/api/v1/settings/ai/connections/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/settings/ai/connections/{connection_id}/models` | required | — | — | 403 `token_not_accepted` |
+| PUT | `/api/v1/settings/ai/agent` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/workflow-runs/{run_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/webhooks` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/webhooks/{delivery_id}` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/webhooks/{delivery_id}/retry` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/webhooks/dismiss-failed` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/audit` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/log-streams` | optional | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/log-streams/{stream_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/settings` | optional | — | — | 403 `token_not_accepted` |
+| PUT | `/api/v1/settings` | required | — | foreign refused | 403 `token_not_accepted` |
+| PUT | `/api/v1/settings/runner-host` | required | — | foreign refused | 403 `token_not_accepted` |
+| PUT | `/api/v1/settings/runner-host/budget` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/platform-connections/bitbucket` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/platform-connections/bitbucket` | required | — | foreign refused | 403 `token_not_accepted` |
+| PUT | `/api/v1/platform-connections/bitbucket/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| DELETE | `/api/v1/platform-connections/bitbucket/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/github-app/manifest` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/backups/database` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/backups/database` | required | — | — | 403 `token_not_accepted` |
+| GET | `/api/v1/fleet/hosts` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}` | required | `fleet:read` | — | accepted |
+| DELETE | `/api/v1/fleet/hosts/{host_id}` | required | `fleet:operate` | exact | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/backends` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}` | required | `fleet:read` | — | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | required | `fleet:operate` | exact | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/domains` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/domains/{domain_id}` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/samples` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/events` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/grants` | required | `fleet:read` | — | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/grants/{target_id}` | required | `fleet:operate` | exact | accepted |
+| GET | `/api/v1/fleet/hosts/{host_id}/unconfirmed` | required | `fleet:read` | — | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/unconfirmed/repair` | required | — | exact | 403 `token_not_accepted` |
+| GET | `/api/v1/fleet/hosts/{host_id}/logs` | required | — | — | 403 `token_not_accepted` |
+| PUT | `/api/v1/fleet/hosts/{host_id}/budget` | required | `fleet:operate` | exact | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/lifecycle` | required | `fleet:operate` | exact | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/approve` | required | `fleet:approve` | exact | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/retire` | required | `fleet:retire` | exact | accepted |
+| POST | `/api/v1/fleet/hosts/{host_id}/recover` | required | — | exact | 403 `token_not_accepted` |
+| POST | `/api/v1/fleet/hosts/{host_id}/credentials/rotate` | required | — | exact | 403 `token_not_accepted` |
+| GET | `/api/v1/fleet/targets` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/workload` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/pools/{pool_id}/profile` | required | `fleet:read` | — | accepted |
+| PUT | `/api/v1/fleet/pools/{pool_id}/profile` | required | `fleet:operate` | exact | accepted |
+| GET | `/api/v1/fleet/pools/{pool_id}/queue` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/pools/{pool_id}/capacity` | required | `fleet:read` | — | accepted |
+| PUT | `/api/v1/fleet/pools/{pool_id}/capacity` | required | `fleet:operate` | exact | accepted |
+| POST | `/api/v1/fleet/enrollments` | required | `fleet:enroll` | exact | accepted |
+| GET | `/api/v1/fleet/enrollments/{enrollment_id}` | required | `fleet:enroll` | — | accepted |
+| POST | `/api/v1/fleet/enrollments/{enrollment_id}/revoke` | required | `fleet:enroll` | exact | accepted |
+| POST | `/api/v1/fleet/api-tokens` | required | — | exact | 403 `token_not_accepted` |
+| GET | `/api/v1/fleet/api-tokens` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/fleet/api-tokens/{token_id}/revoke` | required | — | exact | 403 `token_not_accepted` |
+| GET | `/api/v1/operations/{operation_id}` | required | `fleet:read` | — | accepted |
+| POST | `/api/v1/fleet/agent/enroll` | — | — | — | ignored |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/handshake` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/inventory` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/heartbeat` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/logs` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/output` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/bootstrap` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/commands/poll` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/commands/result` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/credentials/rotate` | — | — | — | 401 `unauthenticated` |
+| POST | `/api/v1/fleet/agent/hosts/{host_id}/credentials/ack` | — | — | — | 401 `unauthenticated` |
 
 ## API tokens
 
@@ -93,6 +261,81 @@ Token metadata is `id`, `name`, `displayPrefix` (the first eight characters
 after `gat_`), `scopes`, `createdAt`, `expiresAt`, `lastUsedAt` and
 `revokedAt`.
 
+## Retiring a machine
+
+`POST /api/v1/fleet/hosts/{host_id}/retire` with `{ "expectedRevision": n }`
+revokes the machine's credentials and stops it taking work; its history
+stays, and it can then be [deleted](#deleting-a-machine). Retiring cannot be
+undone: the computer comes back only by enrolling again, as a new record.
+
+**From a browser session** an administrator retires under the original
+rules: the current revision, and no placement on the machine that is not
+`cleaned` or `failed` (`400 invalid_request` otherwise). Nothing below
+changes that.
+
+**With an API token** the token needs `fleet:retire`, which no other scope
+(`fleet:operate` included) implies, and its owner must still be an
+administrator. The machine must also be one that cannot hurt a healthy
+fleet. These guard rails are checked in the same database transaction as the
+retire, so nothing can change between the check and the change:
+
+| Reason | Refused while |
+|---|---|
+| `lifecycle_active` | The machine's lifecycle is `active`. Pause it, drain it or put it in maintenance first (`POST .../lifecycle`, `fleet:operate`). |
+| `recently_seen` | It reported in (heartbeat or inventory) within the quiet period: 15 minutes, or `GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES` (a whole number from 2 to 10080; the API refuses to start on anything else). A machine that never reported in counts as quiet. |
+| `live_placement` | A placement is not `cleaned`, `failed` or `uncertain`, or capacity it holds is not released. |
+| `unconfirmed_start` | A placement is `uncertain`: its start could not be confirmed. Repair it on the machine page. |
+| `live_runner` | A runner placed on the machine has not finished (its status is not `deleted` or `failed`). |
+| `pending_command` | A command for the machine is still waiting or running within its deadline. |
+
+A refusal is `409 host_not_retirable` with `details.kind = "retire_blocked"`
+and **every** reason that applies in `details.reasons`, in the order above:
+
+```json fleet-error
+{
+  "code": "host_not_retirable",
+  "message": "Machine cannot be retired with an API token yet",
+  "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e72",
+  "details": { "kind": "retire_blocked", "reasons": ["lifecycle_active", "recently_seen"] }
+}
+```
+
+So a leaked `fleet:retire` token can retire only a machine that is already
+out of service, silent and idle: one that was taking no work anyway. A
+machine that is alive and paused, or drained but still reporting in, is
+refused. Retiring a machine that is already retired is a no-op (`200`), for
+a token and a browser alike. A stale `expectedRevision` is
+`409 revision_conflict`. The audit row and fleet event `fleet.host.retired`
+name the actor and, for a token, `"<login> (token: <name>)"` with the
+token's id and name in `viaApiToken`.
+
+There is no second approver and no separate expiry rule for this scope: the
+guard rails above are what make a leaked token harmless to a working fleet.
+Give a token `fleet:retire` only for the clean-up it is made for, and keep
+its lifetime short (see [the release operator
+token](fleet-automation.md#the-release-operator-token)). Operators should
+review the guard rails and the quiet period for their fleet.
+
+## Runner pools with a token
+
+The runner-pool routes listed in [Who may call what](#who-may-call-what)
+accept a token with `pools:read` (list and read pools, their events, the
+capacity history and the pool form's options) or `pools:manage` (create,
+edit and remove pools). Neither implies the other: a bot that creates pools
+and then lists them needs both. The token acts as its owner, who must still
+be a system administrator: the handlers are the web app's own, with the
+form's validation (a `400 { "error": "..." }` with the form's message) and
+the owner's GitHub installation access, so a token can see and change
+exactly the pools its owner can, and nothing on an installation the owner
+cannot reach. Responses carry no provider credentials or tokens. Every
+create, edit and remove is audited (`runner_pool.created`,
+`runner_pool.updated`, `runner_pool.deleted`) with the actor
+`"<login> (token: <name>)"` and `viaApiToken` in the metadata. Token-request
+refusals (`401 unauthenticated`, `403 forbidden` with or without
+`details.requiredScope`) use the fleet error envelope; a browser session
+gets the same answers as before. Pool actions (pause, resume, scale, retry,
+reconcile) stay cookie-only.
+
 ## Deleting a machine
 
 `DELETE /api/v1/fleet/hosts/{host_id}` removes a machine that can never take
@@ -103,7 +346,8 @@ no body and returns `200 { "hostId": "..." }`.
 
 A machine can be deleted when it is **retired**, or when it **never finished
 enrolling** (pending or revoked) and has not reported in for 90 seconds. An
-approved machine is retired first (from its page; retirement is cookie-only),
+approved machine is retired first (from its page, or with a `fleet:retire`
+token within its guard rails; see [Retiring a machine](#retiring-a-machine)),
 which also revokes its credential. Anything else is refused with
 `409 host_not_deletable` and `details.kind = "delete_blocked"`; the refusal
 lists **every** reason that applies in `details.reasons`:
@@ -180,6 +424,18 @@ Every fleet error has the same shape:
 }
 ```
 
+A bearer token sent to a route that does not accept tokens is refused before
+anything else, whether the token is valid or not:
+
+```json fleet-error
+{
+  "code": "token_not_accepted",
+  "message": "This route does not accept API tokens",
+  "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e73",
+  "details": null
+}
+```
+
 A token that authenticated but lacks the route's scope is refused with the
 missing scope named, and nothing else is revealed:
 
@@ -197,8 +453,10 @@ missing scope named, and nothing else is revealed:
 | `invalid_request`, `contract_range` | 400 | No | Fix the request; a resend will not improve on its own. |
 | `unauthenticated` | 401 | No | Check the token. Unknown, expired, revoked and malformed tokens are deliberately indistinguishable. Mint a new token if the old one expired or was revoked. |
 | `forbidden` | 403 | No | The token lacks the route's scope (`details.kind = "scope"` names it), or the owner's role no longer permits the action. Cannot be fixed by retrying. |
+| `token_not_accepted` | 403 | No | The route does not take API tokens at all (see [Who may call what](#who-may-call-what)); no token or scope will change that. Use a browser session, or a route that takes a token. |
 | `not_found` | 404 | No | The id is wrong or the record was deleted. |
 | `host_not_deletable` | 409 | After cleanup | `details.reasons` lists everything keeping the machine: finish or clean up what each reason names, then delete again. See [Deleting a machine](#deleting-a-machine). |
+| `host_not_retirable` | 409 | After the machine is out of service, silent and idle | `details.reasons` lists every guard rail the machine fails for a token retire. See [Retiring a machine](#retiring-a-machine). |
 | `revision_conflict` | 409 | Yes | Re-read the resource, recompute from the fresh `revision` (or approval evidence), resend. On approve, `enrollment: "approved"` means the call already succeeded. |
 | `idempotency_conflict` | 409 | No | The same `Idempotency-Key` was used with a different body. Do not retry with that key. |
 | `enrollment_expired`, `grant_expired`, `cursor_expired`, `cursor_gap` | 410 | Re-issue | The one-time artifact is gone. Issue a new code (or re-read page one for cursors). |
@@ -210,8 +468,9 @@ missing scope named, and nothing else is revealed:
 `field`), `limit` (with `maximum`), `retry` (with `retryAfterMs`),
 `cursor_gap`, `readiness` (with a placement rejection reason), `scope`
 (with `requiredScope`, returned only when a bearer token authenticated but
-lacks the route's scope), or `delete_blocked` (with `reasons`, on
-`host_not_deletable`). A host with no compatible capacity is a queued
+lacks the route's scope), `delete_blocked` (with `reasons`, on
+`host_not_deletable`), or `retire_blocked` (with `reasons`, on
+`host_not_retirable`). A host with no compatible capacity is a queued
 placement with an explanation, not an error.
 
 ## Idempotency and retries
@@ -240,7 +499,8 @@ in their body and fail replays with `revision_conflict`.
 
 ## Machine-readable contract
 
-The same routes, scopes and error shapes are published as an OpenAPI 3.1
+The fleet and operations routes, the runner-pool routes that take a token,
+their scopes and the error shapes are published as an OpenAPI 3.1
 document, served unauthenticated at
 [`GET /api/v1/openapi.json`](/api/v1/openapi.json) and checked into the
 repository at `docs/openapi/gridops-v1.json`. A drift test fails the build

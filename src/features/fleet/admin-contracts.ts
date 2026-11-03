@@ -138,8 +138,10 @@ export const deletedHostSchema = z.strictObject({ hostId: fleetIdSchema });
 export const repairResultSchema = z.strictObject({ repaired: z.array(fleetIdSchema).max(64) });
 export type UnconfirmedPlacement = z.infer<typeof unconfirmedPlacementSchema>;
 
-/** The v1 token scopes, in the order the server stores them. */
-export const apiTokenScopes = ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate"] as const;
+/** The token scopes, in the order the server stores them. No scope implies another. */
+export const apiTokenScopes = [
+  "fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate", "fleet:retire", "pools:read", "pools:manage",
+] as const;
 export const apiTokenScopeSchema = z.enum(apiTokenScopes);
 export const API_TOKEN_DEFAULT_DAYS = 90;
 export const API_TOKEN_MAX_DAYS = 365;

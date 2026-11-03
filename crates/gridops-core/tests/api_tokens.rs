@@ -370,3 +370,89 @@ async fn list_never_returns_the_verifier_and_record_use_throttles() -> Result<()
     );
     Ok(())
 }
+
+/// A token stored before the pool and retire scopes existed keeps exactly
+/// its scopes: nothing is added on read, and `fleet:operate` never implies
+/// `fleet:retire` or a pool scope.
+#[tokio::test]
+async fn existing_tokens_keep_their_scopes_and_new_scopes_round_trip() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let legacy = fixture
+        .service
+        .create(
+            &fixture.user_id,
+            "release-operator",
+            &[ApiTokenScope::FleetRead, ApiTokenScope::FleetOperate],
+            fixture.clock.now_millis() + DAY,
+        )
+        .await?;
+    let authenticated = fixture.service.authenticate(legacy.expose()).await?;
+    assert_eq!(
+        authenticated.scopes,
+        vec![ApiTokenScope::FleetRead, ApiTokenScope::FleetOperate]
+    );
+    for scope in [
+        ApiTokenScope::FleetRetire,
+        ApiTokenScope::PoolsRead,
+        ApiTokenScope::PoolsManage,
+    ] {
+        assert!(!authenticated.scopes.contains(&scope), "{scope}");
+    }
+
+    let receipt = fixture
+        .service
+        .create(
+            &fixture.user_id,
+            "pool-bot",
+            &[
+                ApiTokenScope::PoolsManage,
+                ApiTokenScope::FleetRetire,
+                ApiTokenScope::PoolsRead,
+            ],
+            fixture.clock.now_millis() + DAY,
+        )
+        .await?;
+    let row = sqlx::query("SELECT scopes_json FROM api_tokens WHERE id=?")
+        .bind(receipt.token_id())
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(
+        row.get::<String, _>("scopes_json"),
+        "[\"fleet:retire\",\"pools:read\",\"pools:manage\"]"
+    );
+    let authenticated = fixture.service.authenticate(receipt.expose()).await?;
+    assert_eq!(
+        authenticated.scopes,
+        vec![
+            ApiTokenScope::FleetRetire,
+            ApiTokenScope::PoolsRead,
+            ApiTokenScope::PoolsManage,
+        ]
+    );
+    Ok(())
+}
+
+/// A row naming a scope this build does not know fails closed: the token
+/// does not authenticate at all rather than authenticating with less.
+#[tokio::test]
+async fn a_stored_scope_this_build_does_not_know_fails_closed() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let receipt = fixture
+        .service
+        .create(
+            &fixture.user_id,
+            "future",
+            &[ApiTokenScope::PoolsRead],
+            fixture.clock.now_millis() + DAY,
+        )
+        .await?;
+    sqlx::query("UPDATE api_tokens SET scopes_json='[\"pools:read\",\"pools:admin\"]' WHERE id=?")
+        .bind(receipt.token_id())
+        .execute(&fixture.pool)
+        .await?;
+    assert!(matches!(
+        fixture.service.authenticate(receipt.expose()).await,
+        Err(ApiTokenError::AuthenticationFailed)
+    ));
+    Ok(())
+}

@@ -3,7 +3,7 @@
 
 mod api_tokens;
 mod auth;
-mod boundary;
+pub(crate) mod boundary;
 mod commands;
 mod credentials;
 mod enrollment;
@@ -26,11 +26,13 @@ use gridops_core::fleet::protocol::{browser::ErrorCode, primitives::DEFAULT_JSON
 use self::error::RequestContext;
 use crate::state::AppState;
 
-/// The v1 token scope map, as data. A fleet browser route accepts a bearer
-/// token only when it appears here; every other fleet route is cookie-only.
-/// The extractors in `boundary.rs` name the same scope per handler, and the
-/// HTTP tests cross-check both against this table.
-#[allow(dead_code)] // consumed by the OpenAPI and docs issues (#21, #22); kept beside the router so they cannot drift
+/// The token scope map, as data: every route, fleet or not, that accepts a
+/// bearer token, and the scope it requires. Every other route refuses tokens
+/// (`token_not_accepted`) or never authenticates users. The extractors in
+/// `boundary.rs` and `access.rs` name the same scope per handler; the
+/// `OpenAPI` drift test, the `access.rs` tests (against `docs/fleet-api.md`)
+/// and the HTTP tests cross-check all of them against this table.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/fleet/hosts", "fleet:read"),
     ("GET", "/api/v1/fleet/hosts/{host_id}", "fleet:read"),
@@ -87,6 +89,11 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ),
     (
         "POST",
+        "/api/v1/fleet/hosts/{host_id}/retire",
+        "fleet:retire",
+    ),
+    (
+        "POST",
         "/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled",
         "fleet:operate",
     ),
@@ -115,6 +122,26 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/fleet/pools/{pool_id}/capacity",
         "fleet:operate",
     ),
+    // Runner pools, outside the fleet router (`access.rs`).
+    ("GET", "/api/v1/runner-pools", "pools:read"),
+    ("GET", "/api/v1/runner-pools/options", "pools:read"),
+    ("GET", "/api/v1/runner-pools/repositories", "pools:read"),
+    (
+        "GET",
+        "/api/v1/installations/{installation_id}/runner-groups",
+        "pools:read",
+    ),
+    (
+        "GET",
+        "/api/v1/installations/{installation_id}/repositories",
+        "pools:read",
+    ),
+    ("GET", "/api/v1/runner-pools/{pool_id}", "pools:read"),
+    ("GET", "/api/v1/runner-pools/{pool_id}/events", "pools:read"),
+    ("GET", "/api/v1/overview/capacity", "pools:read"),
+    ("POST", "/api/v1/runner-pools", "pools:manage"),
+    ("PUT", "/api/v1/runner-pools/{pool_id}", "pools:manage"),
+    ("DELETE", "/api/v1/runner-pools/{pool_id}", "pools:manage"),
 ];
 
 pub(crate) fn router() -> Router<AppState> {
