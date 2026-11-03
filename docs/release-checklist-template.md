@@ -106,7 +106,7 @@ issue: write the placeholders, and a result such as "all passed".
 - [ ] 4. **Decide what the release builds** from the repository variables (`Settings → Secrets and variables → Actions → Variables`, or `gh variable list --repo Performant-Labs/gridops`)
   - Linux x64 agent, `install.sh` and `SHA256SUMS`: always
   - macOS agents (`gridops-host-agent-macos-arm64`, `-macos-x64`, `gridops-tart-agent-macos-arm64`): always, on the macOS runner of P7. The release is not published without them unless `RELEASE_MACOS` is exactly `false`, an emergency opt-out that publishes it **without a macOS agent**
-  - Control plane images, `compose.release.yaml` and `env.example`: only when `RELEASE_IMAGES` is `true` (built on a macOS runner with Docker for now; unset, deployments build from source)
+  - Control plane images, `compose.release.yaml` and `env.example`: only when `RELEASE_IMAGES` is `true` (built on a Linux runner through its host's Docker, which must run `linux/arm64` containers: [runner requirements](https://github.com/Performant-Labs/gridops/blob/master/docs/releasing.md#runner-requirements); unset, deployments build from source)
   - Linux arm64 agent: only when `RELEASE_LINUX_ARM64` is `true` (needs an `ARM64` runner in a pool)
   - This release builds (macOS agent / images / Linux arm64): `___`
   - If `RELEASE_MACOS` is `false`: why, and that this release has no macOS agent: `___`
