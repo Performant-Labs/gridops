@@ -41,6 +41,10 @@ struct AgentState {
     bitbucket_runner_root: String,
     network_mode: NetworkMode,
     limits: AgentLimits,
+    /// How long a VM start waits for one of the Mac's two VM slots.
+    vm_slot_wait: VmSlotWait,
+    /// VM runners currently waiting for a slot, so they can be listed as such.
+    slot_waiters: SlotWaiters,
     records: Arc<RwLock<HashMap<String, TartRecord>>>,
     provision_lock: Arc<Mutex<()>>,
     /// Liveness of natively executed runners, keyed by record id. Populated when
@@ -305,7 +309,16 @@ enum AgentError {
     Unauthorized,
     BadRequest(String),
     Conflict(String),
-    Guardrail { code: &'static str, message: String },
+    Guardrail {
+        code: &'static str,
+        message: String,
+    },
+    /// The host could not do it now for a reason that is not a fault, but
+    /// the request failed: a start that waited for a VM slot and got none.
+    Unavailable {
+        code: &'static str,
+        message: String,
+    },
     NotFound(String),
     Internal(anyhow::Error),
 }
@@ -321,6 +334,7 @@ impl IntoResponse for AgentError {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
             Self::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
             Self::Guardrail { code, message } => (StatusCode::TOO_MANY_REQUESTS, code, message),
+            Self::Unavailable { code, message } => (StatusCode::SERVICE_UNAVAILABLE, code, message),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
             Self::Internal(error) => {
                 tracing::error!(error = ?error, "Tart agent request failed");
@@ -400,6 +414,11 @@ async fn main() -> Result<()> {
         (1..=100).contains(&limits.max_runners),
         "GRIDOPS_TART_MAX_RUNNERS must be 1-100"
     );
+    let vm_slot_wait_seconds = env_value("GRIDOPS_TART_VM_SLOT_WAIT_SECONDS", 600_u64)?;
+    anyhow::ensure!(
+        vm_slot_wait_seconds <= MAX_VM_SLOT_WAIT_SECONDS,
+        "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be 0-{MAX_VM_SLOT_WAIT_SECONDS}"
+    );
 
     fs::create_dir_all(home.join("records")).await?;
     fs::create_dir_all(home.join("logs")).await?;
@@ -415,13 +434,15 @@ async fn main() -> Result<()> {
         bitbucket_runner_root,
         network_mode,
         limits,
+        vm_slot_wait: VmSlotWait::from_seconds(vm_slot_wait_seconds),
+        slot_waiters: SlotWaiters::default(),
         records: Arc::new(RwLock::new(records)),
         provision_lock: Arc::new(Mutex::new(())),
         native: Arc::new(RwLock::new(HashMap::new())),
         release_lock: Arc::new(Mutex::new(())),
     };
     let bind = env::var("GRIDOPS_TART_AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:8790".into());
-    tracing::info!(%bind, tart_version = version.trim(), ?network_mode, "GridOps Tart agent starting");
+    tracing::info!(%bind, tart_version = version.trim(), ?network_mode, vm_slot_wait_seconds, "GridOps Tart agent starting");
 
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -530,6 +551,14 @@ async fn list_runners(
                     Some(_) => ("exited", "exited".to_owned()),
                     None => ("missing", "missing".to_owned()),
                 }
+            } else if let Some(since) = state.slot_waiters.since(&record.id) {
+                // Cloned but not yet running: both of the Mac's VM slots are
+                // taken and the start is waiting for one, as Docker reports a
+                // container that exists but has not started.
+                (
+                    "created",
+                    format!("waiting for a free macOS VM slot since {since}"),
+                )
             } else {
                 let vm_state = vms
                     .get(&record.vm_name)
@@ -643,8 +672,7 @@ async fn provision_runner(
             .write()
             .await
             .insert(id.clone(), record.clone());
-        start_vm(&state, &record)?;
-        wait_for_guest_agent(&state, &record).await?;
+        boot_vm(&state, &record).await?;
         let (script, bootstrap_secret) = match input.platform.as_str() {
             "github" => (
                 runner_script(&state.runner_root),
@@ -682,6 +710,14 @@ async fn provision_runner(
         cleanup_vm(&state, &vm_name).await;
         state.records.write().await.remove(&id);
         let _ = fs::remove_file(record_path(&state, &id)).await;
+        // Said plainly to the control plane, which records it as the runner's
+        // failure reason and counts it like any other failed start.
+        if let Some(no_slot) = error.downcast_ref::<NoVmSlot>() {
+            return Err(AgentError::Unavailable {
+                code: "vm_slot_unavailable",
+                message: no_slot.to_string(),
+            });
+        }
         return Err(AgentError::Internal(error));
     }
     Ok((
@@ -1155,15 +1191,265 @@ fn text_response(body: Body) -> Response {
         .into_response()
 }
 
-fn start_vm(state: &AgentState, record: &TartRecord) -> Result<()> {
-    let runtime_log = state
-        .home
-        .join("logs")
-        .join(format!("{}.runtime.log", record.id));
+/// Most VMs macOS runs at once on one Mac, counting every VM on it, including
+/// those other software started. Only used in messages: the limit itself is
+/// learnt from the Virtualization framework refusing a VM.
+const MACOS_VM_SLOTS: &str = "two";
+
+/// What the Virtualization framework says, through `tart run`, when all of the
+/// Mac's VM slots are taken. Matched in lower case.
+const VM_SLOT_LIMIT_ERROR: &str = "the number of vms exceeds the system limit";
+
+/// Longest `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`. The wait happens inside the
+/// provisioning request, which this agent and the manager both cut off after
+/// 45 minutes, and cloning, booting and starting the runner need time too.
+const MAX_VM_SLOT_WAIT_SECONDS: u64 = 1_800;
+
+/// Whether `tart run`'s output says every VM slot on the Mac is taken.
+fn vm_slot_limit_reached(output: &str) -> bool {
+    output.to_ascii_lowercase().contains(VM_SLOT_LIMIT_ERROR)
+}
+
+/// How long, and how often, a VM start retries while the Mac's VM slots are
+/// all taken. Another program's VMs hold a slot for as long as their job
+/// runs, so a busy slot is a reason to wait, not a failed start.
+#[derive(Clone, Copy, Debug)]
+struct VmSlotWait {
+    /// The longest total wait. Zero fails on the first busy slot.
+    max_wait: Duration,
+    /// The pause before the first retry; each later one doubles it...
+    first_retry: Duration,
+    /// ...up to this.
+    max_retry: Duration,
+}
+
+impl VmSlotWait {
+    fn from_seconds(seconds: u64) -> Self {
+        Self {
+            max_wait: Duration::from_secs(seconds),
+            first_retry: Duration::from_secs(2),
+            max_retry: Duration::from_secs(30),
+        }
+    }
+
+    /// The pause before retry `retry`, counting from zero.
+    fn delay(&self, retry: u32) -> Duration {
+        self.first_retry
+            .saturating_mul(2_u32.saturating_pow(retry))
+            .min(self.max_retry)
+    }
+}
+
+/// A VM start that waited the longest allowed for a VM slot and got none.
+#[derive(Debug)]
+struct NoVmSlot {
+    waited_seconds: u64,
+}
+
+impl std::fmt::Display for NoVmSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "no macOS VM slot became free within {} seconds; the Mac allows {MACOS_VM_SLOTS} VMs at once, including VMs of other software",
+            self.waited_seconds
+        )
+    }
+}
+
+impl std::error::Error for NoVmSlot {}
+
+/// How one attempt to boot a runner's VM went.
+#[derive(Debug)]
+enum BootOutcome {
+    Booted,
+    /// `tart run` was refused because every VM slot on the Mac is taken.
+    SlotBusy,
+    Failed(anyhow::Error),
+}
+
+#[derive(Debug)]
+enum BootError {
+    NoSlot(NoVmSlot),
+    Failed(anyhow::Error),
+}
+
+/// Runs `attempt` until it boots, retrying with backoff while it finds every
+/// VM slot taken, for at most `wait.max_wait`. Any other failure ends it at
+/// once. `waiting` is told before each pause how long it has waited so far.
+async fn boot_when_slot_free<A, F, W>(
+    wait: VmSlotWait,
+    mut attempt: A,
+    mut waiting: W,
+) -> Result<(), BootError>
+where
+    A: FnMut() -> F,
+    F: Future<Output = BootOutcome>,
+    W: FnMut(Duration),
+{
+    let started = tokio::time::Instant::now();
+    let mut retry = 0_u32;
+    loop {
+        match attempt().await {
+            BootOutcome::Booted => return Ok(()),
+            BootOutcome::Failed(error) => return Err(BootError::Failed(error)),
+            BootOutcome::SlotBusy => {
+                let waited = started.elapsed();
+                let Some(remaining) = wait
+                    .max_wait
+                    .checked_sub(waited)
+                    .filter(|remaining| !remaining.is_zero())
+                else {
+                    return Err(BootError::NoSlot(NoVmSlot {
+                        waited_seconds: wait.max_wait.as_secs(),
+                    }));
+                };
+                waiting(waited);
+                tokio::time::sleep(wait.delay(retry).min(remaining)).await;
+                retry = retry.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// VM runners waiting for a free VM slot, by record id, with when they began.
+#[derive(Clone, Debug, Default)]
+struct SlotWaiters(Arc<std::sync::Mutex<HashMap<String, String>>>);
+
+impl SlotWaiters {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Marks the runner as waiting until the returned guard is dropped, which
+    /// also happens if the provisioning request is abandoned mid-wait.
+    fn wait(&self, id: &str) -> SlotWaiter {
+        self.entries()
+            .entry(id.to_owned())
+            .or_insert_with(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+        SlotWaiter {
+            waiters: self.clone(),
+            id: id.to_owned(),
+        }
+    }
+
+    fn since(&self, id: &str) -> Option<String> {
+        self.entries().get(id).cloned()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries().is_empty()
+    }
+}
+
+struct SlotWaiter {
+    waiters: SlotWaiters,
+    id: String,
+}
+
+impl Drop for SlotWaiter {
+    fn drop(&mut self) {
+        self.waiters.entries().remove(&self.id);
+    }
+}
+
+/// Boots the runner's cloned VM, waiting for a free VM slot when the Mac has
+/// none. The clone is kept while waiting; the caller deletes it on failure.
+async fn boot_vm(state: &AgentState, record: &TartRecord) -> Result<()> {
+    let mut waiter: Option<SlotWaiter> = None;
+    let result = boot_when_slot_free(
+        state.vm_slot_wait,
+        || boot_vm_once(state, record),
+        |waited| {
+            if waiter.is_none() {
+                tracing::info!(
+                    runner = %record.name,
+                    vm = %record.vm_name,
+                    max_wait_seconds = state.vm_slot_wait.max_wait.as_secs(),
+                    "every macOS VM slot on this Mac is in use (it allows {MACOS_VM_SLOTS}, including other software's VMs); waiting for one to become free"
+                );
+                waiter = Some(state.slot_waiters.wait(&record.id));
+            } else {
+                tracing::debug!(runner = %record.name, waited_seconds = waited.as_secs(), "still waiting for a free macOS VM slot");
+            }
+        },
+    )
+    .await;
+    if waiter.take().is_some() && result.is_ok() {
+        tracing::info!(runner = %record.name, vm = %record.vm_name, "a macOS VM slot became free; the VM started");
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(BootError::NoSlot(no_slot)) => Err(no_slot.into()),
+        Err(BootError::Failed(error)) => Err(error),
+    }
+}
+
+/// One `tart run` of the runner's VM, followed until its guest agent answers
+/// or the VM process exits first, which is how a refused start shows itself.
+async fn boot_vm_once(state: &AgentState, record: &TartRecord) -> BootOutcome {
+    let runtime_log = runtime_log_path(state, &record.id);
+    let offset = fs::metadata(&runtime_log)
+        .await
+        .map_or(0, |metadata| metadata.len());
+    let exited = match start_vm(state, record) {
+        Ok(exited) => exited,
+        Err(error) => return BootOutcome::Failed(error),
+    };
+    match wait_for_guest_agent(state, record, exited).await {
+        GuestStart::Ready => BootOutcome::Booted,
+        GuestStart::TimedOut => BootOutcome::Failed(anyhow::anyhow!(
+            "Tart guest agent did not become ready within 180 seconds"
+        )),
+        GuestStart::VmExited(status) => {
+            let output = read_log_from(&runtime_log, offset).await;
+            if vm_slot_limit_reached(&output) {
+                return BootOutcome::SlotBusy;
+            }
+            let status =
+                status.map_or_else(|| "unknown status".to_owned(), |status| status.to_string());
+            let output = output.trim();
+            let tail = output
+                .char_indices()
+                .rev()
+                .nth(999)
+                .map_or(output, |(index, _)| &output[index..]);
+            BootOutcome::Failed(anyhow::anyhow!(
+                "tart run exited ({status}) before the guest agent became ready: {tail}"
+            ))
+        }
+    }
+}
+
+fn runtime_log_path(state: &AgentState, id: &str) -> PathBuf {
+    state.home.join("logs").join(format!("{id}.runtime.log"))
+}
+
+/// What was appended to `path` after `offset`, up to 64 KiB.
+async fn read_log_from(path: &FsPath, offset: u64) -> String {
+    let Ok(mut file) = File::open(path).await else {
+        return String::new();
+    };
+    if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(64 * 1_024).read_to_end(&mut bytes).await;
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Spawns `tart run` for the record's VM. The receiver resolves when that
+/// process exits, with its status when it could be read.
+fn start_vm(
+    state: &AgentState,
+    record: &TartRecord,
+) -> Result<tokio::sync::oneshot::Receiver<Option<std::process::ExitStatus>>> {
     let stdout = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&runtime_log)?;
+        .open(runtime_log_path(state, &record.id))?;
     let stderr = stdout.try_clone()?;
     let mut command = Command::new(&state.tart_binary);
     command
@@ -1180,18 +1466,36 @@ fn start_vm(state: &AgentState, record: &TartRecord) -> Result<()> {
         .stderr(Stdio::from(stderr))
         .spawn()?;
     let vm_name = record.vm_name.clone();
+    let (exited_tx, exited) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        match child.wait().await {
-            Ok(status) => tracing::info!(%vm_name, %status, "Tart VM process exited"),
+        let status = match child.wait().await {
+            Ok(status) => {
+                tracing::info!(%vm_name, %status, "Tart VM process exited");
+                Some(status)
+            }
             Err(error) => {
                 tracing::warn!(%vm_name, error = ?error, "Tart VM process wait failed");
+                None
             }
-        }
+        };
+        // Nobody is listening once the VM has booted.
+        let _ = exited_tx.send(status);
     });
-    Ok(())
+    Ok(exited)
 }
 
-async fn wait_for_guest_agent(state: &AgentState, record: &TartRecord) -> Result<()> {
+enum GuestStart {
+    Ready,
+    TimedOut,
+    /// The VM process ended before its guest agent answered.
+    VmExited(Option<std::process::ExitStatus>),
+}
+
+async fn wait_for_guest_agent(
+    state: &AgentState,
+    record: &TartRecord,
+    mut exited: tokio::sync::oneshot::Receiver<Option<std::process::ExitStatus>>,
+) -> GuestStart {
     let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
     loop {
         let ready = Command::new(&state.tart_binary)
@@ -1202,12 +1506,15 @@ async fn wait_for_guest_agent(state: &AgentState, record: &TartRecord) -> Result
             .await
             .is_ok_and(|status| status.success());
         if ready {
-            return Ok(());
+            return GuestStart::Ready;
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("Tart guest agent did not become ready within 180 seconds");
+            return GuestStart::TimedOut;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::select! {
+            status = &mut exited => return GuestStart::VmExited(status.ok().flatten()),
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
     }
 }
 
@@ -1705,6 +2012,408 @@ mod tests {
         };
         assert_eq!(tail, b"two\nthree\n");
         fs::remove_file(path).await?;
+        Ok(())
+    }
+
+    // ---- Waiting for one of the Mac's two VM slots ----
+
+    #[test]
+    fn recognises_the_virtualization_frameworks_vm_limit() {
+        assert!(vm_slot_limit_reached(
+            "Error: The number of VMs exceeds the system limit."
+        ));
+        assert!(vm_slot_limit_reached(
+            "Error Domain=VZErrorDomain Code=6 \"The number of VMs exceeds the system limit.\""
+        ));
+        assert!(vm_slot_limit_reached(
+            "the number of vms exceeds the system limit"
+        ));
+        assert!(!vm_slot_limit_reached("Error: the VM is already running"));
+        assert!(!vm_slot_limit_reached("disk image is corrupted"));
+        assert!(!vm_slot_limit_reached(""));
+    }
+
+    #[test]
+    fn slot_wait_backs_off_from_seconds_to_half_a_minute() {
+        let wait = VmSlotWait::from_seconds(600);
+        let delays = (0..7).map(|retry| wait.delay(retry)).collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            [2, 4, 8, 16, 30, 30, 30].map(Duration::from_secs).to_vec()
+        );
+        assert_eq!(wait.max_wait, Duration::from_mins(10));
+    }
+
+    #[test]
+    fn the_no_slot_message_names_the_limit_and_other_software() {
+        assert_eq!(
+            NoVmSlot {
+                waited_seconds: 600
+            }
+            .to_string(),
+            "no macOS VM slot became free within 600 seconds; the Mac allows two VMs at once, including VMs of other software"
+        );
+    }
+
+    /// Attempts that find the slot busy `busy` times, then boot, counting calls.
+    fn busy_then_booted(
+        busy: usize,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        impl FnMut() -> std::future::Ready<BootOutcome>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        (calls, move || {
+            let call = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(if call < busy {
+                BootOutcome::SlotBusy
+            } else {
+                BootOutcome::Booted
+            })
+        })
+    }
+
+    fn count(calls: &std::sync::atomic::AtomicUsize) -> usize {
+        calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_slot_is_waited_for_and_the_vm_boots_when_it_frees() -> Result<()> {
+        let (calls, attempt) = busy_then_booted(3);
+        let started = tokio::time::Instant::now();
+        let mut waits = Vec::new();
+        let result = boot_when_slot_free(VmSlotWait::from_seconds(600), attempt, |waited| {
+            waits.push(waited);
+        })
+        .await;
+        let Ok(()) = result else {
+            anyhow::bail!("expected the VM to boot, got {result:?}")
+        };
+        assert_eq!(count(&calls), 4);
+        // 2 + 4 + 8 seconds of backoff before the fourth attempt.
+        assert_eq!(started.elapsed(), Duration::from_secs(14));
+        // Each wait reports how long the runner has been waiting so far.
+        assert_eq!(waits, [0, 2, 6].map(Duration::from_secs).to_vec());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slot_that_stays_busy_fails_after_the_maximum_wait() -> Result<()> {
+        let (calls, attempt) = busy_then_booted(usize::MAX);
+        let started = tokio::time::Instant::now();
+        let result = boot_when_slot_free(VmSlotWait::from_seconds(600), attempt, |_| {}).await;
+        let Err(BootError::NoSlot(no_slot)) = result else {
+            anyhow::bail!("expected a no-slot failure, got {result:?}")
+        };
+        assert_eq!(no_slot.waited_seconds, 600);
+        // Never waits past the maximum: the last retry lands on it exactly.
+        assert_eq!(started.elapsed(), Duration::from_mins(10));
+        // 2+4+8+16 = 30 s, then 30 s steps up to 600 s: 4 + 19 retries after the first try.
+        assert_eq!(count(&calls), 24);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unrelated_start_failure_is_not_waited_for() -> Result<()> {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let started = tokio::time::Instant::now();
+        let mut waits = Vec::new();
+        let result = boot_when_slot_free(
+            VmSlotWait::from_seconds(600),
+            move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(BootOutcome::Failed(anyhow::anyhow!(
+                    "disk image is corrupted"
+                )))
+            },
+            |waited| waits.push(waited),
+        )
+        .await;
+        let Err(BootError::Failed(error)) = result else {
+            anyhow::bail!("expected the original failure, got {result:?}")
+        };
+        assert!(error.to_string().contains("disk image is corrupted"));
+        assert_eq!(count(&calls), 1);
+        assert!(waits.is_empty());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_wait_fails_at_once_with_the_clear_message() -> Result<()> {
+        let (calls, attempt) = busy_then_booted(usize::MAX);
+        let started = tokio::time::Instant::now();
+        let mut waits = Vec::new();
+        let result = boot_when_slot_free(VmSlotWait::from_seconds(0), attempt, |waited| {
+            waits.push(waited);
+        })
+        .await;
+        let Err(BootError::NoSlot(no_slot)) = result else {
+            anyhow::bail!("expected a no-slot failure, got {result:?}")
+        };
+        assert_eq!(
+            no_slot.to_string(),
+            "no macOS VM slot became free within 0 seconds; the Mac allows two VMs at once, including VMs of other software"
+        );
+        assert_eq!(count(&calls), 1);
+        assert!(waits.is_empty());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        Ok(())
+    }
+
+    // ---- The same, end to end through the provisioning handler ----
+    //
+    // A shell script stands in for `tart`, so the handler's real clone, run,
+    // wait and cleanup steps run on any Unix machine. It logs each call and
+    // answers `tart run` with the Virtualization framework's limit error while
+    // the `busy` counter is above zero, or always given `always-busy`.
+
+    const FAKE_TART: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+printf '%s\n' "$*" >> "$dir/calls"
+case "$1" in
+  run)
+    if [ -f "$dir/always-busy" ]; then
+      echo 'Error: The number of VMs exceeds the system limit.' >&2; exit 1
+    fi
+    busy=$(cat "$dir/busy" 2>/dev/null || echo 0)
+    if [ "$busy" -gt 0 ]; then
+      echo $((busy - 1)) > "$dir/busy"
+      echo 'Error: The number of VMs exceeds the system limit.' >&2; exit 1
+    fi
+    if [ -f "$dir/broken" ]; then
+      echo 'Error: disk image is corrupted' >&2; exit 1
+    fi
+    echo $$ > "$dir/pid"; touch "$dir/running"; exec sleep 30 ;;
+  exec)
+    [ -f "$dir/running" ] || exit 1
+    if [ "$2" = "-i" ]; then cat > /dev/null; fi
+    exit 0 ;;
+  stop)
+    rm -f "$dir/running"
+    if [ -f "$dir/pid" ]; then kill "$(cat "$dir/pid")" 2>/dev/null; rm -f "$dir/pid"; fi
+    exit 0 ;;
+  list) echo '[]' ;;
+  *) exit 0 ;;
+esac
+"#;
+
+    const CLONE: &str = "gridops-homelab-abcd1234";
+
+    struct FakeTart {
+        dir: PathBuf,
+        state: AgentState,
+    }
+
+    impl FakeTart {
+        async fn new(max_wait: Duration) -> Result<Self> {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = env::temp_dir().join(format!("gridops-fake-tart-{}", uuid::Uuid::new_v4()));
+            let home = dir.join("home");
+            for path in ["records", "logs"] {
+                fs::create_dir_all(home.join(path)).await?;
+            }
+            let binary = dir.join("tart");
+            fs::write(&binary, FAKE_TART).await?;
+            fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).await?;
+            let state = AgentState {
+                token: SecretString::from("t".repeat(32)),
+                tart_binary: binary,
+                home,
+                runner_root: "/Users/admin/actions-runner".into(),
+                bitbucket_runner_root: "/Users/admin/atlassian-bitbucket-pipelines-runner".into(),
+                network_mode: NetworkMode::Nat,
+                limits: AgentLimits {
+                    cpu_budget: 4.0,
+                    memory_budget_mb: 8_192,
+                    max_runners: 1,
+                    min_free_disk_mb: 0,
+                },
+                vm_slot_wait: VmSlotWait {
+                    max_wait,
+                    first_retry: Duration::from_millis(20),
+                    max_retry: Duration::from_millis(50),
+                },
+                slot_waiters: SlotWaiters::default(),
+                records: Arc::default(),
+                provision_lock: Arc::default(),
+                native: Arc::default(),
+                release_lock: Arc::default(),
+            };
+            Ok(Self { dir, state })
+        }
+
+        async fn flag(&self, name: &str, contents: &str) -> Result<()> {
+            Ok(fs::write(self.dir.join(name), contents).await?)
+        }
+
+        async fn calls(&self) -> Vec<String> {
+            fs::read_to_string(self.dir.join("calls"))
+                .await
+                .unwrap_or_default()
+                .lines()
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+
+        async fn calls_to(&self, command: &str) -> usize {
+            self.calls()
+                .await
+                .iter()
+                .filter(|call| call.split(' ').next() == Some(command))
+                .count()
+        }
+
+        async fn provision(&self) -> Result<(StatusCode, Json<Value>), AgentError> {
+            provision_runner(
+                State(self.state.clone()),
+                AgentAuth,
+                Json(provision_request("vm", "gridops-macos-tahoe-base")),
+            )
+            .await
+        }
+
+        /// Whether the agent has let go of the runner: no record, in memory or
+        /// on disk, no waiting entry, and the clone deleted.
+        async fn released(&self) -> Result<bool> {
+            let mut files = fs::read_dir(self.state.home.join("records")).await?;
+            Ok(self.state.records.read().await.is_empty()
+                && files.next_entry().await?.is_none()
+                && self.state.slot_waiters.is_empty()
+                && self.calls().await.contains(&format!("delete {CLONE}")))
+        }
+    }
+
+    impl Drop for FakeTart {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(self.dir.join("pid")) {
+                let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn provisioning_waits_out_a_busy_slot_and_starts_the_runner() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("busy", "2").await?;
+        let result = tart.provision().await;
+        let Ok((status, Json(body))) = result else {
+            anyhow::bail!("expected the runner to start, got {result:?}")
+        };
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["state"], "running");
+        assert_eq!(tart.calls_to("run").await, 3, "{:?}", tart.calls().await);
+        // The clone is kept across the retries: cloned once, never deleted.
+        assert_eq!(tart.calls_to("clone").await, 1);
+        assert_eq!(tart.calls_to("delete").await, 0);
+        assert_eq!(tart.state.records.read().await.len(), 1);
+        assert!(tart.state.slot_waiters.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provisioning_gives_up_after_the_maximum_wait_and_removes_the_clone() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_millis(300)).await?;
+        tart.flag("always-busy", "").await?;
+        let result = tart.provision().await;
+        let Err(AgentError::Unavailable { code, message }) = result else {
+            anyhow::bail!("expected the no-slot failure, got {result:?}")
+        };
+        assert_eq!(code, "vm_slot_unavailable");
+        // The maximum is reported in whole seconds; this test's is 0.3 s.
+        assert_eq!(
+            message,
+            "no macOS VM slot became free within 0 seconds; the Mac allows two VMs at once, including VMs of other software"
+        );
+        assert!(tart.calls_to("run").await > 2, "it retried while waiting");
+        assert!(tart.released().await?, "{:?}", tart.calls().await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provisioning_does_not_wait_on_an_unrelated_run_failure() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("broken", "").await?;
+        let started = std::time::Instant::now();
+        let result = tart.provision().await;
+        let Err(AgentError::Internal(error)) = result else {
+            anyhow::bail!("expected an ordinary start failure, got {result:?}")
+        };
+        // It fails on tart's own exit, not after the guest agent's three minutes.
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(
+            format!("{error:#}").contains("disk image is corrupted"),
+            "{error:#}"
+        );
+        assert_eq!(tart.calls_to("run").await, 1);
+        assert!(tart.released().await?, "{:?}", tart.calls().await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provisioning_with_waiting_disabled_fails_at_once_with_the_clear_message() -> Result<()>
+    {
+        let tart = FakeTart::new(Duration::ZERO).await?;
+        tart.flag("always-busy", "").await?;
+        let result = tart.provision().await;
+        let Err(AgentError::Unavailable { message, .. }) = result else {
+            anyhow::bail!("expected the no-slot failure, got {result:?}")
+        };
+        assert!(message.starts_with("no macOS VM slot became free within 0 seconds;"));
+        assert_eq!(tart.calls_to("run").await, 1);
+        assert!(tart.released().await?, "{:?}", tart.calls().await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_runner_waiting_for_a_slot_is_listed_as_waiting() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("busy", "1000").await?;
+        let provisioning = tokio::spawn({
+            let state = tart.state.clone();
+            async move {
+                provision_runner(
+                    State(state),
+                    AgentAuth,
+                    Json(provision_request("vm", "gridops-macos-tahoe-base")),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let runner = loop {
+            let Ok(Json(list)) = list_runners(State(tart.state.clone()), AgentAuth).await else {
+                anyhow::bail!("listing runners failed")
+            };
+            if let Some(runner) = list["runners"]
+                .as_array()
+                .and_then(|runners| runners.first())
+                && runner["state"] == "created"
+            {
+                break runner.clone();
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "never listed as waiting"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            runner["status"]
+                .as_str()
+                .is_some_and(|status| status.starts_with("waiting for a free macOS VM slot")),
+            "{runner}"
+        );
+        // Free the slot: the runner starts and is no longer listed as waiting.
+        tart.flag("busy", "0").await?;
+        let Ok(Ok(())) = provisioning.await else {
+            anyhow::bail!("the runner did not start once the slot was free")
+        };
+        assert!(tart.state.slot_waiters.is_empty());
         Ok(())
     }
 }

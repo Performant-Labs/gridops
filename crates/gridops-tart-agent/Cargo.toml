@@ -23,5 +23,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+# Paused time, so the VM slot wait's minutes of backoff run instantly in tests.
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true
