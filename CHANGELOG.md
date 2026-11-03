@@ -55,6 +55,19 @@ Known problems in the current release are in the README's
   version. (#87)
 - Placement failures are counted from this version on; failures from before
   the upgrade are not in the new counts. (#67)
+- **A request with an `Authorization: Bearer …` header to a route that needs a
+  signed-in user but takes no API token now gets `403 token_not_accepted`**,
+  whether or not the token is valid. Before, such routes answered `200` with a
+  signed-out body (for example `/api/v1/settings` and `/api/v1/runner-pools`)
+  or `401`. A script that sent a token there must use a route that accepts it;
+  `docs/fleet-api.md` has a **Who may call what** table for every route. The
+  web app itself is not affected. If a reverse proxy forwards a `Bearer`
+  header to GridOps on its own, it would now be refused. (#90)
+- New optional setting `GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES` (default 15,
+  a whole number from 2 to 10080; the API does not start on any other value):
+  how long a machine must have been silent before a token may retire it. There
+  is no migration, and existing API tokens keep exactly the scopes they have.
+  (#90)
 
 ### Added
 
@@ -88,6 +101,23 @@ Known problems in the current release are in the README's
 - A **Prerequisites** section in the release checklist and
   `scripts/release-preflight.sh`, which checks them before a release, including
   a macOS ARM64 machine for the macOS agent build. (#77, #83)
+- **Three API token scopes: `pools:read`, `pools:manage` and `fleet:retire`.**
+  No scope includes another, and `fleet:operate` grants none of them. Existing
+  tokens are unchanged. (#90)
+  - With the pool scopes a token lists, reads, creates, edits and removes runner
+    pools and reads their events and capacity history, as its owner (who must
+    be a system administrator) and with the web form's validation. Pool
+    actions (pause, resume, scale, retry, reconcile) stay browser-only.
+  - `POST /api/v1/fleet/hosts/{host_id}/retire` takes a token with
+    `fleet:retire` only for a machine that is not active, has reported nothing
+    for the quiet period above, and has no live placement, unfinished runner or
+    pending command. Otherwise it answers `409 host_not_retirable` listing
+    every reason. A retire from the browser is unchanged. The audit row names
+    the token.
+  - Creating, listing and revoking tokens, recovering a machine, rotating a
+    credential and the built-in runner host settings stay browser-only.
+- A **Who may call what** table in `docs/fleet-api.md` covers every route, and
+  tests check it against the router and the OpenAPI file. (#90)
 
 ### Changed
 
@@ -109,6 +139,8 @@ Known problems in the current release are in the README's
   image scripts retry transient network errors and time out hung steps. A
   wrong version in `install.sh` now fails after about 30 seconds of retries
   instead of at once. (#66)
+- Routes that take no API token refuse one with `403 token_not_accepted`
+  instead of answering as a signed-out caller; see Upgrading. (#90)
 
 ### Fixed
 
