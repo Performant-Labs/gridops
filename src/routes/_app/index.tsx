@@ -23,6 +23,7 @@ import { metricTiles } from "~/features/dashboard/metric-tiles";
 import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
+import { TartHostSection } from "~/features/runner-pools/tart-host-card";
 import { RunRow } from "~/features/workflow-runs/run-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { useRefreshInterval, useRefreshSignal } from "~/lib/use-refresh-interval";
@@ -81,6 +82,7 @@ function OverviewPage() {
               {data.authenticated ? <QueuedJobsSection queued={data.metrics.queuedJobs} /> : null}
               {data.authenticated ? <FleetWorkloadSection /> : null}
               <PoolsSection pools={data.pools} unmatched={data.queue.unmatched} />
+              {data.authenticated ? <TartHostSection /> : null}
               {data.machines?.items.length ? <MachinesSection machines={data.machines} /> : null}
               <RunsSection runs={data.runs} />
               {data.agentRuns ? <AgentRunsSection runs={data.agentRuns} /> : null}

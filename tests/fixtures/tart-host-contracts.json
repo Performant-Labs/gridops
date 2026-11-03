@@ -1,0 +1,127 @@
+[
+  {
+    "name": "slots held by a GridOps runner and another program's VM, two pools waiting",
+    "managerTart": {
+      "available": true,
+      "health": { "status": "ok", "provider": "tart" },
+      "vmSlots": {
+        "limit": 2, "inUse": 2, "free": 0, "gridops": 1, "runnerIds": ["runner-mac-1"],
+        "starting": 0, "startingVms": [],
+        "external": [{ "name": "runner-warm-1", "user": "ci", "source": "tart-process" }],
+        "detection": "processes",
+        "queue": [
+          { "poolId": "mac-pool", "position": 1, "waitingSince": "2026-11-03T16:02:00Z" },
+          { "poolId": "other-pool", "position": 2, "waitingSince": "2026-11-03T16:03:30Z" }
+        ],
+        "agentMaxRunners": 2, "warning": null
+      }
+    },
+    "body": {
+      "tartAgent": "available",
+      "message": null,
+      "slotSetting": 2,
+      "slots": {
+        "limit": 2, "inUse": 2, "free": 0, "detection": "processes",
+        "agentMaxRunners": 2, "warning": null,
+        "holders": [
+          {
+            "kind": "runner", "runnerId": "runner-mac-1", "runnerName": "macos-release-1a2b3c4d",
+            "poolId": "mac-pool", "poolName": "macos-release", "poolHidden": false,
+            "since": "2026-11-03T16:00:00.000Z"
+          },
+          { "kind": "external", "name": "runner-warm-1", "user": "ci", "source": "tart-process" }
+        ],
+        "queue": [
+          { "position": 1, "poolId": "mac-pool", "poolName": "macos-release", "poolHidden": false, "waitingSince": "2026-11-03T16:02:00Z" },
+          { "position": 2, "poolId": null, "poolName": null, "poolHidden": true, "waitingSince": "2026-11-03T16:03:30Z" }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a runner of a pool the caller cannot see, a start in progress, and the agent's cap below the slots",
+    "managerTart": {
+      "available": true,
+      "health": { "status": "ok", "provider": "tart" },
+      "vmSlots": {
+        "limit": 2, "inUse": 2, "free": 0, "gridops": 1, "runnerIds": ["runner-other-1"],
+        "starting": 1, "startingVms": [{ "runnerId": "runner-mac-2", "poolId": "mac-pool" }],
+        "external": [], "detection": "processes", "queue": [],
+        "agentMaxRunners": 1,
+        "warning": "The Tart agent allows 1 runner (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to 2, so GridOps uses at most 1 of them. Raise GRIDOPS_TART_MAX_RUNNERS to 2 and run the Tart agent installer again, or set the slots to 1."
+      }
+    },
+    "body": {
+      "tartAgent": "available",
+      "message": null,
+      "slotSetting": 2,
+      "slots": {
+        "limit": 2, "inUse": 2, "free": 0, "detection": "processes",
+        "agentMaxRunners": 1,
+        "warning": "The Tart agent allows 1 runner (GRIDOPS_TART_MAX_RUNNERS); macOS VM slots are set to 2, so GridOps uses at most 1 of them. Raise GRIDOPS_TART_MAX_RUNNERS to 2 and run the Tart agent installer again, or set the slots to 1.",
+        "holders": [
+          {
+            "kind": "runner", "runnerId": null, "runnerName": null,
+            "poolId": null, "poolName": null, "poolHidden": true,
+            "since": "2026-11-03T15:58:00.000Z"
+          },
+          {
+            "kind": "starting", "runnerId": "runner-mac-2", "runnerName": "macos-release-5e6f7a8b",
+            "poolId": "mac-pool", "poolName": "macos-release", "poolHidden": false,
+            "since": "2026-11-03T16:04:00.000Z"
+          }
+        ],
+        "queue": []
+      }
+    }
+  },
+  {
+    "name": "an agent that does not name its runners, one slot free",
+    "managerTart": {
+      "available": true,
+      "health": { "status": "ok", "provider": "tart" },
+      "vmSlots": {
+        "limit": 2, "inUse": 1, "free": 1, "gridops": 1, "runnerIds": null,
+        "starting": 0, "startingVms": [],
+        "external": [], "detection": null, "queue": [],
+        "agentMaxRunners": 2, "warning": null
+      }
+    },
+    "body": {
+      "tartAgent": "available",
+      "message": null,
+      "slotSetting": 2,
+      "slots": {
+        "limit": 2, "inUse": 1, "free": 1, "detection": null,
+        "agentMaxRunners": 2, "warning": null,
+        "holders": [
+          {
+            "kind": "runner", "runnerId": null, "runnerName": null,
+            "poolId": null, "poolName": null, "poolHidden": false, "since": null
+          }
+        ],
+        "queue": []
+      }
+    }
+  },
+  {
+    "name": "the Tart agent is unreachable",
+    "managerTart": { "available": false, "error": "Tart agent is unavailable." },
+    "body": {
+      "tartAgent": "unavailable",
+      "message": "Tart agent is unavailable.",
+      "slotSetting": 2,
+      "slots": null
+    }
+  },
+  {
+    "name": "no Tart agent is configured",
+    "managerTart": { "available": false, "configured": false },
+    "body": {
+      "tartAgent": "not_configured",
+      "message": null,
+      "slotSetting": 2,
+      "slots": null
+    }
+  }
+]

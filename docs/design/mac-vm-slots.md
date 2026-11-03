@@ -38,16 +38,18 @@ The manager's admission is already the one place every Tart start passes through
 **API [phase 1].** `GET /api/v1/settings` returns `settings.macosVmSlots`; `PUT /api/v1/settings` accepts an optional `macosVmSlots` (left out, it is unchanged, so older clients keep working; out of range is `400`), audited with `settings.updated`. Pool list and detail gain `provisionWaitReason` (see 4). The manager's health gains `providers.tart.vmSlots`:
 
 ```json
-{ "limit": 2, "inUse": 2, "free": 0, "gridops": 1, "starting": 0,
+{ "limit": 2, "inUse": 2, "free": 0, "gridops": 1, "runnerIds": ["…"], "starting": 0, "startingVms": [],
   "external": [{ "name": "runner-warm-1", "user": "ci", "source": "tart-process" }],
   "detection": "processes",
   "queue": [{ "poolId": "…", "position": 1, "waitingSince": "2026-11-03T09:00:00Z" }],
   "agentMaxRunners": 2, "warning": null }
 ```
 
-`agentMaxRunners` and `warning` were added in 0.2.0 (see "Relationship to `GRIDOPS_TART_MAX_RUNNERS`" above). `GET /api/v1/settings` passes this object on as `manager.tartVmSlots` (null without a Tart agent).
+`agentMaxRunners` and `warning` were added in 0.2.0 (see "Relationship to `GRIDOPS_TART_MAX_RUNNERS`" above). `GET /api/v1/settings` passes this object on as `manager.tartVmSlots` (null without a Tart agent). `runnerIds` (the runners of GridOps's running VMs, from the agent; null from an agent that predates it) and `startingVms` (each start in flight as `{ runnerId, poolId }`, the leases counted in `starting`) were added in 0.2.0 for the Tart host card.
 
-**UI [phase 1].** One number field in Settings → General, read-only for members. A per-host card (slots, holders, queue) is phase 2; the operator already sees the reason on the waiting pool's page.
+**UI [phase 1].** One number field in Settings → General, read-only for members. The operator also sees the reason on the waiting pool's page.
+
+**UI [phase 2, 0.2.0]: the Tart host card.** The Overview has a **Tart host** card: the limit, who holds each slot (a GridOps runner with its pool, name and when it was started; a VM started outside GridOps; a start in progress; or free), the queue in order with how long each pool has waited, and the agent cap warning. It reads `GET /api/v1/overview/tart-host` (session, or a token with `pools:read`), which adds to the manager's report the names GridOps holds, only for pools the caller may see (others are `poolHidden`). It is on the Overview rather than the Machines page because the Tart host is not an enrolled machine: the manager reaches it through `GRIDOPS_TART_AGENT_URL`, and nothing links it to a row on the Machines page; the Overview is also where every signed-in user, not only administrators, looks at capacity and queued work. The card fetches on its own, so a slow agent never holds up the page; it is hidden without a Tart agent or when the manager cannot be asked, and says so when the agent is unreachable.
 
 ## 2. Central, atomic admission
 
@@ -110,7 +112,7 @@ Its own `tart run` processes (including a retry during the safety-net wait) are 
 
 **Phase 2: learning from the OS's refusal.** When the agent's `tart run` is refused although the manager's view said a slot was free, something invisible holds it. The manager can then count one "unidentified" slot for a few minutes (and say so in the reason), instead of starting clone-wait-fail cycles.
 
-**UI:** phase 1 names the holders in the waiting reason and in the manager's health. A Tart host card listing them is phase 2.
+**UI:** phase 1 names the holders in the waiting reason and in the manager's health. The Tart host card (0.2.0, see 1) lists them.
 
 ## 6. The #87 wait becomes a safety net
 
@@ -154,7 +156,7 @@ In `docs/macos-runners.md` ("Moving another project's macOS CI onto GridOps"): p
 - Reconciler: `vm_slot_busy` and `vm_slot_unavailable` deferred, never counted; no 30 s pause for `vm_slot_busy` or a Tart `host_capacity_exhausted`; the wait reason (`runner_pool_waits`, migration 0042) shown on the pool page.
 - Docs: `docs/macos-runners.md` updated, with the migration guide.
 
-**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue); optional weights and priority with aging. (Shortening the safety-net wait's default was decided for 0.2.0: 60 s.)
+**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue; done in 0.2.0); optional weights and priority with aging. (Shortening the safety-net wait's default was decided for 0.2.0: 60 s.)
 
 **Phase 3.** Several Tart hosts (a `tart_hosts` table with per-host slots and queue); several VM stores per agent (`GRIDOPS_TART_IMAGE_SOURCES`).
 

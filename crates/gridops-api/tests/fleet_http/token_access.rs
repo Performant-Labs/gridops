@@ -380,6 +380,16 @@ async fn pool_read_routes_negative_matrix() -> Result<()> {
         Anonymous::SignedOut(json!({"window": "24h", "points": []})),
     )
     .await?;
+    read_matrix(
+        &f,
+        "/api/v1/overview/tart-host",
+        ApiTokenScope::PoolsRead,
+        Anonymous::SignedOut(json!({
+            "authenticated": false, "tartAgent": "unknown", "message": null,
+            "slotSetting": null, "slots": null,
+        })),
+    )
+    .await?;
     for path in [
         "/api/v1/runner-pools/fleet-pool",
         "/api/v1/runner-pools/fleet-pool/events",

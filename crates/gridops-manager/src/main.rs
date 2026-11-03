@@ -1082,11 +1082,20 @@ async fn health(
                     Ok(capacity) => {
                         let usage = capacity.slot_usage();
                         let leases = vm_slot_reservations(&state).await;
-                        let starting =
-                            vm_slots::starting_vms(&usage, leases.iter().map(String::as_str));
-                        state
-                            .vm_slots
-                            .report(&usage, starting, Some(capacity.max_runners))
+                        let starts = vm_slots::starts_in_flight(
+                            &usage,
+                            leases
+                                .iter()
+                                .map(|(runner_id, pool_id)| (runner_id.as_str(), pool_id.as_str())),
+                        );
+                        let mut report =
+                            state
+                                .vm_slots
+                                .report(&usage, starts.len(), Some(capacity.max_runners));
+                        // Which runner and pool each start is for, so a
+                        // reader can say who holds the slot (#95 phase 2).
+                        report["startingVms"] = json!(starts);
+                        report
                     }
                     Err(_) => Value::Null,
                 };
@@ -2173,13 +2182,14 @@ impl TartCapacity {
 }
 
 /// The runners of admissions holding a VM slot for a VM being started.
-async fn vm_slot_reservations(state: &ManagerState) -> Vec<String> {
+/// The live admissions holding a VM slot, as `(runner, pool)`.
+async fn vm_slot_reservations(state: &ManagerState) -> Vec<(String, String)> {
     let mut reservations = state.reservations.lock().await;
     reservations.retain(|_, reservation| reservation.expires_at > Instant::now());
     reservations
         .values()
         .filter(|reservation| reservation.vm_slot)
-        .map(|reservation| reservation.runner_id.clone())
+        .map(|reservation| (reservation.runner_id.clone(), reservation.pool_id.clone()))
         .collect()
 }
 

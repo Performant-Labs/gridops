@@ -134,6 +134,7 @@ cookie-only on purpose. Paths not listed here answer `404`.
 | PUT | `/api/v1/users/{user_id}/role` | required | — | foreign refused | 403 `token_not_accepted` |
 | GET | `/api/v1/overview` | optional | — | — | 403 `token_not_accepted` |
 | GET | `/api/v1/overview/capacity` | optional | `pools:read` | — | accepted |
+| GET | `/api/v1/overview/tart-host` | optional | `pools:read` | — | accepted |
 | GET | `/api/v1/overview/queued-jobs` | optional | — | — | 403 `token_not_accepted` |
 | GET | `/api/v1/search` | required | — | — | 403 `token_not_accepted` |
 | GET | `/api/v1/repositories` | optional | — | — | 403 `token_not_accepted` |

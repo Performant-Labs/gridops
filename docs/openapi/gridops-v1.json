@@ -342,6 +342,91 @@
         },
         "required": ["schemaVersion", "operationId", "state"],
         "additionalProperties": true
+      },
+      "TartHost": {
+        "type": "object",
+        "description": "The Tart host's macOS VM slots, as the runner manager arbitrates them (`docs/design/mac-vm-slots.md`). Pools, and runners of pools, the caller may not see are reported with `poolHidden: true` and no id or name. Signed out, `authenticated` is `false` and everything else is `null` or `unknown`.",
+        "properties": {
+          "authenticated": { "type": "boolean", "const": false, "description": "Present, and `false`, only for a caller that is not signed in." },
+          "tartAgent": {
+            "type": "string",
+            "enum": ["available", "unavailable", "not_configured", "unknown"],
+            "description": "`available`: the manager read the Tart agent's health. `unavailable`: a Tart agent is configured but the manager cannot reach it. `not_configured`: the manager has no Tart agent. `unknown`: the runner manager itself could not be asked (or the caller is signed out)."
+          },
+          "message": { "type": ["string", "null"], "description": "Why the agent is `unavailable` or `unknown`; otherwise `null`." },
+          "slotSetting": { "type": ["integer", "null"], "minimum": 1, "maximum": 2, "description": "The GridOps setting \"macOS VM slots on the Tart host\" (`macosVmSlots`). The manager's `slots.limit` follows it once the reconciler has sent the policy." },
+          "slots": {
+            "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/TartHostSlots" }],
+            "description": "Present when `tartAgent` is `available` and the agent reports its slots."
+          }
+        },
+        "required": ["tartAgent", "message", "slotSetting", "slots"],
+        "additionalProperties": false
+      },
+      "TartHostSlots": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "description": "The slot limit the runner manager enforces." },
+          "inUse": { "type": "integer", "description": "GridOps VMs running, other software's VMs, and starts in flight." },
+          "free": { "type": "integer" },
+          "detection": { "type": ["string", "null"], "enum": ["processes", "tart-list", null], "description": "How the agent found other software's VMs; `null` from an agent that predates it." },
+          "agentMaxRunners": { "type": ["integer", "null"], "description": "The Tart agent's own cap on GridOps runners (`GRIDOPS_TART_MAX_RUNNERS`)." },
+          "warning": { "type": ["string", "null"], "description": "Set when `agentMaxRunners` is below `limit`: the lower of the two wins." },
+          "holders": {
+            "type": "array",
+            "description": "Who holds each slot in use: GridOps runners whose VMs run (oldest first), VMs other software runs, then starts in flight. A runner the manager counts but does not name (an agent that predates naming them) is listed with every name `null`.",
+            "items": { "$ref": "#/components/schemas/TartHostHolder" }
+          },
+          "queue": {
+            "type": "array",
+            "description": "Pools waiting for a slot, head of the line first.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "position": { "type": "integer", "minimum": 1 },
+                "poolId": { "type": ["string", "null"] },
+                "poolName": { "type": ["string", "null"] },
+                "poolHidden": { "type": "boolean" },
+                "waitingSince": { "type": "string", "format": "date-time", "description": "When the pool joined the line, by the runner manager's clock." }
+              },
+              "required": ["position", "poolId", "poolName", "poolHidden", "waitingSince"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["limit", "inUse", "free", "detection", "agentMaxRunners", "warning", "holders", "queue"],
+        "additionalProperties": false
+      },
+      "TartHostHolder": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A GridOps runner: `runner` once its VM runs, `starting` while it is being started.",
+            "properties": {
+              "kind": { "type": "string", "enum": ["runner", "starting"] },
+              "runnerId": { "type": ["string", "null"] },
+              "runnerName": { "type": ["string", "null"] },
+              "poolId": { "type": ["string", "null"] },
+              "poolName": { "type": ["string", "null"] },
+              "poolHidden": { "type": "boolean" },
+              "since": { "type": ["string", "null"], "format": "date-time", "description": "When GridOps began starting the runner." }
+            },
+            "required": ["kind", "runnerId", "runnerName", "poolId", "poolName", "poolHidden", "since"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "A VM started outside GridOps.",
+            "properties": {
+              "kind": { "type": "string", "const": "external" },
+              "name": { "type": "string" },
+              "user": { "type": ["string", "null"] },
+              "source": { "type": "string", "enum": ["tart-process", "tart-list"] }
+            },
+            "required": ["kind", "name", "user", "source"],
+            "additionalProperties": false
+          }
+        ]
       }
     },
     "examples": {
@@ -1129,6 +1214,18 @@
         "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
         "responses": {
           "200": { "description": "`{ window, points }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/overview/tart-host": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "The Tart host's macOS VM slots: the limit, who holds each slot, and the pools waiting for one",
+        "description": "Read only. Built from the runner manager's health (`providers.tart.vmSlots`) and the runners and pools GridOps holds. Answers `200` whether or not a Tart agent is configured or reachable; `tartAgent` says which.",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "The Tart host", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TartHost" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

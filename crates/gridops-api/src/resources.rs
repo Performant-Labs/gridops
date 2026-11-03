@@ -87,6 +87,8 @@ macro_rules! visible_queued_jobs {
 }
 
 mod overview_queue;
+mod tart_host;
+pub use self::tart_host::tart_host;
 
 #[derive(Debug, FromRow)]
 struct PoolAccess {
