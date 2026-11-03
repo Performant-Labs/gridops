@@ -4,6 +4,9 @@
  * for it whenever the pool includes macOS · Tart with the VM runtime, prefilled
  * with the server default, and sends what the operator typed; the settings
  * form shows the same row with the same wording.
+ *
+ * Images of providers a pool does not use (issue #103): neither form sends
+ * one, and adding a provider in Settings asks for its image, starting empty.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, createElement, type ComponentType, type ReactElement } from "react";
@@ -68,6 +71,7 @@ beforeEach(() => {
   fetcher = vi.fn(async (url: string, init?: RequestInit) => {
     if (url === "/api/v1/runner-pools/repositories") return Response.json({ items: [repository] });
     if (url === "/api/v1/runner-pools" && init?.method === "POST") return Response.json({ id: "pool-1" }, { status: 201 });
+    if (url === "/api/v1/runner-pools/pool-1" && init?.method === "PUT") return Response.json({ ok: true, configurationVersion: 2, rollingReplacement: false });
     return Response.json({ error: "not in this test" }, { status: 404 });
   });
   vi.stubGlobal("fetch", fetcher);
@@ -233,5 +237,132 @@ describe("Pool settings: Tart base VM", () => {
     expect(labelFor("tart-image")?.textContent).toBe("Tart base VM");
     expect(tartInput()?.value).toBe("acme-xcode-26");
     expect(descriptionFor("tart-image")).toBe(createDescription);
+  });
+});
+
+describe("New runner pool: images of providers the pool does not use", () => {
+  it("sends no Tart base VM for a Docker-only pool", async () => {
+    await renderCreateForm({ providers: ["docker"] });
+    const body = await submitCreate();
+    expect(body).toMatchObject({ provider: "docker", providers: ["docker"], image: "runner:default", dockerImage: "runner:default", tartImage: "" });
+  });
+
+  it("sends no Docker image for a Tart-only pool", async () => {
+    await renderCreateForm({ providers: ["tart"] });
+    const body = await submitCreate();
+    expect(body).toMatchObject({ provider: "tart", providers: ["tart"], image: SERVER_DEFAULT_VM, tartImage: SERVER_DEFAULT_VM, dockerImage: "" });
+  });
+
+  it("drops the Tart base VM when macOS · Tart is taken out again", async () => {
+    await renderCreateForm({ providers: ["docker"] });
+    await choose("Runner providers", "macOS · Tart");
+    const input = tartInput();
+    if (!input) throw new Error("No Tart base VM input");
+    type(input, "acme-xcode-26");
+    await toggleProvider("macOS · Tart");
+    expect(tartInput()).toBeNull();
+
+    const body = await submitCreate();
+    expect(body).toMatchObject({ providers: ["docker"], tartImage: "" });
+  });
+});
+
+/** Picks or unpicks a provider, opening the picker only if it is closed. */
+async function toggleProvider(label: string) {
+  if (!document.querySelector("[role=option]")) act(() => button("Runner providers").click());
+  act(() => option(label).click());
+  await settle();
+}
+
+function settingsPool(overrides: Record<string, unknown>) {
+  return {
+    id: "pool-1", installationId: 1, repositoryId: null, repository: null, repositoryIds: [], repositories: [],
+    priorityRepositoryIds: [], priorityWaitMinutes: 10, bitbucketConnections: [], bitbucketConnectionIds: [],
+    accountLogin: "octo-org", name: "linux-app", scope: "organization", mode: "ephemeral", provider: "docker",
+    providers: ["docker"], labels: [], image: "runner:acme", dockerImage: "runner:acme", tartImage: "",
+    macosRuntime: "vm", desiredCount: 0, minCount: 0, maxCount: 2, cpuLimit: 4, memoryLimitMb: 8192,
+    maxCpuLimit: 16, maxMemoryLimitMb: 65_536, builtinRunnerHostEnabled: true, runnerGroupId: 1, paused: false,
+    state: "active", autoscalingEnabled: true, queueScaleFactor: 1, idleTimeoutMinutes: 5, configurationVersion: 1,
+    provisionFailureCount: 0, provisionRetryAt: null, provisionCircuitOpen: false, canManage: true,
+    ...overrides,
+  };
+}
+
+async function renderSettings(overrides: Record<string, unknown>) {
+  loaderData.current = settingsPool(overrides);
+  const page = (PoolSettingsRoute as unknown as { options: { component: ComponentType } }).options.component;
+  await render(createElement(page));
+}
+
+const updateRequests = () => fetcher.mock.calls.filter(([url, init]) => url === "/api/v1/runner-pools/pool-1" && (init as RequestInit | undefined)?.method === "PUT");
+
+async function submitSettings() {
+  const form = document.querySelector("form");
+  if (!form) throw new Error("No form");
+  await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+  await settle();
+  const call = updateRequests().at(-1);
+  return call ? JSON.parse(String((call[1] as RequestInit).body)) as Record<string, unknown> : null;
+}
+
+describe("Pool settings: adding a provider asks for its image", () => {
+  it("starts the Tart base VM empty and required when Tart is added, even if the pool still holds the old default", async () => {
+    await renderSettings({ tartImage: "gridops-macos-tahoe-base" });
+    expect(tartInput()).toBeNull();
+
+    await choose("Runner providers", "macOS · Tart");
+    expect(tartInput()?.value).toBe("");
+    expect(tartInput()?.required).toBe(true);
+
+    expect(await submitSettings()).toBeNull();
+    expect(document.body.textContent).toContain("Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.");
+
+    const input = tartInput();
+    if (!input) throw new Error("No Tart base VM input");
+    type(input, "acme-xcode-26");
+    expect(await submitSettings()).toMatchObject({
+      provider: "docker", providers: ["docker", "tart"], image: "runner:acme", dockerImage: "runner:acme", tartImage: "acme-xcode-26",
+    });
+  });
+
+  it("starts the Docker image empty and required when Docker is added to a Tart pool", async () => {
+    await renderSettings({
+      name: "macos-app", provider: "tart", providers: ["tart"], image: "acme-xcode-26",
+      dockerImage: "ghcr.io/actions/actions-runner:latest", tartImage: "acme-xcode-26",
+    });
+    expect(dockerInput()).toBeNull();
+
+    await choose("Runner providers", "Linux · Docker");
+    expect(dockerInput()?.value).toBe("");
+    expect(dockerInput()?.required).toBe(true);
+    expect(await submitSettings()).toBeNull();
+    expect(document.body.textContent).toContain("Docker image (dockerImage) is required for a pool that uses Linux · Docker.");
+
+    const input = dockerInput();
+    if (!input) throw new Error("No Docker image input");
+    type(input, "ghcr.io/acme/runner:2");
+    expect(await submitSettings()).toMatchObject({
+      provider: "tart", providers: ["tart", "docker"], image: "acme-xcode-26", tartImage: "acme-xcode-26", dockerImage: "ghcr.io/acme/runner:2",
+    });
+  });
+
+  it("needs no Tart base VM when Tart is added for native execution", async () => {
+    await renderSettings({});
+    await choose("Runner providers", "macOS · Tart");
+    await choose("macOS execution", "Native on host");
+    expect(tartInput()).toBeNull();
+    expect(await submitSettings()).toMatchObject({ providers: ["docker", "tart"], macosRuntime: "native", tartImage: "" });
+  });
+
+  it("sends no image for a provider the pool does not use", async () => {
+    await renderSettings({ tartImage: "gridops-macos-tahoe-base" });
+    expect(await submitSettings()).toMatchObject({ providers: ["docker"], dockerImage: "runner:acme", tartImage: "" });
+  });
+
+  it("drops the Tart base VM when Tart is taken out of a pool", async () => {
+    await renderSettings({ providers: ["docker", "tart"], tartImage: "acme-xcode-26" });
+    expect(tartInput()?.value).toBe("acme-xcode-26");
+    await choose("Runner providers", "macOS · Tart");
+    expect(await submitSettings()).toMatchObject({ providers: ["docker"], tartImage: "" });
   });
 });

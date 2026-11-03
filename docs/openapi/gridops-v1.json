@@ -1018,7 +1018,7 @@
       "post": {
         "tags": ["pools"],
         "summary": "Create a runner pool",
-        "description": "The body and its validation are exactly the web form's (`CreateRunnerPool`); a validation error is `400 { \"error\": \"...\" }` with the form's message, a duplicate name `409`. The owner must administer the pool's installation (or repositories), as in the browser; Bitbucket connections need a system administrator. A token request is not origin-checked. Audited as `runner_pool.created`, naming the token. Starts `desiredCount` runners as the form does. A pool that includes Tart clones the Tart base VM in `tartImage` (when Tart is the primary provider and `tartImage` is left out, `image` is used); the server default from `/api/v1/runner-pools/options` is never substituted. `image` and the primary provider's `dockerImage` or `tartImage`, when both are sent, must be the same value, or the request is refused with `400`.",
+        "description": "The body and its validation are exactly the web form's (`CreateRunnerPool`); a validation error is `400 { \"error\": \"...\" }` with the form's message, a duplicate name `409`. The owner must administer the pool's installation (or repositories), as in the browser; Bitbucket connections need a system administrator. A token request is not origin-checked. Audited as `runner_pool.created`, naming the token. Starts `desiredCount` runners as the form does. A pool that includes Tart clones the Tart base VM in `tartImage` (when Tart is the primary provider and `tartImage` is left out, `image` is used); the server default from `/api/v1/runner-pools/options` is never substituted. `image` and the primary provider's `dockerImage` or `tartImage`, when both are sent, must be the same value, or the request is refused with `400`. No image is stored for a provider the pool does not use: `dockerImage` or `tartImage` sent for one is ignored and reads back as `\"\"`. Every provider in `providers` needs its image (Tart with `macosRuntime` `native` excepted), or the request is refused with `400` naming the field.",
         "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
         "responses": {
@@ -1088,7 +1088,7 @@
       "put": {
         "tags": ["pools"],
         "summary": "Edit a runner pool",
-        "description": "The body and validation are the web form's (`UpdateRunnerPool`). The owner must administer every installation the pool uses. Audited as `runner_pool.updated`, naming the token.",
+        "description": "The body and validation are the web form's (`UpdateRunnerPool`). The owner must administer every installation the pool uses. Audited as `runner_pool.updated`, naming the token. Images follow the create rules: `image` and the primary provider's `dockerImage` or `tartImage`, when both are sent, must be the same value (`400` otherwise); no image is kept for a provider the pool does not use; and adding a provider needs its image (`dockerImage`, or `tartImage` unless `macosRuntime` is `native`), never a server default, or the edit is refused with `400` naming the field. Dropping an image left over for an unused provider does not replace the pool's runners.",
         "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },

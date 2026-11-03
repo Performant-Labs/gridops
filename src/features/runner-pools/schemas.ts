@@ -14,9 +14,10 @@ const configurationShape = {
     (label) => !["self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm", "x86"].includes(label.toLowerCase()),
     "System labels are assigned automatically by the selected provider.",
   )).max(20),
-  image: z.string().trim().min(1).max(300),
-  dockerImage: z.string().trim().min(1).max(300),
-  tartImage: z.string().trim().min(1).max(300),
+  // Each image is required only for a provider the pool uses; see validateProvider.
+  image: z.string().trim().max(300),
+  dockerImage: z.string().trim().max(300),
+  tartImage: z.string().trim().max(300),
   macosRuntime: z.enum(["vm", "native"]).default("vm"),
   desiredCount: z.number().int().min(0).max(100),
   minCount: z.number().int().min(0).max(100),
@@ -60,7 +61,10 @@ function validateCapacity(
 }
 
 function validateProvider(
-  value: { provider: "docker" | "tart"; providers: Array<"docker" | "tart">; mode: "ephemeral" | "persistent"; cpuLimit: number; memoryLimitMb: number; macosRuntime: "vm" | "native" },
+  value: {
+    provider: "docker" | "tart"; providers: Array<"docker" | "tart">; mode: "ephemeral" | "persistent"; cpuLimit: number; memoryLimitMb: number; macosRuntime: "vm" | "native";
+    image: string; dockerImage: string; tartImage: string;
+  },
   context: z.RefinementCtx,
 ) {
   if (new Set(value.providers).size !== value.providers.length || value.providers[0] !== value.provider) {
@@ -77,6 +81,16 @@ function validateProvider(
   // would silently never receive a native runner.
   if (value.macosRuntime === "native" && !includesTart) {
     context.addIssue({ code: "custom", path: ["macosRuntime"], message: "Native execution requires the macOS runner provider." });
+  }
+  // A provider added to a pool brings its own image; none is filled in from a
+  // default (issue #103). `image` stands in for the primary provider's, as on
+  // the server. Native execution clones no VM, so it needs no base VM.
+  const imageOf = (kind: "docker" | "tart", configured: string) => configured || (value.provider === kind ? value.image : "");
+  if (value.providers.includes("docker") && !imageOf("docker", value.dockerImage)) {
+    context.addIssue({ code: "custom", path: ["dockerImage"], message: "Docker image (dockerImage) is required for a pool that uses Linux · Docker." });
+  }
+  if (includesTart && value.macosRuntime !== "native" && !imageOf("tart", value.tartImage)) {
+    context.addIssue({ code: "custom", path: ["tartImage"], message: "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines." });
   }
 }
 

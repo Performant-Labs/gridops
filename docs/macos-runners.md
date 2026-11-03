@@ -50,6 +50,8 @@ Use an `-xcode` Tart image instead when workflows require a preinstalled Xcode t
 
 When you create a pool in **Runner pools → New pool** and select **macOS · Tart** under **Providers** with **macOS execution** set to **Virtual machine**, the form asks for the **Tart base VM**. It starts with the control plane's `GRIDOPS_TART_RUNNER_IMAGE` (or `gridops-macos-tahoe-base`); replace it with the pool's own prepared VM before you select **Create pool**, because a new pool starts runners as soon as it is saved and a matching queued job clones whatever VM the pool names. **Native on host** clones no VM, so the field is hidden. A pool with both Docker and Tart asks for a Docker image and a Tart base VM. Change it later in the pool's **Settings → Tart base VM**.
 
+A pool keeps an image only for the providers it uses. When you add **macOS · Tart** to an existing pool in its **Settings**, the **Tart base VM** field starts empty and must be filled in before you save; no default is put in for you. The same goes for the **Docker image** when you add **Linux · Docker** to a Tart pool. Taking a provider out of a pool drops its image.
+
 ## Network isolation
 
 GridOps starts VMs without graphics, audio, clipboard sharing, or shared host directories. It supports two Tart network modes:
@@ -221,7 +223,7 @@ In **System → Platform connections**, add an API token restricted to the targe
 
 ## Workflow labels
 
-One pool can include both Docker and Tart. The pool keeps a separate image for each provider and one shared minimum, target, and maximum runner count. GridOps matches each queued job to a compatible provider, then replaces an idle runner from the wrong provider when the pool is already at its maximum.
+One pool can include both Docker and Tart. The pool keeps a separate image for each provider it uses and one shared minimum, target, and maximum runner count. GridOps matches each queued job to a compatible provider, then replaces an idle runner from the wrong provider when the pool is already at its maximum.
 
 Tart runners automatically advertise `self-hosted`, `macOS`, `ARM64`, and the pool name. Select the exact pool explicitly:
 

@@ -23,6 +23,7 @@ import { BuiltinHostOffNotice } from "~/features/runner-pools/builtin-host-off-n
 import { builtinHostOn } from "~/features/runner-pools/builtin-host";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { type RunnerHost, hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { poolImages } from "~/features/runner-pools/pool-images";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 
 export const Route = createFileRoute("/_app/runner-pools/new")({
@@ -243,9 +244,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             .split(",")
             .map((label) => label.trim())
             .filter(Boolean),
-          image: provider === "tart" ? tartImage : dockerImage,
-          dockerImage,
-          tartImage,
+          ...poolImages({ provider, providers, dockerImage, tartImage }),
           macosRuntime,
           desiredCount: Number(form.get("desiredCount")),
           minCount: Number(form.get("minCount")),

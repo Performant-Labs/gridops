@@ -92,6 +92,28 @@ describe("runner pool validation", () => {
     expect(createRunnerPoolSchema.safeParse({ ...mixedPool, providers: [] }).success).toBe(false);
   });
 
+  it("needs the image of each provider the pool uses, and none of one it does not use", () => {
+    const { installationId: _installationId, scope: _scope, ...configuration } = validPool;
+    expect(updateRunnerPoolSchema.safeParse({ ...configuration, tartImage: "" }).success).toBe(true);
+    const addTart = { ...configuration, providers: ["docker" as const, "tart" as const], tartImage: "" };
+    const refused = updateRunnerPoolSchema.safeParse(addTart);
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]).toMatchObject({
+      path: ["tartImage"],
+      message: "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.",
+    });
+    expect(updateRunnerPoolSchema.safeParse({ ...addTart, macosRuntime: "native" }).success).toBe(true);
+
+    const tartPool = { ...configuration, provider: "tart" as const, providers: ["tart" as const], image: "acme-xcode-26", tartImage: "acme-xcode-26", dockerImage: "" };
+    expect(updateRunnerPoolSchema.safeParse(tartPool).success).toBe(true);
+    const addDocker = updateRunnerPoolSchema.safeParse({ ...tartPool, providers: ["tart", "docker"] });
+    expect(addDocker.success).toBe(false);
+    expect(addDocker.error?.issues[0]).toMatchObject({
+      path: ["dockerImage"],
+      message: "Docker image (dockerImage) is required for a pool that uses Linux · Docker.",
+    });
+  });
+
   it("validates editable configuration without allowing a destination change", () => {
     const { installationId: _installationId, scope: _scope, ...configuration } = validPool;
     expect(updateRunnerPoolSchema.parse(configuration)).toEqual({ ...configuration, macosRuntime: "vm" });
