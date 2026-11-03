@@ -520,11 +520,11 @@ async fn main() -> Result<()> {
         (1..=100).contains(&limits.max_runners),
         "GRIDOPS_TART_MAX_RUNNERS must be 1-100"
     );
-    let vm_slot_wait_seconds = env_value("GRIDOPS_TART_VM_SLOT_WAIT_SECONDS", 180_u64)?;
-    anyhow::ensure!(
-        vm_slot_wait_seconds <= MAX_VM_SLOT_WAIT_SECONDS,
-        "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be 0-{MAX_VM_SLOT_WAIT_SECONDS}"
-    );
+    let vm_slot_wait_seconds = env_value(
+        "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS",
+        DEFAULT_VM_SLOT_WAIT_SECONDS,
+    )?;
+    let vm_slot_wait = vm_slot_wait_setting(vm_slot_wait_seconds)?;
 
     fs::create_dir_all(home.join("records")).await?;
     fs::create_dir_all(home.join("logs")).await?;
@@ -553,7 +553,7 @@ async fn main() -> Result<()> {
         bitbucket_runner_root,
         network_mode,
         limits,
-        vm_slot_wait: VmSlotWait::from_seconds(vm_slot_wait_seconds),
+        vm_slot_wait,
         slot_waiters: SlotWaiters::default(),
         records: Arc::new(RwLock::new(records)),
         provision_lock: Arc::new(Mutex::new(())),
@@ -718,6 +718,8 @@ async fn provision_runner(
     _auth: AgentAuth,
     Json(mut input): Json<ProvisionRunner>,
 ) -> Result<(StatusCode, Json<Value>), AgentError> {
+    // The VM slot wait counts from here, so cloning is part of it.
+    let request_started = tokio::time::Instant::now();
     input.validate()?;
     let _guard = state.provision_lock.lock().await;
     let vms = tart_vms(&state).await?;
@@ -791,7 +793,7 @@ async fn provision_runner(
             .write()
             .await
             .insert(id.clone(), record.clone());
-        boot_vm(&state, &record).await?;
+        boot_vm(&state, &record, request_started).await?;
         let (script, bootstrap_secret) = match input.platform.as_str() {
             "github" => (
                 runner_script(&state.runner_root),
@@ -1319,10 +1321,46 @@ const MACOS_VM_SLOTS: &str = "two";
 /// Mac's VM slots are taken. Matched in lower case.
 const VM_SLOT_LIMIT_ERROR: &str = "the number of vms exceeds the system limit";
 
-/// Longest `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`. The wait happens inside the
-/// provisioning request, which this agent and the manager both cut off after
-/// 45 minutes, and cloning, booting and starting the runner need time too.
-const MAX_VM_SLOT_WAIT_SECONDS: u64 = 1_800;
+/// How long the runner manager waits for this agent to start a VM runner
+/// (`TART_PROVISION_TIMEOUT` in the manager). After that the start fails as a
+/// timeout, whatever the agent would have said, so the whole start has to
+/// finish inside it.
+const MANAGER_TART_START_TIMEOUT: Duration = Duration::from_mins(15);
+
+/// How long a booted VM's guest agent has to answer.
+const GUEST_BOOT_TIMEOUT: Duration = Duration::from_mins(3);
+
+/// Kept back, after a VM boots, for starting the runner in it, and for the
+/// manager's own part of the request: waiting for its turn and the network.
+const START_ALLOWANCE: Duration = Duration::from_mins(2);
+
+/// `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` when it is not set.
+const DEFAULT_VM_SLOT_WAIT_SECONDS: u64 = 180;
+
+/// Longest `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`. The wait counts from the start
+/// request, so it includes the clone. A slot can free up at its very end, and
+/// the VM then still has to boot and the runner to start, all before the
+/// manager stops listening: 600 + 180 + 120 = 900 seconds.
+const MAX_VM_SLOT_WAIT_SECONDS: u64 = 600;
+
+const _: () = assert!(
+    MAX_VM_SLOT_WAIT_SECONDS + GUEST_BOOT_TIMEOUT.as_secs() + START_ALLOWANCE.as_secs()
+        <= MANAGER_TART_START_TIMEOUT.as_secs(),
+    "the longest VM slot wait must leave time to boot and start before the manager gives up"
+);
+
+/// The VM slot wait for `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`, refusing one the
+/// manager would cut off: the start would then fail as an unexplained timeout
+/// instead of saying that no slot became free.
+fn vm_slot_wait_setting(seconds: u64) -> Result<VmSlotWait> {
+    anyhow::ensure!(
+        seconds <= MAX_VM_SLOT_WAIT_SECONDS,
+        "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS is {seconds}, but at most {MAX_VM_SLOT_WAIT_SECONDS} fits: the runner manager waits {} seconds for a Tart runner start, and after the wait the agent needs up to {} seconds to boot the VM and start the runner. Set it from 0 to {MAX_VM_SLOT_WAIT_SECONDS}.",
+        MANAGER_TART_START_TIMEOUT.as_secs(),
+        (GUEST_BOOT_TIMEOUT + START_ALLOWANCE).as_secs(),
+    );
+    Ok(VmSlotWait::from_seconds(seconds))
+}
 
 /// Whether `tart run`'s output says every VM slot on the Mac is taken.
 fn vm_slot_limit_reached(output: &str) -> bool {
@@ -1393,10 +1431,14 @@ enum BootError {
 }
 
 /// Runs `attempt` until it boots, retrying with backoff while it finds every
-/// VM slot taken, for at most `wait.max_wait`. Any other failure ends it at
-/// once. `waiting` is told before each pause how long it has waited so far.
+/// VM slot taken, until `wait.max_wait` after `request_started`, when the
+/// start request began: the clone before the first attempt counts towards
+/// the wait, so the whole start stays inside the manager's limit. Any other
+/// failure ends it at once. `waiting` is told before each pause how long the
+/// start has taken so far.
 async fn boot_when_slot_free<A, F, W>(
     wait: VmSlotWait,
+    request_started: tokio::time::Instant,
     mut attempt: A,
     mut waiting: W,
 ) -> Result<(), BootError>
@@ -1405,14 +1447,13 @@ where
     F: Future<Output = BootOutcome>,
     W: FnMut(Duration),
 {
-    let started = tokio::time::Instant::now();
     let mut retry = 0_u32;
     loop {
         match attempt().await {
             BootOutcome::Booted => return Ok(()),
             BootOutcome::Failed(error) => return Err(BootError::Failed(error)),
             BootOutcome::SlotBusy => {
-                let waited = started.elapsed();
+                let waited = request_started.elapsed();
                 let Some(remaining) = wait
                     .max_wait
                     .checked_sub(waited)
@@ -1475,11 +1516,17 @@ impl Drop for SlotWaiter {
 }
 
 /// Boots the runner's cloned VM, waiting for a free VM slot when the Mac has
-/// none. The clone is kept while waiting; the caller deletes it on failure.
-async fn boot_vm(state: &AgentState, record: &TartRecord) -> Result<()> {
+/// none, until the wait runs out counting from `request_started`. The clone
+/// is kept while waiting; the caller deletes it on failure.
+async fn boot_vm(
+    state: &AgentState,
+    record: &TartRecord,
+    request_started: tokio::time::Instant,
+) -> Result<()> {
     let mut waiter: Option<SlotWaiter> = None;
     let result = boot_when_slot_free(
         state.vm_slot_wait,
+        request_started,
         || boot_vm_once(state, record),
         |waited| {
             if waiter.is_none() {
@@ -1520,7 +1567,8 @@ async fn boot_vm_once(state: &AgentState, record: &TartRecord) -> BootOutcome {
     match wait_for_guest_agent(state, record, exited).await {
         GuestStart::Ready => BootOutcome::Booted,
         GuestStart::TimedOut => BootOutcome::Failed(anyhow::anyhow!(
-            "Tart guest agent did not become ready within 180 seconds"
+            "Tart guest agent did not become ready within {} seconds",
+            GUEST_BOOT_TIMEOUT.as_secs()
         )),
         GuestStart::VmExited(status) => {
             let output = read_log_from(&runtime_log, offset).await;
@@ -1615,7 +1663,7 @@ async fn wait_for_guest_agent(
     record: &TartRecord,
     mut exited: tokio::sync::oneshot::Receiver<Option<std::process::ExitStatus>>,
 ) -> GuestStart {
-    let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+    let deadline = tokio::time::Instant::now() + GUEST_BOOT_TIMEOUT;
     loop {
         let ready = state
             .tart
@@ -2311,6 +2359,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_whole_start_fits_inside_the_managers_limit() {
+        // The longest slot wait, then a full guest boot after the last
+        // `tart run`, then starting the runner, all before the manager stops
+        // listening.
+        assert_eq!(MAX_VM_SLOT_WAIT_SECONDS, 600);
+        assert!(
+            Duration::from_secs(MAX_VM_SLOT_WAIT_SECONDS) + GUEST_BOOT_TIMEOUT + START_ALLOWANCE
+                <= MANAGER_TART_START_TIMEOUT
+        );
+        const { assert!(DEFAULT_VM_SLOT_WAIT_SECONDS <= MAX_VM_SLOT_WAIT_SECONDS) };
+    }
+
+    #[test]
+    fn the_managers_limit_is_the_one_the_manager_uses() {
+        // The manager and this agent are built separately, so each names the
+        // limit; this keeps them the same.
+        let manager = include_str!("../../gridops-manager/src/main.rs");
+        let expected = format!(
+            "const TART_PROVISION_TIMEOUT: Duration = Duration::from_mins({});",
+            MANAGER_TART_START_TIMEOUT.as_secs() / 60
+        );
+        assert!(
+            manager.contains(&expected),
+            "the manager no longer has {expected}"
+        );
+    }
+
+    #[test]
+    fn the_installer_refuses_the_same_waits_as_the_agent() {
+        let installer = include_str!("../../../scripts/install-tart-agent.sh");
+        assert!(installer.contains(&format!(
+            "vm_slot_wait=\"${{GRIDOPS_TART_VM_SLOT_WAIT_SECONDS:-{DEFAULT_VM_SLOT_WAIT_SECONDS}}}\""
+        )));
+        assert!(installer.contains(&format!("(( vm_slot_wait > {MAX_VM_SLOT_WAIT_SECONDS} ))")));
+    }
+
+    #[test]
+    fn a_slot_wait_that_cannot_fit_is_refused_with_the_reason() -> Result<()> {
+        for seconds in [0, 180, 600] {
+            assert_eq!(
+                vm_slot_wait_setting(seconds)?.max_wait,
+                Duration::from_secs(seconds)
+            );
+        }
+        for seconds in [601, 1_800] {
+            let Err(error) = vm_slot_wait_setting(seconds) else {
+                anyhow::bail!("{seconds} seconds should be refused");
+            };
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS is {seconds}, but at most 600 fits: the runner manager waits 900 seconds for a Tart runner start, and after the wait the agent needs up to 300 seconds to boot the VM and start the runner. Set it from 0 to 600."
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_counts_from_the_start_request_not_from_the_clone() -> Result<()> {
+        let (calls, attempt) = busy_then_booted(usize::MAX);
+        let request_started = tokio::time::Instant::now();
+        // Cloning the VM took the first minute of a three-minute wait.
+        tokio::time::advance(Duration::from_mins(1)).await;
+        let result = boot_when_slot_free(
+            VmSlotWait::from_seconds(180),
+            request_started,
+            attempt,
+            |_| {},
+        )
+        .await;
+        let Err(BootError::NoSlot(no_slot)) = result else {
+            anyhow::bail!("expected a no-slot failure, got {result:?}")
+        };
+        assert_eq!(no_slot.waited_seconds, 180);
+        assert_eq!(request_started.elapsed(), Duration::from_mins(3));
+        assert!(count(&calls) > 1);
+        Ok(())
+    }
+
     /// Attempts that find the slot busy `busy` times, then boot, counting calls.
     fn busy_then_booted(
         busy: usize,
@@ -2339,10 +2468,11 @@ mod tests {
         let (calls, attempt) = busy_then_booted(3);
         let started = tokio::time::Instant::now();
         let mut waits = Vec::new();
-        let result = boot_when_slot_free(VmSlotWait::from_seconds(600), attempt, |waited| {
-            waits.push(waited);
-        })
-        .await;
+        let result =
+            boot_when_slot_free(VmSlotWait::from_seconds(600), started, attempt, |waited| {
+                waits.push(waited);
+            })
+            .await;
         let Ok(()) = result else {
             anyhow::bail!("expected the VM to boot, got {result:?}")
         };
@@ -2358,7 +2488,8 @@ mod tests {
     async fn a_slot_that_stays_busy_fails_after_the_maximum_wait() -> Result<()> {
         let (calls, attempt) = busy_then_booted(usize::MAX);
         let started = tokio::time::Instant::now();
-        let result = boot_when_slot_free(VmSlotWait::from_seconds(600), attempt, |_| {}).await;
+        let result =
+            boot_when_slot_free(VmSlotWait::from_seconds(600), started, attempt, |_| {}).await;
         let Err(BootError::NoSlot(no_slot)) = result else {
             anyhow::bail!("expected a no-slot failure, got {result:?}")
         };
@@ -2378,6 +2509,7 @@ mod tests {
         let mut waits = Vec::new();
         let result = boot_when_slot_free(
             VmSlotWait::from_seconds(600),
+            started,
             move || {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::future::ready(BootOutcome::Failed(anyhow::anyhow!(
@@ -2402,7 +2534,7 @@ mod tests {
         let (calls, attempt) = busy_then_booted(usize::MAX);
         let started = tokio::time::Instant::now();
         let mut waits = Vec::new();
-        let result = boot_when_slot_free(VmSlotWait::from_seconds(0), attempt, |waited| {
+        let result = boot_when_slot_free(VmSlotWait::from_seconds(0), started, attempt, |waited| {
             waits.push(waited);
         })
         .await;
@@ -2452,6 +2584,9 @@ case "$1" in
     rm -f "$dir/running"
     if [ -f "$dir/pid" ]; then kill "$(cat "$dir/pid")" 2>/dev/null; rm -f "$dir/pid"; fi
     exit 0 ;;
+  clone)
+    if [ -f "$dir/slow-clone" ]; then sleep "$(cat "$dir/slow-clone")"; fi
+    exit 0 ;;
   list) echo '[]' ;;
   *) exit 0 ;;
 esac
@@ -2475,6 +2610,24 @@ esac
             let binary = dir.join("tart");
             fs::write(&binary, FAKE_TART).await?;
             fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).await?;
+            // A process another test forks while the script is being written
+            // inherits the write handle until it execs, and running the
+            // script meanwhile fails with "Text file busy". Once one run
+            // works no such handle is left, so run it until one does.
+            let mut tries = 0;
+            loop {
+                match Command::new(&binary).arg("probe").status().await {
+                    Ok(_) => break,
+                    Err(error) if error.raw_os_error() == Some(26) && tries < 100 => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            // The warm-up run is not a command the agent issued; forget it.
+            let _ = fs::remove_file(dir.join("calls")).await;
+            let _ = fs::remove_file(dir.join("paths")).await;
             let state = AgentState {
                 token: SecretString::from("t".repeat(32)),
                 tart: Tart::new(binary, env::var_os("PATH").as_deref()),
@@ -2639,6 +2792,23 @@ esac
             "no macOS VM slot became free within 0 seconds; the Mac allows two VMs at once, including VMs of other software"
         );
         assert!(tart.calls_to("run").await > 2, "it retried while waiting");
+        assert!(tart.released().await?, "{:?}", tart.calls().await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_slow_clone_uses_up_the_wait_it_counts_towards() -> Result<()> {
+        // The wait counts from the start request, so a clone that takes
+        // longer than the whole wait leaves one try at `tart run`, no more.
+        let tart = FakeTart::new(Duration::from_secs(1)).await?;
+        tart.flag("slow-clone", "2").await?;
+        tart.flag("always-busy", "").await?;
+        let result = tart.provision().await;
+        let Err(AgentError::Unavailable { code, .. }) = result else {
+            anyhow::bail!("expected the no-slot failure, got {result:?}")
+        };
+        assert_eq!(code, "vm_slot_unavailable");
+        assert_eq!(tart.calls_to("run").await, 1, "{:?}", tart.calls().await);
         assert!(tart.released().await?, "{:?}", tart.calls().await);
         Ok(())
     }

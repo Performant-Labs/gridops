@@ -2335,24 +2335,10 @@ async fn manager_request<T: serde::de::DeserializeOwned>(
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
-        let payload = serde_json::from_str::<Value>(&text).ok();
-        let code = payload
-            .as_ref()
-            .and_then(|value| value.get("code"))
-            .and_then(Value::as_str)
-            .unwrap_or("manager_error");
-        let message = payload
-            .as_ref()
-            .and_then(|value| value.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or(&text);
         if status == StatusCode::NOT_FOUND {
             bail!("runner manager object was not found");
         }
-        bail!(
-            "runner manager request failed ({status}) [{code}]: {}",
-            message.chars().take(500).collect::<String>()
-        );
+        bail!(manager_failure(status, &text));
     }
     // A 204 (a removed sandbox or a released lease) has no body; callers that
     // ignore the result read it as null.
@@ -2360,6 +2346,32 @@ async fn manager_request<T: serde::de::DeserializeOwned>(
         return Ok(serde_json::from_value(Value::Null)?);
     }
     Ok(serde_json::from_str(&text)?)
+}
+
+/// What a failed manager request is recorded as: its status, the manager's
+/// error code and its reason, which is never left empty.
+fn manager_failure(status: StatusCode, text: &str) -> String {
+    let payload = serde_json::from_str::<Value>(text).ok();
+    let code = payload
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("manager_error");
+    let message = payload
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or(text)
+        .trim();
+    let message = if message.is_empty() {
+        "the runner manager answered without saying why"
+    } else {
+        message
+    };
+    format!(
+        "runner manager request failed ({status}) [{code}]: {}",
+        message.chars().take(500).collect::<String>()
+    )
 }
 
 struct CapacityAdmission {
@@ -2994,6 +3006,34 @@ mod tests {
             "runner manager request failed (429 Too Many Requests) [host_disk_guardrail]: only 100 MB disk space remains"
         )));
         assert!(!host_capacity_exhausted(None));
+    }
+
+    #[test]
+    fn a_manager_error_is_never_reported_without_a_reason() {
+        // A timeout layer answers 408 with no body at all; the operator must
+        // still learn what failed.
+        assert_eq!(
+            manager_failure(StatusCode::REQUEST_TIMEOUT, ""),
+            "runner manager request failed (408 Request Timeout) [manager_error]: the runner manager answered without saying why"
+        );
+        assert_eq!(
+            manager_failure(
+                StatusCode::REQUEST_TIMEOUT,
+                r#"{"code":"tart_start_timeout","error":"the Tart agent did not finish starting the macOS runner within 900 seconds"}"#
+            ),
+            "runner manager request failed (408 Request Timeout) [tart_start_timeout]: the Tart agent did not finish starting the macOS runner within 900 seconds"
+        );
+        assert_eq!(
+            manager_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"code":"vm_slot_unavailable","error":"  "}"#
+            ),
+            "runner manager request failed (503 Service Unavailable) [vm_slot_unavailable]: the runner manager answered without saying why"
+        );
+        assert_eq!(
+            manager_failure(StatusCode::BAD_GATEWAY, "upstream connect error"),
+            "runner manager request failed (502 Bad Gateway) [manager_error]: upstream connect error"
+        );
     }
 
     #[test]
