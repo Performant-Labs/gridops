@@ -31,6 +31,7 @@ issue: write the placeholders, and a result such as "all passed".
   - A fine-grained token needs Contents, Actions and Issues read and write, plus Variables read (step 4); a classic token needs `repo`
   - If a ruleset protects `v*` tags, the account is on its bypass list
 - [ ] P2. **A release operator token for `<deployment>`** with the scopes `fleet:read` and `fleet:operate` and a short expiry (one to three days); [how to create it, keep it and what it can do](https://github.com/Performant-Labs/gridops/blob/master/docs/fleet-automation.md#the-release-operator-token)
+  - Add `pools:read` and `pools:manage` only if this release creates or changes a runner pool, and `fleet:retire` only if it retires a machine (one that is paused or drained, shut down and idle). Without them those steps need a person in the browser. Enrolling and approving machines, recovery, credential rotation and token management always do
   - An administrator creates it under **Settings → API tokens**. The secret is shown once: put it in a secrets manager or the agent's secret store, never in the repository, an issue, a pull request or a chat
   - The preflight (P9) proves both scopes. The API does not let a token read its own expiry, so read it on the Settings page and pass it as `PREFLIGHT_TOKEN_EXPIRES_AT`
   - Revoke it in step 23

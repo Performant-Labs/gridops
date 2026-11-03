@@ -137,6 +137,20 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
                         };
                         assert_eq!(reasons.len(), 2);
                     }
+                    ErrorCode::HostNotRetirable => {
+                        assert_eq!(error.code.status(), 409);
+                        let Some(ErrorDetails::RetireBlocked { reasons }) = error.details else {
+                            anyhow::bail!("a refused token retire must carry its reasons");
+                        };
+                        assert_eq!(reasons.len(), 2);
+                    }
+                    ErrorCode::TokenNotAccepted => {
+                        assert_eq!(error.code.status(), 403);
+                        assert!(
+                            error.details.is_none(),
+                            "the refusal reveals nothing about the token"
+                        );
+                    }
                     other => anyhow::bail!("untested error fixture: {other:?}"),
                 }
             }
@@ -148,6 +162,6 @@ fn documented_examples_match_contracts() -> anyhow::Result<()> {
         }
         checked += 1;
     }
-    assert_eq!(checked, 4);
+    assert_eq!(checked, 6);
     Ok(())
 }

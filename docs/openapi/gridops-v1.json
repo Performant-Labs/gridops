@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "GridOps Fleet and Operations API",
+    "title": "GridOps Fleet, Operations and Runner Pool API",
     "version": "1.0.0",
-    "description": "Machine-readable contract for `/api/v1/fleet` and `/api/v1/operations`.\n\nBrowser routes authenticate with the dashboard session cookie or, where marked, a scoped API token (`Authorization: Bearer gat_...`). A request carrying both a cookie and a bearer token is refused. Agent routes are the host-agent protocol and use a host credential, never an API token.\n\nSee docs/fleet-api.md for the human contract and docs/fleet-automation.md for bot-driven enrollment."
+    "description": "Machine-readable contract for `/api/v1/fleet`, `/api/v1/operations`, and the runner-pool routes that accept an API token.\n\nBrowser routes authenticate with the dashboard session cookie or, where marked, a scoped API token (`Authorization: Bearer gat_...`). A request carrying both a cookie and a bearer token is refused. Every route that needs a signed-in user but is not marked with a token scope, here or elsewhere in GridOps, refuses any bearer token with `403 token_not_accepted` before doing anything, instead of answering as a signed-out caller. Agent routes are the host-agent protocol and use a host credential, never an API token.\n\nSee docs/fleet-api.md for the human contract, including the authoritative \"Who may call what\" table of every route, and docs/fleet-automation.md for bot-driven automation."
   },
   "servers": [{ "url": "/" }],
   "tags": [
@@ -11,7 +11,9 @@
     { "name": "fleet-enroll", "description": "Issue and manage enrollment codes (token scope `fleet:enroll` or cookie)" },
     { "name": "fleet-approve", "description": "Approve pending hosts (token scope `fleet:approve` or cookie)" },
     { "name": "fleet-operate", "description": "Run-time levers: runtimes, lifecycle, grants, pool profiles, deleting retired machines (token scope `fleet:operate` or cookie)" },
-    { "name": "fleet-admin", "description": "Cookie-only administration (API tokens, recovery, retirement, rotation)" },
+    { "name": "fleet-retire", "description": "Retire a machine (token scope `fleet:retire` with guard rails, or cookie)" },
+    { "name": "fleet-admin", "description": "Cookie-only administration (API tokens, recovery, rotation); a bearer token gets `403 token_not_accepted`" },
+    { "name": "pools", "description": "Runner pools (token scope `pools:read` or `pools:manage`, or cookie), with the web form's validation and the token owner's installation access" },
     { "name": "operations", "description": "Durable operation status (token scope `fleet:read` or cookie)" },
     { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" }
   ],
@@ -21,7 +23,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Scoped API token: `gat_` followed by 43 base64url characters. Created by an administrator; scopes are fleet:read, fleet:enroll, fleet:approve, fleet:operate."
+        "description": "Scoped API token: `gat_` followed by 43 base64url characters. Created by an administrator; scopes are fleet:read, fleet:enroll, fleet:approve, fleet:operate, fleet:retire, pools:read and pools:manage. No scope implies another. The owner must still be a system administrator on every request."
       },
       "cookieAuth": {
         "type": "apiKey",
@@ -79,6 +81,18 @@
         "required": true,
         "schema": { "$ref": "#/components/schemas/Uuid" }
       },
+      "RunnerPoolId": {
+        "name": "pool_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "InstallationId": {
+        "name": "installation_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer" }
+      },
       "OperationId": {
         "name": "operation_id",
         "in": "path",
@@ -119,7 +133,7 @@
           },
           {
             "type": "object",
-            "properties": { "kind": { "const": "scope" }, "requiredScope": { "type": "string", "enum": ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate"] } },
+            "properties": { "kind": { "const": "scope" }, "requiredScope": { "type": "string", "enum": ["fleet:read", "fleet:enroll", "fleet:approve", "fleet:operate", "fleet:retire", "pools:read", "pools:manage"] } },
             "required": ["kind", "requiredScope"], "additionalProperties": false
           },
           {
@@ -127,6 +141,14 @@
             "properties": {
               "kind": { "const": "delete_blocked" },
               "reasons": { "type": "array", "items": { "$ref": "#/components/schemas/HostDeleteBlocker" } }
+            },
+            "required": ["kind", "reasons"], "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": { "const": "retire_blocked" },
+              "reasons": { "type": "array", "items": { "$ref": "#/components/schemas/HostRetireBlocker" } }
             },
             "required": ["kind", "reasons"], "additionalProperties": false
           }
@@ -137,12 +159,17 @@
         "description": "Why a machine cannot be deleted yet. A refusal lists every reason that applies.",
         "enum": ["not_retired", "still_heartbeating", "active_credential", "live_placement", "unconfirmed_start", "live_runner", "pending_command"]
       },
+      "HostRetireBlocker": {
+        "type": "string",
+        "description": "Why an API token may not retire a machine yet. A refusal lists every reason that applies, in this order.",
+        "enum": ["lifecycle_active", "recently_seen", "live_placement", "unconfirmed_start", "live_runner", "pending_command"]
+      },
       "ErrorResponse": {
         "type": "object",
         "properties": {
           "code": {
             "type": "string",
-            "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range", "host_not_deletable"]
+            "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "revision_conflict", "idempotency_conflict", "enrollment_expired", "grant_expired", "cursor_expired", "cursor_gap", "payload_too_large", "rate_limited", "dependency_unavailable", "not_ready", "contract_range", "host_not_deletable", "token_not_accepted", "host_not_retirable"]
           },
           "message": { "type": "string" },
           "requestId": { "$ref": "#/components/schemas/Uuid" },
@@ -342,6 +369,22 @@
           "details": { "kind": "delete_blocked", "reasons": ["live_placement", "pending_command"] }
         }
       },
+      "fleetErrorHostNotRetirable": {
+        "value": {
+          "code": "host_not_retirable",
+          "message": "Machine cannot be retired with an API token yet",
+          "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e72",
+          "details": { "kind": "retire_blocked", "reasons": ["lifecycle_active", "recently_seen"] }
+        }
+      },
+      "fleetErrorTokenNotAccepted": {
+        "value": {
+          "code": "token_not_accepted",
+          "message": "This route does not accept API tokens",
+          "requestId": "0192f0c4-7a1e-7c3b-9f00-3d1c2b4a5e73",
+          "details": null
+        }
+      },
       "enrollmentIssueCreated": {
         "value": {
           "code": "7MFBNUWH2DWCLSPZR4XZJRMNFBWKMPRLIQZKBEXYKV4",
@@ -358,7 +401,8 @@
             "schema": { "$ref": "#/components/schemas/ErrorResponse" },
             "examples": {
               "revisionConflict": { "$ref": "#/components/examples/fleetErrorRevisionConflict" },
-              "scopeDenied": { "$ref": "#/components/examples/fleetErrorScopeDenied" }
+              "scopeDenied": { "$ref": "#/components/examples/fleetErrorScopeDenied" },
+              "tokenNotAccepted": { "$ref": "#/components/examples/fleetErrorTokenNotAccepted" }
             }
           }
         }
@@ -793,12 +837,26 @@
     },
     "/api/v1/fleet/hosts/{host_id}/retire": {
       "post": {
-        "tags": ["fleet-admin"],
-        "summary": "Retire a host (cookie only)",
-        "security": [{ "cookieAuth": [] }],
+        "tags": ["fleet-retire"],
+        "summary": "Retire a host",
+        "description": "Revokes the machine's credentials and stops it taking work; its history stays. Body: `{\"expectedRevision\": n}`. A browser session retires under the original rules (an administrator, the current revision, no placement still running). A token with `fleet:retire` (never implied by `fleet:operate`) may retire only a machine that cannot hurt a healthy fleet; otherwise it is refused with `409 host_not_retirable`, `details.kind = \"retire_blocked\"`, listing every reason in `details.reasons`: the lifecycle is `active` (`lifecycle_active`); it reported in within the quiet period, 15 minutes unless `GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES` says otherwise (`recently_seen`); a placement is not cleaned up or failed, or capacity is still charged (`live_placement`); a start is unconfirmed (`unconfirmed_start`); a runner on it has not finished (`live_runner`); a command is waiting within its deadline (`pending_command`). The checks run in the retire transaction. Retiring a retired machine is a no-op. The audit row `fleet.host.retired` names the token.",
+        "security": [{ "bearerAuth": ["fleet:retire"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } }, "required": ["expectedRevision"], "additionalProperties": false } } }
+        },
         "responses": {
-          "200": { "description": "Retired", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "200": { "description": "Retired (or already retired)", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "409": {
+            "description": "A token may not retire this machine yet (`retire_blocked`), or the revision moved (`revision_conflict`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "examples": { "hostNotRetirable": { "$ref": "#/components/examples/fleetErrorHostNotRetirable" } }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }
@@ -942,6 +1000,134 @@
         "parameters": [{ "$ref": "#/components/parameters/HostId" }],
         "responses": {
           "200": { "description": "Acknowledged", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/runner-pools": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "List the runner pools the caller may see",
+        "description": "Paginated (`page`, `perPage`). A browser without a session gets `200` with `\"authenticated\": false` and no items; a token never does: it is accepted with `pools:read` or refused. Only pools on GitHub installations the token's owner can access are listed.",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "`{ authenticated, items, total, page, perPage }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "post": {
+        "tags": ["pools"],
+        "summary": "Create a runner pool",
+        "description": "The body and its validation are exactly the web form's (`CreateRunnerPool`); a validation error is `400 { \"error\": \"...\" }` with the form's message, a duplicate name `409`. The owner must administer the pool's installation (or repositories), as in the browser; Bitbucket connections need a system administrator. A token request is not origin-checked. Audited as `runner_pool.created`, naming the token. Starts `desiredCount` runners as the form does.",
+        "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "201": { "description": "`{ id, provisioned, cannotRun }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/runner-pools/options": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "The pool form's options: installations the owner administers, Bitbucket connections (name and workspace only), defaults",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "Form options; never a credential", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/runner-pools/repositories": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "Repositories the owner can put in a repository pool (asks GitHub)",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "`{ items }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/installations/{installation_id}/runner-groups": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "Runner groups of an organization installation the owner administers (asks GitHub)",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/InstallationId" }],
+        "responses": {
+          "200": { "description": "`{ items }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/installations/{installation_id}/repositories": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "Repositories of an installation the owner administers (asks GitHub)",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/InstallationId" }],
+        "responses": {
+          "200": { "description": "`{ items }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/runner-pools/{pool_id}": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "One runner pool, with its capacity and configuration",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
+        "responses": {
+          "200": { "description": "Pool detail", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "put": {
+        "tags": ["pools"],
+        "summary": "Edit a runner pool",
+        "description": "The body and validation are the web form's (`UpdateRunnerPool`). The owner must administer every installation the pool uses. Audited as `runner_pool.updated`, naming the token.",
+        "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "`{ ok, configurationVersion, rollingReplacement }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      },
+      "delete": {
+        "tags": ["pools"],
+        "summary": "Remove a runner pool and its runners",
+        "description": "Refused with `409` while the pool still has runners on fleet machines. Removes the pool's runners on the built-in host, as the web app does. Audited as `runner_pool.deleted`, naming the token.",
+        "security": [{ "bearerAuth": ["pools:manage"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
+        "responses": {
+          "200": { "description": "`{ ok: true }`", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/runner-pools/{pool_id}/events": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "A pool's lifecycle events, newest first",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
+        "responses": {
+          "200": { "description": "Paginated events", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/overview/capacity": {
+      "get": {
+        "tags": ["pools"],
+        "summary": "Available, busy and queued runner counts over time, for the pools the caller may see",
+        "description": "`window` is `24h` (default), `7d` or `30d`.",
+        "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "`{ window, points }`", "content": { "application/json": { "schema": { "type": "object" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }

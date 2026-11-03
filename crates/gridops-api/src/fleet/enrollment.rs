@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::{
     boundary::{
         Approve, CookieOnly, Enroll, FleetJson, FleetPath, FleetUser, FleetWriteUser, Operate,
-        Read, context,
+        Read, Retire, context,
     },
     error::{FleetApiError, RequestContext},
 };
@@ -536,17 +536,23 @@ pub(super) struct RetireBody {
     expected_revision: BrowserCounter,
 }
 
+/// Retires a machine. A session retires as it always has; a token with
+/// `fleet:retire` is held by the registry to the guard rails, with the quiet
+/// period from `GRIDOPS_TOKEN_RETIRE_MIN_OFFLINE_MINUTES`.
 pub(super) async fn retire(
     State(state): State<AppState>,
     context: RequestContext,
-    user: FleetWriteUser<CookieOnly>,
+    user: FleetWriteUser<Retire>,
     FleetPath(host_id): FleetPath<HostId>,
     FleetJson(body): FleetJson<RetireBody>,
 ) -> Result<Response, FleetApiError> {
     let expected_revision = Revision::new(body.expected_revision.get())
         .map_err(|_| context.error(ErrorCode::InvalidRequest))?;
+    let policy = gridops_core::fleet::registry::RetirePolicy {
+        token_min_offline_millis: state.config.token_retire_min_offline_millis(),
+    };
     RegistryService::new(state.database, state.vault)
-        .retire_host(user.principal(), host_id, expected_revision)
+        .retire_host_with_policy(user.principal(), host_id, expected_revision, policy)
         .await
         .map_err(|error| context.registry_error(&error))?;
     Ok(StatusCode::OK.into_response())

@@ -30,6 +30,16 @@ pub struct AuthUser {
     pub login: String,
     pub github_id: i64,
     pub role: String,
+    /// Set when the request authenticated with a scoped API token of this
+    /// user instead of a session (pool routes only); audit rows then name it.
+    pub via_token: Option<TokenActor>,
+}
+
+/// The API token a request acted through: its id and name, never its secret.
+#[derive(Clone, Debug)]
+pub struct TokenActor {
+    pub id: String,
+    pub name: String,
 }
 
 pub struct OptionalAuth(pub Option<AuthUser>);
@@ -100,6 +110,7 @@ pub(crate) async fn authenticate_session(
             login: row.get("login"),
             github_id: row.get("github_id"),
             role: row.get("role"),
+            via_token: None,
         },
         session_id: row.get("session_id"),
     })
@@ -429,10 +440,27 @@ pub async fn audit(
     target_id: Option<&str>,
     metadata: serde_json::Value,
 ) -> ApiResult<()> {
+    let (actor_label, metadata) = audit_actor(user, metadata);
     sqlx::query("INSERT INTO audit_events (id,actor_user_id,actor_label,action,target_type,target_id,metadata,created_at) VALUES (?,?,?,?,?,?,?,?)")
-        .bind(uuid::Uuid::new_v4().to_string()).bind(&user.id).bind(&user.login).bind(action).bind(target_type).bind(target_id)
+        .bind(uuid::Uuid::new_v4().to_string()).bind(&user.id).bind(actor_label).bind(action).bind(target_type).bind(target_id)
         .bind(metadata.to_string()).bind(now_millis()).execute(&state.database).await?;
     Ok(())
+}
+
+/// The audit label and metadata for `user`: their login, or for a token
+/// request `"<login> (token: <name>)"` with `viaApiToken: {id, name}` added
+/// to the metadata, exactly as the fleet registry records token actions.
+fn audit_actor(user: &AuthUser, mut metadata: serde_json::Value) -> (String, serde_json::Value) {
+    let Some(token) = &user.via_token else {
+        return (user.login.clone(), metadata);
+    };
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "viaApiToken".to_owned(),
+            serde_json::json!({ "id": token.id, "name": token.name }),
+        );
+    }
+    (format!("{} (token: {})", user.login, token.name), metadata)
 }
 
 #[cfg(test)]
@@ -447,7 +475,30 @@ mod tests {
             login: "octocat".into(),
             github_id: 1,
             role: role.into(),
+            via_token: None,
         }
+    }
+
+    #[test]
+    fn a_token_request_is_audited_with_the_token_and_a_session_as_before() {
+        let session = user("admin");
+        let (label, metadata) = audit_actor(&session, serde_json::json!({"name": "pool"}));
+        assert_eq!(label, "octocat");
+        assert_eq!(metadata, serde_json::json!({"name": "pool"}));
+
+        let token = AuthUser {
+            via_token: Some(TokenActor {
+                id: "token-1".into(),
+                name: "pool-bot".into(),
+            }),
+            ..user("admin")
+        };
+        let (label, metadata) = audit_actor(&token, serde_json::json!({"name": "pool"}));
+        assert_eq!(label, "octocat (token: pool-bot)");
+        assert_eq!(
+            metadata,
+            serde_json::json!({"name": "pool", "viaApiToken": {"id": "token-1", "name": "pool-bot"}})
+        );
     }
 
     #[test]

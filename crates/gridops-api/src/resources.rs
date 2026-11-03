@@ -28,6 +28,7 @@ use sqlx::{FromRow, Row as _};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use crate::{
+    access::{OptionalPoolUser, PoolUser, PoolWriteUser, PoolsManage, PoolsRead},
     auth::{
         AuthUser, OptionalAuth, assert_installation_admin, assert_pool_admin, audit,
         require_system_admin,
@@ -791,7 +792,7 @@ fn queued_job_waiting_reason(
 pub async fn capacity_history(
     State(state): State<AppState>,
     Query(query): Query<CapacityQuery>,
-    OptionalAuth(user): OptionalAuth,
+    OptionalPoolUser(user, ..): OptionalPoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     let window = query.window.as_deref().unwrap_or("24h");
     let (window_millis, bucket_millis) = capacity_window(window)
@@ -1214,7 +1215,7 @@ pub async fn search(
 pub async fn runner_pools(
     State(state): State<AppState>,
     Query(query): Query<PaginationQuery>,
-    OptionalAuth(user): OptionalAuth,
+    OptionalPoolUser(user, ..): OptionalPoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     let (requested_page, per_page) = pagination(query.page, query.per_page);
     let Some(user) = user else {
@@ -1300,7 +1301,7 @@ pub async fn runner_pools(
 pub async fn runner_pool(
     State(state): State<AppState>,
     Path(pool_id): Path<String>,
-    user: AuthUser,
+    PoolUser(user, ..): PoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     let pool = pool_access(&state, &user, &pool_id).await?;
     let additional_labels = json_array(&pool.labels)
@@ -1443,7 +1444,7 @@ pub async fn runner_pool_events(
     State(state): State<AppState>,
     Path(pool_id): Path<String>,
     Query(query): Query<PaginationQuery>,
-    user: AuthUser,
+    PoolUser(user, ..): PoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     // Reuse the pool access check so lifecycle details never cross an
     // installation boundary, even when a user knows another pool's id.
@@ -1501,8 +1502,7 @@ pub async fn runner_pool_events(
 pub async fn update_runner_pool(
     State(state): State<AppState>,
     Path(pool_id): Path<String>,
-    _same_origin: SameOrigin,
-    user: AuthUser,
+    PoolWriteUser(user, ..): PoolWriteUser<PoolsManage>,
     Json(input): Json<UpdateRunnerPool>,
 ) -> ApiResult<Json<Value>> {
     input.validate().map_err(ApiError::BadRequest)?;
@@ -2307,7 +2307,7 @@ pub async fn log_targets(
 
 pub async fn runner_pool_options(
     State(state): State<AppState>,
-    OptionalAuth(user): OptionalAuth,
+    OptionalPoolUser(user, ..): OptionalPoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     let Some(user) = user else {
         return Ok(Json(
@@ -2351,7 +2351,7 @@ pub async fn runner_pool_options(
 
 pub async fn runner_pool_repository_options(
     State(state): State<AppState>,
-    user: AuthUser,
+    PoolUser(user, ..): PoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     let (_, mut available) = available_repositories(&state, &user, true).await?;
     available.retain(|item| !item.repository.archived);
@@ -2380,7 +2380,7 @@ pub async fn runner_pool_repository_options(
 pub async fn installation_repositories(
     State(state): State<AppState>,
     Path(installation_id): Path<i64>,
-    user: AuthUser,
+    PoolUser(user, ..): PoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     assert_installation_admin(&state, &user, installation_id).await?;
     let installation = available_installations(&state, &user, true)
@@ -2415,7 +2415,7 @@ pub async fn installation_repositories(
 pub async fn installation_runner_groups(
     State(state): State<AppState>,
     Path(installation_id): Path<i64>,
-    user: AuthUser,
+    PoolUser(user, ..): PoolUser<PoolsRead>,
 ) -> ApiResult<Json<Value>> {
     assert_installation_admin(&state, &user, installation_id).await?;
     let installation = sqlx::query(
@@ -2453,8 +2453,7 @@ pub async fn installation_runner_groups(
 
 pub async fn create_runner_pool(
     State(state): State<AppState>,
-    _same_origin: SameOrigin,
-    user: AuthUser,
+    PoolWriteUser(user, ..): PoolWriteUser<PoolsManage>,
     Json(input): Json<CreateRunnerPool>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     input.validate().map_err(ApiError::BadRequest)?;
@@ -2648,8 +2647,7 @@ pub async fn runner_pool_action(
 pub async fn delete_runner_pool(
     State(state): State<AppState>,
     Path(pool_id): Path<String>,
-    _same_origin: SameOrigin,
-    user: AuthUser,
+    PoolWriteUser(user, ..): PoolWriteUser<PoolsManage>,
 ) -> ApiResult<Json<Value>> {
     pool_access(&state, &user, &pool_id).await?;
     assert_pool_admin(&state, &user, &pool_id).await?;

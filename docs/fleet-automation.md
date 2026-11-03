@@ -1,8 +1,10 @@
 # Bot-driven fleet automation
 
-How a script, CI job or agent operates the fleet with a scoped API token —
-no browser session, no direct database writes. The
-[API contract](fleet-api.md) lists every route; this page is the recipe.
+How a script, CI job or agent operates the fleet and its runner pools with a
+scoped API token — no browser session, no direct database writes. The
+[API contract](fleet-api.md) lists every route
+([Who may call what](fleet-api.md#who-may-call-what) says which take a token);
+this page is the recipe.
 
 ## Create a token
 
@@ -31,7 +33,9 @@ Scripts that already hold a cookie session can still call the API directly:
 same path to list, and `POST /api/v1/fleet/api-tokens/{token_id}/revoke`
 (see [the API contract](fleet-api.md#api-tokens)).
 
-For full host onboarding a bot needs all four v1 scopes:
+Give a token only the scopes its job needs. No scope implies another:
+`fleet:operate` does not include `fleet:retire`, and `pools:manage` does not
+include `pools:read`.
 
 | Scope | Lets the bot |
 |---|---|
@@ -39,12 +43,45 @@ For full host onboarding a bot needs all four v1 scopes:
 | `fleet:enroll` | Issue, check and revoke enrollment codes |
 | `fleet:approve` | Approve a pending host |
 | `fleet:operate` | Turn runtimes on/off, set lifecycle intent, set grants, set a machine's budget, save a pool's fleet execution profile, set a pool's runner counts, delete a retired machine (`DELETE /api/v1/fleet/hosts/{host_id}`, see [Deleting a machine](fleet-api.md#deleting-a-machine)) |
+| `fleet:retire` | Retire a machine that is already out of service (not `active`), has been silent for the quiet period (15 minutes by default) and runs nothing; refused with every reason otherwise (see [Retiring a machine](fleet-api.md#retiring-a-machine)) |
+| `pools:read` | List and read runner pools, their events and capacity history, and the pool form's options (installations, Bitbucket workspaces, defaults) |
+| `pools:manage` | Create, edit and remove runner pools, with exactly the web form's validation (see [Runner pools with a token](fleet-api.md#runner-pools-with-a-token)) |
 
-Recovering, retiring or rotating a host's credentials, reading agent logs,
-and managing tokens stay cookie-only. A token belongs to its creator: their
-role is re-checked on every request, so demoting or deleting the owner
-neuters the token without touching it. Tokens expire (default 90 days, at
-most 365) and are revocable by their owner or any system admin.
+Full host onboarding needs `fleet:read`, `fleet:enroll`, `fleet:approve`
+and `fleet:operate`; adding a pool for the new machine also needs
+`pools:read` and `pools:manage`.
+
+### What a bot can and cannot do
+
+A token can do only what its scopes name, only on the routes that
+[Who may call what](fleet-api.md#who-may-call-what) marks with that scope,
+and only what its owner may do. Everything else stays with a person in the
+browser, on purpose:
+
+- **Token management** (create, list, revoke): cookie-only, so a leaked token
+  cannot mint, extend or find other tokens.
+- **Recovering a machine, rotating its credential, repairing unconfirmed
+  starts, reading agent logs**: cookie-only.
+- **Retiring a machine that is still alive or still running work**: only a
+  browser session can; a token is held to the guard rails.
+- **Pool actions** (pause, resume, scale, retry, reconcile), runners,
+  workflow runs, logs, the audit log, settings (the built-in runner host and
+  its budget included), platform connections, AI settings, users and
+  backups: cookie-only.
+
+Every one of those routes answers a bearer token with
+`403 token_not_accepted`, whether the token is valid or not, so a script
+never mistakes a refusal for an empty answer. A token does nothing on GitHub
+beyond what the pool form itself does for its owner (listing the owner's
+installations, repositories and runner groups, and starting a new pool's
+runners), and nothing on the deploy host.
+
+A token belongs to its creator: their role is re-checked on every request,
+so demoting or deleting the owner neuters the token without touching it (a
+demoted owner's token is refused even on pool routes where the owner, as a
+member with installation access, could still act in the browser). Tokens
+expire (default 90 days, at most 365) and are revocable by their owner or
+any system admin.
 
 Keep the token out of shell history and CI logs:
 
@@ -69,13 +106,13 @@ release, a person or an agent, holds a token made for that release alone
 
 | | |
 |---|---|
-| **Scopes** | `fleet:read` and `fleet:operate`, nothing else |
+| **Scopes** | `fleet:read` and `fleet:operate`; add `pools:read` and `pools:manage` only for a release that creates or changes a runner pool, and `fleet:retire` only for one that retires a machine |
 | **Lifetime** | one to three days: long enough for one release, gone soon after. `scripts/release-preflight.sh` fails a token that expires within 6 hours or lives longer than 7 days |
 | **Owner** | an administrator; the token can do only what its owner may do, checked on every request |
 | **Name** | the release it is for, for example `release-v0.2.0`, so the audit trail says why a machine changed |
 
 **Create it** as an administrator under **Settings → API tokens**: the name,
-the two scopes and a lifetime of 1 to 3 days. Copy the `gat_...` secret from
+the scopes and a lifetime of 1 to 3 days. Copy the `gat_...` secret from
 the dialog; it is never shown again.
 
 **Keep it** in a secrets manager, or the secret store of the agent or CI job
@@ -91,11 +128,19 @@ grants, targets, queues, pool profiles and capacity, operations) and every
 maintenance), turn runtimes on or off, set target grants and budgets, save a
 pool's fleet profile and runner counts, and delete a retired machine.
 `fleet:operate` is broad, which is why the token lives for days, not months.
+With the extra scopes it can also create, edit and remove runner pools
+(`pools:manage`, with the form's validation) and read them (`pools:read`),
+and retire a machine that is out of service, silent and idle
+(`fleet:retire`).
 
 **What it cannot do:** enroll or approve machines (`fleet:enroll`,
-`fleet:approve`), retire or recover a machine, rotate its credentials, read
-agent logs, or create, list or revoke tokens (so it cannot extend itself),
-all of which stay cookie-only. It works only on the routes
+`fleet:approve`); recover a machine, rotate its credentials, read agent
+logs, pause or scale a pool through the pool actions, change settings, or
+create, list or revoke tokens (so it cannot extend itself), all of which
+stay cookie-only and answer `403 token_not_accepted`; retire a machine that
+is still active, reporting in or running work, which only a browser can;
+and, without the extra scopes, anything on runner pools or retirement
+(`403 forbidden` naming the missing scope). It works only on the routes
 [the API contract](fleet-api.md#routes) marks with a scope, and it cannot
 upgrade an agent: GridOps has no command
 that makes an agent update itself yet, so system-service machines are
@@ -114,6 +159,18 @@ cookie-only. Read the expiry on the Settings page and pass it to the
 preflight as `PREFLIGHT_TOKEN_EXPIRES_AT`. Nor can a request that changes
 nothing tell whether the owner is still an administrator: that shows up as a
 `403 forbidden` without a scope on the first real change.
+
+**Which release steps need what.** With `fleet:read` and `fleet:operate` a
+release pauses, drains and activates machines and changes pool fleet
+profiles and runner counts. Creating or editing a runner pool (for example
+for a new macOS machine) needs `pools:read` and `pools:manage`; retiring the
+machine a new one replaces needs `fleet:retire`, after it is paused or
+drained, shut down for the quiet period and idle. Enrolling and approving a
+machine need `fleet:enroll` and `fleet:approve`, which the release token
+does not carry: a person does that, or a separate onboarding token. To check
+that a token holds a pool scope before relying on it,
+`GET /api/v1/runner-pools` answers `200` with `pools:read` and `403` naming
+`pools:read` without it.
 
 ## Onboard a machine
 
@@ -264,6 +321,63 @@ reason a runner is waiting; each maps to one missing layer:
 | `forbidden` | Not a host layer: the intent is pinned to a replaced fleet profile (known issue; cancel and re-dispatch the run) |
 | `physical_resource_exhausted` | The platform reservation exceeds every host's budget — check disk/cpu/memory reservations against reported budgets, and raise a budget with `PUT /api/v1/fleet/hosts/{id}/budget` (`{"cpuMillis":…,"memoryMib":…,"diskBytes":…}`, any subset, never above what the machine reports) |
 
+## Manage runner pools
+
+With `pools:read` and `pools:manage`. The request bodies are the web form's;
+to edit, read the pool first and send it back with your change:
+
+```sh
+curl -sS "$GRIDOPS_URL/api/v1/runner-pools/options" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN" | jq '.installations, .defaults'
+curl -sS -X POST "$GRIDOPS_URL/api/v1/runner-pools" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"installationId":<id>,"name":"macos-release","scope":"organization",
+       "mode":"ephemeral","provider":"tart","labels":[],"image":"<tart image>",
+       "desiredCount":0,"minCount":0,"maxCount":2,"autoscalingEnabled":true,
+       "queueScaleFactor":1,"idleTimeoutMinutes":10,"cpuLimit":4,
+       "memoryLimitMb":8192,"runnerGroupId":1}'
+# → 201 { "id": "<pool id>", "provisioned": [...], "cannotRun": ... }
+curl -sS "$GRIDOPS_URL/api/v1/runner-pools/$POOL_ID" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN"
+curl -sS -X PUT "$GRIDOPS_URL/api/v1/runner-pools/$POOL_ID" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+  -H 'Content-Type: application/json' -d @pool.json
+curl -sS -X DELETE "$GRIDOPS_URL/api/v1/runner-pools/$POOL_ID" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN"
+```
+
+A validation error is `400 {"error": "..."}` with the form's message, a
+duplicate name `409`, and removing a pool that still has runners on fleet
+machines `409` until they stop. Creating a pool starts its `desiredCount`
+runners, as the form does. The pool must be on an installation the token's
+owner administers, and records the owner as its creator. It runs on fleet
+machines once its fleet profile is enabled
+(`PUT /api/v1/fleet/pools/{pool_id}/profile`, `fleet:operate`).
+
+## Retire a machine
+
+With `fleet:retire` (and `fleet:read` to read the revision). Take the
+machine out of service first and let it go quiet:
+
+```sh
+curl -sS -X POST "$GRIDOPS_URL/api/v1/fleet/hosts/$HOST_ID/lifecycle" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"lifecycle":"draining","expectedRevision":<revision>}'   # fleet:operate
+# wait for its work to finish, stop the agent, wait out the quiet period
+curl -sS -X POST "$GRIDOPS_URL/api/v1/fleet/hosts/$HOST_ID/retire" \
+  -H "Authorization: Bearer $GRIDOPS_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"expectedRevision":<fresh revision>}'
+```
+
+A `409 host_not_retirable` lists every reason in `details.reasons`
+(`lifecycle_active`, `recently_seen`, `live_placement`, `unconfirmed_start`,
+`live_runner`, `pending_command`); wait for or fix what each names, and try
+again. On `revision_conflict`, re-read the host. A retired machine can then
+be deleted with `fleet:operate`.
+
 ## The script
 
 [`scripts/fleet-enroll-bot.sh`](../scripts/fleet-enroll-bot.sh) does the
@@ -292,3 +406,7 @@ id and name in the metadata, so a bot's actions are attributable after the
 fact. Reads are not audited per request, but each successful call bumps the
 token's `lastUsedAt` (rate-limited to one write per minute). A scope denial
 writes an `api_token.denied` row — also rate-limited — naming the route.
+Runner-pool changes are audited the same way (`runner_pool.created`,
+`runner_pool.updated`, `runner_pool.deleted`), as are retirements
+(`fleet.host.retired`). A `token_not_accepted` refusal writes nothing: the
+route never looked at the token.

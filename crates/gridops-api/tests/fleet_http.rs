@@ -52,6 +52,8 @@ mod recovery;
 mod release_preflight;
 #[path = "fleet_http/start_retry.rs"]
 mod start_retry;
+#[path = "fleet_http/token_access.rs"]
+mod token_access;
 
 struct Fixture {
     process: ApiProcess,
@@ -63,6 +65,8 @@ struct Fixture {
     /// A runner manager the API talks to, when a test runs one; otherwise
     /// the manager is unreachable and not configured.
     manager: Option<String>,
+    /// Extra environment the API process starts with, kept for restarts.
+    env: Vec<(String, String)>,
 }
 
 /// The token the API presents to a test's runner manager.
@@ -81,12 +85,14 @@ fn start_api(
     directory: &std::path::Path,
     origin: &str,
     manager: Option<&str>,
+    env: &[(String, String)],
 ) -> Result<ApiProcess> {
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(directory.join("api.log"))?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_gridops-api"));
+    command.envs(env.iter().map(|(key, value)| (key, value)));
     if let Some(manager) = manager {
         command
             .env("GRIDOPS_MANAGER_URL", manager)
@@ -141,20 +147,31 @@ async fn wait_until_healthy(
 
 impl Fixture {
     async fn new() -> Result<Self> {
-        Self::start(None).await
+        Self::start(None, Vec::new()).await
     }
 
     /// An API that talks to the runner manager at `manager`.
     async fn with_manager(manager: &str) -> Result<Self> {
-        Self::start(Some(manager.to_owned())).await
+        Self::start(Some(manager.to_owned()), Vec::new()).await
     }
 
-    async fn start(manager: Option<String>) -> Result<Self> {
+    /// An API started with extra environment variables.
+    async fn with_env(env: &[(&str, &str)]) -> Result<Self> {
+        Self::start(
+            None,
+            env.iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn start(manager: Option<String>, env: Vec<(String, String)>) -> Result<Self> {
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let directory = std::env::temp_dir().join(format!("gridops-fleet-http-{}", Uuid::new_v4()));
         fs::create_dir(&directory)?;
         let origin = format!("http://127.0.0.1:{port}");
-        let process = start_api(&directory, &origin, manager.as_deref())?;
+        let process = start_api(&directory, &origin, manager.as_deref(), &env)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(SESSION_SECRET.as_bytes())?;
         mac.update(SESSION_TOKEN.as_bytes());
         let cookie = format!(
@@ -171,6 +188,7 @@ impl Fixture {
             origin,
             cookie,
             manager,
+            env,
         };
         fixture.seed().await?;
         Ok(fixture)
@@ -182,7 +200,12 @@ impl Fixture {
         self.process.0.kill()?;
         self.process.0.wait()?;
         tokio::time::sleep(downtime).await;
-        self.process = start_api(&self.directory, &self.origin, self.manager.as_deref())?;
+        self.process = start_api(
+            &self.directory,
+            &self.origin,
+            self.manager.as_deref(),
+            &self.env,
+        )?;
         wait_until_healthy(&self.client, &self.origin, &self.directory).await
     }
 

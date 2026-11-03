@@ -57,6 +57,14 @@ impl RequestContext {
                 },
             );
         }
+        if let RegistryError::HostNotRetirable(reasons) = error {
+            return self.error_with_details(
+                ErrorCode::HostNotRetirable,
+                ErrorDetails::RetireBlocked {
+                    reasons: reasons.clone(),
+                },
+            );
+        }
         self.error(match error {
             RegistryError::Database(_) | RegistryError::Json(_) | RegistryError::Storage(_) => {
                 // Messages can carry stored values, so only the class and the
@@ -78,6 +86,7 @@ impl RequestContext {
             }
             RegistryError::RotationGone => ErrorCode::GrantExpired,
             RegistryError::HostNotDeletable(_) => ErrorCode::HostNotDeletable,
+            RegistryError::HostNotRetirable(_) => ErrorCode::HostNotRetirable,
             RegistryError::EnrollmentScopeMismatch
             | RegistryError::InvalidRequest(_)
             | RegistryError::InvalidIdentifier(_)
@@ -154,8 +163,10 @@ impl IntoResponse for FleetApiError {
             ErrorCode::NotReady => "Fleet is not ready for this operation",
             ErrorCode::ContractRange => "Fleet value is outside the supported range",
             ErrorCode::HostNotDeletable => "Machine cannot be deleted yet",
+            ErrorCode::TokenNotAccepted => "This route does not accept API tokens",
+            ErrorCode::HostNotRetirable => "Machine cannot be retired with an API token yet",
         };
-        (
+        let mut response = (
             status,
             [(header::CACHE_CONTROL, "no-store")],
             Json(ErrorBody {
@@ -165,7 +176,14 @@ impl IntoResponse for FleetApiError {
                 details: self.details,
             }),
         )
-            .into_response()
+            .into_response();
+        // The fleet middleware sets the same value again; outside the fleet
+        // router (the pool routes, the token refusal) this keeps the header
+        // and the body's `requestId` in agreement.
+        if let Ok(value) = header::HeaderValue::from_str(&self.context.id.to_string()) {
+            response.headers_mut().insert("x-request-id", value);
+        }
+        response
     }
 }
 
@@ -193,16 +211,27 @@ mod tests {
             ErrorCode::NotReady,
             ErrorCode::ContractRange,
             ErrorCode::HostNotDeletable,
+            ErrorCode::TokenNotAccepted,
+            ErrorCode::HostNotRetirable,
         ] {
             let context = RequestContext::new();
             let response = context.error(code).into_response();
             assert_eq!(response.status().as_u16(), code.status());
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let response_request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let bytes = axum::body::to_bytes(response.into_body(), 1024).await?;
             let body: FleetErrorResponse = serde_json::from_slice(&bytes)?;
             assert_eq!(body.code, code);
             assert_eq!(body.request_id.as_uuid(), context.id());
             assert!(body.details.is_none());
+            assert_eq!(
+                response_request_id.as_deref(),
+                Some(context.id().to_string().as_str())
+            );
         }
         Ok(())
     }

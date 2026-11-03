@@ -28,6 +28,9 @@ const scopeDetails: Record<ApiTokenScope, string> = {
   "fleet:enroll": "Issue, check and revoke enrollment codes.",
   "fleet:approve": "Approve a pending host.",
   "fleet:operate": "Turn runtimes on or off, set lifecycle intent and grants, and save a pool’s fleet profile.",
+  "fleet:retire": "Retire a machine that is out of service, silent and idle. Not included in fleet:operate.",
+  "pools:read": "Read runner pools, their events and capacity, and the pool form’s options.",
+  "pools:manage": "Create, edit and remove runner pools, with the form’s validation. Add pools:read to list them.",
 };
 
 export function CreateTokenSection() {

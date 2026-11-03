@@ -94,8 +94,10 @@ pub struct AuthenticatedApiToken {
     pub scopes: Vec<ApiTokenScope>,
 }
 
-/// The v1 token scopes. A route accepts a token only when it declares one of
-/// these; anything else is cookie-only.
+/// The token scopes. A route accepts a token only when it declares one of
+/// these; anything else is cookie-only. No scope implies another. The
+/// declaration order is the stored and returned order, so new scopes go last
+/// and tokens created earlier keep exactly the order they were stored in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApiTokenScope {
@@ -107,6 +109,19 @@ pub enum ApiTokenScope {
     FleetApprove,
     #[serde(rename = "fleet:operate")]
     FleetOperate,
+    /// Retire a machine, only when it cannot hurt a healthy fleet (see
+    /// `RegistryService::retire_host_with_policy`). Not implied by
+    /// `fleet:operate`.
+    #[serde(rename = "fleet:retire")]
+    FleetRetire,
+    /// Read runner pools, their events and capacity, and the pool form's
+    /// options, as the token's owner may.
+    #[serde(rename = "pools:read")]
+    PoolsRead,
+    /// Create, edit and remove runner pools with the form's validation, as
+    /// the token's owner may. Does not imply `pools:read`.
+    #[serde(rename = "pools:manage")]
+    PoolsManage,
 }
 
 impl ApiTokenScope {
@@ -117,6 +132,9 @@ impl ApiTokenScope {
             Self::FleetEnroll => "fleet:enroll",
             Self::FleetApprove => "fleet:approve",
             Self::FleetOperate => "fleet:operate",
+            Self::FleetRetire => "fleet:retire",
+            Self::PoolsRead => "pools:read",
+            Self::PoolsManage => "pools:manage",
         }
     }
 
@@ -128,6 +146,9 @@ impl ApiTokenScope {
             "fleet:enroll" => Some(Self::FleetEnroll),
             "fleet:approve" => Some(Self::FleetApprove),
             "fleet:operate" => Some(Self::FleetOperate),
+            "fleet:retire" => Some(Self::FleetRetire),
+            "pools:read" => Some(Self::PoolsRead),
+            "pools:manage" => Some(Self::PoolsManage),
             _ => None,
         }
     }
@@ -701,6 +722,9 @@ mod tests {
             ApiTokenScope::FleetEnroll,
             ApiTokenScope::FleetApprove,
             ApiTokenScope::FleetOperate,
+            ApiTokenScope::FleetRetire,
+            ApiTokenScope::PoolsRead,
+            ApiTokenScope::PoolsManage,
         ] {
             assert_eq!(
                 serde_json::to_string(&scope)?,
@@ -713,8 +737,47 @@ mod tests {
                 scope.as_str()
             );
         }
+        assert_eq!(ApiTokenScope::FleetRetire.as_str(), "fleet:retire");
+        assert_eq!(ApiTokenScope::PoolsRead.as_str(), "pools:read");
+        assert_eq!(ApiTokenScope::PoolsManage.as_str(), "pools:manage");
         assert!(ApiTokenScope::parse("fleet:admin").is_none());
+        assert!(ApiTokenScope::parse("pools:write").is_none());
+        assert!(ApiTokenScope::parse("pools").is_none());
         assert!(serde_json::from_str::<ApiTokenScope>("\"tokens\"").is_err());
+        Ok(())
+    }
+
+    /// Stored and returned scopes are sorted by this order, so existing
+    /// tokens keep exactly the order they were stored in, and the web form
+    /// lists the scopes the same way.
+    #[test]
+    fn new_scopes_sort_after_the_v1_scopes_and_imply_nothing() -> anyhow::Result<()> {
+        let normalized = normalize_scopes(&[
+            ApiTokenScope::PoolsManage,
+            ApiTokenScope::FleetOperate,
+            ApiTokenScope::PoolsRead,
+            ApiTokenScope::FleetRetire,
+            ApiTokenScope::FleetRead,
+        ])?;
+        assert_eq!(
+            normalized,
+            [
+                ApiTokenScope::FleetRead,
+                ApiTokenScope::FleetOperate,
+                ApiTokenScope::FleetRetire,
+                ApiTokenScope::PoolsRead,
+                ApiTokenScope::PoolsManage,
+            ]
+        );
+        // No scope widens into another: a v1 token holds only what it lists.
+        let v1 = normalize_scopes(&[ApiTokenScope::FleetOperate])?;
+        for scope in [
+            ApiTokenScope::FleetRetire,
+            ApiTokenScope::PoolsRead,
+            ApiTokenScope::PoolsManage,
+        ] {
+            assert!(!v1.contains(&scope));
+        }
         Ok(())
     }
 

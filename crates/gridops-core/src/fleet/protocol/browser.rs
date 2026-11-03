@@ -412,6 +412,35 @@ pub enum ErrorCode {
     ContractRange,
     /// A machine cannot be deleted yet; the details name every reason.
     HostNotDeletable,
+    /// A bearer token was sent to a route that does not accept API tokens.
+    /// Refused before anything else, whether the token is valid or not.
+    TokenNotAccepted,
+    /// A token may not retire this machine yet; the details name every
+    /// reason. A browser session retires under its own, older rules.
+    HostNotRetirable,
+}
+
+/// Why an API token may not retire a machine. Every reason that applies is
+/// reported, in this order, so one refusal says everything to wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRetireBlocker {
+    /// The machine's lifecycle is `active`: pause, drain or put it in
+    /// maintenance first.
+    LifecycleActive,
+    /// The machine reported in (heartbeat or inventory) within the
+    /// configured quiet period.
+    RecentlySeen,
+    /// A placement is not cleaned up or failed, or capacity it holds is not
+    /// released.
+    LivePlacement,
+    /// A placement's start could not be confirmed (it is `uncertain`).
+    UnconfirmedStart,
+    /// A runner placed on the machine has not finished.
+    LiveRunner,
+    /// A command for the machine is still waiting or running within its
+    /// deadline.
+    PendingCommand,
 }
 
 /// Why a machine cannot be deleted. Every reason that applies is reported, so
@@ -467,6 +496,11 @@ pub enum ErrorDetails {
     DeleteBlocked {
         reasons: Vec<HostDeleteBlocker>,
     },
+    /// A token retire was refused; every reason that applies, in a fixed
+    /// order.
+    RetireBlocked {
+        reasons: Vec<HostRetireBlocker>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,9 +517,12 @@ impl ErrorCode {
         match self {
             Self::InvalidRequest | Self::ContractRange => 400,
             Self::Unauthenticated => 401,
-            Self::Forbidden => 403,
+            Self::Forbidden | Self::TokenNotAccepted => 403,
             Self::NotFound => 404,
-            Self::RevisionConflict | Self::IdempotencyConflict | Self::HostNotDeletable => 409,
+            Self::RevisionConflict
+            | Self::IdempotencyConflict
+            | Self::HostNotDeletable
+            | Self::HostNotRetirable => 409,
             Self::EnrollmentExpired
             | Self::GrantExpired
             | Self::CursorExpired

@@ -78,17 +78,22 @@ async fn management_routes_are_cookie_only_and_admin_only() -> Result<()> {
     assert_eq!(body["items"], json!([]));
 
     // A valid admin token cannot manage tokens: not even the list. The
-    // Origin is correct so the write refusal is the token itself.
+    // Origin is correct so the write refusal is the token itself, and the
+    // refusal says the route does not take tokens at all.
     let admin_token = mint(&f, "admin", &[ApiTokenScope::FleetRead]).await?;
     let bearer_list = token_get(&f, "/api-tokens", &admin_token).send().await?;
-    error(bearer_list, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    error(bearer_list, StatusCode::FORBIDDEN, "token_not_accepted").await?;
     let bearer_create = token_post(&f, "/api-tokens", &admin_token)
         .header(header::ORIGIN, &f.origin)
         .header("idempotency-key", "bearer-create")
         .json(&json!({"name":"self-replicate","scopes":["fleet:read"]}))
         .send()
         .await?;
-    error(bearer_create, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    error(bearer_create, StatusCode::FORBIDDEN, "token_not_accepted").await?;
+    let minted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens")
+        .fetch_one(&f.database)
+        .await?;
+    assert_eq!(minted, 1, "the bearer create minted nothing");
 
     // Unauthenticated entirely.
     let anonymous = f.client.get(f.url("/api-tokens")).send().await?;
@@ -438,20 +443,31 @@ async fn cookie_only_routes_and_agent_routes_reject_tokens() -> Result<()> {
     )
     .await?;
 
-    // Even every scope cannot reach cookie-only write routes. The Origin is
-    // correct, so the failure is the token itself, not the CSRF check.
+    // Even every v1 scope cannot reach cookie-only write routes. The Origin
+    // is correct, so the failure is the token itself, not the CSRF check.
     let recover = token_post(&f, &format!("/hosts/{host}/recover"), &all_scopes)
         .header(header::ORIGIN, &f.origin)
         .json(&json!({"expectedRevision":1}))
         .send()
         .await?;
-    error(recover, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    error(recover, StatusCode::FORBIDDEN, "token_not_accepted").await?;
+    // Retiring takes a token only with its own scope, which none of the v1
+    // scopes (fleet:operate included) grants.
     let retire = token_post(&f, &format!("/hosts/{host}/retire"), &all_scopes)
         .header(header::ORIGIN, &f.origin)
         .json(&json!({"expectedRevision":1}))
         .send()
         .await?;
-    error(retire, StatusCode::UNAUTHORIZED, "unauthenticated").await?;
+    let body = expect_error(retire, StatusCode::FORBIDDEN).await?;
+    assert_eq!(body["code"], "forbidden");
+    assert_eq!(body["details"]["kind"], "scope");
+    assert_eq!(body["details"]["requiredScope"], "fleet:retire");
+    let lifecycle: String =
+        sqlx::query_scalar("SELECT lifecycle_state FROM fleet_hosts WHERE id=?")
+            .bind(&host)
+            .fetch_one(&f.database)
+            .await?;
+    assert_ne!(lifecycle, "retired");
 
     // A token is not a host credential.
     let poll = token_post(
