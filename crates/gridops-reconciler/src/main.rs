@@ -1660,7 +1660,7 @@ async fn confirm_jobs(app: &Reconciler, tokens: &mut HashMap<i64, Option<String>
             let token = installation_token(app, job.installation_id)
                 .await
                 .unwrap_or_else(|error| {
-                    tracing::warn!(installation_id = job.installation_id, error = ?error, "no GitHub token to check open jobs with");
+                    tracing::warn!(installation_id = job.installation_id, error = ?error, "no GitHub token to check jobs with");
                     None
                 });
             tokens.insert(job.installation_id, token.clone());
