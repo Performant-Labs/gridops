@@ -8,6 +8,122 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
+## 0.1.5 - 2026-11-02
+
+### Upgrading
+
+- Three database migrations run when the services start on the new version:
+  `0039` (the built-in runner host setting), `0040` (`fleet_hosts.deleted_at`,
+  for deleting machines) and `0041` (three columns on `workload_intents` and
+  two indexes, for retrying failed starts). (#68, #71, #74)
+- **The built-in runner host can be turned off, and migration `0039` picks its
+  first value.** It stays **on** if anything may still use it: a pool that can
+  start Docker runners and has no enabled fleet profile, an enabled fleet
+  profile with placement *Machines first* or *Wherever there's room*, or a live
+  runner with a container on the host. Otherwise, and on a new install, it
+  starts **off**. Change it under **Settings → Runner host** (administrators)
+  or with `PUT /api/v1/settings/runner-host`. With it off, nothing starts a
+  runner on the host GridOps runs on, idle runners there are removed, and a
+  pool with nowhere else to run shows **Cannot run: built-in runner host is
+  off**. (#68)
+- Upgrade the API, runner manager and reconciler together. The manager now
+  treats the built-in host as off until the reconciler or the API sends it the
+  setting, which the reconciler does on every pass. (#68)
+- The built-in runner host's CPU and memory budget is now set under
+  **Settings → Runner host → Budget** or with
+  `PUT /api/v1/settings/runner-host/budget`. The manager's
+  `GRIDOPS_RUNNER_CPU_BUDGET` and `GRIDOPS_RUNNER_MEMORY_BUDGET_MB` are only the
+  fallback for a figure that is not set there; with nothing set, the budget in
+  force is unchanged. (#72)
+- Optional: `compose.no-docker-socket.yaml` runs the runner manager without
+  the Docker socket (`GRIDOPS_MANAGER_DOCKER=off`). The default `compose.yaml`
+  keeps the socket, which the built-in host and the fix agent's sandboxes
+  need. (#68)
+- **Every release now carries the macOS agents** (`gridops-host-agent-macos-arm64`,
+  `-macos-x64`, `gridops-tart-agent-macos-arm64`), built on a self-hosted
+  macOS ARM64 runner, and is not published without them. Cutting a release
+  therefore needs that runner online; the repository variable `RELEASE_MACOS`
+  set to exactly `false` is an emergency opt-out that publishes a release
+  without a macOS agent. The control plane images and `compose.release.yaml`
+  now have their own variable, `RELEASE_IMAGES`, and are built only when it is
+  `true`. (#83)
+- Tart runners wait for a free macOS VM slot for up to
+  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` (default 180, maximum 1800, `0` turns the
+  wait off). It is a setting of the Tart agent on the Mac: set it before
+  running `scripts/install-tart-agent.sh`, which writes it into the launchd
+  agent. The new behaviour needs the Tart agent reinstalled from this
+  version. (#87)
+- Placement failures are counted from this version on; failures from before
+  the upgrade are not in the new counts. (#67)
+
+### Added
+
+- **Delete a machine** from its page or with
+  `DELETE /api/v1/fleet/hosts/{host_id}` (`fleet:operate`): a retired machine,
+  or one that never finished enrolling and has not reported in for 90 seconds.
+  It disappears from lists, counts and capacity; its history stays. A refusal
+  is `409 host_not_deletable` with every reason. The machine read also lists
+  other machines with the same hardware (`duplicateHardwareOf`). (#71)
+- **A failed runner start is retried on another machine**, at most three
+  attempts per runner, with the machines that failed tried last. **A machine
+  with three start failures in 15 minutes is set aside** from new placements
+  until a start on it succeeds or the failures age out; its state and running
+  jobs are unchanged. It shows on the machine page, as a "Not accepting new
+  runners" badge on the Fleet page, as `startGate` on the machine read, and
+  as `machines_failing_starts` when a runner waits because every machine is
+  set aside. (#74)
+- An Overview alert, for administrators, naming each machine set aside for
+  failing starts and when it will be reconsidered. (#79)
+- **Why a placement failed is recorded**: a `placement_failed` fleet event with
+  a reason, the runner's failure reason, a "Recent placement failures" section
+  on the machine page, an "N failed in the last hour" badge on the Fleet page,
+  and `failedPlacementsLastHour` and `recentPlacementFailures` on the machine
+  read. (#67)
+- **Settings → Preferences → Live updates → Refresh**: 5 seconds, 10 seconds
+  (the default, today's timing), 30 seconds, 1 minute or Off, for this browser.
+  With Off, live pages show when they were last updated and a Refresh button.
+  Job log viewers are not affected. (#82)
+- **Queued jobs** in the sidebar (shortcut `g q`); the queued-jobs count badge
+  moved there from Workflow runs. (#76)
+- A **Prerequisites** section in the release checklist and
+  `scripts/release-preflight.sh`, which checks them before a release, including
+  a macOS ARM64 machine for the macOS agent build. (#77, #83)
+
+### Changed
+
+- A queued job that only a manual-mode pool can run is counted as **on a
+  manual pool** (the Overview's queued tile, `metrics.queuedManual`, the
+  Queued jobs reason "Manual pool, no runner started"), not as having no
+  matching pool, and the run page says the pool is in manual mode instead of
+  calling it ready. The Overview, the Queued jobs list and the run page now
+  use one rule. Closes #63. (#75)
+- A queued job asking for a platform no pool runs (for example
+  `self-hosted-macos` with only Linux pools) is now flagged with that label in
+  the Overview alert, and each Queued jobs row names the labels no pool
+  offers (`missingLabels`). Closes #32. (#73)
+- A Tart runner whose Mac already runs two macOS VMs waits for a slot instead
+  of failing; after the wait it fails with `vm_slot_unavailable` and a clear
+  message. Other `tart run` failures now fail as soon as `tart run` exits.
+  Fixes #86. (#87)
+- `install.sh`, the CI and release workflows, the Dockerfiles and the Tart
+  image scripts retry transient network errors and time out hung steps. A
+  wrong version in `install.sh` now fails after about 30 seconds of retries
+  instead of at once. (#66)
+
+### Fixed
+
+- An agent that reconnects while its Docker engine is unreachable is no longer
+  refused with `409 revision_conflict`; a missing runtime identity is not a
+  conflict, and the recorded one is kept. Fixes #84. (#85)
+
+### Internal
+
+- Release workflow: a watchdog cancels the run when no macOS runner has started
+  the macOS job after 60 minutes, and the publish job also runs on a dry run
+  and fails rather than publish without a required build. (#83)
+- A regression test that a pool keeps a full pool's jobs across reconcile
+  ticks (#42). (#70)
+
 ## 0.1.4 - 2026-11-02
 
 ### Upgrading
