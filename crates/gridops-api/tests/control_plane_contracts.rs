@@ -1983,3 +1983,122 @@ async fn an_empty_instance_partitions_into_zeros() -> Result<()> {
     assert_eq!(body["queue"]["missingLabels"], json!([]));
     Ok(())
 }
+
+fn iso_millis(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_default()
+}
+
+fn waiting_alert(body: &Value) -> Option<Value> {
+    body["slo"]["alerts"].as_array().and_then(|alerts| {
+        alerts
+            .iter()
+            .find(|alert| alert["title"] == "Jobs have been waiting for over five minutes")
+            .cloned()
+    })
+}
+
+/// #33 and #34: the queue alert names the job it is about and when GitHub
+/// last confirmed it, and once attempt 2 of the run starts, the attempt-1 job
+/// that was still listed as queued is finished and the alert clears.
+#[tokio::test]
+async fn a_rerun_clears_the_queue_alert_that_names_its_job() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    let queued_at = minutes_ago(30);
+    let confirmed_at = minutes_ago(20);
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("linux", "[\"linux-pool\"]", ""),
+            "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+               VALUES (100,7,'CI',1,1,'push','in_progress','abc','https://github.com/fixture/app/actions/runs/100',2,2,2,2);".to_owned(),
+            format!(
+                "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+                   VALUES (1000,100,'build','queued','[\"self-hosted-linux\"]','https://github.com/fixture/app/actions/runs/100/job/1000',{queued_at},{queued_at});
+                 INSERT INTO workflow_job_sync (job_id,run_attempt,confirmed_at) VALUES (1000,1,{confirmed_at});"
+            ),
+        ],
+    )
+    .await?;
+
+    let body = overview_of(&fixture).await?;
+    let job = json!({
+        "id": 1000,
+        "name": "build",
+        "repository": "fixture/app",
+        "workflow": "CI",
+        "htmlUrl": "https://github.com/fixture/app/actions/runs/100/job/1000",
+        "status": "queued",
+        "queuedAt": iso_millis(queued_at),
+        "confirmedAt": iso_millis(confirmed_at),
+    });
+    let alert = waiting_alert(&body).context("the queue alert is up")?;
+    assert_eq!(alert["job"], job, "{alert}");
+    let detail = alert["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with("30m") && detail.contains("build") && detail.contains("fixture/app"),
+        "{detail}"
+    );
+    assert_eq!(body["slo"]["queue"]["oldestJob"], job);
+
+    // GitHub re-runs the run: attempt 2 is requested.
+    let rerun = json!({
+        "action": "requested",
+        "installation": { "id": 42 },
+        "repository": { "id": 7 },
+        "workflow_run": {
+            "id": 100, "workflow_id": 3, "name": "CI", "run_number": 1, "run_attempt": 2,
+            "event": "push", "status": "queued", "conclusion": null, "head_branch": "main",
+            "head_sha": "abc", "html_url": "https://github.com/fixture/app/actions/runs/100",
+            "created_at": "2026-11-01T14:00:00Z", "updated_at": "2026-11-01T15:00:00Z",
+            "run_started_at": "2026-11-01T15:00:00Z",
+        },
+    })
+    .to_string();
+    let response = fixture
+        .post_webhook_event(
+            "delivery-rerun",
+            "workflow_run",
+            &rerun,
+            &ApiFixture::webhook_signature(&rerun)?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let status = sqlx::query_scalar::<_, String>("SELECT status FROM workflow_jobs WHERE id=1000")
+        .fetch_one(&database)
+        .await?;
+    assert_eq!(status, "completed");
+    let body = overview_of(&fixture).await?;
+    assert_eq!(waiting_alert(&body), None, "{}", body["slo"]["alerts"]);
+    assert_eq!(body["metrics"]["queuedJobs"], 0);
+    assert_eq!(body["slo"]["queue"]["oldestSeconds"], Value::Null);
+    assert_eq!(body["slo"]["queue"]["oldestJob"], Value::Null);
+
+    // A late event about attempt 1 does not take the run back to it.
+    let mut late = serde_json::from_str::<Value>(&rerun)?;
+    late["action"] = json!("completed");
+    late["workflow_run"]["run_attempt"] = json!(1);
+    late["workflow_run"]["status"] = json!("completed");
+    late["workflow_run"]["conclusion"] = json!("failure");
+    let late = late.to_string();
+    let response = fixture
+        .post_webhook_event(
+            "delivery-late-attempt-1",
+            "workflow_run",
+            &late,
+            &ApiFixture::webhook_signature(&late)?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let run = sqlx::query_as::<_, (i64, String)>(
+        "SELECT run_attempt,status FROM workflow_runs WHERE id=100",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!((run.0, run.1.as_str()), (2, "queued"));
+    Ok(())
+}

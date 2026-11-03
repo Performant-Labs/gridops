@@ -192,6 +192,76 @@ pub async fn associate_runner_with_job(
     )
 }
 
+/// Records that GitHub reported job `job_id` at `now` (`workflow_job_sync`),
+/// with its run attempt when GitHub gave one; an attempt already known is kept
+/// otherwise. Called wherever a job's status is written from GitHub's word.
+pub async fn record_job_report<'e, E>(
+    executor: E,
+    job_id: i64,
+    run_attempt: Option<i64>,
+    now: i64,
+) -> std::result::Result<(), sqlx::Error>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    sqlx::query(
+        r#"INSERT INTO workflow_job_sync (job_id,run_attempt,confirmed_at) VALUES (?,?,?)
+           ON CONFLICT(job_id) DO UPDATE SET
+             run_attempt=COALESCE(excluded.run_attempt,workflow_job_sync.run_attempt),
+             confirmed_at=excluded.confirmed_at"#,
+    )
+    .bind(job_id)
+    .bind(run_attempt)
+    .bind(now)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Finishes the open jobs of `run_id` that belong to an earlier attempt than
+/// the newest one known here (the run's own `run_attempt`, or a job of a
+/// later attempt, whichever is higher). Returns how many it finished.
+///
+/// GitHub re-runs a run only once it has completed, and the new attempt keeps
+/// the run id, so an earlier attempt's job that is still `queued`,
+/// `waiting` or `in_progress` here is one whose completion was missed. It
+/// can never run, yet it would count as queued for as long as the new attempt
+/// keeps the run unfinished. Its outcome is not known here, so a conclusion
+/// already recorded is kept and none is made up: the next poll lists every
+/// attempt's jobs and records the real one. When GitHub last reported the job
+/// is left alone, since GitHub did not say so. Jobs whose attempt is unknown
+/// (recorded before attempts were) are left to the reconciler's job check.
+pub async fn finish_earlier_attempts<'e, E>(
+    executor: E,
+    run_id: i64,
+    now: i64,
+) -> std::result::Result<u64, sqlx::Error>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    Ok(sqlx::query(
+        r#"UPDATE workflow_jobs
+              SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=?
+            WHERE run_id=? AND status<>'completed' AND id IN (
+              SELECT sync.job_id FROM workflow_job_sync sync
+                JOIN workflow_jobs job ON job.id=sync.job_id
+               WHERE job.run_id=? AND sync.run_attempt < MAX(
+                 COALESCE((SELECT run.run_attempt FROM workflow_runs run WHERE run.id=?),1),
+                 COALESCE((SELECT MAX(later.run_attempt) FROM workflow_job_sync later
+                   JOIN workflow_jobs later_job ON later_job.id=later.job_id
+                  WHERE later_job.run_id=?),1)))"#,
+    )
+    .bind(now)
+    .bind(now)
+    .bind(run_id)
+    .bind(run_id)
+    .bind(run_id)
+    .bind(run_id)
+    .execute(executor)
+    .await?
+    .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +279,8 @@ mod tests {
         .fetch_one(&pool)
         .await?
         .get::<i64, _>("count");
-        assert_eq!(tables, 69);
+        assert_eq!(tables, 70);
+        assert!(table_exists(&pool, "workflow_job_sync").await?);
         assert!(table_exists(&pool, "runner_pool_waits").await?);
         assert!(table_exists(&pool, "fleet_hosts").await?);
         assert!(table_exists(&pool, "api_tokens").await?);

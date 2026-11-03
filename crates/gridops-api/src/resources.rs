@@ -367,7 +367,7 @@ pub async fn overview(
     let now = now_millis();
     let queue = overview_queue::queue_breakdown(&state, &user, now).await?;
     let slo_rows = sqlx::query(
-        r#"SELECT wj.status,wr.status AS run_status,wj.conclusion,wj.created_at,wj.started_at
+        r#"SELECT wj.id,wj.status,wr.status AS run_status,wj.conclusion,wj.created_at,wj.started_at
           FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
@@ -379,6 +379,8 @@ pub async fn overview(
     .fetch_all(&state.database)
     .await?;
     let mut queue_ages = Vec::new();
+    // The job the Oldest queued tile is about: its age and id.
+    let mut oldest_queued: Option<(i64, i64)> = None;
     let mut start_latencies = Vec::new();
     let mut failure_reasons = HashMap::<String, i64>::new();
     for row in &slo_rows {
@@ -389,7 +391,11 @@ pub async fn overview(
             "queued" | "waiting" | "pending" | "requested"
         ) && row.get::<String, _>("run_status") != "completed"
         {
-            queue_ages.push(now.saturating_sub(created_at));
+            let age = now.saturating_sub(created_at);
+            queue_ages.push(age);
+            if oldest_queued.is_none_or(|(oldest, _)| age > oldest) {
+                oldest_queued = Some((age, row.get::<i64, _>("id")));
+            }
         }
         if let Some(started_at) = row.try_get::<Option<i64>, _>("started_at").ok().flatten()
             && started_at >= created_at
@@ -406,7 +412,11 @@ pub async fn overview(
             *failure_reasons.entry(conclusion).or_default() += 1;
         }
     }
-    let oldest_queue_age_ms = queue_ages.iter().copied().max();
+    let oldest_queue_age_ms = oldest_queued.map(|(age, _)| age);
+    let oldest_queued_job = match oldest_queued {
+        Some((_, id)) => queued_job_reference(&state, id).await?,
+        None => None,
+    };
     let queue_p95_ms = percentile_millis(&queue_ages, 95);
     let start_p50_ms = percentile_millis(&start_latencies, 50);
     let start_p95_ms = percentile_millis(&start_latencies, 95);
@@ -456,10 +466,28 @@ pub async fn overview(
         .oldest_waiting_millis
         .filter(|age| *age >= 5 * 60 * 1_000)
     {
+        // Named, so it can be checked against GitHub (#34): the reconciler
+        // asks GitHub about a job open this long, and `confirmedAt` says when
+        // GitHub last reported it.
+        let job = match queue.oldest_waiting_job {
+            Some(id) => queued_job_reference(&state, id).await?,
+            None => None,
+        };
+        let detail = match &job {
+            Some(job) => format!(
+                "{}: {} in {} ({}).",
+                format_duration_millis(age),
+                job["name"].as_str().unwrap_or_default(),
+                job["repository"].as_str().unwrap_or_default(),
+                job["workflow"].as_str().unwrap_or_default(),
+            ),
+            None => format_duration_millis(age),
+        };
         alerts.push(json!({
             "level": "warning", "title": "Jobs have been waiting for over five minutes",
-            "detail": format_duration_millis(age),
+            "detail": detail,
             "href": "/queued-jobs",
+            "job": job,
         }));
     }
     let open_circuits = provisioning.get::<i64, _>("open_circuits");
@@ -608,6 +636,7 @@ pub async fn overview(
             "windowHours": 24,
             "queue": {
                 "oldestSeconds": oldest_queue_age_ms.map(millis_to_seconds),
+                "oldestJob": oldest_queued_job,
                 "p95Seconds": queue_p95_ms.map(millis_to_seconds),
             },
             "startLatency": {
@@ -623,6 +652,36 @@ pub async fn overview(
         "machines": machines,
         "pools": pools, "runs": runs, "activity": activity, "installations": installations,
     })))
+}
+
+/// A queued job as the Overview names it: which job, where, and when GitHub
+/// last reported its status (`confirmedAt`, null for a row from before that
+/// was recorded). `id` must come from a query scoped to the viewer.
+async fn queued_job_reference(state: &AppState, id: i64) -> ApiResult<Option<Value>> {
+    let row = sqlx::query(
+        r#"SELECT wj.id,wj.name,wj.status,wj.html_url,wj.created_at,sync.confirmed_at,
+          wr.workflow_name,repo.full_name
+        FROM workflow_jobs wj
+        JOIN workflow_runs wr ON wr.id=wj.run_id
+        JOIN repositories repo ON repo.id=wr.repository_id
+        LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
+        WHERE wj.id=?"#,
+    )
+    .bind(id)
+    .fetch_optional(&state.database)
+    .await?;
+    Ok(row.map(|row| {
+        json!({
+            "id": row.get::<i64, _>("id"),
+            "name": row.get::<String, _>("name"),
+            "repository": row.get::<String, _>("full_name"),
+            "workflow": row.get::<String, _>("workflow_name"),
+            "htmlUrl": row.get::<String, _>("html_url"),
+            "status": row.get::<String, _>("status"),
+            "queuedAt": iso(row.get::<i64, _>("created_at")),
+            "confirmedAt": iso_optional(row.get::<Option<i64>, _>("confirmed_at")),
+        })
+    }))
 }
 
 /// One page of the jobs counted as queued in the Overview, the ones that have

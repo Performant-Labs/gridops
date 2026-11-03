@@ -452,6 +452,10 @@ pub struct WorkflowJobPage {
 pub struct GitHubWorkflowJob {
     pub id: i64,
     pub run_id: i64,
+    /// Which attempt of the run the job belongs to; a re-run keeps the run id
+    /// and gives each job a new id.
+    #[serde(default)]
+    pub run_attempt: Option<i64>,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,

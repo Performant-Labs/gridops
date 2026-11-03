@@ -31,7 +31,10 @@ pub use bitbucket::{
 };
 pub use config::Config;
 pub use crypto::Vault;
-pub use db::{associate_runner_with_job, connect_database, connect_database_path, now_millis};
+pub use db::{
+    associate_runner_with_job, connect_database, connect_database_path, finish_earlier_attempts,
+    now_millis, record_job_report,
+};
 pub use github::{
     GitHubApp, GitHubClient, GitHubInstallation, GitHubOrganizationMembership, GitHubRepository,
     GitHubUser, GitHubWorkflowJob, GitHubWorkflowRun, GitHubWorkflowStep, InstallationPage,
