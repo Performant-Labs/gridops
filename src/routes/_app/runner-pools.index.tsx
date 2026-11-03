@@ -14,6 +14,7 @@ import { Tooltip } from "~/components/ui/tooltip";
 import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type RunnerPool, getRunnerPoolsPage } from "~/features/operations/operations.functions";
 import { PoolActionsMenu, providerLabel } from "~/features/runner-pools/pool-actions";
+import { poolGroup } from "~/features/runner-pools/pool-group";
 import { validatePageSearch } from "~/lib/pagination";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { cn, formatRunnerShape } from "~/lib/utils";
@@ -33,14 +34,6 @@ const GROUPS = [
   { key: "active", label: "Active", tone: "success" },
   { key: "paused", label: "Paused", tone: "neutral" },
 ] as const;
-
-function poolGroup(pool: RunnerPool): (typeof GROUPS)[number]["key"] {
-  if (pool.paused || pool.state === "paused" || pool.state === "provisioning-paused") return "paused";
-  if (pool.provisionCircuitOpen || pool.failedRunners > 0 || pool.state === "blocked" || isBuiltinHostOff(pool)) return "attention";
-  if (pool.state === "waiting" || pool.state === "backoff") return "waiting";
-  if (["scaling", "updating", "draining"].includes(pool.state) || pool.outdatedRunners > 0) return "changing";
-  return "active";
-}
 
 function RunnerPoolsPage() {
   const data = Route.useLoaderData();

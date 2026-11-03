@@ -1077,7 +1077,7 @@
       "get": {
         "tags": ["pools"],
         "summary": "One runner pool, with its capacity and configuration",
-        "description": "Includes the provisioning state: `state`, `provisionFailureCount`, `provisionRetryAt`, `provisionCircuitOpen`, and `provisionWaitReason`, the runner manager's reason while `state` is `waiting` (for a Tart VM, `Waiting for a macOS VM slot: position p of n in the queue. …` with who holds the Mac's slots), otherwise `null`. A wait for a slot is not a failure and never counts towards the provisioning circuit. The pool list carries the same fields.",
+        "description": "Includes the provisioning state: `state`, `provisionFailureCount`, `provisionRetryAt`, `provisionCircuitOpen`, and `provisionWaitReason`, the runner manager's reason while `state` is `waiting` (for a Tart VM, `Waiting for a macOS VM slot: position p of n in the queue. …` with who holds the Mac's slots), otherwise `null`. A wait for a slot is not a failure and never counts towards the provisioning circuit. A pool whose latest start waits for capacity or a slot has `state` `waiting` (and its reason) even with earlier failures or `provisionCircuitOpen` `true`; only `paused`, `provisioning-paused` and `builtin-host-off` take precedence over it. The circuit stays open while the pool waits, until a start succeeds or fails. The pool list carries the same fields.",
         "security": [{ "bearerAuth": ["pools:read"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/RunnerPoolId" }],
         "responses": {

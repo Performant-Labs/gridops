@@ -15,7 +15,7 @@ import { getRunnersPage } from "~/features/operations/operations.functions";
 import type { RunnerPoolDetail } from "~/features/runner-pools/runner-pools.functions";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { PoolEventTable, usePoolEvents } from "~/features/runner-pools/pool-events";
-import { waitingNotice } from "~/features/runner-pools/waiting-notice";
+import { provisioningNotice } from "~/features/runner-pools/waiting-notice";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { useRefreshInterval } from "~/lib/use-refresh-interval";
@@ -38,12 +38,8 @@ function ProvisioningCallout({ pool }: { pool: RunnerPoolDetail }) {
       body: pool.cannotRun?.message ?? "The built-in runner host is off and this pool has no fleet execution. Turn on Run on machines in the pool’s settings.",
       tone: "danger",
     };
-  } else if (pool.provisionCircuitOpen) {
-    content = { title: `Provisioning paused after ${pool.provisionFailureCount} consecutive failures`, body: `GridOps tries again ${when}. The Activity tab shows the failing step; use the pool menu to retry now.`, tone: "danger" };
-  } else if (pool.provisionFailureCount > 0) {
-    content = { title: "Provisioning is backing off", body: `The last ${pool.provisionFailureCount === 1 ? "attempt" : `${pool.provisionFailureCount} attempts`} failed. GridOps retries ${when}.`, tone: "warning" };
-  } else if (pool.state === "waiting") {
-    content = { ...waitingNotice(pool, when), tone: "neutral" };
+  } else {
+    content = provisioningNotice(pool, when);
   }
   if (!content) return null;
   return (
