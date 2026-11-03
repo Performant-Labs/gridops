@@ -2,19 +2,23 @@
 //! a stand-in Tart agent that answers only after a set delay. Time is paused,
 //! so the minutes these tests wait out pass at once.
 
-use std::future::Future;
+use std::{future::Future, sync::atomic::AtomicUsize};
 
 use super::*;
 
-/// Runs `work` on paused time that moves only one second at a time, with a
-/// real millisecond between steps for loopback I/O to land.
+/// Requests the stand-in agent is holding: received, not yet answered.
+type Holding = Arc<AtomicUsize>;
+
+/// Runs `work` on paused time that moves, a second at a time, only while the
+/// stand-in agent holds a request, so time passes only for the delay under
+/// test and never while a request is still on its way through a socket.
 ///
 /// Left to itself, tokio jumps a paused clock straight to the next timer
-/// whenever no task is ready, even while a request is still on its way
-/// through a socket; the manager's time limit would then fire before the
-/// request even reached the stand-in agent. A running blocking task stops
-/// those jumps, so the clock moves only here.
-async fn on_test_clock<F: Future>(work: F) -> F::Output {
+/// whenever no task is ready, even while loopback I/O is in flight; the
+/// manager's time limit would then fire before the request even reached the
+/// stand-in. A running blocking task stops those jumps, so the clock moves
+/// only here. Between steps a real millisecond lets sockets settle.
+async fn on_test_clock<F: Future>(holding: &Holding, work: F) -> F::Output {
     let (release, held) = std::sync::mpsc::channel::<()>();
     let hold = tokio::task::spawn_blocking(move || held.recv());
     let mut work = std::pin::pin!(work);
@@ -23,7 +27,9 @@ async fn on_test_clock<F: Future>(work: F) -> F::Output {
             output = &mut work => break output,
             _ = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1))) => {}
         }
-        tokio::time::advance(Duration::from_secs(1)).await;
+        if holding.load(Ordering::SeqCst) > 0 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
     };
     drop(release);
     let _ = hold.await;
@@ -38,19 +44,30 @@ const NO_SLOT: &str = "no macOS VM slot became free within 180 seconds; the Mac 
 
 /// A stand-in Tart agent: `POST /v1/runners` and `GET /v1/runners` answer
 /// `status` with `body` after `delay`.
-async fn stand_in_agent(delay: Duration, status: StatusCode, body: String) -> anyhow::Result<Url> {
-    let answer = move || {
-        let body = body.clone();
-        async move {
-            tokio::time::sleep(delay).await;
-            (status, [(header::CONTENT_TYPE, "application/json")], body)
+async fn stand_in_agent(
+    delay: Duration,
+    status: StatusCode,
+    body: String,
+) -> anyhow::Result<(Url, Holding)> {
+    let holding = Holding::default();
+    let answer = {
+        let holding = holding.clone();
+        move || {
+            let body = body.clone();
+            let holding = holding.clone();
+            async move {
+                holding.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                holding.fetch_sub(1, Ordering::SeqCst);
+                (status, [(header::CONTENT_TYPE, "application/json")], body)
+            }
         }
     };
     let app = Router::new().route("/v1/runners", get(answer.clone()).post(answer));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
     tokio::spawn(async move { axum::serve(listener, app).await });
-    Ok(url)
+    Ok((url, holding))
 }
 
 /// The real manager router in front of `agent`, holding a capacity lease for
@@ -137,17 +154,20 @@ async fn start_tart_runner(
     agent_status: StatusCode,
     agent_body: String,
 ) -> anyhow::Result<(StatusCode, Value, Duration)> {
-    let agent = stand_in_agent(agent_delay, agent_status, agent_body).await?;
+    let (agent, holding) = stand_in_agent(agent_delay, agent_status, agent_body).await?;
     let manager = manager_in_front_of(agent).await?;
     let started = tokio::time::Instant::now();
-    let response = reqwest::Client::new()
-        .post(format!("{manager}/v1/runners"))
-        .bearer_auth(TOKEN)
-        .json(&tart_runner_request())
-        .send()
-        .await?;
-    let status = response.status();
-    let text = response.text().await?;
+    let (status, text) = on_test_clock(&holding, async {
+        let response = reqwest::Client::new()
+            .post(format!("{manager}/v1/runners"))
+            .bearer_auth(TOKEN)
+            .json(&tart_runner_request())
+            .send()
+            .await?;
+        let status = response.status();
+        anyhow::Ok((status, response.text().await?))
+    })
+    .await?;
     let body = serde_json::from_str(&text).unwrap_or(Value::Null);
     Ok((status, body, started.elapsed()))
 }
@@ -162,11 +182,11 @@ async fn the_default_slot_wait_reaches_the_caller_as_vm_slot_unavailable() -> an
     // its default 180 s for a slot (now counted from the start request) and
     // spent a few seconds on its last `tart run`. The manager must still be
     // listening when the agent says why the start failed.
-    let (status, body, _) = on_test_clock(start_tart_runner(
+    let (status, body, _) = start_tart_runner(
         Duration::from_secs(186),
         StatusCode::SERVICE_UNAVAILABLE,
         no_slot_body(),
-    ))
+    )
     .await?;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "vm_slot_unavailable");
@@ -179,11 +199,11 @@ async fn the_longest_start_the_tart_agent_allows_still_fits() -> anyhow::Result<
     // The agent's longest slot wait (600 s, counted from the start request),
     // then a full guest boot (180 s) and a minute to start the runner:
     // 14 minutes.
-    let (status, body, _) = on_test_clock(start_tart_runner(
+    let (status, body, _) = start_tart_runner(
         Duration::from_mins(14),
         StatusCode::SERVICE_UNAVAILABLE,
         no_slot_body(),
-    ))
+    )
     .await?;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "vm_slot_unavailable");
@@ -192,11 +212,11 @@ async fn the_longest_start_the_tart_agent_allows_still_fits() -> anyhow::Result<
 
 #[tokio::test(start_paused = true)]
 async fn a_tart_start_past_the_ceiling_is_a_408_that_says_what_timed_out() -> anyhow::Result<()> {
-    let (status, body, took) = on_test_clock(start_tart_runner(
+    let (status, body, took) = start_tart_runner(
         Duration::from_mins(20),
         StatusCode::SERVICE_UNAVAILABLE,
         no_slot_body(),
-    ))
+    )
     .await?;
     assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
     assert_eq!(body["code"], "tart_start_timeout", "{body}");
@@ -205,18 +225,18 @@ async fn a_tart_start_past_the_ceiling_is_a_408_that_says_what_timed_out() -> an
         message.contains("Tart agent") && message.contains("900 seconds"),
         "{message}"
     );
-    // The clock moves in whole seconds, so allow one step either way.
-    assert!((899..=901).contains(&took.as_secs()), "{took:?}");
+    // The clock moves in whole seconds.
+    assert!((900..=901).contains(&took.as_secs()), "{took:?}");
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
 async fn an_agent_error_without_a_message_is_still_explained() -> anyhow::Result<()> {
-    let (status, body, took) = on_test_clock(start_tart_runner(
+    let (status, body, took) = start_tart_runner(
         Duration::ZERO,
         StatusCode::INTERNAL_SERVER_ERROR,
         String::new(),
-    ))
+    )
     .await?;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["code"], "tart_agent_error");
@@ -225,16 +245,14 @@ async fn an_agent_error_without_a_message_is_still_explained() -> anyhow::Result
         message.contains("Tart agent") && message.contains("500"),
         "{message}"
     );
-    // At once, not at a time limit (the test clock steps a second at a time
-    // while sockets settle).
-    assert!(took < Duration::from_secs(30), "{took:?}");
+    assert_eq!(took, Duration::ZERO);
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
 async fn any_timed_out_request_says_what_timed_out() -> anyhow::Result<()> {
     // Listing runners asks the Tart agent too, under the standard limit.
-    let agent = stand_in_agent(
+    let (agent, holding) = stand_in_agent(
         Duration::from_mins(5),
         StatusCode::OK,
         json!({ "runners": [] }).to_string(),
@@ -242,6 +260,7 @@ async fn any_timed_out_request_says_what_timed_out() -> anyhow::Result<()> {
     .await?;
     let manager = manager_in_front_of(agent).await?;
     let response = on_test_clock(
+        &holding,
         reqwest::Client::new()
             .get(format!("{manager}/v1/runners"))
             .bearer_auth(TOKEN)

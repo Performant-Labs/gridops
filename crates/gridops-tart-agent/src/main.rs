@@ -2610,6 +2610,22 @@ esac
             let binary = dir.join("tart");
             fs::write(&binary, FAKE_TART).await?;
             fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).await?;
+            // A process another test forks while the script is being written
+            // inherits the write handle until it execs, and running the
+            // script meanwhile fails with "Text file busy". Once one run
+            // works no such handle is left, so run it until one does.
+            let mut tries = 0;
+            loop {
+                match Command::new(&binary).arg("probe").status().await {
+                    Ok(_) => break,
+                    Err(error) if error.raw_os_error() == Some(26) && tries < 100 => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let _ = fs::remove_file(dir.join("calls")).await;
             let state = AgentState {
                 token: SecretString::from("t".repeat(32)),
                 tart: Tart::new(binary, env::var_os("PATH").as_deref()),
