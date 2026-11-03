@@ -20,7 +20,9 @@ use super::{
 };
 use crate::fleet::{
     Architecture, BackendReadiness, ExecutionOs, RuntimeKind,
-    ids::{BackendId, ControlPlaneIncarnation, HostEpoch, ResourceDomainId, SessionId},
+    ids::{
+        BackendId, ControlPlaneIncarnation, HostEpoch, ResourceDomainId, SessionId, UpstreamText,
+    },
     protocol::{
         inventory::{
             DomainKind, HeartbeatRequest, HeartbeatResponse, HelperState, InventoryIdMapping,
@@ -634,8 +636,10 @@ async fn reconcile_inventory(
             if mapping.get::<String, _>("kind") != domain_kind(domain.kind) { return Err(InventoryError::MappingConflict); }
             if mapping.get::<Option<String>, _>("parent_local_key")
                 != domain.parent_local_key.as_ref().map(|value| value.as_str().to_owned())
-                || mapping.get::<Option<String>, _>("runtime_identity")
-                    != domain.runtime_identity.as_ref().map(|value| value.as_str().to_owned())
+                || runtime_identity_conflicts(
+                    mapping.get::<Option<String>, _>("runtime_identity").as_deref(),
+                    domain.runtime_identity.as_ref(),
+                )
             {
                 return Err(InventoryError::MappingConflict);
             }
@@ -674,7 +678,7 @@ async fn reconcile_inventory(
         sqlx::query(
             "INSERT INTO fleet_observed_domains (host_id,local_key,domain_id,parent_local_key,kind,observed_name,runtime_identity,cpu_millis,memory_mib,disk_bytes,session_id,host_epoch,control_plane_incarnation,inventory_sequence,received_at)
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(host_id,local_key) DO UPDATE SET parent_local_key=excluded.parent_local_key,observed_name=excluded.observed_name,runtime_identity=excluded.runtime_identity,cpu_millis=excluded.cpu_millis,memory_mib=excluded.memory_mib,disk_bytes=excluded.disk_bytes,session_id=excluded.session_id,host_epoch=excluded.host_epoch,control_plane_incarnation=excluded.control_plane_incarnation,inventory_sequence=excluded.inventory_sequence,received_at=excluded.received_at",
+             ON CONFLICT(host_id,local_key) DO UPDATE SET parent_local_key=excluded.parent_local_key,observed_name=excluded.observed_name,cpu_millis=excluded.cpu_millis,memory_mib=excluded.memory_mib,disk_bytes=excluded.disk_bytes,session_id=excluded.session_id,host_epoch=excluded.host_epoch,control_plane_incarnation=excluded.control_plane_incarnation,inventory_sequence=excluded.inventory_sequence,received_at=excluded.received_at",
         ).bind(session.host_id.to_string()).bind(domain.local_key.as_str()).bind(id.to_string()).bind(parent_key).bind(domain_kind(domain.kind)).bind(domain.name.as_str()).bind(domain.runtime_identity.as_ref().map(|value| value.as_str())).bind(opt_u64(domain.capacity.cpu_millis)).bind(opt_u64(domain.capacity.memory_mib)).bind(opt_u64(domain.capacity.disk_bytes)).bind(session.authority_session_id.to_string()).bind(i64::try_from(session.host_epoch.get()).map_err(|_| RegistryError::InvalidRequest("epoch exceeds SQLite integer"))?).bind(session.control_plane_incarnation.to_string()).bind(i64::try_from(report.inventory_sequence.get()).map_err(|_| RegistryError::InvalidRequest("sequence exceeds SQLite integer"))?).bind(now).execute(&mut **tx).await?;
         // A budget nobody has set yet starts at 80% of what the host reports,
         // leaving headroom for the host itself. Set budgets are never changed.
@@ -747,6 +751,18 @@ async fn reconcile_inventory(
     Ok((domain_map, backend_map, interactive_map))
 }
 
+/// Whether a reported runtime identity contradicts the one recorded for a
+/// mapping. A missing identity on either side is "not known right now" (for
+/// example a Docker engine that is stopped, reported `unavailable` with no
+/// identity), not a different runtime, so only two present identities that
+/// differ conflict. A report never changes the recorded identity: the domain
+/// and backend upserts leave `runtime_identity` out of their `DO UPDATE` (the
+/// schema keeps it immutable), so an identity first recorded as unknown stays
+/// unknown.
+fn runtime_identity_conflicts(recorded: Option<&str>, reported: Option<&UpstreamText>) -> bool {
+    matches!((recorded, reported), (Some(recorded), Some(reported)) if recorded != reported.as_str())
+}
+
 async fn ensure_domain_owner(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: crate::fleet::ids::HostId,
@@ -773,7 +789,7 @@ async fn upsert_backend(
 ) -> Result<BackendId, InventoryError> {
     let id = if let Some(mapping) = sqlx::query("SELECT backend_id,domain_local_key,runtime_kind,execution_os,architecture,runtime_identity FROM fleet_observed_backends WHERE host_id=? AND local_key=?").bind(session.host_id.to_string()).bind(backend.local_key.as_str()).fetch_optional(&mut **tx).await? {
         let mapped: BackendId = mapping.get::<String, _>("backend_id").parse().map_err(|_| RegistryError::InvalidRequest("backend mapping ID is malformed"))?;
-        if backend.known_id.is_some_and(|known| known != mapped) || mapping.get::<String, _>("domain_local_key") != backend.domain_local_key.as_str() || mapping.get::<String, _>("runtime_kind") != runtime_name(backend.runtime_kind) || mapping.get::<String, _>("execution_os") != os_name(backend.execution_os) || mapping.get::<String, _>("architecture") != arch_name(backend.architecture) || mapping.get::<Option<String>, _>("runtime_identity") != backend.runtime_identity.as_ref().map(|value| value.as_str().to_owned()) { return Err(InventoryError::MappingConflict); }
+        if backend.known_id.is_some_and(|known| known != mapped) || mapping.get::<String, _>("domain_local_key") != backend.domain_local_key.as_str() || mapping.get::<String, _>("runtime_kind") != runtime_name(backend.runtime_kind) || mapping.get::<String, _>("execution_os") != os_name(backend.execution_os) || mapping.get::<String, _>("architecture") != arch_name(backend.architecture) || runtime_identity_conflicts(mapping.get::<Option<String>, _>("runtime_identity").as_deref(), backend.runtime_identity.as_ref()) { return Err(InventoryError::MappingConflict); }
         mapped
     } else if backend.known_id.is_some() {
         return Err(InventoryError::MappingConflict);
@@ -795,7 +811,7 @@ async fn upsert_backend(
     let caps = serde_json::to_string(backend.capabilities.report())?;
     sqlx::query("UPDATE host_backends SET readiness=?,reason_code=?,capabilities_json=?,last_probed_at=?,probe_epoch=?,probe_session_id=?,probe_boot_id=?,probe_incarnation=?,updated_at=? WHERE id=? AND host_id=?")
         .bind(readiness_name(backend.readiness)).bind(backend.reason.as_ref().map(|value| value.as_str())).bind(&caps).bind(now).bind(i64::try_from(session.host_epoch.get()).map_err(|_| RegistryError::InvalidRequest("epoch exceeds SQLite integer"))?).bind(session.authority_session_id.to_string()).bind(session.boot_id.as_str()).bind(session.control_plane_incarnation.to_string()).bind(now).bind(id.to_string()).bind(session.host_id.to_string()).execute(&mut **tx).await?;
-    sqlx::query("INSERT INTO fleet_observed_backends (host_id,local_key,backend_id,domain_local_key,runtime_kind,execution_os,architecture,capabilities_json,observed_readiness,reason,runtime_identity,session_id,host_epoch,control_plane_incarnation,inventory_sequence,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id,local_key) DO UPDATE SET domain_local_key=excluded.domain_local_key,capabilities_json=excluded.capabilities_json,observed_readiness=excluded.observed_readiness,reason=excluded.reason,runtime_identity=excluded.runtime_identity,session_id=excluded.session_id,host_epoch=excluded.host_epoch,control_plane_incarnation=excluded.control_plane_incarnation,inventory_sequence=excluded.inventory_sequence,received_at=excluded.received_at")
+    sqlx::query("INSERT INTO fleet_observed_backends (host_id,local_key,backend_id,domain_local_key,runtime_kind,execution_os,architecture,capabilities_json,observed_readiness,reason,runtime_identity,session_id,host_epoch,control_plane_incarnation,inventory_sequence,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_id,local_key) DO UPDATE SET domain_local_key=excluded.domain_local_key,capabilities_json=excluded.capabilities_json,observed_readiness=excluded.observed_readiness,reason=excluded.reason,session_id=excluded.session_id,host_epoch=excluded.host_epoch,control_plane_incarnation=excluded.control_plane_incarnation,inventory_sequence=excluded.inventory_sequence,received_at=excluded.received_at")
         .bind(session.host_id.to_string()).bind(backend.local_key.as_str()).bind(id.to_string()).bind(backend.domain_local_key.as_str()).bind(runtime_name(backend.runtime_kind)).bind(os_name(backend.execution_os)).bind(arch_name(backend.architecture)).bind(caps).bind(readiness_name(backend.readiness)).bind(backend.reason.as_ref().map(|value| value.as_str())).bind(backend.runtime_identity.as_ref().map(|value| value.as_str())).bind(session.authority_session_id.to_string()).bind(i64::try_from(session.host_epoch.get()).map_err(|_| RegistryError::InvalidRequest("epoch exceeds SQLite integer"))?).bind(session.control_plane_incarnation.to_string()).bind(i64::try_from(report.inventory_sequence.get()).map_err(|_| RegistryError::InvalidRequest("sequence exceeds SQLite integer"))?).bind(now).execute(&mut **tx).await?;
     Ok(id)
 }
