@@ -1181,6 +1181,7 @@ dependencies = [
  "gridops-core",
  "hex",
  "reqwest 0.13.4",
+ "rsa",
  "secrecy",
  "serde",
  "serde_json",

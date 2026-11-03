@@ -148,6 +148,24 @@ impl Config {
         inner.github_api_url = url;
         Self(Arc::new(inner))
     }
+    /// This configuration with the runner manager at `url`, reached with
+    /// `token`, for a process that talks to a stand-in manager in its tests
+    /// without changing its environment.
+    #[must_use]
+    pub fn with_manager(&self, url: Url, token: &str) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.manager_url = url;
+        inner.manager_token = Some(SecretString::from(token.to_owned()));
+        Self(Arc::new(inner))
+    }
+    /// This configuration with runner logs archived under `directory`, for a
+    /// test that must not write into the working directory.
+    #[must_use]
+    pub fn with_log_directory(&self, directory: PathBuf) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.log_directory = directory;
+        Self(Arc::new(inner))
+    }
     pub fn webhook_delivery_active(&self) -> bool {
         self.0.github_webhook_active.unwrap_or_else(|| {
             self.0.base_url.scheme() == "https"

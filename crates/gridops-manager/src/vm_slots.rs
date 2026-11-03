@@ -1300,6 +1300,42 @@ mod tests {
             Ok(())
         }
 
+        /// The reconciler watches the slots while a pool waits for one, to
+        /// hand a freed slot to the head of the line at once. It reads them
+        /// alone, as health reports them, without the Docker host's figures.
+        #[tokio::test]
+        async fn the_slots_are_reported_on_their_own_for_the_reconciler_to_watch()
+        -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&["runner-a"])).await?;
+            manager.lease_for("pool-a", "runner-b", 1).await?;
+            let (status, ..) = manager.admit("pool-c", Some("vm"), Some(1)).await?;
+            assert_eq!(status, 429, "both slots are taken");
+            let response = manager
+                .request(reqwest::Method::GET, "/v1/vm-slots")
+                .send()
+                .await?;
+            assert_eq!(response.status().as_u16(), 200);
+            let watched = response.json::<Value>().await?["vmSlots"].clone();
+            assert_eq!(watched, manager.health_slots().await?);
+            assert_eq!(
+                (watched["inUse"].as_u64(), watched["free"].as_u64()),
+                (Some(2), Some(0)),
+                "{watched}"
+            );
+            assert_eq!(watched["queue"][0]["poolId"], "pool-c", "{watched}");
+
+            // The VM stops: the slot is free, and the view says so.
+            manager.set_agent_slots(running(&[]));
+            let watched = manager
+                .request(reqwest::Method::GET, "/v1/vm-slots")
+                .send()
+                .await?
+                .json::<Value>()
+                .await?;
+            assert_eq!(watched["vmSlots"]["inUse"], 1, "{watched}");
+            Ok(())
+        }
+
         #[tokio::test]
         async fn two_pools_racing_for_the_last_slot_get_one_lease_between_them()
         -> anyhow::Result<()> {

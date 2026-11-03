@@ -953,6 +953,7 @@ async fn main() -> Result<()> {
 fn router(state: ManagerState) -> Router {
     let standard = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/vm-slots", get(vm_slots_view))
         .route("/v1/policy", put(update_policy))
         .route("/v1/admissions", post(reserve_capacity))
         .route("/v1/admissions/{lease_id}", delete(release_capacity))
@@ -1076,29 +1077,7 @@ async fn health(
         Some(agent) => match tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await
         {
             Ok(health) => {
-                // The slots as admission counts them: the agent's view plus
-                // VMs being started now, and the line for them.
-                let vm_slots = match tart_capacity_from_health(&health) {
-                    Ok(capacity) => {
-                        let usage = capacity.slot_usage();
-                        let leases = vm_slot_reservations(&state).await;
-                        let starts = vm_slots::starts_in_flight(
-                            &usage,
-                            leases
-                                .iter()
-                                .map(|(runner_id, pool_id)| (runner_id.as_str(), pool_id.as_str())),
-                        );
-                        let mut report =
-                            state
-                                .vm_slots
-                                .report(&usage, starts.len(), Some(capacity.max_runners));
-                        // Which runner and pool each start is for, so a
-                        // reader can say who holds the slot (#95 phase 2).
-                        report["startingVms"] = json!(starts);
-                        report
-                    }
-                    Err(_) => Value::Null,
-                };
+                let vm_slots = vm_slots_report(&state, &health).await;
                 (
                     "ok",
                     json!({ "available": true, "health": health, "vmSlots": vm_slots }),
@@ -1162,6 +1141,52 @@ async fn health(
         },
         "disk": disk,
     })))
+}
+
+/// The Mac's VM slots as admission counts them, from the Tart agent's
+/// `health`: the agent's view plus VMs being started now, and the line for
+/// them. Null when the agent's health has no capacity to read.
+async fn vm_slots_report(state: &ManagerState, health: &Value) -> Value {
+    match tart_capacity_from_health(health) {
+        Ok(capacity) => {
+            // The slots as admission counts them: the agent's view plus VMs
+            // being started now, and the line for them.
+            let usage = capacity.slot_usage();
+            let leases = vm_slot_reservations(state).await;
+            let starts = vm_slots::starts_in_flight(
+                &usage,
+                leases
+                    .iter()
+                    .map(|(runner_id, pool_id)| (runner_id.as_str(), pool_id.as_str())),
+            );
+            let mut report = state
+                .vm_slots
+                .report(&usage, starts.len(), Some(capacity.max_runners));
+            // Which runner and pool each start is for, so a reader can say
+            // who holds the slot (#95 phase 2).
+            report["startingVms"] = json!(starts);
+            report
+        }
+        Err(_) => Value::Null,
+    }
+}
+
+/// `GET /v1/vm-slots`: the Mac's VM slots alone, as health reports them under
+/// `providers.tart.vmSlots`. The reconciler reads it every few seconds while
+/// a pool waits in the line, to start the head of the line as soon as a slot
+/// frees, so it asks the Tart agent only and not the Docker host. Null
+/// without a Tart agent.
+async fn vm_slots_view(
+    State(state): State<ManagerState>,
+    _auth: ManagerAuth,
+) -> Result<Json<Value>, ManagerError> {
+    let Some(agent) = &state.tart else {
+        return Ok(Json(json!({ "vmSlots": null })));
+    };
+    let health = tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await?;
+    Ok(Json(
+        json!({ "vmSlots": vm_slots_report(&state, &health).await }),
+    ))
 }
 
 async fn update_policy(
