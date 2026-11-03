@@ -218,6 +218,32 @@ pub(crate) fn starting_vms<'a>(
         .count()
 }
 
+/// A VM start in flight, as the manager's health names it: the runner being
+/// started and its pool.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartingVm {
+    pub(crate) runner_id: String,
+    pub(crate) pool_id: String,
+}
+
+/// The starts [`starting_vms`] counts, named: of the admissions holding a VM
+/// slot (`leases`, as `(runner, pool)`), those whose VM the agent does not
+/// report running.
+pub(crate) fn starts_in_flight<'a>(
+    usage: &AgentSlotUsage,
+    leases: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<StartingVm> {
+    leases
+        .into_iter()
+        .filter(|(runner_id, _)| !runs(usage, runner_id))
+        .map(|(runner_id, pool_id)| StartingVm {
+            runner_id: runner_id.to_owned(),
+            pool_id: pool_id.to_owned(),
+        })
+        .collect()
+}
+
 /// Whether the agent already counts `runner_id`'s VM as running.
 pub(crate) fn runs(usage: &AgentSlotUsage, runner_id: &str) -> bool {
     usage
@@ -315,6 +341,8 @@ impl VmSlots {
             "inUse": in_use,
             "free": limit.saturating_sub(in_use),
             "gridops": usage.gridops,
+            // Who those VMs run for; null from an agent that predates it.
+            "runnerIds": usage.runner_ids,
             "starting": starting,
             "external": usage.external,
             "detection": usage.detection,
@@ -1369,6 +1397,51 @@ mod tests {
                 .json::<Value>()
                 .await?;
             assert_eq!(response["tartVmSlots"], 1);
+            Ok(())
+        }
+
+        /// The Tart host card (#95 phase 2) says who holds each slot: health
+        /// names the runner of each `GridOps` VM that is running, and the
+        /// runner and pool of each start still in flight. A start whose VM
+        /// the agent already reports running is listed once, as running.
+        #[tokio::test]
+        async fn health_names_the_runners_holding_slots_and_the_starts_in_flight()
+        -> anyhow::Result<()> {
+            let manager = TestManager::start(running(&[])).await?;
+            manager.lease_for("pool-a", "runner-a", 1).await?;
+            manager.lease_for("pool-b", "runner-b", 1).await?;
+            let report = manager.health_slots().await?;
+            assert_eq!(report["runnerIds"], json!([]), "{report}");
+            let mut starting = report["startingVms"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            starting.sort_by_key(|start| start["runnerId"].as_str().map(str::to_owned));
+            assert_eq!(
+                starting,
+                [
+                    json!({"runnerId": "runner-a", "poolId": "pool-a"}),
+                    json!({"runnerId": "runner-b", "poolId": "pool-b"}),
+                ],
+                "{report}"
+            );
+
+            manager.set_agent_slots(running(&["runner-a"]));
+            let report = manager.health_slots().await?;
+            assert_eq!(report["runnerIds"], json!(["runner-a"]), "{report}");
+            assert_eq!(
+                report["startingVms"],
+                json!([{"runnerId": "runner-b", "poolId": "pool-b"}]),
+                "{report}"
+            );
+            assert_eq!(report["starting"], 1, "{report}");
+
+            // An agent that does not name its runners: nothing to name, and
+            // every lease is a start, as admission counts it.
+            manager.set_agent_slots(slots(1, &[]));
+            let report = manager.health_slots().await?;
+            assert!(report["runnerIds"].is_null(), "{report}");
+            assert_eq!(report["startingVms"].as_array().map(Vec::len), Some(2));
             Ok(())
         }
 

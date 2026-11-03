@@ -139,6 +139,7 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/runner-pools/{pool_id}", "pools:read"),
     ("GET", "/api/v1/runner-pools/{pool_id}/events", "pools:read"),
     ("GET", "/api/v1/overview/capacity", "pools:read"),
+    ("GET", "/api/v1/overview/tart-host", "pools:read"),
     ("POST", "/api/v1/runner-pools", "pools:manage"),
     ("PUT", "/api/v1/runner-pools/{pool_id}", "pools:manage"),
     ("DELETE", "/api/v1/runner-pools/{pool_id}", "pools:manage"),

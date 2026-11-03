@@ -187,6 +187,7 @@ fn token_routes() -> Router<AppState> {
             "/api/v1/overview/capacity",
             get(resources::capacity_history),
         )
+        .route("/api/v1/overview/tart-host", get(resources::tart_host))
         .route(
             "/api/v1/runner-pools",
             get(resources::runner_pools).post(resources::create_runner_pool),
