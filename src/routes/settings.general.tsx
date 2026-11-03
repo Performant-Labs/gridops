@@ -9,6 +9,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { saveSettingsAction } from "~/features/operations/operations.functions";
+import { MacosVmSlotsRow, TartAgentCapWarning, tartAgentCapWarning } from "~/features/runner-pools/tart-agent-cap";
 
 export const Route = createFileRoute("/settings/general")({
   component: GeneralSettings,
@@ -21,7 +22,8 @@ function GeneralSettings() {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   if (!page.data) return <EmptyState description="Sign in to view operational policy." icon={Settings2} title="Settings unavailable" />;
-  const { settings, user } = page.data;
+  const { manager, settings, user } = page.data;
+  const agentMaxRunners = manager.tartVmSlots?.agentMaxRunners;
   const isAdmin = user.role === "admin";
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -57,7 +59,14 @@ function GeneralSettings() {
           <SettingsValue label="Refresh runner images" value={settings.autoUpdateImages ? "On" : "Off"} />
           <SettingsValue label="Reconcile interval" value={`${settings.reconcileIntervalSeconds} seconds`} />
           <SettingsValue label="GitHub polling interval" value={`${settings.githubSyncIntervalSeconds} seconds`} />
-          {settings.macosVmSlots ? <SettingsValue label="macOS VM slots on the Tart host" value={`${settings.macosVmSlots}`} /> : null}
+          {settings.macosVmSlots ? (
+            <>
+              <SettingsValue label="macOS VM slots on the Tart host" value={`${settings.macosVmSlots}`} />
+              {tartAgentCapWarning(settings.macosVmSlots, agentMaxRunners) ? (
+                <div className="px-4 py-3"><TartAgentCapWarning agentMaxRunners={agentMaxRunners} slots={settings.macosVmSlots} /></div>
+              ) : null}
+            </>
+          ) : null}
         </SettingsSection>
         <SettingsSection title="Retention">
           <SettingsValue label="Runner logs" value={`${settings.logRetentionDays} days · ${settings.logStorageBudgetMb.toLocaleString()} MB`} />
@@ -84,11 +93,7 @@ function GeneralSettings() {
           <SettingsRow description="Workflow state polling, used alongside or instead of webhooks." htmlFor="github-sync" label="GitHub polling interval">
             <UnitField unit="seconds"><Input className="pr-16" defaultValue={settings.githubSyncIntervalSeconds} id="github-sync" max={3600} min={30} name="githubSyncIntervalSeconds" required type="number" /></UnitField>
           </SettingsRow>
-          {settings.macosVmSlots ? (
-            <SettingsRow description="How many macOS VMs GridOps lets run at once on the Tart Mac, counting VMs other software runs there. macOS allows at most two; waiting pools get a free slot in turn." htmlFor="macos-vm-slots" label="macOS VM slots on the Tart host">
-              <UnitField unit="VMs"><Input className="pr-12" defaultValue={settings.macosVmSlots} id="macos-vm-slots" max={2} min={1} name="macosVmSlots" required type="number" /></UnitField>
-            </SettingsRow>
-          ) : null}
+          {settings.macosVmSlots ? <MacosVmSlotsRow agentMaxRunners={agentMaxRunners} slots={settings.macosVmSlots} /> : null}
         </SettingsSection>
 
         <SettingsSection description="Older records are pruned automatically." title="Retention">

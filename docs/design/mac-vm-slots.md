@@ -33,7 +33,7 @@ The manager's admission is already the one place every Tart start passes through
 - *Why a GridOps setting and not a Tart agent environment variable:* the issue asks for a first-class limit owned by GridOps, not "an environment variable that only one client reads". The manager is the arbiter; the agent only reports.
 - *Why at most 2:* macOS refuses a third macOS VM. Allowing 3 would make GridOps hand out a slot the OS then refuses, and fairness would fall back to the agent's polling race. If Apple raises the limit, `MAX_VM_SLOTS` changes in one place in each of core and manager.
 - *Why one number for the whole Mac:* the manager talks to exactly one Tart agent today (`GRIDOPS_TART_AGENT_URL`), so "the Tart host" is one Mac. With several Tart hosts (phase 3) the setting becomes a column of a `tart_hosts` row.
-- *Relationship to `GRIDOPS_TART_MAX_RUNNERS`:* that stays the agent's cap on GridOps's own runners (VM and native) and its CPU and memory budget stay too. The slot limit is separate because it counts other software's VMs and excludes native runners.
+- *Relationship to `GRIDOPS_TART_MAX_RUNNERS`:* that stays the agent's cap on GridOps's own runners (VM and native) and its CPU and memory budget stay too. The slot limit is separate because it counts other software's VMs and excludes native runners. **[0.2.0]** The cap defaults to 2 (it was 1), so by default it no longer holds GridOps to one slot. When an agent's cap is still below the slot limit, the lower one wins, so the manager's health reports the agent's cap next to the limit (`agentMaxRunners`) with a `warning`, and Settings → General shows the same warning under the slot setting. A cap at or above the limit gives no warning.
 
 **API [phase 1].** `GET /api/v1/settings` returns `settings.macosVmSlots`; `PUT /api/v1/settings` accepts an optional `macosVmSlots` (left out, it is unchanged, so older clients keep working; out of range is `400`), audited with `settings.updated`. Pool list and detail gain `provisionWaitReason` (see 4). The manager's health gains `providers.tart.vmSlots`:
 
@@ -41,8 +41,11 @@ The manager's admission is already the one place every Tart start passes through
 { "limit": 2, "inUse": 2, "free": 0, "gridops": 1, "starting": 0,
   "external": [{ "name": "runner-warm-1", "user": "ci", "source": "tart-process" }],
   "detection": "processes",
-  "queue": [{ "poolId": "…", "position": 1, "waitingSince": "2026-11-03T09:00:00Z" }] }
+  "queue": [{ "poolId": "…", "position": 1, "waitingSince": "2026-11-03T09:00:00Z" }],
+  "agentMaxRunners": 2, "warning": null }
 ```
+
+`agentMaxRunners` and `warning` were added in 0.2.0 (see "Relationship to `GRIDOPS_TART_MAX_RUNNERS`" above). `GET /api/v1/settings` passes this object on as `manager.tartVmSlots` (null without a Tart agent).
 
 **UI [phase 1].** One number field in Settings → General, read-only for members. A per-host card (slots, holders, queue) is phase 2; the operator already sees the reason on the waiting pool's page.
 
@@ -55,7 +58,7 @@ The manager's admission is already the one place every Tart start passes through
 3. slots in use = agent's `gridops` (GridOps VMs that are running) + `external.len()` + leases with `vm_slot: true` (starts in flight). Free = limit − in use.
 4. The queue (3) is asked with the number of starts that may go ahead now: the free slots, capped by the room left in GridOps's own Tart budget for a runner of this size (`GRIDOPS_TART_MAX_RUNNERS`, CPU, memory). If it admits the pool, the lease is created with `vm_slot: true`. Otherwise the answer is `429` with the pool's place in line: `vm_slot_busy` ("Waiting for a macOS VM slot: position p of n in the queue. u of l slots in use (GridOps runners: g; other software: e — name (user), …).") when the slots are what is short, or `host_capacity_exhausted` ("Waiting for room on the Tart host: position p of n in the queue." and the budget it hit) when GridOps's own budget is.
 
-   *Why the budget is in the same line:* the agent's runner cap is 1 by default, so it is usually full before both slots are. Checked outside the queue, the pool the reconciler visits first would take every runner that frees and the other would starve exactly as before; a test pins this (`the_tart_runner_budget_does_not_let_a_later_pool_jump_the_line`).
+   *Why the budget is in the same line:* the agent's runner cap was 1 by default when this was written (2 since 0.2.0), and a cap of 1 or large VMs against the CPU and memory budget fill it before both slots are. Checked outside the queue, the pool the reconciler visits first would take every runner that frees and the other would starve exactly as before; a test pins this (`the_tart_runner_budget_does_not_let_a_later_pool_jump_the_line`).
 
 The VM slot lease is released when `POST /v1/runners` ends (success or failure), as every lease already is; from then on a successful VM is counted by the agent as running. Because the manager also holds `provision_lock` for the whole start, the lease and the running VM are never both visible to another admission.
 
@@ -109,7 +112,7 @@ Its own `tart run` processes (including a retry during the safety-net wait) are 
 
 ## 6. The #87 wait becomes a safety net
 
-**[phase 1]** Admission now refuses starts while the slots are full, so the agent's `tart run` retry loop only covers two cases: the race between admission and `tart run` (other software starting a VM in those seconds) and VMs the agent cannot see. Its default (180 s) and maximum are not changed here; #94 (fixed in #96) made the wait fit inside the manager's time limit for a macOS start (a 600 s maximum, against the manager's 900 s). Now that admission holds starts back, a shorter wait (for example 60 s) is enough; that is left to the operator. A timeout is deferred, not counted (section 4).
+**[phase 1]** Admission now refuses starts while the slots are full, so the agent's `tart run` retry loop only covers two cases: the race between admission and `tart run` (other software starting a VM in those seconds) and VMs the agent cannot see. #94 (fixed in #96) made the wait fit inside the manager's time limit for a macOS start (a 600 s maximum, against the manager's 900 s). Phase 1 left its default at 180 s; since admission holds starts back, 0.2.0 shortens the default to 60 s so pools wait in the fair queue rather than inside the agent (the maximum stays 600 s). A timeout is deferred, not counted (section 4).
 
 ## 7. Several clients, several images, VM stores
 
@@ -149,7 +152,7 @@ In `docs/macos-runners.md` ("Moving another project's macOS CI onto GridOps"): p
 - Reconciler: `vm_slot_busy` and `vm_slot_unavailable` deferred, never counted; no 30 s pause for `vm_slot_busy` or a Tart `host_capacity_exhausted`; the wait reason (`runner_pool_waits`, migration 0042) shown on the pool page.
 - Docs: `docs/macos-runners.md` updated, with the migration guide.
 
-**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue); optional weights and priority with aging; decide whether to shorten the safety-net wait's default.
+**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue); optional weights and priority with aging. (Shortening the safety-net wait's default was decided for 0.2.0: 60 s.)
 
 **Phase 3.** Several Tart hosts (a `tart_hosts` table with per-host slots and queue); several VM stores per agent (`GRIDOPS_TART_IMAGE_SOURCES`).
 

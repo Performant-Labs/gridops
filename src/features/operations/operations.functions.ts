@@ -160,6 +160,15 @@ export type SettingsPage = {
         reserved: { activeRunners: number; cpu: number; memoryMb: number };
       };
       disk?: { totalMb: number; availableMb: number; minimumFreeMb: number };
+      /**
+       * The Tart host's macOS VM slots as the runner manager counts them, with the Tart agent's own
+       * runner cap (`agentMaxRunners`) and the manager's warning when that cap is below the slot
+       * limit. Null without a Tart agent; absent from an older server.
+       */
+      tartVmSlots?: null | {
+        limit: number; inUse: number; free: number;
+        agentMaxRunners?: number | null; warning?: string | null;
+      };
     };
     settings: { logRetentionDays: number; logStorageBudgetMb: number; webhookRetentionDays: number; auditRetentionDays: number;
       reconcileIntervalSeconds: number; githubSyncIntervalSeconds: number; autoUpdateImages: boolean; provisioningPaused: boolean;

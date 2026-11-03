@@ -3290,6 +3290,10 @@ pub async fn settings(
                 "builtinHost": value.get("builtinHost"),
                 "capacity": value.get("capacity"),
                 "disk": value.get("disk"),
+                // The Tart host's slots as the manager counts them, with the
+                // agent's own runner cap and a warning when it is lower than
+                // the slot limit; null without a Tart agent.
+                "tartVmSlots": value.pointer("/providers/tart/vmSlots"),
             })
         }
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
