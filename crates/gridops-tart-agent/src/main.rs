@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    ffi::{OsStr, OsString},
     path::{Path as FsPath, PathBuf},
     process::Stdio,
     str::FromStr,
@@ -35,7 +36,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 #[derive(Clone)]
 struct AgentState {
     token: SecretString,
-    tart_binary: PathBuf,
+    tart: Tart,
     home: PathBuf,
     runner_root: String,
     bitbucket_runner_root: String,
@@ -55,6 +56,111 @@ struct AgentState {
     /// Serialises actions-runner release downloads so concurrent provisioning
     /// shares one extraction instead of racing on the same directory.
     release_lock: Arc<Mutex<()>>,
+}
+
+/// How the agent runs Tart: the binary, and the PATH each Tart process gets.
+///
+/// Tart runs `softnet` by looking it up on its own PATH, and launchd gives a
+/// job that sets no PATH only the system directories, where Homebrew never
+/// installs. So every Tart process gets a PATH that starts with Tart's own
+/// directory and Softnet's, whatever PATH the agent itself was started with.
+#[derive(Clone, Debug)]
+struct Tart {
+    binary: PathBuf,
+    path: OsString,
+    softnet: Option<PathBuf>,
+}
+
+/// Where Homebrew links binaries on Apple silicon and on Intel Macs.
+const HOMEBREW_BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// launchd's PATH for a job that sets none.
+const LAUNCHD_DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+impl Tart {
+    fn new(binary: PathBuf, inherited: Option<&OsStr>) -> Self {
+        let search = tart_child_path(&binary, None, inherited);
+        let softnet = find_softnet(
+            env::split_paths(&search).chain(HOMEBREW_BIN_DIRS.iter().map(PathBuf::from)),
+        );
+        let path = tart_child_path(&binary, softnet.as_deref(), inherited);
+        Self {
+            binary,
+            path,
+            softnet,
+        }
+    }
+
+    /// A command for the Tart binary, with the PATH Tart needs. Every Tart
+    /// process the agent starts is made here.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.binary);
+        command.env("PATH", &self.path);
+        command
+    }
+}
+
+/// The PATH for a Tart process: the directory of the Tart binary, then the
+/// directory of the Softnet binary when one was found, then the inherited
+/// PATH (launchd's default when there is none), each directory once.
+///
+/// A directory that is relative or contains a colon is left out: the first
+/// would depend on the working directory, the second cannot be written in a
+/// PATH. Empty inherited entries, which mean the working directory, are
+/// dropped too.
+fn tart_child_path(
+    tart_binary: &FsPath,
+    softnet: Option<&FsPath>,
+    inherited: Option<&OsStr>,
+) -> OsString {
+    let usable_parent = |binary: &FsPath| {
+        binary
+            .parent()
+            .filter(|dir| dir.is_absolute() && !dir.as_os_str().as_encoded_bytes().contains(&b':'))
+            .map(FsPath::to_path_buf)
+    };
+    let mut inherited = inherited
+        .map(|path| {
+            env::split_paths(path)
+                .filter(|entry| !entry.as_os_str().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if inherited.is_empty() {
+        inherited = env::split_paths(LAUNCHD_DEFAULT_PATH).collect();
+    }
+    let mut entries = Vec::<PathBuf>::new();
+    for entry in usable_parent(tart_binary)
+        .into_iter()
+        .chain(softnet.and_then(usable_parent))
+        .chain(inherited)
+    {
+        // Path equality ignores trailing slashes and `.` components.
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    let mut path = OsString::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            path.push(":");
+        }
+        path.push(entry);
+    }
+    path
+}
+
+/// The first executable file named `softnet` in the given absolute
+/// directories, as Tart would find it on a PATH made of them.
+fn find_softnet(dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    dirs.into_iter()
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("softnet"))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -424,11 +530,24 @@ async fn main() -> Result<()> {
     fs::create_dir_all(home.join("logs")).await?;
     fs::create_dir_all(home.join("native").join("releases")).await?;
     fs::create_dir_all(home.join("native").join("runners")).await?;
-    let version = tart_output(&tart_binary, ["--version"]).await?;
+    let tart = Tart::new(tart_binary, env::var_os("PATH").as_deref());
+    tracing::info!(
+        binary = %tart.binary.display(),
+        path = %tart.path.to_string_lossy(),
+        softnet = ?tart.softnet,
+        "Tart commands run with this PATH"
+    );
+    if matches!(network_mode, NetworkMode::Softnet) && tart.softnet.is_none() {
+        tracing::warn!(
+            "softnet was not found next to Tart, on PATH or in Homebrew's bin directories; \
+             Tart cannot start VMs in softnet mode"
+        );
+    }
+    let version = tart_output(&tart, ["--version"]).await?;
     let records = load_records(&home).await?;
     let state = AgentState {
         token: SecretString::from(token),
-        tart_binary,
+        tart,
         home,
         runner_root,
         bitbucket_runner_root,
@@ -503,7 +622,7 @@ async fn health(
     State(state): State<AgentState>,
     _auth: AgentAuth,
 ) -> Result<Json<Value>, AgentError> {
-    let version = tart_output(&state.tart_binary, ["--version"])
+    let version = tart_output(&state.tart, ["--version"])
         .await
         .map_err(AgentError::Internal)?;
     let vms = tart_vms(&state).await?;
@@ -648,14 +767,14 @@ async fn provision_runner(
 
     let result = async {
         tart_status(
-            &state.tart_binary,
+            &state.tart,
             ["clone", input.image.as_str(), vm_name.as_str()],
         )
         .await?;
         let cpu = format!("{:.0}", input.cpu_limit);
         let memory = input.memory_limit_mb.to_string();
         tart_status(
-            &state.tart_binary,
+            &state.tart,
             [
                 "set",
                 vm_name.as_str(),
@@ -1106,7 +1225,7 @@ async fn control_runner(
             Ok(Json(json!({ "status": "stopped" })))
         }
         "stop" => {
-            let _ = tart_status(&state.tart_binary, ["stop", record.vm_name.as_str()]).await;
+            let _ = tart_status(&state.tart, ["stop", record.vm_name.as_str()]).await;
             Ok(Json(json!({ "status": "stopped" })))
         }
         "start" | "restart" | "pause" | "resume" => Err(AgentError::Conflict(
@@ -1451,7 +1570,7 @@ fn start_vm(
         .append(true)
         .open(runtime_log_path(state, &record.id))?;
     let stderr = stdout.try_clone()?;
-    let mut command = Command::new(&state.tart_binary);
+    let mut command = state.tart.command();
     command
         .arg("run")
         .arg("--no-graphics")
@@ -1498,7 +1617,9 @@ async fn wait_for_guest_agent(
 ) -> GuestStart {
     let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
     loop {
-        let ready = Command::new(&state.tart_binary)
+        let ready = state
+            .tart
+            .command()
             .args(["exec", record.vm_name.as_str(), "/usr/bin/true"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1529,7 +1650,9 @@ async fn start_runner(
         .append(true)
         .open(log_path(state, &record.id))?;
     let error_log = log.try_clone()?;
-    let mut child = Command::new(&state.tart_binary)
+    let mut child = state
+        .tart
+        .command()
         .args([
             "exec",
             "-i",
@@ -1551,12 +1674,13 @@ async fn start_runner(
         .await?;
     stdin.write_all(b"\n").await?;
     stdin.shutdown().await?;
-    let tart_binary = state.tart_binary.clone();
+    let tart = state.tart.clone();
     let vm_name = record.vm_name.clone();
     tokio::spawn(async move {
         let status = child.wait().await;
         tracing::info!(%vm_name, ?status, "macOS runner process exited");
-        let _ = Command::new(tart_binary)
+        let _ = tart
+            .command()
             .args(["stop", vm_name.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1725,7 +1849,9 @@ async fn active_capacity(state: &AgentState, vms: &HashMap<String, String>) -> C
 }
 
 async fn tart_vms(state: &AgentState) -> Result<HashMap<String, String>, AgentError> {
-    let output = Command::new(&state.tart_binary)
+    let output = state
+        .tart
+        .command()
         .args(["list", "--source", "local", "--format", "json"])
         .output()
         .await
@@ -1785,8 +1911,8 @@ async fn disk_capacity(state: &AgentState) -> Result<DiskCapacity, AgentError> {
 }
 
 async fn cleanup_vm(state: &AgentState, vm_name: &str) {
-    let _ = tart_status(&state.tart_binary, ["stop", vm_name]).await;
-    let _ = tart_status(&state.tart_binary, ["delete", vm_name]).await;
+    let _ = tart_status(&state.tart, ["stop", vm_name]).await;
+    let _ = tart_status(&state.tart, ["delete", vm_name]).await;
 }
 
 async fn record(state: &AgentState, id: &str) -> Result<TartRecord, AgentError> {
@@ -1858,8 +1984,8 @@ async fn read_log_tail(path: &FsPath, tail: &str) -> Result<Vec<u8>, AgentError>
     Ok(bytes[start..].to_vec())
 }
 
-async fn tart_status<const N: usize>(binary: &FsPath, args: [&str; N]) -> Result<()> {
-    let output = Command::new(binary).args(args).output().await?;
+async fn tart_status<const N: usize>(tart: &Tart, args: [&str; N]) -> Result<()> {
+    let output = tart.command().args(args).output().await?;
     if !output.status.success() {
         anyhow::bail!(
             "Tart command failed ({}): {}",
@@ -1873,8 +1999,8 @@ async fn tart_status<const N: usize>(binary: &FsPath, args: [&str; N]) -> Result
     Ok(())
 }
 
-async fn tart_output<const N: usize>(binary: &FsPath, args: [&str; N]) -> Result<String> {
-    let output = Command::new(binary).args(args).output().await?;
+async fn tart_output<const N: usize>(tart: &Tart, args: [&str; N]) -> Result<String> {
+    let output = tart.command().args(args).output().await?;
     if !output.status.success() {
         anyhow::bail!(
             "Tart command failed: {}",
@@ -1909,6 +2035,136 @@ fn valid_guest_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn child_path(tart: &str, softnet: Option<&str>, inherited: Option<&str>) -> String {
+        tart_child_path(
+            FsPath::new(tart),
+            softnet.map(FsPath::new),
+            inherited.map(std::ffi::OsStr::new),
+        )
+        .to_string_lossy()
+        .into_owned()
+    }
+
+    #[test]
+    fn tart_child_path_puts_tart_then_softnet_before_the_inherited_path() {
+        assert_eq!(
+            child_path(
+                "/Applications/Tart.app/Contents/MacOS/tart",
+                Some("/opt/homebrew/bin/softnet"),
+                Some("/usr/bin:/bin:/usr/sbin:/sbin"),
+            ),
+            "/Applications/Tart.app/Contents/MacOS:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        // Tart and Softnet side by side, the usual Homebrew install.
+        assert_eq!(
+            child_path(
+                "/opt/homebrew/bin/tart",
+                Some("/opt/homebrew/bin/softnet"),
+                Some("/usr/bin:/bin"),
+            ),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+    }
+
+    #[test]
+    fn tart_child_path_falls_back_to_launchds_default_without_an_inherited_path() {
+        for inherited in [None, Some(""), Some(":"), Some("::")] {
+            assert_eq!(
+                child_path("/opt/homebrew/bin/tart", None, inherited),
+                "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                "{inherited:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tart_child_path_lists_each_directory_once() {
+        // Already on the inherited PATH: moved to the front, not repeated.
+        assert_eq!(
+            child_path(
+                "/opt/homebrew/bin/tart",
+                None,
+                Some("/usr/bin:/opt/homebrew/bin:/bin")
+            ),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+        // Duplicates in the inherited PATH, spelled alike or not, and empty
+        // entries, which would mean the working directory, are dropped.
+        assert_eq!(
+            child_path(
+                "/opt/homebrew/bin/tart",
+                Some("/usr/local/bin/softnet"),
+                Some("/usr/bin::/usr/local/bin/:/usr/bin:/bin/.:/bin:/opt/homebrew/bin"),
+            ),
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin/."
+        );
+    }
+
+    #[test]
+    fn tart_child_path_skips_directories_that_cannot_go_on_a_path() {
+        // A bare name or a relative path would put a directory relative to the
+        // working directory on PATH; a colon cannot be written in PATH at all.
+        for tart in ["tart", "bin/tart", "./tart", "/odd:dir/tart", ""] {
+            assert_eq!(
+                child_path(tart, None, Some("/usr/bin:/bin")),
+                "/usr/bin:/bin",
+                "{tart:?}"
+            );
+        }
+        assert_eq!(
+            child_path("/opt/homebrew/bin/tart", Some("softnet"), Some("/usr/bin")),
+            "/opt/homebrew/bin:/usr/bin"
+        );
+        assert_eq!(
+            child_path("/tart", None, Some("/usr/bin")),
+            "/:/usr/bin",
+            "the root directory is a directory like any other"
+        );
+        assert_eq!(
+            child_path(
+                "/Volumes/My Disk/tart & co/tart",
+                Some("/Volumes/My Disk/softnet"),
+                None,
+            ),
+            "/Volumes/My Disk/tart & co:/Volumes/My Disk:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+    }
+
+    #[test]
+    fn find_softnet_returns_the_first_executable_softnet() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = env::temp_dir().join(format!("gridops-softnet-{}", uuid::Uuid::new_v4()));
+        let (empty, plain, found, later) = (
+            root.join("empty"),
+            root.join("plain"),
+            root.join("found"),
+            root.join("later"),
+        );
+        for dir in [&empty, &plain, &found, &later] {
+            std::fs::create_dir_all(dir)?;
+        }
+        // Not executable, so not what Tart would run.
+        std::fs::write(plain.join("softnet"), "")?;
+        for dir in [&found, &later] {
+            std::fs::write(dir.join("softnet"), "")?;
+            std::fs::set_permissions(dir.join("softnet"), std::fs::Permissions::from_mode(0o755))?;
+        }
+        // A directory named softnet is not a binary either.
+        std::fs::create_dir_all(empty.join("softnet"))?;
+        let result = find_softnet([
+            PathBuf::from("relative"),
+            empty.clone(),
+            plain.clone(),
+            found.clone(),
+            later.clone(),
+        ]);
+        let none = find_softnet([empty, plain]);
+        std::fs::remove_dir_all(&root)?;
+        assert_eq!(result, Some(found.join("softnet")));
+        assert_eq!(none, None);
+        Ok(())
+    }
 
     #[test]
     fn validates_tart_runtime_identifiers() {
@@ -2173,6 +2429,7 @@ mod tests {
     const FAKE_TART: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 printf '%s\n' "$*" >> "$dir/calls"
+printf '%s\t%s\n' "$1" "$PATH" >> "$dir/paths"
 case "$1" in
   run)
     if [ -f "$dir/always-busy" ]; then
@@ -2220,7 +2477,7 @@ esac
             fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).await?;
             let state = AgentState {
                 token: SecretString::from("t".repeat(32)),
-                tart_binary: binary,
+                tart: Tart::new(binary, env::var_os("PATH").as_deref()),
                 home,
                 runner_root: "/Users/admin/actions-runner".into(),
                 bitbucket_runner_root: "/Users/admin/atlassian-bitbucket-pipelines-runner".into(),
@@ -2293,6 +2550,59 @@ esac
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    /// Tart finds `softnet` on its own PATH, and launchd gives an agent with
+    /// no PATH of its own only the system directories, so every Tart command
+    /// must be given a PATH that starts with Tart's directory.
+    #[tokio::test]
+    async fn every_tart_command_gets_a_path_starting_with_tarts_directory() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        let result = tart.provision().await;
+        let Ok((StatusCode::CREATED, _)) = result else {
+            anyhow::bail!("expected the runner to start, got {result:?}")
+        };
+        tart_output(&tart.state.tart, ["--version"]).await?;
+        tart_vms(&tart.state)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        cleanup_vm(&tart.state, CLONE).await;
+        // The runner's own stop runs in the background once its exec ends.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while tart.calls_to("stop").await < 2 {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "no runner stop");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let paths = fs::read_to_string(tart.dir.join("paths")).await?;
+        let mut commands = std::collections::BTreeSet::new();
+        let inherited = env::var_os("PATH").unwrap_or_default();
+        for line in paths.lines() {
+            let (command, path) = line.split_once('\t').context("no PATH logged")?;
+            commands.insert(command.to_owned());
+            let entries = env::split_paths(path).collect::<Vec<_>>();
+            assert_eq!(
+                entries.first().map(PathBuf::as_path),
+                Some(tart.dir.as_path()),
+                "{command}: {path}"
+            );
+            for entry in env::split_paths(&inherited).filter(|entry| entry.is_absolute()) {
+                assert!(entries.contains(&entry), "{command} lost {entry:?}: {path}");
+            }
+        }
+        for command in [
+            "--version",
+            "clone",
+            "set",
+            "run",
+            "exec",
+            "list",
+            "stop",
+            "delete",
+        ] {
+            assert!(commands.contains(command), "{command} never ran: {paths}");
+        }
+        Ok(())
     }
 
     #[tokio::test]

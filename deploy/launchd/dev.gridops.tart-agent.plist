@@ -18,6 +18,8 @@
     <string>__BIND__</string>
     <key>GRIDOPS_TART_BINARY</key>
     <string>__TART_BINARY__</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
     <key>GRIDOPS_TART_RUNNER_ROOT</key>
     <string>__RUNNER_ROOT__</string>
     <key>GRIDOPS_TART_NETWORK_MODE</key>

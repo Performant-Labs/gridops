@@ -38,8 +38,9 @@ if [[ "${network_mode}" == "softnet" ]] && ! command -v softnet >/dev/null 2>&1;
   print -u2 "Install and privilege openai/softnet, or explicitly use GRIDOPS_TART_NETWORK_MODE=nat."
   exit 1
 fi
+softnet_command="$(command -v softnet || true)"
 if [[ "${network_mode}" == "softnet" ]]; then
-  softnet_binary="$(realpath "$(command -v softnet)")"
+  softnet_binary="$(realpath "${softnet_command}")"
   if [[ "$(stat -f '%u' "${softnet_binary}")" != "0" || ! -u "${softnet_binary}" ]]; then
     print -u2 "Softnet is installed but is not owned by root with its SUID bit set."
     print -u2 "Run: sudo chown root:wheel ${softnet_binary}"
@@ -47,6 +48,27 @@ if [[ "${network_mode}" == "softnet" ]]; then
     exit 1
   fi
 fi
+
+# Tart runs softnet by looking it up on its own PATH, which it inherits from
+# the agent, and launchd gives a job that sets no PATH only /usr/bin:/bin:
+# /usr/sbin:/sbin. So the agent's PATH starts with the directories Tart and
+# Softnet were found in (the directory of the link Homebrew makes, not of its
+# versioned target, so it survives upgrades), each once.
+agent_path=""
+path_dirs=("${tart_binary:a:h}")
+if [[ -n "${softnet_command}" ]]; then
+  path_dirs+=("${softnet_command:a:h}")
+fi
+for dir in "${path_dirs[@]}" /usr/bin /bin /usr/sbin /sbin; do
+  if [[ "${dir}" == *:* ]]; then
+    print -u2 "Warning: ${dir} contains a colon and cannot be put on the agent's PATH."
+    continue
+  fi
+  if [[ ":${agent_path}:" != *":${dir}:"* ]]; then
+    agent_path="${agent_path:+${agent_path}:}${dir}"
+  fi
+done
+
 if [[ ! "${vm_slot_wait}" =~ '^[0-9]+$' ]] || (( vm_slot_wait > 1800 )); then
   print -u2 "GRIDOPS_TART_VM_SLOT_WAIT_SECONDS must be a whole number of seconds from 0 to 1800."
   exit 1
@@ -74,21 +96,31 @@ escape_sed() {
   print -nr -- "$1" | sed 's/[&|\\]/\\&/g'
 }
 
+# A value for a plist <string>, escaped for XML and then for sed's replacement.
+plist_value() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  escape_sed "${value}"
+}
+
 sed \
-  -e "s|__BINARY__|$(escape_sed "${binary}")|g" \
-  -e "s|__TOKEN_FILE__|$(escape_sed "${token_file}")|g" \
-  -e "s|__AGENT_HOME__|$(escape_sed "${agent_home}")|g" \
-  -e "s|__BIND__|$(escape_sed "${bind}")|g" \
-  -e "s|__TART_BINARY__|$(escape_sed "${tart_binary}")|g" \
-  -e "s|__RUNNER_ROOT__|$(escape_sed "${runner_root}")|g" \
-  -e "s|__NETWORK_MODE__|$(escape_sed "${network_mode}")|g" \
-  -e "s|__CPU_BUDGET__|$(escape_sed "${cpu_budget}")|g" \
-  -e "s|__MEMORY_BUDGET__|$(escape_sed "${memory_budget}")|g" \
-  -e "s|__MAX_RUNNERS__|$(escape_sed "${max_runners}")|g" \
-  -e "s|__MIN_FREE_DISK__|$(escape_sed "${min_free_disk}")|g" \
-  -e "s|__VM_SLOT_WAIT__|$(escape_sed "${vm_slot_wait}")|g" \
-  -e "s|__STDOUT_LOG__|$(escape_sed "${agent_home}/logs/agent.log")|g" \
-  -e "s|__STDERR_LOG__|$(escape_sed "${agent_home}/logs/agent.error.log")|g" \
+  -e "s|__BINARY__|$(plist_value "${binary}")|g" \
+  -e "s|__TOKEN_FILE__|$(plist_value "${token_file}")|g" \
+  -e "s|__AGENT_HOME__|$(plist_value "${agent_home}")|g" \
+  -e "s|__BIND__|$(plist_value "${bind}")|g" \
+  -e "s|__TART_BINARY__|$(plist_value "${tart_binary}")|g" \
+  -e "s|__PATH__|$(plist_value "${agent_path}")|g" \
+  -e "s|__RUNNER_ROOT__|$(plist_value "${runner_root}")|g" \
+  -e "s|__NETWORK_MODE__|$(plist_value "${network_mode}")|g" \
+  -e "s|__CPU_BUDGET__|$(plist_value "${cpu_budget}")|g" \
+  -e "s|__MEMORY_BUDGET__|$(plist_value "${memory_budget}")|g" \
+  -e "s|__MAX_RUNNERS__|$(plist_value "${max_runners}")|g" \
+  -e "s|__MIN_FREE_DISK__|$(plist_value "${min_free_disk}")|g" \
+  -e "s|__VM_SLOT_WAIT__|$(plist_value "${vm_slot_wait}")|g" \
+  -e "s|__STDOUT_LOG__|$(plist_value "${agent_home}/logs/agent.log")|g" \
+  -e "s|__STDERR_LOG__|$(plist_value "${agent_home}/logs/agent.error.log")|g" \
   "${plist_source}" > "${plist_target}"
 chmod 600 "${plist_target}"
 plutil -lint "${plist_target}" >/dev/null
