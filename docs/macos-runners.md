@@ -107,7 +107,30 @@ launchctl print "gui/${UID}/dev.gridops.tart-agent"
 tail -f ~/.gridops/tart-agent/logs/agent.log
 ```
 
-Tart starts `softnet` by looking it up on its own PATH, and launchd gives an agent only `/usr/bin:/bin:/usr/sbin:/sbin` unless told otherwise. The installer therefore writes a `PATH` into the launchd agent that starts with the directories it found Tart and Softnet in, and the agent itself puts Tart's directory, and Softnet's when it finds it next to Tart, on its PATH or in Homebrew's `bin` directory, at the front of the PATH of every `tart` command. Its log states that PATH when it starts. To upgrade an agent installed before this, run `./scripts/install-tart-agent.sh` again with the same settings; it rewrites the launchd agent and restarts it.
+Tart starts `softnet` by looking it up on its own PATH, and launchd gives an agent only `/usr/bin:/bin:/usr/sbin:/sbin` unless told otherwise. The installer therefore writes a `PATH` into the launchd agent that starts with the directories it found Tart and Softnet in, and the agent itself puts Tart's directory, and Softnet's when it finds it next to Tart, on its PATH or in Homebrew's `bin` directory, at the front of the PATH of every `tart` command. Its log states that PATH when it starts. To upgrade an agent installed before this, run `./scripts/install-tart-agent.sh` again; it rewrites the launchd agent and restarts it.
+
+### Running the installer again
+
+Run `./scripts/install-tart-agent.sh` again to upgrade the agent or to change a setting; `GRIDOPS_TART_AGENT_TOKEN` must be set every time. When an agent is already installed, every setting you do not pass keeps the value in the installed launchd agent (`~/Library/LaunchAgents/dev.gridops.tart-agent.plist`), even where the installer's default has changed since. Only a first install uses the defaults. This covers every setting the installer writes: `GRIDOPS_TART_AGENT_HOME`, `GRIDOPS_TART_AGENT_INSTALL_DIR` (when it is not the home's `bin` directory), `GRIDOPS_TART_AGENT_BIND`, `GRIDOPS_TART_BINARY`, `GRIDOPS_TART_RUNNER_ROOT`, `GRIDOPS_TART_NETWORK_MODE`, `GRIDOPS_TART_CPU_BUDGET`, `GRIDOPS_TART_MEMORY_BUDGET_MB`, `GRIDOPS_TART_MAX_RUNNERS`, `GRIDOPS_TART_MIN_FREE_DISK_MB` and `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS`. An empty variable counts as not passed. The agent's `PATH` is worked out again from where Tart and Softnet are.
+
+**To change a setting, pass it.** For example, to move an agent installed before 0.2.0 to the new defaults:
+
+```sh
+export GRIDOPS_TART_AGENT_TOKEN=<the agent's token>
+GRIDOPS_TART_MAX_RUNNERS=2 GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=60 ./scripts/install-tart-agent.sh
+```
+
+The installer prints one line for each value it keeps and one for each value it changes, before it builds anything. Shortened:
+
+```text
+kept GRIDOPS_TART_CPU_BUDGET=4 from the existing install
+set GRIDOPS_TART_MAX_RUNNERS 1 -> 2
+set GRIDOPS_TART_VM_SLOT_WAIT_SECONDS 180 -> 60
+```
+
+A kept value that is no longer the default says so, for example `kept GRIDOPS_TART_MAX_RUNNERS=1 from the existing install (the default is 2)`. A setting the installed agent does not have yet (it was installed by an older installer) gets the default: `set GRIDOPS_TART_VM_SLOT_WAIT_SECONDS to 60 (not in the existing install)`. A kept value is checked like a passed one, and an error about it says `(from the existing install)`; pass the setting to replace it.
+
+The installer reads the installed launchd agent with `python3` (part of the Xcode Command Line Tools, which Homebrew and Rust need anyway). If it cannot read it, it stops with `Cannot read the existing launchd agent …` and changes nothing, rather than guess the settings; fix the file, or remove it (`launchctl bootout "gui/${UID}/dev.gridops.tart-agent"`, then delete the plist) to install with the defaults and the settings you pass.
 
 ### Troubleshooting
 
@@ -124,7 +147,7 @@ GRIDOPS_TART_MAX_RUNNERS=2
 GRIDOPS_TART_MIN_FREE_DISK_MB=40960
 ```
 
-The runner cap is 2 because macOS runs at most two macOS VMs at once and GridOps shares them out itself (next section). Until 0.2.0 it was 1; an agent installed with that default keeps it until `scripts/install-tart-agent.sh` is run again.
+The runner cap is 2 because macOS runs at most two macOS VMs at once and GridOps shares them out itself (next section). Until 0.2.0 it was 1; an agent installed with that default keeps it, also when `scripts/install-tart-agent.sh` is run again, until it is passed: `GRIDOPS_TART_MAX_RUNNERS=2 ./scripts/install-tart-agent.sh` (see [Running the installer again](#running-the-installer-again)).
 
 These are native-host limits, separate from the Docker container limits. The central manager also includes active Tart capacity when admitting any new runner, so Docker and macOS work cannot independently claim the same CPU envelope.
 
@@ -132,7 +155,7 @@ These are native-host limits, separate from the Docker container limits. The cen
 
 macOS runs at most **two** macOS virtual machines at once on one Mac. The limit is system wide: VMs started by other software on the same Mac, such as another project's CI runner VMs, take the same two slots. GridOps owns this limit: it is part of the Tart host's budget, next to CPU, memory and disk, and the runner manager enforces it when it admits a runner, before it asks the Tart agent for a VM. The design is in [docs/design/mac-vm-slots.md](design/mac-vm-slots.md).
 
-**The limit.** **Settings → General → macOS VM slots on the Tart host** (API: `macosVmSlots` in `PUT /api/v1/settings`) is 2 by default and can be 1 or 2. GridOps sends it to the runner manager with the rest of its policy on every reconciliation pass. It counts every VM on the Mac, not only GridOps's: set it to 1 only for a Mac that should run one VM at a time. `GRIDOPS_TART_MAX_RUNNERS` still caps GridOps's own runners on the Mac (VM and native); it is 2 by default, so GridOps can use both slots. When the agent's cap is lower than the slot setting, the lower one wins: the runner manager counts the cap in GridOps's own budget on the Mac, so a pool waits with `Waiting for room on the Tart host` while a slot is free. GridOps also says so next to the setting: Settings → General shows a warning under the slot setting (for example **The Tart agent allows 1 runner; slots are set to 2**), and the runner manager's health reports the agent's cap as `providers.tart.vmSlots.agentMaxRunners`, with the same advice in `providers.tart.vmSlots.warning` (null when the cap is at or above the slot setting). Raise `GRIDOPS_TART_MAX_RUNNERS` and run the installer again, or lower the slot setting.
+**The limit.** **Settings → General → macOS VM slots on the Tart host** (API: `macosVmSlots` in `PUT /api/v1/settings`) is 2 by default and can be 1 or 2. GridOps sends it to the runner manager with the rest of its policy on every reconciliation pass. It counts every VM on the Mac, not only GridOps's: set it to 1 only for a Mac that should run one VM at a time. `GRIDOPS_TART_MAX_RUNNERS` still caps GridOps's own runners on the Mac (VM and native); it is 2 by default, so GridOps can use both slots. When the agent's cap is lower than the slot setting, the lower one wins: the runner manager counts the cap in GridOps's own budget on the Mac, so a pool waits with `Waiting for room on the Tart host` while a slot is free. GridOps also says so next to the setting: Settings → General shows a warning under the slot setting (for example **The Tart agent allows 1 runner; slots are set to 2**), and the runner manager's health reports the agent's cap as `providers.tart.vmSlots.agentMaxRunners`, with the same advice in `providers.tart.vmSlots.warning` (null when the cap is at or above the slot setting). Run the installer again with a higher `GRIDOPS_TART_MAX_RUNNERS` (for example `GRIDOPS_TART_MAX_RUNNERS=2 ./scripts/install-tart-agent.sh`; a re-run without it keeps the installed value), or lower the slot setting.
 
 **What counts as a slot in use.** A start is admitted only while, in the manager's view, a slot is free:
 
@@ -156,7 +179,7 @@ A pool is shown **waiting** whenever its latest start was refused for a slot or 
 GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=60
 ```
 
-The wait counts from when the runner start request reaches the agent, so cloning the VM is part of it. The default is 60 seconds and the maximum is 600 (10 minutes). `0` turns waiting off. The default was 180 seconds until 0.2.0; it is shorter now because admission holds back starts while the slots are full, so a pool waits in the fair queue rather than inside the agent. An agent installed with the old default keeps it until `scripts/install-tart-agent.sh` is run again. Set it before running `scripts/install-tart-agent.sh`, which writes it into the launchd agent.
+The wait counts from when the runner start request reaches the agent, so cloning the VM is part of it. The default is 60 seconds and the maximum is 600 (10 minutes). `0` turns waiting off. The default was 180 seconds until 0.2.0; it is shorter now because admission holds back starts while the slots are full, so a pool waits in the fair queue rather than inside the agent. An agent installed with the old default keeps it, also when `scripts/install-tart-agent.sh` is run again, until it is passed. Set it in the environment of `scripts/install-tart-agent.sh`, which writes it into the launchd agent, for example `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS=60 ./scripts/install-tart-agent.sh`; a re-run without it keeps the installed value.
 
 The maximum follows from how long the runner manager waits for a macOS runner start: 900 seconds (15 minutes), counted from when the request reaches the manager. A slot can free up at the very end of the wait, and the VM then still has up to 180 seconds to boot and some time to start the runner, so the agent keeps 300 seconds back: 600 + 300 = 900. With a longer wait the manager would give up first and the start would fail as a timeout instead of saying no slot became free, so the agent refuses to start with a value above 600, and so does the installer, each saying why. If a start ever does outlast the manager's 900 seconds, for example because cloning the base VM took that long, it fails with `the Tart agent did not finish starting the macOS runner within 900 seconds, ...` (code `tart_start_timeout`). A Docker runner start has its own limit, 720 seconds (12 minutes): the 10 minutes the manager allows for pulling the runner image plus 2 minutes to start the container.
 
