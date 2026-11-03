@@ -1688,8 +1688,13 @@ pub async fn update_runner_pool(
         || pool.providers != encoded_providers
         || pool.labels != encoded_labels
         || pool.image != primary_image.as_str()
-        || pool.docker_image != docker_image
-        || pool.tart_image != tart_image
+        // An image is only stored for a provider the pool uses (#103). One
+        // left over for an unused provider is dropped here, but no runner used
+        // it, so that alone replaces nothing; adding or removing a provider
+        // already counts above.
+        || (providers.iter().any(|provider| provider == "docker")
+            && pool.docker_image != docker_image)
+        || (providers.iter().any(|provider| provider == "tart") && pool.tart_image != tart_image)
         // Switching between VM and native changes how every runner executes, so
         // it has to roll the existing ones rather than apply to new ones only.
         || pool.macos_runtime != macos_runtime

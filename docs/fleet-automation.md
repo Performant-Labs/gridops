@@ -350,8 +350,18 @@ curl -sS -X DELETE "$GRIDOPS_URL/api/v1/runner-pools/$POOL_ID" \
 For a pool that includes Tart, `tartImage` is the Tart base VM each runner
 clones (a local VM name on the Mac); with Tart as the only or first provider
 `image` may carry it instead. When both `image` and the primary provider's
-`tartImage` or `dockerImage` are sent they must be equal, so a body built from
-`.defaults` must replace `tartImage` too, not only `image`.
+`tartImage` or `dockerImage` are sent they must be equal, on create and on
+edit, so a body built from `.defaults` must replace `tartImage` too, not only
+`image`, and an edit that changes the primary provider's image changes both
+(or leaves the provider-specific field out).
+
+A pool stores an image only for the providers it uses: `dockerImage` or
+`tartImage` sent for a provider not in `providers` is ignored, and reads back
+as `""`. To add a provider to a pool, send its image with the edit: adding Tart
+without `tartImage` is refused with `400` (`Tart base VM (tartImage) is required
+for a pool that uses macOS · Tart virtual machines.`), and adding Docker without
+`dockerImage` likewise. Nothing is filled in from the server's defaults. Tart
+with `"macosRuntime":"native"` clones no VM and needs no `tartImage`.
 
 A validation error is `400 {"error": "..."}` with the form's message, a
 duplicate name `409`, and removing a pool that still has runners on fleet

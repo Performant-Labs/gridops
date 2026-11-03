@@ -15,6 +15,7 @@ import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { poolImages, startingImage } from "~/features/runner-pools/pool-images";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import {
   type RepositoryOption,
@@ -46,9 +47,12 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"ephemeral" | "persistent">(pool.mode);
-  const [providers, setProviders] = useState<Array<"docker" | "tart">>(pool.providers?.length ? pool.providers : [pool.provider]);
-  const [dockerImage, setDockerImage] = useState(pool.dockerImage);
-  const [tartImage, setTartImage] = useState(pool.tartImage);
+  const poolProviders: Array<"docker" | "tart"> = pool.providers?.length ? pool.providers : [pool.provider];
+  const [providers, setProviders] = useState(poolProviders);
+  // Adding a provider asks for its image: it starts empty rather than with
+  // anything the pool may still hold for a provider it did not use (#103).
+  const [dockerImage, setDockerImage] = useState(() => startingImage(poolProviders, "docker", pool.dockerImage));
+  const [tartImage, setTartImage] = useState(() => startingImage(poolProviders, "tart", pool.tartImage));
   const [macosRuntime, setMacosRuntime] = useState<"vm" | "native">(pool.macosRuntime ?? "vm");
   const [repositoryIds, setRepositoryIds] = useState(pool.repositoryIds);
   const [priorityRepositoryIds, setPriorityRepositoryIds] = useState(pool.priorityRepositoryIds);
@@ -126,9 +130,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           provider: primaryProvider,
           providers,
           labels: labelList,
-          image: primaryProvider === "tart" ? tartImage : dockerImage,
-          dockerImage,
-          tartImage,
+          ...poolImages({ provider: primaryProvider, providers, dockerImage, tartImage }),
           macosRuntime,
           desiredCount: Number(form.get("desiredCount")),
           minCount: Number(form.get("minCount")),

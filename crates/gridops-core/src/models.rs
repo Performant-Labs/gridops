@@ -112,12 +112,26 @@ impl CreateRunnerPool {
         selected_providers(&self.provider, &self.providers)
     }
 
+    /// The Docker image to store: empty when the pool does not use Docker.
     pub fn selected_docker_image(&self) -> String {
-        selected_image("docker", &self.provider, &self.image, &self.docker_image)
+        selected_image(
+            "docker",
+            &self.provider,
+            &self.providers,
+            &self.image,
+            &self.docker_image,
+        )
     }
 
+    /// The Tart base VM to store: empty when the pool does not use Tart.
     pub fn selected_tart_image(&self) -> String {
-        selected_image("tart", &self.provider, &self.image, &self.tart_image)
+        selected_image(
+            "tart",
+            &self.provider,
+            &self.providers,
+            &self.image,
+            &self.tart_image,
+        )
     }
 
     pub fn selected_repository_ids(&self) -> Vec<i64> {
@@ -177,6 +191,7 @@ impl CreateRunnerPool {
             &self.image,
             &self.docker_image,
             &self.tart_image,
+            &self.selected_macos_runtime(),
             self.desired_count,
             self.min_count,
             self.max_count,
@@ -239,12 +254,26 @@ impl UpdateRunnerPool {
         selected_providers(&self.provider, &self.providers)
     }
 
+    /// The Docker image to store: empty when the pool does not use Docker.
     pub fn selected_docker_image(&self) -> String {
-        selected_image("docker", &self.provider, &self.image, &self.docker_image)
+        selected_image(
+            "docker",
+            &self.provider,
+            &self.providers,
+            &self.image,
+            &self.docker_image,
+        )
     }
 
+    /// The Tart base VM to store: empty when the pool does not use Tart.
     pub fn selected_tart_image(&self) -> String {
-        selected_image("tart", &self.provider, &self.image, &self.tart_image)
+        selected_image(
+            "tart",
+            &self.provider,
+            &self.providers,
+            &self.image,
+            &self.tart_image,
+        )
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -277,6 +306,12 @@ impl UpdateRunnerPool {
             )?;
         }
         validate_macos_runtime(&self.macos_runtime, &self.selected_providers())?;
+        validate_primary_image(
+            &self.provider,
+            &self.image,
+            &self.docker_image,
+            &self.tart_image,
+        )?;
         if self.repository_ids.as_ref().is_some_and(|repositories| {
             i64::try_from(repositories.len()).unwrap_or(i64::MAX) > self.max_count
         }) {
@@ -291,6 +326,7 @@ impl UpdateRunnerPool {
             &self.image,
             &self.docker_image,
             &self.tart_image,
+            &self.selected_macos_runtime(),
             self.desired_count,
             self.min_count,
             self.max_count,
@@ -313,6 +349,7 @@ fn validate_pool_configuration(
     image: &str,
     docker_image: &str,
     tart_image: &str,
+    macos_runtime: &str,
     desired_count: i64,
     min_count: i64,
     max_count: i64,
@@ -377,14 +414,33 @@ fn validate_pool_configuration(
     {
         return Err("System runner labels are assigned by the selected provider.".into());
     }
-    let selected_docker_image = selected_image("docker", provider, image, docker_image);
-    let selected_tart_image = selected_image("tart", provider, image, tart_image);
-    if selected.iter().any(|provider| provider == "docker") && !valid_image(&selected_docker_image)
-    {
-        return Err("Docker image must contain 1-300 non-padding characters.".into());
+    let selected_docker_image = selected_image("docker", provider, providers, image, docker_image);
+    let selected_tart_image = selected_image("tart", provider, providers, image, tart_image);
+    if selected.iter().any(|provider| provider == "docker") {
+        // A provider added to a pool brings its own image: none is filled in
+        // from a default (issue #103).
+        if selected_docker_image.is_empty() {
+            return Err(
+                "Docker image (dockerImage) is required for a pool that uses Linux · Docker."
+                    .into(),
+            );
+        }
+        if !valid_image(&selected_docker_image) {
+            return Err("Docker image must contain 1-300 non-padding characters.".into());
+        }
     }
-    if includes_tart && !valid_image(&selected_tart_image) {
-        return Err("Tart base VM must contain 1-300 non-padding characters.".into());
+    if includes_tart {
+        // Native execution runs on the agent host and clones no VM, so only
+        // the VM runtime needs a base VM. One that is given is still checked.
+        if selected_tart_image.is_empty() && macos_runtime != "native" {
+            return Err(
+                "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines."
+                    .into(),
+            );
+        }
+        if !selected_tart_image.is_empty() && !valid_image(&selected_tart_image) {
+            return Err("Tart base VM must contain 1-300 non-padding characters.".into());
+        }
     }
     if runner_group_id <= 0 {
         return Err("Runner group ID must be positive.".into());
@@ -446,19 +502,35 @@ fn selected_providers(provider: &str, providers: &[String]) -> Vec<String> {
     }
 }
 
-fn selected_image(kind: &str, provider: &str, image: &str, configured: &str) -> String {
-    if configured.is_empty() && provider == kind {
+/// The image a pool stores for one provider (`kind`). A provider the pool does
+/// not use gets none, whatever the request carries: the web form and a body
+/// built from `/options` `.defaults` send both providers' images, and a stored
+/// default would be cloned silently once that provider is added (issue #103).
+/// For the primary provider, `image` stands in when the specific field is empty.
+fn selected_image(
+    kind: &str,
+    provider: &str,
+    providers: &[String],
+    image: &str,
+    configured: &str,
+) -> String {
+    if !selected_providers(provider, providers)
+        .iter()
+        .any(|selected| selected == kind)
+    {
+        String::new()
+    } else if configured.is_empty() && provider == kind {
         image.to_owned()
     } else {
         configured.to_owned()
     }
 }
 
-/// A create request names the primary provider's image twice, as `image` and
-/// as `dockerImage` or `tartImage`, but only the provider-specific field is
-/// stored when it is sent. Two different values would keep one silently, for
-/// example the server's default Tart base VM instead of the one in `image`,
-/// so they must agree (or the provider-specific field be left out).
+/// A create or edit request names the primary provider's image twice, as
+/// `image` and as `dockerImage` or `tartImage`, but only the provider-specific
+/// field is stored when it is sent. Two different values would keep one
+/// silently, for example the server's default Tart base VM instead of the one
+/// in `image`, so they must agree (or the provider-specific field be left out).
 fn validate_primary_image(
     provider: &str,
     image: &str,
@@ -640,5 +712,154 @@ mod tests {
         assert!(bitbucket.validate().is_ok());
         bitbucket.providers = vec!["docker".into()];
         assert!(bitbucket.validate().is_err());
+    }
+
+    fn update(original: CreateRunnerPool) -> UpdateRunnerPool {
+        UpdateRunnerPool {
+            repository_ids: None,
+            bitbucket_connection_ids: None,
+            name: original.name,
+            mode: original.mode,
+            provider: original.provider,
+            providers: original.providers,
+            labels: original.labels,
+            image: original.image,
+            docker_image: original.docker_image,
+            tart_image: original.tart_image,
+            macos_runtime: original.macos_runtime,
+            desired_count: original.desired_count,
+            min_count: original.min_count,
+            max_count: original.max_count,
+            autoscaling_enabled: original.autoscaling_enabled,
+            queue_scale_factor: original.queue_scale_factor,
+            idle_timeout_minutes: original.idle_timeout_minutes,
+            cpu_limit: original.cpu_limit,
+            memory_limit_mb: original.memory_limit_mb,
+            runner_group_id: original.runner_group_id,
+            priority_repository_ids: None,
+            priority_wait_minutes: None,
+        }
+    }
+
+    /// Issue #103: an image kept for a provider the pool does not use is
+    /// cloned silently once that provider is added. Create and edit store no
+    /// image for it, whatever the request carries (the form and `.defaults`
+    /// send both).
+    #[test]
+    fn stores_no_image_for_a_provider_the_pool_does_not_use() {
+        // pool() is Docker-only and carries the default Tart base VM.
+        let docker = pool();
+        assert!(docker.validate().is_ok());
+        assert_eq!(
+            docker.selected_docker_image(),
+            "ghcr.io/actions/actions-runner:latest"
+        );
+        assert_eq!(docker.selected_tart_image(), "");
+        let docker_edit = update(pool());
+        assert!(docker_edit.validate().is_ok());
+        assert_eq!(docker_edit.selected_tart_image(), "");
+
+        let mut tart = pool();
+        tart.provider = "tart".into();
+        tart.providers = vec!["tart".into()];
+        tart.image = "acme-xcode-26".into();
+        tart.tart_image = "acme-xcode-26".into();
+        assert!(tart.validate().is_ok());
+        assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
+        assert_eq!(tart.selected_docker_image(), "");
+        // A legacy request naming only `provider` uses that provider alone.
+        tart.providers = Vec::new();
+        assert_eq!(tart.selected_docker_image(), "");
+        assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
+        tart.providers = vec!["tart".into()];
+        let tart_edit = update(tart);
+        assert_eq!(tart_edit.selected_docker_image(), "");
+        assert_eq!(tart_edit.selected_tart_image(), "acme-xcode-26");
+
+        let mut mixed = update(pool());
+        mixed.providers = vec!["docker".into(), "tart".into()];
+        mixed.tart_image = "acme-xcode-26".into();
+        assert!(mixed.validate().is_ok());
+        assert_eq!(
+            mixed.selected_docker_image(),
+            "ghcr.io/actions/actions-runner:latest"
+        );
+        assert_eq!(mixed.selected_tart_image(), "acme-xcode-26");
+    }
+
+    /// Adding a provider to a pool needs that provider's image; it is never
+    /// filled in from a default.
+    #[test]
+    fn requires_the_image_of_a_provider_the_pool_adds() {
+        let mut add_tart = update(pool());
+        add_tart.providers = vec!["docker".into(), "tart".into()];
+        add_tart.tart_image = String::new();
+        assert_eq!(
+            add_tart.validate(),
+            Err("Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.".into())
+        );
+        // Native execution clones no VM, so it needs no base VM.
+        add_tart.macos_runtime = "native".into();
+        assert!(add_tart.validate().is_ok());
+        assert_eq!(add_tart.selected_tart_image(), "");
+
+        let mut create_mixed = pool();
+        create_mixed.providers = vec!["docker".into(), "tart".into()];
+        create_mixed.tart_image = String::new();
+        assert_eq!(
+            create_mixed.validate(),
+            Err("Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.".into())
+        );
+
+        let mut add_docker = update(pool());
+        add_docker.provider = "tart".into();
+        add_docker.providers = vec!["tart".into(), "docker".into()];
+        add_docker.image = "acme-xcode-26".into();
+        add_docker.tart_image = "acme-xcode-26".into();
+        add_docker.docker_image = String::new();
+        assert_eq!(
+            add_docker.validate(),
+            Err(
+                "Docker image (dockerImage) is required for a pool that uses Linux · Docker."
+                    .into()
+            )
+        );
+        add_docker.docker_image = "ghcr.io/acme/runner:2".into();
+        assert!(add_docker.validate().is_ok());
+
+        // A value that is there but malformed keeps its own message.
+        add_docker.docker_image = " runner:latest".into();
+        assert_eq!(
+            add_docker.validate(),
+            Err("Docker image must contain 1-300 non-padding characters.".into())
+        );
+    }
+
+    /// #99's agreement rule applies to an edit as it does to a create: two
+    /// different values for the primary provider's image would keep one
+    /// silently.
+    #[test]
+    fn refuses_an_edit_whose_image_and_primary_provider_image_disagree() {
+        let mut tart = update(pool());
+        tart.provider = "tart".into();
+        tart.providers = vec!["tart".into()];
+        tart.image = "acme-xcode-26".into();
+        tart.tart_image = "acme-xcode-26".into();
+        assert!(tart.validate().is_ok());
+        tart.tart_image = String::new();
+        assert!(tart.validate().is_ok());
+        assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
+        tart.tart_image = "gridops-macos-tahoe-base".into();
+        assert_eq!(
+            tart.validate(),
+            Err("image and tartImage name different images for the primary provider; send the same value in both, or leave tartImage out.".into())
+        );
+
+        let mut docker = update(pool());
+        docker.image = "ghcr.io/acme/runner:2".into();
+        assert_eq!(
+            docker.validate(),
+            Err("image and dockerImage name different images for the primary provider; send the same value in both, or leave dockerImage out.".into())
+        );
     }
 }

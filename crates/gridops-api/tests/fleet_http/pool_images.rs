@@ -1,7 +1,8 @@
-//! The images a new runner pool clones (issue #97): `POST /api/v1/runner-pools`
-//! stores the Tart base VM the caller sent, never the server default in its
-//! place, and refuses a request whose `image` and primary provider image
-//! disagree instead of silently keeping one of them.
+//! The images a runner pool clones (issues #97 and #103): `POST` and `PUT
+//! /api/v1/runner-pools` store the Tart base VM the caller sent, never the
+//! server default in its place, store no image for a provider the pool does not
+//! use, and refuse a request whose `image` and primary provider image disagree
+//! instead of silently keeping one of them.
 
 use super::{placement::seed_pool, *};
 
@@ -118,7 +119,7 @@ async fn a_new_pool_keeps_the_tart_base_vm_it_was_given() -> Result<()> {
             "cross-no-vm",
             &json!({"provider": "docker", "providers": ["docker", "tart"], "image": "runner:fixture"}),
         )?,
-        "Tart base VM must contain 1-300 non-padding characters.",
+        "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.",
     )
     .await?;
     Ok(())
@@ -157,5 +158,299 @@ async fn a_new_pool_whose_image_and_tart_base_vm_disagree_is_refused() -> Result
         .fetch_one(&f.database)
         .await?;
     assert_eq!(pools_after, pools_before, "no refused pool was stored");
+    Ok(())
+}
+
+fn admin_put(f: &Fixture, id: &str, body: &Value) -> reqwest::RequestBuilder {
+    f.client
+        .put(format!("{}/api/v1/runner-pools/{id}", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(body)
+}
+
+async fn read_pool(f: &Fixture, id: &str) -> Result<Value> {
+    let response = f
+        .client
+        .get(format!("{}/api/v1/runner-pools/{id}", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(response.json().await?)
+}
+
+/// The edit body a client builds by reading the pool and sending it back.
+fn edit_of(read: &Value, delta: &Value) -> Result<Value> {
+    let mut body = json!({});
+    for key in [
+        "name",
+        "mode",
+        "provider",
+        "providers",
+        "labels",
+        "image",
+        "dockerImage",
+        "tartImage",
+        "macosRuntime",
+        "desiredCount",
+        "minCount",
+        "maxCount",
+        "autoscalingEnabled",
+        "queueScaleFactor",
+        "idleTimeoutMinutes",
+        "cpuLimit",
+        "memoryLimitMb",
+        "runnerGroupId",
+    ] {
+        body[key] = read[key].clone();
+    }
+    // The pool-name label is added by the server; sending it back is refused.
+    body["labels"] = json!([]);
+    for (key, value) in delta.as_object().context("delta")? {
+        body[key] = value.clone();
+    }
+    Ok(body)
+}
+
+async fn edit(f: &Fixture, id: &str, body: &Value) -> Result<()> {
+    let response = admin_put(f, id, body).send().await?;
+    let status = response.status();
+    let answer: Value = response.json().await?;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    Ok(())
+}
+
+async fn edit_refused(f: &Fixture, id: &str, body: &Value, message: &str) -> Result<()> {
+    let before = stored_images(f, id).await?;
+    let response = admin_put(f, id, body).send().await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.json::<Value>().await?, json!({ "error": message }));
+    assert_eq!(
+        stored_images(f, id).await?,
+        before,
+        "a refused edit changes nothing"
+    );
+    Ok(())
+}
+
+/// Issue #103: the form and a body built from `/options` `.defaults` send an
+/// image for both providers. A pool stores none for a provider it does not
+/// use, so adding that provider later cannot silently clone the default.
+#[tokio::test]
+async fn a_pool_stores_no_image_for_a_provider_it_does_not_use() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+
+    let docker = create(
+        &f,
+        &pool(
+            "linux-app",
+            &json!({
+                "provider": "docker", "providers": ["docker"], "image": "runner:fixture",
+                "dockerImage": "runner:fixture", "tartImage": "gridops-macos-tahoe-base",
+            }),
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &docker).await?,
+        (
+            "runner:fixture".into(),
+            "runner:fixture".into(),
+            String::new()
+        )
+    );
+    assert_eq!(read_pool(&f, &docker).await?["tartImage"], "");
+
+    let tart = create(
+        &f,
+        &pool(
+            "macos-app",
+            &json!({
+                "image": "acme-xcode-26", "tartImage": "acme-xcode-26",
+                "dockerImage": "ghcr.io/actions/actions-runner:latest",
+            }),
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &tart).await?,
+        (
+            "acme-xcode-26".into(),
+            String::new(),
+            "acme-xcode-26".into()
+        )
+    );
+
+    // Taking a provider out of a pool drops its image too.
+    let mixed = create(
+        &f,
+        &pool(
+            "cross-platform",
+            &json!({
+                "provider": "docker", "providers": ["docker", "tart"],
+                "image": "runner:fixture", "dockerImage": "runner:fixture", "tartImage": "acme-xcode-26",
+            }),
+        )?,
+    )
+    .await?;
+    let read = read_pool(&f, &mixed).await?;
+    edit(
+        &f,
+        &mixed,
+        &edit_of(&read, &json!({"providers": ["docker"]}))?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &mixed).await?,
+        (
+            "runner:fixture".into(),
+            "runner:fixture".into(),
+            String::new()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn adding_tart_to_a_docker_only_pool_needs_its_base_vm() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let id = create(
+        &f,
+        &pool(
+            "linux-app",
+            &json!({
+                "provider": "docker", "providers": ["docker"], "image": "runner:fixture",
+                "dockerImage": "runner:fixture", "tartImage": "gridops-macos-tahoe-base",
+            }),
+        )?,
+    )
+    .await?;
+    let read = read_pool(&f, &id).await?;
+
+    // Read, add Tart, send back: the pool has no Tart base VM to send.
+    edit_refused(
+        &f,
+        &id,
+        &edit_of(&read, &json!({"providers": ["docker", "tart"]}))?,
+        "Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.",
+    )
+    .await?;
+
+    edit(
+        &f,
+        &id,
+        &edit_of(
+            &read,
+            &json!({"providers": ["docker", "tart"], "tartImage": "acme-xcode-26"}),
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        stored_images(&f, &id).await?,
+        (
+            "runner:fixture".into(),
+            "runner:fixture".into(),
+            "acme-xcode-26".into()
+        )
+    );
+    assert_eq!(read_pool(&f, &id).await?["tartImage"], "acme-xcode-26");
+    Ok(())
+}
+
+/// #99's agreement rule on edits (#104): a read-modify-write that changes
+/// only one of `image` and the primary provider's image is refused rather
+/// than silently keeping the other.
+#[tokio::test]
+async fn an_edit_whose_image_and_tart_base_vm_disagree_is_refused() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let id = create(
+        &f,
+        &pool(
+            "macos-app",
+            &json!({"image": "acme-xcode-26", "tartImage": "acme-xcode-26"}),
+        )?,
+    )
+    .await?;
+    let read = read_pool(&f, &id).await?;
+
+    edit_refused(
+        &f,
+        &id,
+        &edit_of(&read, &json!({"image": "acme-xcode-27"}))?,
+        "image and tartImage name different images for the primary provider; send the same value in both, or leave tartImage out.",
+    )
+    .await?;
+    edit_refused(
+        &f,
+        &id,
+        &edit_of(&read, &json!({"tartImage": "acme-xcode-27"}))?,
+        "image and tartImage name different images for the primary provider; send the same value in both, or leave tartImage out.",
+    )
+    .await?;
+
+    edit(
+        &f,
+        &id,
+        &edit_of(
+            &read,
+            &json!({"image": "acme-xcode-27", "tartImage": "acme-xcode-27"}),
+        )?,
+    )
+    .await?;
+    assert_eq!(stored_images(&f, &id).await?.2, "acme-xcode-27");
+
+    let docker = create(
+        &f,
+        &pool(
+            "linux-app",
+            &json!({"provider": "docker", "providers": ["docker"], "image": "runner:fixture", "dockerImage": "runner:fixture"}),
+        )?,
+    )
+    .await?;
+    let read = read_pool(&f, &docker).await?;
+    edit_refused(
+        &f,
+        &docker,
+        &edit_of(&read, &json!({"image": "ghcr.io/acme/runner:2"}))?,
+        "image and dockerImage name different images for the primary provider; send the same value in both, or leave dockerImage out.",
+    )
+    .await?;
+    Ok(())
+}
+
+/// An image left over for a provider the pool does not use (one an operator
+/// typed, which the upgrade keeps) is dropped by the next edit. No runner ever
+/// used it, so dropping it alone does not replace the pool's runners.
+#[tokio::test]
+async fn dropping_an_unused_image_does_not_replace_the_runners() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let id = create(
+        &f,
+        &pool(
+            "linux-app",
+            &json!({"provider": "docker", "providers": ["docker"], "image": "runner:fixture", "dockerImage": "runner:fixture"}),
+        )?,
+    )
+    .await?;
+    sqlx::query("UPDATE runner_pools SET tart_image='acme-xcode-26' WHERE id=?")
+        .bind(&id)
+        .execute(&f.database)
+        .await?;
+    let read = read_pool(&f, &id).await?;
+    let version = read["configurationVersion"].as_i64().context("version")?;
+
+    let response = admin_put(&f, &id, &edit_of(&read, &json!({}))?)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let answer: Value = response.json().await?;
+    assert_eq!(answer["rollingReplacement"], false, "{answer}");
+    assert_eq!(answer["configurationVersion"], version, "{answer}");
+    assert_eq!(stored_images(&f, &id).await?.2, "");
     Ok(())
 }
