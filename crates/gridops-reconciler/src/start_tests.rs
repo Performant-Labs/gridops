@@ -407,6 +407,36 @@ async fn a_tart_start_runs_beside_the_pass_and_is_started_once() -> Result<()> {
     setup.finish().await
 }
 
+/// A probe that works after the circuit opened shows the pool as it is now,
+/// not `blocked` until the next pass (follow-up from #108).
+#[tokio::test]
+async fn a_successful_probe_clears_the_blocked_state_in_the_same_pass() -> Result<()> {
+    let setup = Setup::new(
+        r#"UPDATE runner_pools SET desired_count=0 WHERE id IN ('pool-mac','pool-linux');
+           INSERT INTO runner_pools (id,installation_id,name,scope,image,provider,providers,docker_image,tart_image,desired_count,autoscaling_enabled,state,provision_failure_count,provision_circuit_open,provision_retry_at,created_at,updated_at)
+             VALUES ('pool-probe',1,'probe','organization','runner:latest','docker','["docker"]','runner:latest','',1,0,'blocked',3,1,1,3,3);"#,
+        tart_lane::SLOT_WATCH_INTERVAL,
+    )
+    .await?;
+
+    tokio::time::timeout(PASS_LIMIT, run_pass(&setup.app)).await?;
+
+    assert_eq!(setup.manager.starts("docker"), ["pool-probe"], "the probe");
+    let (state, failures, circuit_open, retry_at): (String, i64, bool, Option<i64>) =
+        sqlx::query_as(
+            "SELECT state,provision_failure_count,provision_circuit_open,provision_retry_at FROM runner_pools WHERE id='pool-probe'",
+        )
+        .fetch_one(&setup.app.database)
+        .await?;
+    assert_eq!(
+        (failures, circuit_open, retry_at),
+        (0, false, None),
+        "the probe cleared the circuit"
+    );
+    assert_eq!(state, "active", "and the pool says so in the same pass");
+    setup.finish().await
+}
+
 /// A Tart start that fails in the background counts towards its pool's
 /// provisioning circuit, and is reported, exactly as a failed start in the
 /// pass was: here the third failure in a row opens the circuit.
