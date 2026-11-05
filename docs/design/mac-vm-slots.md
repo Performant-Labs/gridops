@@ -127,6 +127,16 @@ Its own `tart run` processes (including a retry during the safety-net wait) are 
 
 **[phase 1]** Admission now refuses starts while the slots are full, so the agent's `tart run` retry loop only covers two cases: the race between admission and `tart run` (other software starting a VM in those seconds) and VMs the agent cannot see. #94 (fixed in #96) made the wait fit inside the manager's time limit for a macOS start (a 600 s maximum, against the manager's 900 s). Phase 1 left its default at 180 s; since admission holds starts back, 0.2.0 shortens the default to 60 s so pools wait in the fair queue rather than inside the agent (the maximum stays 600 s). A timeout is deferred, not counted (section 4).
 
+## 6a. Starts the API asked for [0.2.0]
+
+A start waits in the line for a slot for as long as it takes, and the API cuts a request off after 30 seconds, so the API does not start runners for a pool that can use Tart (open question 1 of #96):
+
+- **Pool create** with a desired count, **scale**, **sync** (`reconcile`) and **rebuild** record what the pool should look like and answer at once. The reconciler's next pass (every 30 seconds by default) starts the runners, in its Tart lane and the same line as every other start.
+- **The response** keeps its shape. `provisioned` is empty for such a pool, and a new `handedToReconciler` says how many runners were left to the reconciler (pool create: the desired count; sync and scale: the missing runners). The pool page shows the pool as waiting or starting, as for any other start.
+- **A pool with only Docker** keeps starting in the request: a Docker start does not wait in the line. A pool with Docker and Tart hands over too, so its Tart starts cannot be cut off; its Docker starts then come with the next pass.
+- **Rebuild** deletes the runner and leaves the replacement to the reconciler, which restores the pool's desired size.
+- **Not changed:** no migration, no new column, no new setting. The reconciler already converges every pool to its desired size.
+
 ## 7. Several clients, several images, VM stores
 
 - **One pool per client [phase 1, already possible].** A pool names its own base VM (`tart_image`) and is scoped to its repositories or organization; several pools on one Mac share the slots through the queue. Another organization is another installation and another pool.

@@ -2634,7 +2634,12 @@ pub async fn create_runner_pool(
         .await
         .map_err(ApiError::Internal)?;
     let mut provisioned = Vec::new();
-    for _ in 0..if blocked { 0 } else { input.desired_count } {
+    let handed_over = !blocked && starts_belong_to_reconciler(&providers);
+    for _ in 0..if blocked || handed_over {
+        0
+    } else {
+        input.desired_count
+    } {
         match provision(&state, &user, &pool_id, None).await {
             Ok(runner) => provisioned.push(runner),
             Err(error) => provisioned
@@ -2643,9 +2648,10 @@ pub async fn create_runner_pool(
     }
     Ok((
         StatusCode::CREATED,
-        Json(
-            json!({ "id": pool_id, "provisioned": provisioned, "cannotRun": cannot_run(blocked) }),
-        ),
+        Json(json!({
+            "id": pool_id, "provisioned": provisioned, "cannotRun": cannot_run(blocked),
+            "handedToReconciler": if handed_over { input.desired_count } else { 0 },
+        })),
     ))
 }
 
@@ -2780,7 +2786,11 @@ pub async fn runner_action(
                 return Err(builtin_host_refusal());
             }
             delete_runner_resources(&state, &user, &runner).await?;
-            provision(&state, &user, &runner.pool_id, runner.target_repository_id).await?;
+            // A pool with Tart gets its replacement from the reconciler.
+            let pool = pool_access(&state, &user, &runner.pool_id).await?;
+            if !starts_belong_to_reconciler(&json_array(&pool.providers)) {
+                provision(&state, &user, &runner.pool_id, runner.target_repository_id).await?;
+            }
         }
         "start" | "stop" | "pause" | "resume" | "restart" => {
             if matches!(input.action.as_str(), "start" | "resume" | "restart")
@@ -4146,6 +4156,16 @@ pub async fn database_backup(State(state): State<AppState>, user: AuthUser) -> A
         .into_response())
 }
 
+/// Whether the API leaves the starts of a pool to the reconciler. A Tart
+/// start can wait in the line for a VM slot on the Mac for longer than the
+/// API's 30 second request limit, so the API records the desired size and
+/// answers; the reconciler's next pass starts the runners, through the same
+/// line as every other start. A pool with only Docker keeps starting in the
+/// request. (Open question 1 of #96.)
+fn starts_belong_to_reconciler(providers: &[String]) -> bool {
+    providers.iter().any(|provider| provider == "tart")
+}
+
 async fn provision(
     state: &AppState,
     user: &AuthUser,
@@ -4550,13 +4570,16 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         .collect::<Vec<_>>();
     let mut provisioned = 0;
     let mut removed = 0;
+    let mut handed_over = 0;
     // This action starts runners through the manager, on the host GridOps
     // runs on. With that host off it starts none: the reconciler places the
     // pool's runners on machines, and a pool without fleet execution is shown
     // as unable to run.
     let host_on = builtin_host_enabled(state).await;
     if active.len() < pool.desired_count as usize {
-        if host_on {
+        if starts_belong_to_reconciler(&json_array(&pool.providers)) {
+            handed_over = pool.desired_count as usize - active.len();
+        } else if host_on {
             for _ in active.len()..pool.desired_count as usize {
                 provision(state, user, pool_id, None).await?;
                 provisioned += 1;
@@ -4598,7 +4621,7 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         .await
         .map_err(ApiError::Internal)?;
     Ok(
-        json!({ "ok": true, "desired": pool.desired_count, "active": final_active, "provisioned": provisioned, "removed": removed, "rotated": rotated, "outdated": outdated, "builtinRunnerHostOff": !host_on }),
+        json!({ "ok": true, "desired": pool.desired_count, "active": final_active, "provisioned": provisioned, "handedToReconciler": handed_over, "removed": removed, "rotated": rotated, "outdated": outdated, "builtinRunnerHostOff": !host_on }),
     )
 }
 
