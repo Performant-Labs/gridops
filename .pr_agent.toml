@@ -1,0 +1,30 @@
+# PR-Agent configuration for GridOps. The model and its limits come from the
+# playbook's shared workflow and .agents/pr-review.yml, not from here.
+# Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/
+
+[config]
+verbosity_level = 1
+
+[pr_reviewer]
+require_score_review = true
+require_tests_review = true
+require_security_review = true
+require_focused_review = false
+require_ticket_analysis_review = false
+num_code_suggestions = 4
+inline_code_comments = true
+automatic_review = true
+persistent_comment = true
+final_update_message = false
+extra_instructions = """
+You review GridOps, a control plane for self-hosted CI runners: Rust services
+(API, runner manager, reconciler, host agent) and a web UI. Look first for
+correctness and safety: authorization and token scopes, database migrations,
+races between the reconciler, the manager and the agents, secrets reaching logs,
+and behaviour that differs between Linux and macOS. Check that a change comes with
+a test and, where it changes what an operator sees or does, a docs and CHANGELOG
+update. Keep findings short and concrete.
+"""
+
+[ignore]
+glob = ['Cargo.lock', 'package-lock.json']

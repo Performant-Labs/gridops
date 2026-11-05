@@ -1,0 +1,16 @@
+# .agents/pr-review.yml: PR automation config for GridOps.
+# Read by .github/workflows/pr-review.yml (the playbook's shared PR Agent workflow).
+# Every key is optional; the playbook's defaults apply to the ones left out.
+
+project:
+  name: "GridOps"
+  timezone: "America/Boise"
+
+pr_agent:
+  # The model, the handler and the fallback are the playbook's; set `model` here
+  # only to override them for this repository.
+  skip_docs_only: true
+  status_check: true
+
+dco:
+  required: false
