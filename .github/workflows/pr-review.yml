@@ -1,0 +1,44 @@
+name: PR-Agent Spec Review
+
+# The default PR Agent of Performant Labs: a thin caller of the playbook's shared
+# workflow. How the review runs (model, handler, labels, status check) is decided
+# there, so changes to the playbook's PR Agent reach this repository without a
+# change here. What it reviews is decided in .agents/pr-review.yml and .pr_agent.toml.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  # A newer commit makes a running review stale, but a comment (a "/review") must
+  # not cancel the review that is already running.
+  cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  pr-review:
+    # This repository is public and the review runs on a self-hosted runner, so it
+    # runs only for code from this repository (as ci.yml does) and, for a "/review"
+    # style comment, only when its author belongs to the organization or is a
+    # collaborator.
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+    secrets:
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
