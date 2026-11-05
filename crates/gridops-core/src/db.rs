@@ -228,9 +228,11 @@ where
 /// can never run, yet it would count as queued for as long as the new attempt
 /// keeps the run unfinished. Its outcome is not known here, so a conclusion
 /// already recorded is kept and none is made up: the next poll lists every
-/// attempt's jobs and records the real one. When GitHub last reported the job
-/// is left alone, since GitHub did not say so. Jobs whose attempt is unknown
-/// (recorded before attempts were) are left to the reconciler's job check.
+/// attempt's jobs and records the real one, and if the run is not polled
+/// again the reconciler's job check asks GitHub for it. When GitHub last
+/// reported the job is left alone, since GitHub did not say so. Jobs whose
+/// attempt is unknown (recorded before attempts were) are left to the
+/// reconciler's job check.
 pub async fn finish_earlier_attempts<'e, E>(
     executor: E,
     run_id: i64,

@@ -1114,7 +1114,7 @@ async fn maybe_sync_github(app: &Reconciler) -> Result<()> {
             tracing::warn!(repository = %repository.full_name, error = ?error, "GitHub workflow polling failed for repository");
         }
     }
-    confirm_open_jobs(app, &mut tokens).await
+    confirm_jobs(app, &mut tokens).await
 }
 
 /// Populates `repositories` for an organization-scoped pool's installation.
@@ -1554,27 +1554,42 @@ const JOB_CHECK_AGE_MS: i64 = 5 * 60 * 1_000;
 /// parallel. A backlog of stale rows clears at this rate too.
 const JOB_CHECK_LIMIT: i64 = 10;
 
+/// How long after a job was finished here without a conclusion the job check
+/// still asks GitHub for one: the window of the Overview's per-machine pass
+/// rates, the one place such a job is counted (as neither passed nor failed).
+/// The check reaches such a job within a few syncs, so the window only
+/// matters when GitHub cannot be asked for that long, or keeps answering
+/// without a conclusion; then the job stops taking a place in the check.
+const CONCLUSION_CHECK_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
 #[derive(Debug, FromRow)]
 struct UnconfirmedJob {
     id: i64,
     installation_id: i64,
     owner: String,
     name: String,
+    /// Already `completed` here, without a conclusion: the check is only for
+    /// how it ended.
+    closed: bool,
 }
 
-/// Open jobs GitHub has said nothing about for [`JOB_CHECK_AGE_MS`] and that
-/// were not asked about within it either, at most `limit`: jobs of unfinished
-/// runs before jobs of finished ones (only the first can hold up the queue),
-/// waiting jobs before running ones, oldest first, so the job the queue alert
-/// names is checked first.
-async fn unconfirmed_open_jobs(
+/// Jobs GitHub has said nothing about for [`JOB_CHECK_AGE_MS`] and that were
+/// not asked about within it either, at most `limit`. Open jobs come first:
+/// jobs of unfinished runs before jobs of finished ones (only the first can
+/// hold up the queue), waiting jobs before running ones, oldest first, so the
+/// job the queue alert names is checked first. The room left goes to jobs
+/// finished here without a conclusion in the last
+/// [`CONCLUSION_CHECK_WINDOW_MS`] (an earlier attempt's job finished when a
+/// re-run appeared), oldest first. Two queries rather than one with `OR`, so
+/// each is served by its own partial index instead of a scan of every job.
+async fn unconfirmed_jobs(
     database: &SqlitePool,
     now: i64,
     limit: i64,
 ) -> Result<Vec<UnconfirmedJob>> {
     let before = now - JOB_CHECK_AGE_MS;
-    Ok(sqlx::query_as::<_, UnconfirmedJob>(
-        r#"SELECT wj.id,repo.installation_id,repo.owner,repo.name
+    let mut jobs = sqlx::query_as::<_, UnconfirmedJob>(
+        r#"SELECT wj.id,repo.installation_id,repo.owner,repo.name,0 AS closed
            FROM workflow_jobs wj
            JOIN workflow_runs wr ON wr.id=wj.run_id
            JOIN repositories repo ON repo.id=wr.repository_id
@@ -1593,7 +1608,35 @@ async fn unconfirmed_open_jobs(
     .bind(before)
     .bind(limit)
     .fetch_all(database)
-    .await?)
+    .await?;
+    let room = limit.saturating_sub(i64::try_from(jobs.len())?);
+    if room > 0 {
+        jobs.extend(
+            sqlx::query_as::<_, UnconfirmedJob>(
+                r#"SELECT wj.id,repo.installation_id,repo.owner,repo.name,1 AS closed
+                   FROM workflow_jobs wj
+                   JOIN workflow_runs wr ON wr.id=wj.run_id
+                   JOIN repositories repo ON repo.id=wr.repository_id
+                   JOIN installations i ON i.id=repo.installation_id
+                   LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
+                   WHERE wj.status='completed' AND wj.conclusion IS NULL
+                     AND COALESCE(wj.completed_at,wj.updated_at)>=?
+                     AND i.suspended_at IS NULL
+                     AND wj.created_at<? AND COALESCE(sync.confirmed_at,0)<?
+                     AND COALESCE(sync.checked_at,0)<?
+                   ORDER BY wj.created_at,wj.id
+                   LIMIT ?"#,
+            )
+            .bind(now - CONCLUSION_CHECK_WINDOW_MS)
+            .bind(before)
+            .bind(before)
+            .bind(before)
+            .bind(room)
+            .fetch_all(database)
+            .await?,
+        );
+    }
+    Ok(jobs)
 }
 
 /// Asks GitHub (`GET /repos/{owner}/{repo}/actions/jobs/{id}`) about open jobs
@@ -1603,11 +1646,13 @@ async fn unconfirmed_open_jobs(
 /// longer lists. A job GitHub no longer has (404) can never run and is
 /// cancelled, as a deleted run's jobs are. `tokens` caches installation tokens
 /// for the sync.
-async fn confirm_open_jobs(
-    app: &Reconciler,
-    tokens: &mut HashMap<i64, Option<String>>,
-) -> Result<()> {
-    let jobs = unconfirmed_open_jobs(&app.database, now_millis(), JOB_CHECK_LIMIT).await?;
+///
+/// With the room the open jobs leave, it also asks about jobs finished here
+/// without a conclusion (an earlier attempt's job finished when a re-run
+/// appeared), so how they ended is recorded even when their run is not polled
+/// again. Once such a job has a conclusion it is not asked about again.
+async fn confirm_jobs(app: &Reconciler, tokens: &mut HashMap<i64, Option<String>>) -> Result<()> {
+    let jobs = unconfirmed_jobs(&app.database, now_millis(), JOB_CHECK_LIMIT).await?;
     for job in jobs {
         let token = if let Some(token) = tokens.get(&job.installation_id) {
             token.clone()
@@ -1615,7 +1660,7 @@ async fn confirm_open_jobs(
             let token = installation_token(app, job.installation_id)
                 .await
                 .unwrap_or_else(|error| {
-                    tracing::warn!(installation_id = job.installation_id, error = ?error, "no GitHub token to check open jobs with");
+                    tracing::warn!(installation_id = job.installation_id, error = ?error, "no GitHub token to check jobs with");
                     None
                 });
             tokens.insert(job.installation_id, token.clone());
@@ -1646,20 +1691,27 @@ async fn confirm_open_jobs(
                 upsert_workflow_job(&mut connection, &remote, now).await?;
                 gridops_core::finish_earlier_attempts(&mut *connection, remote.run_id, now).await?;
                 drop(connection);
-                associate_runner_with_job(
-                    &app.database,
-                    remote.id,
-                    &remote.status,
-                    remote.runner_id,
-                    remote.runner_name.as_deref(),
-                    now,
-                )
-                .await?;
-                tracing::info!(job_id = job.id, status = %remote.status, "checked an open job with GitHub");
+                if job.closed {
+                    // The job was over here already, so the answer says
+                    // nothing about its runner now: the runner may have
+                    // taken the new attempt's job since.
+                    tracing::info!(job_id = job.id, conclusion = ?remote.conclusion, "recorded how a job finished here ended");
+                } else {
+                    associate_runner_with_job(
+                        &app.database,
+                        remote.id,
+                        &remote.status,
+                        remote.runner_id,
+                        remote.runner_name.as_deref(),
+                        now,
+                    )
+                    .await?;
+                    tracing::info!(job_id = job.id, status = %remote.status, "checked an open job with GitHub");
+                }
             }
             Err(error) if github_not_found(&error) => {
                 sqlx::query(
-                    "UPDATE workflow_jobs SET status='completed',conclusion=COALESCE(conclusion,'cancelled'),completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND status<>'completed'",
+                    "UPDATE workflow_jobs SET status='completed',conclusion=COALESCE(conclusion,'cancelled'),completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND (status<>'completed' OR conclusion IS NULL)",
                 )
                 .bind(now)
                 .bind(now)
@@ -1667,13 +1719,10 @@ async fn confirm_open_jobs(
                 .execute(&app.database)
                 .await?;
                 gridops_core::record_job_report(&app.database, job.id, None, now).await?;
-                tracing::info!(
-                    job_id = job.id,
-                    "cancelled an open job GitHub no longer has"
-                );
+                tracing::info!(job_id = job.id, "cancelled a job GitHub no longer has");
             }
             Err(error) => {
-                tracing::warn!(job_id = job.id, error = ?error, "could not check an open job with GitHub");
+                tracing::warn!(job_id = job.id, error = ?error, "could not check a job with GitHub");
             }
         }
     }
@@ -4231,7 +4280,7 @@ mod tests {
 
         // The cap holds: two at a time, the oldest queued job first.
         assert_eq!(
-            unconfirmed_open_jobs(&database, now, 2)
+            unconfirmed_jobs(&database, now, 2)
                 .await?
                 .iter()
                 .map(|job| job.id)
@@ -4240,7 +4289,7 @@ mod tests {
         );
 
         let mut tokens = HashMap::from([(1, Some("installation-token".to_owned()))]);
-        confirm_open_jobs(&app, &mut tokens).await?;
+        confirm_jobs(&app, &mut tokens).await?;
 
         assert_eq!(
             *seen
@@ -4285,11 +4334,170 @@ mod tests {
         seen.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
-        confirm_open_jobs(&app, &mut tokens).await?;
+        confirm_jobs(&app, &mut tokens).await?;
         assert!(
             seen.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
+        );
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// Follow-up to #33: an earlier attempt's job finished here when a re-run
+    /// appeared has no conclusion until the poll records it, and keeps none
+    /// for good if the run is not polled again. The job check asks GitHub
+    /// about it after the open jobs, records the real conclusion, and stops
+    /// asking once the job has one.
+    #[tokio::test]
+    async fn the_job_check_records_the_conclusion_of_a_job_closed_by_a_rerun() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-job-conclusion-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let now = now_millis();
+        let ago = |minutes: i64| now - minutes * 60_000;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            r#"{REPAIR_BASE}
+            INSERT INTO runner_pools (id,installation_id,name,scope,image,created_at,updated_at)
+              VALUES ('pool-1',1,'linux','organization','runner:latest',1,1);
+            INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,os,architecture,status,busy,current_job_id,ephemeral,configuration_version,runtime,created_at,updated_at)
+              VALUES ('63000000-0000-4000-8000-000000000001','pool-1',10,'linux-1','docker','github','linux','X64','busy',1,703,0,1,'vm',1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (70,10,'CI',1,2,'push','in_progress',NULL,'a','https://github.com/octo/app/actions/runs/70',1,1,1,1);
+            INSERT INTO workflow_jobs (id,run_id,name,status,conclusion,runner_name,labels,html_url,completed_at,created_at,updated_at)
+              VALUES
+              (701,70,'closed by the re-run','completed',NULL,'linux-1','[]','u',{c701},{a701},{c701}),
+              (702,70,'queued','queued',NULL,NULL,'[]','u',NULL,{a702},{a702}),
+              (703,70,'running','in_progress',NULL,'linux-1','[]','u',NULL,{a703},{a703}),
+              (704,70,'concluded','completed','success',NULL,'[]','u',{c701},{a701},{c701}),
+              (705,70,'closed long ago','completed',NULL,NULL,'[]','u',{c705},{a705},{c705}),
+              (706,70,'just asked','completed',NULL,NULL,'[]','u',{c701},{a701},{c701}),
+              (707,70,'deleted','completed',NULL,NULL,'[]','u',{c701},{a707},{c701}),
+              (708,70,'just heard of','completed',NULL,NULL,'[]','u',{c701},{a701},{c701});
+            INSERT INTO workflow_job_sync (job_id,run_attempt,confirmed_at,checked_at)
+              VALUES
+              (701,1,{k701},NULL),
+              (702,2,{a702},NULL),
+              (703,2,{k703},NULL),
+              (704,1,{k701},NULL),
+              (705,1,{a705},NULL),
+              (706,1,{k701},{k706}),
+              (707,1,{k701},NULL),
+              (708,1,{k708},NULL);
+            "#,
+            a701 = ago(60),
+            c701 = ago(30),
+            k701 = ago(40),
+            a702 = ago(20),
+            a703 = ago(25),
+            k703 = ago(10),
+            a705 = ago(8 * 24 * 60 + 60),
+            c705 = ago(8 * 24 * 60),
+            k706 = ago(1),
+            a707 = ago(50),
+            k708 = ago(1),
+        )))
+        .execute(&database)
+        .await?;
+        let mut concluded = github_job(701, 70, 1, "completed", Some("failure"));
+        concluded["runner_name"] = json!("linux-1");
+        let mut running = github_job(703, 70, 2, "in_progress", None);
+        running["runner_name"] = json!("linux-1");
+        let (url, seen) = fake_github(vec![
+            ("/repos/octo/app/actions/jobs/701".into(), concluded),
+            (
+                "/repos/octo/app/actions/jobs/702".into(),
+                github_job(702, 70, 2, "queued", None),
+            ),
+            ("/repos/octo/app/actions/jobs/703".into(), running),
+        ])
+        .await?;
+        let app = reconciler_with_github(database.clone(), &url)?;
+
+        // Open jobs come first and share the cap: with room for two, the
+        // older closed jobs wait; with room for three, the oldest one fits.
+        let ids = |jobs: Vec<UnconfirmedJob>| jobs.iter().map(|job| job.id).collect::<Vec<_>>();
+        assert_eq!(ids(unconfirmed_jobs(&database, now, 2).await?), [702, 703]);
+        assert_eq!(
+            ids(unconfirmed_jobs(&database, now, 3).await?),
+            [702, 703, 701]
+        );
+        assert_eq!(
+            ids(unconfirmed_jobs(&database, now, 10).await?),
+            [702, 703, 701, 707]
+        );
+
+        let mut tokens = HashMap::from([(1, Some("installation-token".to_owned()))]);
+        confirm_jobs(&app, &mut tokens).await?;
+
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                "/repos/octo/app/actions/jobs/702",
+                "/repos/octo/app/actions/jobs/703",
+                "/repos/octo/app/actions/jobs/701",
+                "/repos/octo/app/actions/jobs/707",
+            ]
+        );
+        // GitHub's conclusion is recorded.
+        let (status, conclusion, attempt, confirmed) = job_state(&database, 701).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref(), attempt),
+            ("completed", Some("failure"), Some(1))
+        );
+        assert!(confirmed.is_some_and(|at| at >= now));
+        // The runner that ran the earlier attempt's job is busy with the new
+        // attempt's job; hearing how the old one ended does not free it.
+        assert_eq!(
+            sqlx::query_as::<_, (i64, Option<i64>)>(
+                "SELECT busy,current_job_id FROM runners WHERE name='linux-1'"
+            )
+            .fetch_one(&database)
+            .await?,
+            (1, Some(703))
+        );
+        // A job GitHub no longer has gets the conclusion a deleted job gets.
+        let (status, conclusion, _, _) = job_state(&database, 707).await?;
+        assert_eq!(
+            (status.as_str(), conclusion.as_deref()),
+            ("completed", Some("cancelled"))
+        );
+        // A job with a conclusion, one closed before the window, and ones
+        // asked about or reported on by GitHub within the check age were not
+        // asked about.
+        assert_eq!(
+            job_state(&database, 704).await?.1.as_deref(),
+            Some("success")
+        );
+        for id in [705, 706, 708] {
+            assert_eq!(job_state(&database, id).await?.1, None);
+        }
+
+        // Once a job has a conclusion it is not asked about again, even after
+        // the check age; the open jobs still are.
+        sqlx::query("UPDATE workflow_job_sync SET confirmed_at=?,checked_at=? WHERE job_id IN (701,702,703,707)")
+            .bind(ago(10))
+            .bind(ago(10))
+            .execute(&database)
+            .await?;
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        confirm_jobs(&app, &mut tokens).await?;
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                "/repos/octo/app/actions/jobs/702",
+                "/repos/octo/app/actions/jobs/703",
+            ]
         );
 
         database.close().await;
