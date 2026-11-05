@@ -25,6 +25,10 @@ Known problems in the current release are in the README's
   `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` to 60 (was 180). Re-running the installer
   now keeps the settings of an installed agent unless you pass a variable.
   (#106, #114)
+- **The control plane images are built on a Linux runner** (`self-hosted-linux`),
+  which needs `linux/arm64` emulation (QEMU) registered once on the Docker host;
+  the job checks it first. They are still built only when the repository
+  variable `RELEASE_IMAGES` is `true`. (#105)
 - **The API no longer starts Tart runners itself.** `POST
   /api/v1/runner-pools` and the pool scale and reconcile calls leave the
   missing Tart runners to the reconciler and say how many in
@@ -35,6 +39,8 @@ Known problems in the current release are in the README's
 - **A Tart host card on the Overview**: the Mac's macOS VM slots, who holds
   each one, the slot queue, and the warning when the agent's cap is below the
   slot setting. (#113)
+- **The Tart installer test runs in CI** on the macOS runner, when the
+  installer, its plist template or the Tart agent change. (#105)
 - The manager's health reports `agentMaxRunners` and a `warning` for the Tart
   agent's cap. (#106)
 
@@ -58,10 +64,14 @@ Known problems in the current release are in the README's
   #34, #109, #112)
 - **Each Mac VM is counted once** while it starts, and a pool waiting for a
   slot shows as waiting, not failed. (#101, #102, #108)
+- The README's banner, CI badge and Install downloads point at this
+  repository instead of upstream. (#105)
 - A finished start gives its slot lease back before the Tart lock is
   released. (#111)
 - A pool blocked by the provisioning circuit leaves the blocked state in the
   same pass as a successful probe. (#118)
+- Runners the API asked to start (create, scale, reconcile) can no longer
+  start a Tart VM beside the reconciler's own start. (#119)
 - A flaky reconciler test no longer races the Tart start. (#117)
 
 ## 0.1.5 - 2026-11-03
