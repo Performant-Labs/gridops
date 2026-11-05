@@ -1159,9 +1159,10 @@ async fn vm_slots_report(state: &ManagerState, health: &Value) -> Value {
                     .iter()
                     .map(|(runner_id, pool_id)| (runner_id.as_str(), pool_id.as_str())),
             );
-            let mut report = state
-                .vm_slots
-                .report(&usage, starts.len(), Some(capacity.max_runners));
+            let mut report =
+                state
+                    .vm_slots
+                    .report(&usage, starts.len(), Some(capacity.max_runners));
             // Which runner and pool each start is for, so a reader can say
             // who holds the slot (#95 phase 2).
             report["startingVms"] = json!(starts);
