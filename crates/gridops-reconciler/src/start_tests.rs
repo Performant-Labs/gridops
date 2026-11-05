@@ -289,6 +289,18 @@ impl Setup {
         .await?)
     }
 
+    /// Waits, at most five seconds, for the Tart start the pass handed over
+    /// to reach the manager: the pass does not wait for it.
+    async fn tart_start_reached_manager(&self) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.manager.starts("tart").is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("the Tart start did not reach the manager")
+    }
+
     /// Waits, at most five seconds, for the Tart start under way to end.
     async fn tart_start_ended(&self) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -329,6 +341,7 @@ async fn a_tart_start_runs_beside_the_pass_and_is_started_once() -> Result<()> {
         first_pass.is_ok(),
         "the pass waited for the Tart start, which has not ended"
     );
+    setup.tart_start_reached_manager().await?;
     assert_eq!(setup.manager.starts("tart"), ["pool-mac"]);
     assert_eq!(
         setup.runners("pool-mac").await?,
