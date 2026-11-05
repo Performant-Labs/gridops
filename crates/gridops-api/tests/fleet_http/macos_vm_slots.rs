@@ -478,3 +478,79 @@ async fn the_tart_host_card_lists_running_runners_oldest_first() -> Result<()> {
     );
     Ok(())
 }
+
+/// A Tart start can wait in the line for a slot longer than the API's request
+/// limit, so the API records the size a pool should have and answers; the
+/// reconciler starts the runners. The manager here answers no start at all,
+/// so any start in the request would fail it.
+#[tokio::test]
+async fn the_api_hands_a_tart_pools_starts_to_the_reconciler() -> Result<()> {
+    let manager = FakeManager::start().await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    seed_pool(&f).await?;
+    sqlx::query("INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES ('builtinRunnerHostEnabled','true',1)")
+        .execute(&f.database)
+        .await?;
+
+    // Creating a pool with a desired count starts nothing in the request.
+    let created = admin(&f, reqwest::Method::POST, "/runner-pools")
+        .json(&json!({
+            "installationId": 1, "name": "mac", "scope": "organization", "mode": "ephemeral",
+            "provider": "tart", "providers": ["tart"], "labels": ["gridops"],
+            "image": "base", "tartImage": "base",
+            "desiredCount": 2, "minCount": 0, "maxCount": 2, "autoscalingEnabled": false,
+            "queueScaleFactor": 1, "idleTimeoutMinutes": 5, "cpuLimit": 2, "memoryLimitMb": 2048,
+            "runnerGroupId": 1,
+        }))
+        .send()
+        .await?;
+    let status = created.status();
+    let text = created.text().await?;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let body: Value = serde_json::from_str(&text)?;
+    assert_eq!(body["provisioned"], json!([]));
+    assert_eq!(body["handedToReconciler"], 2);
+    let id = body["id"].as_str().context("pool id")?;
+    let (desired, runners): (i64, i64) = sqlx::query_as(
+        "SELECT desired_count,(SELECT COUNT(*) FROM runners WHERE pool_id=runner_pools.id) FROM runner_pools WHERE id=?",
+    )
+    .bind(id)
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(
+        (desired, runners),
+        (2, 0),
+        "the size is recorded, no runner"
+    );
+
+    // So does scaling one.
+    sqlx::query("UPDATE runner_pools SET provider='tart',providers='[\"tart\"]',tart_image='base' WHERE id='fleet-pool'")
+        .execute(&f.database)
+        .await?;
+    let scaled = admin(&f, reqwest::Method::POST, "/runner-pools/fleet-pool/action")
+        .json(&json!({"action": "scale", "desiredCount": 3}))
+        .send()
+        .await?;
+    assert_eq!(scaled.status(), StatusCode::OK);
+    let body: Value = scaled.json().await?;
+    assert_eq!(body["provisioned"], 0);
+    assert_eq!(body["handedToReconciler"], 3);
+
+    // A pool with only Docker still starts in the request, which here fails
+    // because the manager takes no start.
+    sqlx::query(
+        "UPDATE runner_pools SET provider='docker',providers='[\"docker\"]' WHERE id='fleet-pool'",
+    )
+    .execute(&f.database)
+    .await?;
+    let scaled = admin(&f, reqwest::Method::POST, "/runner-pools/fleet-pool/action")
+        .json(&json!({"action": "scale", "desiredCount": 2}))
+        .send()
+        .await?;
+    assert_ne!(
+        scaled.status(),
+        StatusCode::OK,
+        "Docker starts in the request"
+    );
+    Ok(())
+}
