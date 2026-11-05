@@ -8,6 +8,62 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
+## 0.2.0 - 2026-11-04
+
+### Upgrading
+
+- Three database migrations run when the services start on the new version:
+  `0043` (an attempt number on workflow jobs, so a re-run's earlier attempts
+  can be told apart), `0044` (clears the default image stored on a provider a
+  pool does not use) and `0045` (an index on jobs without a conclusion). No
+  existing table is dropped. (#109, #110, #112)
+- Upgrade the API, runner manager and reconciler together. Tart starts now run
+  in the reconciler, and the manager reports the slot queue the new Tart host
+  card shows. (#106, #113, #115)
+- **Reinstall the Tart agent on the Mac** with `scripts/install-tart-agent.sh`.
+  `GRIDOPS_TART_MAX_RUNNERS` now defaults to 2 and
+  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` to 60 (was 180). Re-running the installer
+  now keeps the settings of an installed agent unless you pass a variable.
+  (#106, #114)
+- **The API no longer starts Tart runners itself.** `POST
+  /api/v1/runner-pools` and the pool scale and reconcile calls leave the
+  missing Tart runners to the reconciler and say how many in
+  `handedToReconciler`. Docker pools start as before. (#119)
+
+### Added
+
+- **A Tart host card on the Overview**: the Mac's macOS VM slots, who holds
+  each one, the slot queue, and the warning when the agent's cap is below the
+  slot setting. (#113)
+- The manager's health reports `agentMaxRunners` and a `warning` for the Tart
+  agent's cap. (#106)
+
+### Changed
+
+- **The Create pool form asks for the Tart base VM** with a hint on how to
+  prepare one. (#99)
+- **Each provider has its own start lock**, and Docker starts cover the image
+  pull, so a slow start on one provider no longer holds up another. (#107)
+- **Tart starts run beside the reconciler pass**, and a macOS VM slot that
+  frees goes to the head of the line at once. (#115)
+- A pool stores no image for a provider it does not use, nor a base VM for a
+  native Tart pool, and editing a pool applies the same image agreement check
+  as creating one. (#110, #116)
+
+### Fixed
+
+- **A re-run no longer leaves the earlier attempt's jobs queued or in
+  progress**, and the "waiting for over five minutes" alert is confirmed with
+  GitHub before it shows. The jobs it closes get their real conclusion. (#33,
+  #34, #109, #112)
+- **Each Mac VM is counted once** while it starts, and a pool waiting for a
+  slot shows as waiting, not failed. (#101, #102, #108)
+- A finished start gives its slot lease back before the Tart lock is
+  released. (#111)
+- A pool blocked by the provisioning circuit leaves the blocked state in the
+  same pass as a successful probe. (#118)
+- A flaky reconciler test no longer races the Tart start. (#117)
+
 ## 0.1.5 - 2026-11-03
 
 ### Upgrading
