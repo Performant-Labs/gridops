@@ -2,7 +2,7 @@
 
 Issue: [#95](https://github.com/Performant-Labs/gridops/issues/95). Related: #86 and #87 (the slot wait in the Tart agent), #94 and #96 (making that wait fit the manager's time limit), #80 (a release needs a macOS runner).
 
-Status: **phase 1 is implemented** (marked **[phase 1]** below). Everything else is the plan.
+Status: **phase 1 is implemented** (marked **[phase 1]** below). Of phase 2, the immediate hand-off of a freed slot is implemented in 0.2.0 (marked **[0.2.0]**), with Tart starts run beside the reconciler's pass. Everything else is the plan.
 
 ## The problem in one paragraph
 
@@ -13,6 +13,7 @@ An Apple-silicon Mac runs at most two macOS VMs at once, whoever starts them. Be
 ```
 reconciler (one process, one pass at a time, pools in creation order)
   └─ provision_on_host ─ POST /v1/admissions ─▶ manager.reserve_capacity
+     (a Tart start, once admitted, runs in its own task, one at a time; the pass carries on [0.2.0])
                                                  ├─ provision_lock (tokio Mutex; one per provider since 0.2.0)
                                                  ├─ Tart agent GET /v1/health → budget, active
                                                  ├─ reservations lock: enforce_capacity, insert lease (5 min TTL)
@@ -75,14 +76,22 @@ Both the reconciler and the web app go through this check, so neither can bypass
 - A request from pool P with `f` free slots is admitted only if P is among the first `f` live entries of the queue. A pool not yet in the queue joins at the back. So a freed slot is held for the head of the queue and nobody else can take it, whichever pool happens to ask first.
 - An admitted pool leaves the queue; if it wants another slot it joins at the back. Two pools that always want a slot therefore alternate, and with N pools each waits at most N − 1 grants: **no starvation**, independent of the order the reconciler visits pools.
 - **Liveness without clocks.** Every admission from the reconciler carries `reconcilePass` (the pass's start time, used only as an identifier). The manager counts passes as *rounds* when the identifier changes. An entry that did not ask in a whole round (it is two rounds behind) has stopped asking (its job ran elsewhere or was cancelled, or its pool was paused) and is dropped, so a slot is never held for a pool that no longer wants it for more than one pass. No timestamps from different machines are compared, so clock skew does not matter.
+- **Rounds while a Tart start runs [0.2.0].** A Tart start runs beside the pass, one at a time (`crates/gridops-reconciler/src/tart_lane.rs`). While it runs, the reconciler asks for no other Tart runner: the manager's Tart lock would hold that admission for the whole start, and the pass with it. A pool that wanted one is *held back*; it has not stopped asking. So a pass that held a pool back does not begin a new round: the next pass sends the same `reconcilePass`, and so on until a pass has asked for every pool that wanted a Tart runner. A pool waiting in line therefore keeps its place however long the start in front of it takes (up to the manager's 15-minute limit), and the round advances again as soon as nobody is held back. The cost: while a Tart start runs, a pool that stopped wanting a slot stays in the line until the round advances. That holds no slot, since nobody else can be admitted then either.
 - The reconciler does **not** pause a pool for 30 s after `vm_slot_busy`, nor after a Tart `host_capacity_exhausted` (it does for other waits), so a waiting pool asks on every pass and keeps its place. Native Tart runners take no slot and do not wait in the line; they still count against the Tart budget, so a native start can take budget room a waiting VM pool wanted (an accepted edge in phase 1; native and VM pools rarely share one Mac's budget).
 - A start without a pass (the web app's **Start runner**) is admitted only if free slots exceed the number of waiting pools, and does not join the queue; it cannot jump it.
 
-"Handed over at once" in phase 1 means: from the moment a slot is free, it belongs to the head of the queue, and the head gets it the next time it asks, within one reconciliation pass (30 s by default). Nobody else can take it meanwhile.
+"Handed over at once" in phase 1 meant: from the moment a slot is free, it belongs to the head of the queue, and the head gets it the next time it asks, within one reconciliation pass (30 s by default). Nobody else can take it meanwhile. Since 0.2.0 the head asks at once (below).
+
+**Immediate hand-off [0.2.0].** The reconciler runs its next pass as soon as a slot frees, instead of at the end of its interval:
+
+- *A Tart start of the reconciler's ends* (started, failed, deferred): the start's task wakes the pass when it gives up its claim on the Tart lane. A failed start's lease is released by the manager before it answers (#111), so the slot is free by then.
+- *Anything else frees a slot* (a GridOps VM's job ends and the agent stops it, a VM of other software stops, the limit is raised, a start the reconciler did not make gives its lease back): while a pool waits in the line (a start in the last pass was refused with `vm_slot_busy`, or with a Tart `host_capacity_exhausted`) and no Tart start of the reconciler's runs, the reconciler reads `GET /v1/vm-slots` on the manager every 3 s. That answers what the health's `providers.tart.vmSlots` answers, asking the Tart agent only. When fewer slots are in use or more are free than at the last look, it wakes the pass. On the first look after the wait began, a free slot counts too: it may have freed between the refusal and that look.
+- The woken pass is an ordinary pass: every pool, in creation order. The head of the line asks first only if it is visited first, but that does not matter: the manager keeps the slot for the head and refuses everyone else (section 3), so the head gets it in this pass whatever the order. FIFO and the round rule are unchanged; a woken pass is one more round, and a waiting pool asks in every pass.
+
+*Why the reconciler watches rather than the manager nudging.* The manager learns that a VM stopped only by asking the Tart agent (`tart list`, `ps`), so somebody has to poll the agent either way; the manager has no event to forward. The reconciler has no HTTP endpoint for the manager to call, and adding one (with its own token) to push a nudge that is itself the result of a poll adds a moving part without saving one. A long poll on the manager would do the same polling inside the manager. Polling from the reconciler only while a pool waits keeps the agent's load where it was when nobody waits, and is 20 light requests a minute while someone does. The latency is at most 3 s plus the pass, against up to 30 s before.
 
 **Later [phase 2]:**
 
-- *Immediate hand-off.* When the manager's view shows a free slot held for the head, it can tell the reconciler (the reconciler already receives `workflow_job` webhooks; a "slot freed" nudge or a long-poll on `GET /v1/admissions/queue`) to run that pool's start immediately instead of on the next pass.
 - *Weights and priority.* An optional per-pool `vmSlotWeight` (default 1): deficit round robin across waiting pools, where a grant costs 1/weight; priority as a strict class above weights, with an aging bound (a waiting entry gains one class per K minutes) so a low class still cannot starve. FIFO stays the default; no weights are added until someone needs them.
 - *Persistence.* The queue lives in the manager's memory. A manager restart rebuilds it in one pass in the reconciler's visiting order, losing seniority once. If that matters, the pool's `waiting since` can move to the database and be sent with the admission.
 
@@ -156,7 +165,7 @@ In `docs/macos-runners.md` ("Moving another project's macOS CI onto GridOps"): p
 - Reconciler: `vm_slot_busy` and `vm_slot_unavailable` deferred, never counted; no 30 s pause for `vm_slot_busy` or a Tart `host_capacity_exhausted`; the wait reason (`runner_pool_waits`, migration 0042) shown on the pool page.
 - Docs: `docs/macos-runners.md` updated, with the migration guide.
 
-**Phase 2.** Immediate hand-off (nudge the reconciler when a slot frees); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue; done in 0.2.0); optional weights and priority with aging. (Shortening the safety-net wait's default was decided for 0.2.0: 60 s.)
+**Phase 2.** Immediate hand-off (the reconciler runs a pass as soon as a slot frees; done in 0.2.0); keep-warm per pool with cross-pool reclaim; learning from the OS's refusal; a Tart host card in the UI (slots, holders, queue; done in 0.2.0); optional weights and priority with aging. (Shortening the safety-net wait's default was decided for 0.2.0: 60 s.)
 
 **Phase 3.** Several Tart hosts (a `tart_hosts` table with per-host slots and queue); several VM stores per agent (`GRIDOPS_TART_IMAGE_SOURCES`).
 

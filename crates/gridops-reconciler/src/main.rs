@@ -1,6 +1,10 @@
 mod agent;
 mod builtin_host;
 mod fleet;
+mod tart_lane;
+
+#[cfg(test)]
+mod start_tests;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -40,12 +44,17 @@ struct Reconciler {
     bitbucket: BitbucketClient,
     vault: Vault,
     http: reqwest::Client,
-    /// The pass under way (its start, in milliseconds), sent with admissions
-    /// so a pool waiting for a macOS VM slot keeps its place in line.
+    /// The round of the Mac's VM slot line under way, sent with admissions
+    /// so a pool waiting for a slot keeps its place in line: the start of
+    /// the pass that began it, in milliseconds. A round lasts one pass, or
+    /// longer while pools are held back behind a Tart start (`tart_lane`).
     pass: Arc<AtomicI64>,
+    /// Tart starts, run beside the pass one at a time, and what wakes the
+    /// pass early.
+    tart: Arc<tart_lane::TartLane>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Clone, Debug, FromRow)]
 struct Pool {
     id: String,
     installation_id: i64,
@@ -166,6 +175,12 @@ struct CreatedRunner {
 
 enum ProvisionAttempt {
     Provisioned,
+    /// A Tart start was admitted and runs in the background; its pool's next
+    /// pass records how it ended.
+    Started,
+    /// Another Tart start runs, so this one was not asked for (see
+    /// `tart_lane`).
+    HeldBack,
     /// No queued job needs another runner, so none was started.
     NoDemand,
     /// The host had no safe capacity. `full_provider` names the provider whose
@@ -200,6 +215,10 @@ async fn main() -> Result<()> {
             .user_agent("GridOps reconciler/0.1")
             .build()?,
         pass: Arc::default(),
+        tart: Arc::new(tart_lane::TartLane::new(
+            Arc::default(),
+            tart_lane::SLOT_WATCH_INTERVAL,
+        )),
     };
 
     tracing::info!("GridOps Rust reconciler started");
@@ -209,21 +228,81 @@ async fn main() -> Result<()> {
     // Syncing every repository from GitHub takes over a minute; inside the
     // pass it held up every runner waiting to be told to start.
     tokio::spawn(github_sync_worker(reconciler.clone()));
+    tokio::spawn(watch_vm_slots(reconciler.clone()));
+    run_passes(reconciler).await;
+    Ok(())
+}
+
+/// Runs a pass, then waits for the reconcile interval, or less when woken: a
+/// Tart start ended, a macOS VM slot freed while a pool waits for one, or the
+/// API asked for runners. A wake-up during a pass starts the next one as soon
+/// as it ends.
+async fn run_passes(reconciler: Reconciler) {
     loop {
-        let started_at = now_millis();
-        reconciler.pass.store(started_at, Ordering::Relaxed);
-        let started = std::time::Instant::now();
-        if let Err(error) = reconcile(&reconciler).await {
-            tracing::error!(error = ?error, "reconciliation pass failed");
-        }
-        let elapsed = started.elapsed();
-        if let Err(error) = record_pass(&reconciler.database, started_at, elapsed).await {
-            tracing::warn!(error = ?error, "could not record reconciliation pass duration");
-        }
+        let elapsed = run_pass(&reconciler).await;
         let interval = setting_i64(&reconciler.database, "reconcileIntervalSeconds", 30)
             .await
             .clamp(5, 3_600);
-        tokio::time::sleep(Duration::from_secs(interval as u64).saturating_sub(elapsed)).await;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(interval as u64).saturating_sub(elapsed)) => {}
+            () = reconciler.tart.wake().notified() => {}
+        }
+    }
+}
+
+/// One pass, with what the Tart lane keeps between passes: the round of the
+/// Mac's VM slot line it belongs to, and whether a pool waits in that line.
+/// Answers how long it took.
+async fn run_pass(reconciler: &Reconciler) -> Duration {
+    let started_at = now_millis();
+    if reconciler.tart.begin_pass() {
+        reconciler.pass.store(started_at, Ordering::Relaxed);
+    }
+    let started = std::time::Instant::now();
+    if let Err(error) = reconcile(reconciler).await {
+        tracing::error!(error = ?error, "reconciliation pass failed");
+    }
+    reconciler.tart.end_pass();
+    let elapsed = started.elapsed();
+    if let Err(error) = record_pass(&reconciler.database, started_at, elapsed).await {
+        tracing::warn!(error = ?error, "could not record reconciliation pass duration");
+    }
+    elapsed
+}
+
+/// Watches the Mac's VM slots while a pool waits in the line for one, and
+/// wakes the pass as soon as a slot frees, so the pool at the head of the
+/// line starts at once instead of on the next scheduled pass (#95 phase 2).
+/// The manager learns of a VM that stopped only from the Tart agent, so this
+/// asks it every few seconds, and only while someone waits.
+async fn watch_vm_slots(app: Reconciler) {
+    let mut last = None;
+    loop {
+        tokio::time::sleep(app.tart.watch_interval()).await;
+        if !app.tart.watching_slots() {
+            last = None;
+            continue;
+        }
+        match manager_request::<Value>(&app, Method::GET, "v1/vm-slots", None).await {
+            Ok(view) => {
+                let now = view
+                    .get("vmSlots")
+                    .and_then(tart_lane::SlotView::from_report);
+                if let Some(now) = now
+                    && tart_lane::wake_for_slots(last, now)
+                {
+                    tracing::info!(
+                        "a macOS VM slot freed while a pool waits for one; reconciling now"
+                    );
+                    app.tart.wake().notify_one();
+                }
+                last = now;
+            }
+            Err(error) => {
+                tracing::debug!(error = ?error, "could not read the Mac's VM slots");
+                last = None;
+            }
+        }
     }
 }
 
@@ -316,6 +395,12 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
         .map(|runner| (runner.id, runner.state))
         .collect::<HashMap<_, _>>();
     let pools = load_pools(&app.database).await?;
+    app.tart.retain_finished(
+        &pools
+            .iter()
+            .map(|pool| pool.id.as_str())
+            .collect::<Vec<_>>(),
+    );
     for pool in pools {
         if let Err(error) = reconcile_pool(
             app,
@@ -497,7 +582,36 @@ async fn reconcile_pool(
     let mut provisioned = 0;
     let mut removed = 0;
     let mut capacity_deferred = false;
-    if !provisioning_blocked && active.len() < desired as usize {
+    let mut held_back = false;
+    // A Tart start that ran beside an earlier pass is recorded now, as the
+    // pass that started it would have recorded it (`tart_lane`).
+    let mut start_ended = false;
+    match app.tart.take_finished(&pool.id) {
+        None => {}
+        Some(tart_lane::Finished::Provisioned) => provisioned += 1,
+        Some(tart_lane::Finished::Deferred {
+            reason,
+            full_provider,
+        }) => {
+            note_line_wait(app, reason.as_deref(), full_provider.as_deref());
+            defer_pool_capacity(
+                &app.database,
+                pool,
+                reason.as_deref(),
+                full_provider.as_deref(),
+            )
+            .await?;
+            capacity_deferred = true;
+            start_ended = true;
+        }
+        Some(tart_lane::Finished::Failed { error, counts }) => {
+            if counts {
+                record_provision_failure(&app.database, pool).await?;
+            }
+            return Err(error);
+        }
+    }
+    if !provisioning_blocked && !start_ended && active.len() < desired as usize {
         for _ in active.len()..desired as usize {
             let mut attempt = provision(app, pool, builtin_enabled).await?;
             // An idle runner parked on a repository without work does not make
@@ -517,11 +631,18 @@ async fn reconcile_pool(
             }
             match attempt {
                 ProvisionAttempt::Provisioned => provisioned += 1,
+                // Counted when it ends, by the pass that records it.
+                ProvisionAttempt::Started => {}
+                ProvisionAttempt::HeldBack => {
+                    held_back = true;
+                    break;
+                }
                 ProvisionAttempt::NoDemand => break,
                 ProvisionAttempt::Deferred {
                     reason,
                     full_provider,
                 } => {
+                    note_line_wait(app, reason.as_deref(), full_provider.as_deref());
                     defer_pool_capacity(
                         &app.database,
                         pool,
@@ -563,6 +684,7 @@ async fn reconcile_pool(
         host_blocked,
         capacity_deferred,
         retry_deferred,
+        held_back,
         outdated: outdated_count,
         active: active_count,
         desired: usize::try_from(desired).unwrap_or_default(),
@@ -598,6 +720,8 @@ struct PassOutcome {
     retry_deferred: bool,
     /// The pool's last start, in an earlier pass, was deferred.
     wait_recorded: bool,
+    /// This pass asked for no Tart runner because another Tart start runs.
+    held_back: bool,
     outdated: usize,
     active: usize,
     desired: usize,
@@ -627,7 +751,10 @@ impl PassOutcome {
 /// stays open, and the pool page says so, until a start succeeds or fails.
 /// Only then do an open circuit (`blocked`) and a failure's pause (`backoff`).
 fn pool_state(outcome: &PassOutcome) -> &'static str {
+    // A pool held back behind another Tart start did not ask, so it keeps
+    // the wait it had: still in the Mac's line, or not waiting.
     let waiting = outcome.capacity_deferred
+        || (outcome.held_back && outcome.wait_recorded)
         || (outcome.retry_deferred && (outcome.failure_count == 0 || outcome.wait_recorded));
     if outcome.paused {
         "paused"
@@ -1909,16 +2036,26 @@ async fn provision_on_host(
         &pool.tart_image,
     );
     let platform = plan.platform;
-    let runner_mode = plan.mode.as_str();
     let runner_ephemeral = plan.ephemeral;
-    let runtime = plan.runtime.as_str();
-    let image = plan.image.as_str();
+    // A Tart start runs beside the pass, one at a time (see `tart_lane`), so
+    // the pools after it, Docker's among them, do not wait for it. While one
+    // runs, no other Tart runner is asked for: the manager would hold that
+    // admission until the running start ended.
+    let tart_claim = if provider == "tart" {
+        let Some(claim) = app.tart.claim() else {
+            app.tart.hold_back();
+            return Ok(ProvisionAttempt::HeldBack);
+        };
+        Some(claim)
+    } else {
+        None
+    };
     let admission = reserve_runner_capacity(
         app,
         &runner_id,
         &pool.id,
         &provider,
-        runtime,
+        &plan.runtime,
         pool.cpu_limit,
         pool.memory_limit_mb,
     )
@@ -1947,7 +2084,7 @@ async fn provision_on_host(
         .bind(runner_architecture)
         .bind(runner_ephemeral)
         .bind(pool.configuration_version)
-        .bind(runtime)
+        .bind(&plan.runtime)
         .bind(now)
         .bind(now)
         .execute(&app.database)
@@ -1958,7 +2095,114 @@ async fn provision_on_host(
         }
         return Err(error.into());
     }
+    let start = AdmittedStart {
+        runner_id,
+        runner_name,
+        provider,
+        platform,
+        mode: plan.mode,
+        runtime: plan.runtime,
+        image: plan.image,
+        labels,
+        target_repository,
+        bitbucket_connection,
+        capacity_lease,
+    };
+    let Some(mut claim) = tart_claim else {
+        return match start_admitted_runner(app, pool, start).await? {
+            StartOutcome::Provisioned => Ok(ProvisionAttempt::Provisioned),
+            StartOutcome::Deferred {
+                reason,
+                full_provider,
+            } => Ok(ProvisionAttempt::Deferred {
+                reason,
+                full_provider,
+            }),
+            StartOutcome::Failed(error) => {
+                record_provision_failure(&app.database, pool).await?;
+                Err(error)
+            }
+        };
+    };
+    // Its runner row is `starting` from now on, so the next pass counts it
+    // and does not start another for the same need.
+    claim.start(&pool.id, &start.runner_id);
+    let app = app.clone();
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        let finished = match start_admitted_runner(&app, &pool, start).await {
+            Ok(StartOutcome::Provisioned) => tart_lane::Finished::Provisioned,
+            Ok(StartOutcome::Deferred {
+                reason,
+                full_provider,
+            }) => tart_lane::Finished::Deferred {
+                reason,
+                full_provider,
+            },
+            Ok(StartOutcome::Failed(error)) => tart_lane::Finished::Failed {
+                error,
+                counts: true,
+            },
+            Err(error) => tart_lane::Finished::Failed {
+                error,
+                counts: false,
+            },
+        };
+        claim.finish(finished);
+    });
+    Ok(ProvisionAttempt::Started)
+}
 
+/// A runner start that was admitted, with its runner row recorded.
+struct AdmittedStart {
+    runner_id: String,
+    runner_name: String,
+    provider: String,
+    platform: &'static str,
+    mode: String,
+    runtime: String,
+    image: String,
+    labels: Vec<String>,
+    target_repository: Option<RepositoryCapacity>,
+    bitbucket_connection: Option<BitbucketPoolConnection>,
+    capacity_lease: String,
+}
+
+/// How an admitted start ended.
+enum StartOutcome {
+    Provisioned,
+    /// Deferred, not failed (see `deferred_manager_error`); the runner is
+    /// recorded as failed with its event.
+    Deferred {
+        reason: Option<String>,
+        full_provider: Option<String>,
+    },
+    /// Failed, with the runner and its event recorded; it counts towards the
+    /// pool's provisioning circuit, which the caller records.
+    Failed(anyhow::Error),
+}
+
+/// Registers the admitted runner with GitHub or Bitbucket and asks the
+/// manager to start it, then records how that ended.
+async fn start_admitted_runner(
+    app: &Reconciler,
+    pool: &Pool,
+    start: AdmittedStart,
+) -> Result<StartOutcome> {
+    let AdmittedStart {
+        runner_id,
+        runner_name,
+        provider,
+        platform,
+        mode,
+        runtime,
+        image,
+        labels,
+        target_repository,
+        bitbucket_connection,
+        capacity_lease,
+    } = start;
+    let runner_mode = mode.as_str();
     let result = async {
         let mut request = json!({
             "runnerId": runner_id,
@@ -2121,13 +2365,12 @@ async fn provision_on_host(
         )
         .await?;
         if deferred_manager_error(&error) {
-            return Ok(ProvisionAttempt::Deferred {
+            return Ok(StartOutcome::Deferred {
                 full_provider: host_capacity_exhausted(Some(&message)).then_some(provider),
                 reason: Some(message),
             });
         }
-        record_provision_failure(&app.database, pool).await?;
-        return Err(error);
+        return Ok(StartOutcome::Failed(error));
     }
     sqlx::query(
         "UPDATE runner_pools SET provision_failure_count=0,provision_retry_at=NULL,provision_circuit_open=0 WHERE id=?",
@@ -2144,7 +2387,7 @@ async fn provision_on_host(
         json!({ "poolId": pool.id, "provider": provider, "repositoryId": target_repository.as_ref().map(|repository| repository.repository_id) }),
     )
     .await?;
-    Ok(ProvisionAttempt::Provisioned)
+    Ok(StartOutcome::Provisioned)
 }
 
 /// Deregisters and retires a runner. Returns `false`, leaving it in place
@@ -2153,6 +2396,12 @@ async fn provision_on_host(
 /// `in_progress` webhook arrives while the API is restarting, and removing it
 /// would kill the job.
 async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result<bool> {
+    // A Tart start running beside the pass has no VM to remove yet; removing
+    // its runner now would leave the VM it is about to start without one.
+    // Whatever wanted it removed asks again once the start has ended.
+    if app.tart.starting(&runner.id) {
+        return Ok(false);
+    }
     if runner.container_id.is_some()
         && let Err(error) = archive_runner_logs(app, pool, runner).await
     {
@@ -2783,15 +3032,32 @@ struct PoolWait {
     reason: Option<String>,
 }
 
-/// A Tart VM start refused for lack of one of the Mac's VM slots, or of room
-/// in `GridOps`'s own budget on the Mac (`full_provider` is `tart`), asks again
-/// on the next pass, so the pool keeps its place in the manager's line for
-/// the Mac (a pool that misses a whole pass leaves it). Other waits pause
-/// half a minute.
+/// Whether a deferred start waits in the manager's line for the Mac: refused
+/// for lack of one of its VM slots, or of room in `GridOps`'s own budget there
+/// (`full_provider` is `tart`).
+fn in_tart_line(reason: Option<&str>, full_provider: Option<&str>) -> bool {
+    reason.is_some_and(|reason| reason.contains("[vm_slot_busy]"))
+        || (full_provider == Some("tart") && host_capacity_exhausted(reason))
+}
+
+/// Tells the Tart lane a pool waits in the Mac's line, so the slots are
+/// watched and the pass woken when one frees.
+fn note_line_wait(app: &Reconciler, reason: Option<&str>, full_provider: Option<&str>) {
+    if in_tart_line(reason, full_provider) {
+        app.tart.note_line_wait();
+    }
+}
+
+/// A start waiting in the Mac's line (`in_tart_line`) asks again on the next
+/// pass, so the pool keeps its place in the manager's line for the Mac (a
+/// pool that misses a whole round leaves it). Other waits pause half a
+/// minute.
 fn pool_wait(reason: Option<&str>, full_provider: Option<&str>) -> PoolWait {
-    let in_tart_line = reason.is_some_and(|reason| reason.contains("[vm_slot_busy]"))
-        || (full_provider == Some("tart") && host_capacity_exhausted(reason));
-    let retry_after_ms = if in_tart_line { None } else { Some(30_000) };
+    let retry_after_ms = if in_tart_line(reason, full_provider) {
+        None
+    } else {
+        Some(30_000)
+    };
     PoolWait {
         retry_after_ms,
         reason: reason.map(|reason| {
@@ -4096,6 +4362,10 @@ mod tests {
             vault: Vault::new([0; 32], b"reconciler-test".to_vec()),
             http: reqwest::Client::new(),
             pass: Arc::default(),
+            tart: Arc::new(tart_lane::TartLane::new(
+                Arc::default(),
+                tart_lane::SLOT_WATCH_INTERVAL,
+            )),
         })
     }
 

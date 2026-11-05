@@ -27,6 +27,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+rsa = { version = "0.9", features = ["getrandom"] }
 
 [lints]
 workspace = true
