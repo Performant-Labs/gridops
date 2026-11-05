@@ -5,8 +5,9 @@
 #   VM guest or a Mac). The release is not published without them. The only
 #   way out is the repository variable RELEASE_MACOS=false, an emergency
 #   opt-out that publishes the release without a macOS agent;
-# - RELEASE_IMAGES=true: the control plane images on GHCR and the
-#   compose.release.yaml that names them (built on the macOS runner for now);
+# - RELEASE_IMAGES=true: the control plane images on GHCR (linux/amd64 and
+#   linux/arm64, built on a Linux runner) and the compose.release.yaml that
+#   names them;
 # - RELEASE_LINUX_ARM64=true: the Linux arm64 agent, on a Linux ARM64 runner.
 # Windows is not a deployment target. Running it by hand on a branch builds the
 # same and assembles the release, and publishes nothing.
@@ -380,16 +381,38 @@ jobs:
     # job): unset, the release has no images and no compose.release.yaml, and
     # deployments build from source. It no longer follows RELEASE_MACOS.
     if: needs.version.outputs.images == 'true'
-    # Built through Docker (OrbStack or Docker Desktop, with buildx) on a
-    # macOS ARM64 runner, which builds both platforms (amd64 through Rosetta).
-    # The macOS agent job needs none of that. Moving this job to a Linux
-    # runner is issue #80.
-    runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 150
+    # Linux images, built on a Linux runner through the Docker daemon of the
+    # machine it runs on: the Linux pools share the host's Docker socket with
+    # the job (a Docker-in-job profile, docs/fleet-agent.md), and the runner
+    # image has the docker CLI and buildx. Those machines are x86_64, so
+    # linux/arm64 is built under QEMU, which the host must have registered for
+    # arm64; the first step checks it (docs/releasing.md#runner-requirements).
+    runs-on: [self-hosted-linux]
+    timeout-minutes: 240
     permissions:
       contents: read
       packages: write
     steps:
+      # Fail in a minute, with what is missing, rather than halfway through a
+      # build. The arm64 check runs the Dockerfile's own base image, which the
+      # build pulls anyway.
+      - name: Check Docker, buildx and arm64 emulation
+        timeout-minutes: 10
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          command -v docker >/dev/null || fail "no docker CLI on this runner"
+          docker version --format 'docker client {{.Client.Version}}, daemon {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})' ||
+            fail "this runner cannot reach a Docker daemon: the job needs a Linux pool that shares the host's Docker socket (docs/fleet-agent.md#docker-in-job-profiles)"
+          docker buildx version || fail "no buildx plugin for the docker CLI"
+          for platform in linux/amd64 linux/arm64; do
+            docker pull -q --platform "$platform" debian:bookworm-slim >/dev/null || fail "cannot pull debian:bookworm-slim for $platform"
+            if ! machine="$(docker run --rm --platform "$platform" debian:bookworm-slim uname -m 2>&1)"; then
+              echo "$machine"
+              fail "the Docker host cannot run $platform containers, so it cannot build $platform images. Register QEMU for it on the host once (docs/releasing.md#runner-requirements), then re-run this job"
+            fi
+            echo "$platform: $machine"
+          done
+
       - name: Check out repository
         uses: actions/checkout@v5
         timeout-minutes: 5
@@ -402,16 +425,14 @@ jobs:
           GRIDOPS_BUILD_NUMBER: ${{ needs.version.outputs.build_number }}
           GRIDOPS_COMMIT: ${{ needs.version.outputs.commit }}
         run: |
-          export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.orbstack/bin"
           # A throwaway Docker config, so the registry login never lands in
-          # the host's keychain or ~/.docker.
-          export DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
+          # ~/.docker. The docker CLI still finds a buildx plugin installed
+          # system-wide (the runner image has one); one in ~/.docker is linked.
           export DOCKER_CONFIG="$RUNNER_TEMP/docker-config"
           mkdir -p "$DOCKER_CONFIG/cli-plugins"
-          for dir in "$HOME/.docker/cli-plugins" /Applications/OrbStack.app/Contents/MacOS/xbin \
-            /Applications/Docker.app/Contents/Resources/cli-plugins /usr/local/lib/docker/cli-plugins; do
-            if [ -x "$dir/docker-buildx" ]; then ln -sf "$dir/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"; break; fi
-          done
+          if [ -x "$HOME/.docker/cli-plugins/docker-buildx" ]; then
+            ln -sf "$HOME/.docker/cli-plugins/docker-buildx" "$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          fi
           docker buildx version
           push=""
           if [ "$PUBLISH" = true ]; then
@@ -419,9 +440,13 @@ jobs:
             printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" > "$DOCKER_CONFIG/config.json"
             push="--push"
           fi
+          # Docker refuses capitals in an image name, and the owner is
+          # Performant-Labs. compose.release.yaml names the same lower-case
+          # owner (scripts/release-compose.mjs).
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           minor="${VERSION%.*}"
           for target in api manager reconciler; do
-            image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/gridops-$target"
+            image="ghcr.io/$owner/gridops-$target"
             docker buildx build \
               --platform linux/amd64,linux/arm64 \
               --target "$target" \
@@ -434,7 +459,23 @@ jobs:
               --annotation "index:org.opencontainers.image.description=GridOps $target" \
               $push .
           done
-          rm -rf "$DOCKER_CONFIG"
+
+      # The host's Docker keeps what it builds. Remove the tags this job made
+      # so release builds do not pile up on a shared machine (an image a
+      # container still uses stays: no -f), and the registry login with them.
+      - name: Clean up
+        if: always()
+        timeout-minutes: 5
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          rm -rf "$RUNNER_TEMP/docker-config"
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for target in api manager reconciler; do
+            for tag in "$VERSION" "${VERSION%.*}" latest; do
+              docker image rm "ghcr.io/$owner/gridops-$target:$tag" >/dev/null 2>&1 || true
+            done
+          done
 
   release:
     name: Publish release

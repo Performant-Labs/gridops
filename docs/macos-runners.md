@@ -227,7 +227,9 @@ The job's limit is 75 minutes once it starts. With the default guardrails above 
 
 Before a release, `scripts/release-preflight.sh` checks that GridOps sees this Mac: its `macos-machine` check needs a machine in the fleet list with `hostOs` `macos` and `architecture` `arm64` that is approved, `active`, has a fresh heartbeat and is not set aside for failing starts. That means the Mac is enrolled as a fleet machine ([Fleet machines](fleet-agent.md)) as well as hosting the Tart agent. Pause or drain it during a release only if you mean to publish without the macOS agent, which needs the repository variable `RELEASE_MACOS` set to `false`.
 
-The release's control plane images (repository variable `RELEASE_IMAGES`) are a different job: it builds Linux images through Docker and buildx, which a Tart guest does not have, so for now it needs a Mac runner with OrbStack or Docker Desktop. Moving it to a Linux runner is [issue #80](https://github.com/Performant-Labs/gridops/issues/80).
+The release's control plane images (repository variable `RELEASE_IMAGES`) do not use the macOS runner: they are built on a Linux runner ([Releasing](releasing.md#runner-requirements)).
+
+Besides the release, the **Tart installer** workflow (`.github/workflows/tart-installer.yml`) runs on this runner whenever a push to `master` or a pull request changes `scripts/install-tart-agent.sh`, its test `scripts/test-install-tart-agent.sh`, the plist template or the `gridops-tart-agent` crate. It runs that test with the guest's own zsh, `sed` and python3, needs nothing else, and fails if the test skips.
 
 ## Bitbucket Cloud workspaces
 

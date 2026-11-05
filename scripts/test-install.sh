@@ -145,5 +145,20 @@ check "the workflow stages gridops-host-agent-linux-<arch>" 'grep -q "dist/grido
 check "SHA256SUMS sums every staged agent" 'grep -q "sha256sum gridops-\* " "$workflow"'
 check "the publish job requires the macOS agent among the files it sums" 'grep -q "expected=.*gridops-host-agent-macos-arm64" "$workflow"'
 
+# 9. The control plane images. compose.release.yaml (scripts/release-compose.mjs)
+# names ghcr.io/performant-labs/gridops-<service>; Docker refuses an image name
+# with capitals, so the job must lower-case the owner (Performant-Labs) rather
+# than tag ghcr.io/$GITHUB_REPOSITORY_OWNER directly. They are Linux images and
+# build on a Linux runner.
+images_job="$(awk '/^  images:$/ { on = 1; print; next } on && /^  [a-z]/ { exit } on' "$workflow")"
+lower_owner="owner=\"\$(printf '%s' \"\$GITHUB_REPOSITORY_OWNER\" | tr '[:upper:]' '[:lower:]')\""
+tag_image='image="ghcr.io/$owner/gridops-$target"'
+check "the images job tags images under the lower-cased owner" \
+  'printf "%s\n" "$images_job" | grep -qF "$lower_owner" && printf "%s\n" "$images_job" | grep -qF "$tag_image" && ! grep -qF "ghcr.io/\${GITHUB_REPOSITORY_OWNER}" "$workflow"'
+check "compose.release.yaml names the same lower-case owner" \
+  'grep -q "GRIDOPS_IMAGE_OWNER ?? \"performant-labs\"" "$here/release-compose.mjs"'
+check "the images job runs on a Linux runner" \
+  'printf "%s\n" "$images_job" | grep -q "^    runs-on: \[self-hosted-linux\]\$"'
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all passed"

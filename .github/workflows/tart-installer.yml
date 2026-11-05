@@ -1,0 +1,87 @@
+# Tests the Tart agent's installer (scripts/install-tart-agent.sh) with
+# scripts/test-install-tart-agent.sh on the macOS runner, where zsh, BSD sed
+# and the system python3 are the real ones. The test stubs uname, stat, cargo,
+# plutil and launchctl, so nothing is built, installed or started, and the job
+# needs no Rust.
+#
+# It runs only when a change can affect what the test checks: the installer,
+# its plist template, the test itself, the Tart agent crate, or this workflow.
+# A `paths` filter does that without starting any job, so a change elsewhere
+# costs no runner and no macOS VM. (A changed-files step would need a Linux job
+# on every push just to decide; it would be the better choice only if this
+# check were ever made required, since a required check whose workflow did not
+# run stays pending. Nothing requires it today.)
+name: Tart installer
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - scripts/install-tart-agent.sh
+      - scripts/test-install-tart-agent.sh
+      - deploy/launchd/dev.gridops.tart-agent.plist
+      - crates/gridops-tart-agent/**
+      - .github/workflows/tart-installer.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - scripts/install-tart-agent.sh
+      - scripts/test-install-tart-agent.sh
+      - deploy/launchd/dev.gridops.tart-agent.plist
+      - crates/gridops-tart-agent/**
+      - .github/workflows/tart-installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tart-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tart installer test (macOS)
+    # Like ci.yml: a pull request from a fork never runs on the self-hosted
+    # runners.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # The runner the release's macOS agent job uses: a Tart VM guest started by
+    # GridOps (docs/macos-runners.md), or a Mac.
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    steps:
+      # The test skips (and exits 0) without zsh or python3. Here that would be
+      # a broken runner, not a reason to pass, so say what is missing instead.
+      # python3 must be able to read plists: without the Xcode command line
+      # tools /usr/bin/python3 is only a stub.
+      - name: Check the runner
+        timeout-minutes: 5
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          sw_vers
+          [ "$(uname -s)" = Darwin ] || fail "not macOS: $(uname -s)"
+          command -v zsh >/dev/null || fail "zsh is missing"
+          command -v python3 >/dev/null || fail "python3 is missing"
+          python3 -I -c 'import plistlib' || fail "python3 cannot run: install the Xcode command line tools, or use a Tart base image that has them"
+          zsh --version
+          python3 --version
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+        timeout-minutes: 5
+
+      # Passes only on the test's own "all passed" as its last line, so a skip
+      # (which also exits 0) fails the job.
+      - name: Test the Tart installer
+        timeout-minutes: 5
+        run: |
+          status=0
+          out="$(sh scripts/test-install-tart-agent.sh 2>&1)" || status=$?
+          printf '%s\n' "$out"
+          [ "$status" = 0 ] || { echo "::error::scripts/test-install-tart-agent.sh failed (exit $status)"; exit 1; }
+          if [ "$(printf '%s\n' "$out" | tail -n 1)" != "all passed" ]; then
+            echo "::error::scripts/test-install-tart-agent.sh did not run its checks: $(printf '%s\n' "$out" | tail -n 1)"
+            exit 1
+          fi

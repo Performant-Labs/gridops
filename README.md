@@ -1,8 +1,8 @@
 # GridOps
 
-[![GridOps — Self-hosted GitHub Actions runner control plane](public/social-preview.jpg)](https://github.com/iamngoni/gridops)
+[![GridOps — Self-hosted GitHub Actions runner control plane](public/social-preview.jpg)](https://github.com/Performant-Labs/gridops)
 
-[![CI](https://github.com/iamngoni/gridops/actions/workflows/ci.yml/badge.svg)](https://github.com/iamngoni/gridops/actions/workflows/ci.yml)
+[![CI](https://github.com/Performant-Labs/gridops/actions/workflows/ci.yml/badge.svg)](https://github.com/Performant-Labs/gridops/actions/workflows/ci.yml)
 
 GridOps is a self-hosted control plane for GitHub Actions runners. Connect a GitHub App, select repositories or organizations, and operate isolated Linux container or macOS virtual-machine runner pools from one interface.
 
@@ -66,8 +66,8 @@ Run the control plane from the published images. Download the release's
 compose file and settings template:
 
 ```sh
-curl -fsSLO https://github.com/iamngoni/gridops/releases/latest/download/compose.release.yaml
-curl -fsSL -o .env https://github.com/iamngoni/gridops/releases/latest/download/env.example
+curl -fsSLO https://github.com/Performant-Labs/gridops/releases/latest/download/compose.release.yaml
+curl -fsSL -o .env https://github.com/Performant-Labs/gridops/releases/latest/download/env.example
 # Fill the required values in .env, then:
 docker compose -f compose.release.yaml up -d
 ```
@@ -130,9 +130,10 @@ Last reviewed for v0.1.5. What changed in each release is in the
   and `install.sh`. The container images, `compose.release.yaml` and
   `env.example` are built only when the repository variable `RELEASE_IMAGES`
   is `true`, and the Linux arm64 agent only when `RELEASE_LINUX_ARM64` is
-  `true` ([#80](https://github.com/Performant-Labs/gridops/issues/80)). The
-  download links in [Install](#install) point at the upstream project, so
-  they do not give you this repository's build.
+  `true` ([#80](https://github.com/Performant-Labs/gridops/issues/80)). No
+  release has published the images yet, so until one does, the download links
+  in [Install](#install) return 404; [run from source](#run-from-source)
+  instead.
 
 ## Develop
 

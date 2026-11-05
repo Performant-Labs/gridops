@@ -8,7 +8,7 @@ runners. Nothing is compiled on a user's machine.
 | `gridops-host-agent-linux-x64`, `-linux-arm64` (static, musl) | the Linux Docker runners, in the CI image | release assets |
 | `install.sh`, `SHA256SUMS` | the Linux runner | release assets |
 | `gridops-host-agent-macos-arm64`, `-macos-x64`, `gridops-tart-agent-macos-arm64` | a self-hosted macOS ARM64 runner (a Tart VM guest, or a Mac) | release assets, in every release |
-| `api`, `manager`, `reconciler` images (`linux/amd64`, `linux/arm64`) | a self-hosted macOS ARM64 runner, through its Docker | `ghcr.io/<owner>/gridops-<service>:<version>`, `:<major.minor>`, `:latest` (only with `RELEASE_IMAGES`) |
+| `api`, `manager`, `reconciler` images (`linux/amd64`, `linux/arm64`) | a Linux runner, through its host's Docker (arm64 under QEMU) | `ghcr.io/<owner>/gridops-<service>:<version>`, `:<major.minor>`, `:latest` (only with `RELEASE_IMAGES`) |
 | `compose.release.yaml`, `env.example` | the Linux runner | release assets (only when the images were built) |
 
 Windows is not a deployment target: nothing is built or published for it.
@@ -166,7 +166,10 @@ What still needs a person:
 - **Setting up the prerequisites.** Only an administrator can create the
   token (the token routes are cookie-only), and only someone with root can
   install the sudo rule on a machine. Both are done before the release, and
-  the sudo rule only once per machine.
+  the sudo rule only once per machine. A release with `RELEASE_IMAGES` also
+  needs QEMU registered for arm64 on the Linux machines that may take the
+  images job ([runner requirements](#runner-requirements)), which needs root
+  on each; the preflight does not check it, the job's first step does.
 - **Reviews the repository requires.** If a branch rule requires an approving
   review, merging the version bump of step 5 waits for one.
 - **Anything the preflight cannot see.** It cannot read the token's expiry or
@@ -282,10 +285,25 @@ Rebuilding the same commit gives the same number. To get a new number, commit.
   toolchain under the job's temporary directory and needs no Docker and no
   Homebrew; its first step checks the rest and fails with what is missing. See
   [macOS runners](macos-runners.md#what-a-release-needs-from-the-macos-runner).
-- **Control plane images** (`RELEASE_IMAGES`): for now a macOS ARM64 runner
-  with Docker (OrbStack or Docker Desktop) and buildx, which a Tart VM guest
-  does not have. Moving this job to a Linux runner is
-  [issue #80](https://github.com/Performant-Labs/gridops/issues/80).
+- **Control plane images** (`RELEASE_IMAGES`): a runner with the
+  `self-hosted-linux` label whose pool shares the host's Docker socket with
+  the job ([Docker-in-job profiles](fleet-agent.md#docker-in-job-profiles)),
+  and a runner image with the docker CLI and buildx (the shared one has both).
+  The job builds with the host's Docker, so that Docker must build
+  multi-platform images (Docker Engine with the containerd image store does)
+  and run `linux/arm64` containers. On an x86_64 machine that needs QEMU
+  registered for arm64, with the fix-binary (`F`) flag so containers can use
+  it. Docker does not do that for you. Once per machine, as root: install the
+  distribution's package (`qemu-user-binfmt` on current Debian and Ubuntu,
+  `qemu-user-static` on older ones), which registers it at every boot, or run
+  `docker run --privileged --rm tonistiigi/binfmt --install arm64`, which
+  lasts until the next reboot. Check it with
+  `docker run --rm --platform linux/arm64 debian:bookworm-slim uname -m`,
+  which must print `aarch64`. The job's first step runs the same check and
+  fails within minutes, before building anything, if a platform is missing.
+  The arm64 half of the build runs under emulation, so it is much slower than
+  the amd64 half; the job may take up to 4 hours. It removes the image tags it
+  built from the host's Docker when it ends.
 
 ## How installs use a release
 
