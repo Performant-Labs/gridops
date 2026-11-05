@@ -1410,17 +1410,13 @@ async fn provision_runner(
     Json(input): Json<ProvisionRunner>,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
     let limit = provision_time_limit(&input.provider);
-    let provider = input.provider.clone();
-    let lease_id = input.capacity_lease.clone();
-    if let Ok(result) =
-        tokio::time::timeout(limit, provision_runner_in_time(state.clone(), auth, input)).await
-    {
-        return result;
-    }
-    // Abandoned part way: give the capacity back as finishing would have.
-    state.reservations.lock().await.remove(&lease_id);
+    provision_runner_in_time(state, auth, input, limit).await
+}
+
+/// What a start that ran out of its time limit answers.
+fn start_timed_out(provider: &str, limit: Duration) -> ManagerError {
     let seconds = limit.as_secs();
-    Err(if provider == "tart" {
+    if provider == "tart" {
         tracing::warn!(
             seconds,
             "the Tart agent did not finish a runner start in time"
@@ -1438,19 +1434,34 @@ async fn provision_runner(
                 "the runner manager did not finish starting the {provider} runner within {seconds} seconds, its limit for a runner start"
             ),
         }
-    })
+    }
 }
 
+/// Starts a runner within `limit`, counted from now, the wait for the
+/// provider's start lock included.
 async fn provision_runner_in_time(
     state: ManagerState,
     _auth: ManagerAuth,
     mut input: ProvisionRunner,
+    limit: Duration,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
+    let deadline = tokio::time::Instant::now() + limit;
     input.validate()?;
     if input.provider != "tart" {
         state.builtin_host.require_runners()?;
     }
-    let _guard = state.provision_locks.lock(&input.provider).await;
+    let Ok(_guard) =
+        tokio::time::timeout_at(deadline, state.provision_locks.lock(&input.provider)).await
+    else {
+        // Out of time before the start began: give the capacity back as
+        // finishing would have.
+        state
+            .reservations
+            .lock()
+            .await
+            .remove(&input.capacity_lease);
+        return Err(start_timed_out(&input.provider, limit));
+    };
     ensure_provisioning_enabled(&state)?;
     if input.network != state.limits.runner_network {
         return Err(ManagerError::Forbidden(
@@ -1458,15 +1469,30 @@ async fn provision_runner_in_time(
         ));
     }
     validate_capacity_lease(&state, &input.lease_claim()).await?;
-    // Declared after the provider's start lock guard (the Tart lock for a Tart
-    // start), so it is dropped first: unless the lease map is busy at that
-    // moment (see `Drop` below), the lease is gone before the next admission
-    // for this provider can look.
-    let _lease = LeaseRelease::new(&state, &input.capacity_lease);
+    let lease = LeaseRelease::new(&state, &input.capacity_lease);
+    let result = match tokio::time::timeout_at(deadline, start_runner(&state, &mut input)).await {
+        Ok(result) => result,
+        Err(_) => Err(start_timed_out(&input.provider, limit)),
+    };
+    // However the start ended, started, failed or out of time, its lease is
+    // given back here, while this start still holds the provider's start
+    // lock (the Tart lock for a Tart start), so the next admission for the
+    // provider, which waits for that lock, never finds it still held. Only a
+    // start whose caller gave up leaves it to `LeaseRelease`'s `Drop`.
+    lease.release().await;
+    result
+}
+
+/// The start itself: the Tart agent's for a Tart runner, a container for
+/// Docker.
+async fn start_runner(
+    state: &ManagerState,
+    input: &mut ProvisionRunner,
+) -> Result<(StatusCode, Json<Value>), ManagerError> {
     if input.provider == "tart" {
         return match &state.tart {
             Some(agent) => {
-                let body = serde_json::to_value(&input)
+                let body = serde_json::to_value(&*input)
                     .map_err(|error| ManagerError::Internal(error.into()))?;
                 tart_agent_value(agent, reqwest::Method::POST, "v1/runners", Some(body))
                     .await
@@ -1475,15 +1501,16 @@ async fn provision_runner_in_time(
             None => Err(tart_provider_disabled()),
         };
     }
-    provision_runner_inner(&state, &mut input).await
+    provision_runner_inner(state, input).await
 }
 
-/// Gives a runner start's capacity lease back when the start ends, however it
-/// ends: started, failed, over its time limit, or abandoned by its caller. A
-/// caller that gives up closes the connection and the server drops the
-/// handler at whatever `.await` it had reached, so a release written after
-/// that `.await` never ran, and the lease held a slot and budget for its full
-/// five minutes on top of the VM it had started (#101).
+/// Gives a runner start's capacity lease back when the start ends. A start
+/// that ends in the handler, however it ends, calls `release` while it still
+/// holds its start lock. A caller that gives up closes the connection and the
+/// server drops the handler at whatever `.await` it had reached, so a release
+/// written after that `.await` never ran, and the lease held a slot and
+/// budget for its full five minutes on top of the VM it had started (#101).
+/// `Drop` covers that case.
 struct LeaseRelease {
     reservations: Arc<Mutex<HashMap<String, CapacityReservation>>>,
     lease_id: String,
@@ -1496,17 +1523,29 @@ impl LeaseRelease {
             lease_id: lease_id.to_owned(),
         }
     }
+
+    /// Gives the lease back now, waiting for the lease map if someone holds
+    /// it.
+    async fn release(mut self) {
+        let lease_id = std::mem::take(&mut self.lease_id);
+        self.reservations.lock().await.remove(&lease_id);
+    }
 }
 
 impl Drop for LeaseRelease {
     fn drop(&mut self) {
         let lease_id = std::mem::take(&mut self.lease_id);
+        if lease_id.is_empty() {
+            // Given back by `release`.
+            return;
+        }
         if let Ok(mut reservations) = self.reservations.try_lock() {
             reservations.remove(&lease_id);
             return;
         }
-        // Someone holds the map for a moment; release it as soon as they let
-        // go. Without a runtime (it is shutting down) the map goes with it.
+        // An abandoned start, and someone holds the map for a moment: release
+        // it as soon as they let go. Without a runtime (it is shutting down)
+        // the map goes with it.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let reservations = Arc::clone(&self.reservations);
             runtime.spawn(async move {
