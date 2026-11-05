@@ -679,7 +679,7 @@ async fn reconcile_pool(
         .iter()
         .filter(|runner| runner_needs_update(pool, runner))
         .count();
-    let state = pool_state(&PassOutcome {
+    let mut outcome = PassOutcome {
         provisioning_paused,
         host_blocked,
         capacity_deferred,
@@ -689,7 +689,22 @@ async fn reconcile_pool(
         active: active_count,
         desired: usize::try_from(desired).unwrap_or_default(),
         ..PassOutcome::for_pool(pool, now_millis())
-    });
+    };
+    // A start that succeeded in this pass cleared the pool's circuit and
+    // failures after the pass loaded the pool, so a probe that works shows
+    // the pool as it is now, not `blocked` or `backoff` for one pass more.
+    if provisioned > 0 {
+        let (circuit_open, failure_count, retry_at) = sqlx::query_as::<_, (bool, i64, Option<i64>)>(
+            "SELECT provision_circuit_open,provision_failure_count,provision_retry_at FROM runner_pools WHERE id=?",
+        )
+        .bind(&pool.id)
+        .fetch_one(&app.database)
+        .await?;
+        outcome.circuit_open = circuit_open;
+        outcome.failure_count = failure_count;
+        outcome.retry_deferred = retry_at.is_some_and(|retry_at| retry_at > now_millis());
+    }
+    let state = pool_state(&outcome);
     finish_pool_pass(&app.database, &pool.id, state).await?;
     record_capacity_sample(app, pool, &final_runners).await?;
     if provisioned > 0 || removed > 0 || rotated > 0 || rebalanced > 0 || retired > 0 {
