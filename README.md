@@ -110,15 +110,9 @@ Apple Silicon hosts may additionally run ephemeral macOS pools through Tart. The
 
 ## Known issues
 
-Last reviewed for v0.1.5. What changed in each release is in the
+Last reviewed for v0.2.0. What changed in each release is in the
 [changelog](CHANGELOG.md).
 
-- A workflow re-run can leave the previous attempt's jobs shown as queued or in
-  progress, so queue alerts stay up until they are cleared
-  ([#33](https://github.com/Performant-Labs/gridops/issues/33)).
-- The "waiting for over five minutes" alert is not checked against GitHub, so
-  it can name a job that GitHub no longer has queued
-  ([#34](https://github.com/Performant-Labs/gridops/issues/34)).
 - The runner host built into GridOps and fleet machines have separate budgets
   that draw on the same hardware if the host is both. Keep the sum within what
   you want GridOps to use; both budgets are now set in GridOps, and the
