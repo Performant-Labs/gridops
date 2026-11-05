@@ -361,7 +361,11 @@ as `""`. To add a provider to a pool, send its image with the edit: adding Tart
 without `tartImage` is refused with `400` (`Tart base VM (tartImage) is required
 for a pool that uses macOS · Tart virtual machines.`), and adding Docker without
 `dockerImage` likewise. Nothing is filled in from the server's defaults. Tart
-with `"macosRuntime":"native"` clones no VM and needs no `tartImage`.
+with `"macosRuntime":"native"` clones no VM and needs no `tartImage`. The web form
+sends none for it. Pools stored by earlier versions with a default image for a
+provider they do not use read back `""` too: the upgrade clears the built-in
+defaults, and the API clears the deployment's configured ones
+(`GRIDOPS_RUNNER_IMAGE`, `GRIDOPS_TART_RUNNER_IMAGE`) when it starts.
 
 A validation error is `400 {"error": "..."}` with the form's message, a
 duplicate name `409`, and removing a pool that still has runners on fleet

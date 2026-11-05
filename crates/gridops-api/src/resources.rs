@@ -5441,7 +5441,7 @@ fn runner_pool_defaults(image: &str, runner_host: &ManagerCapacity) -> Value {
     })
 }
 
-fn default_tart_image() -> String {
+pub(crate) fn default_tart_image() -> String {
     std::env::var("GRIDOPS_TART_RUNNER_IMAGE").unwrap_or_else(|_| "gridops-macos-tahoe-base".into())
 }
 
