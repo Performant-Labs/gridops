@@ -7,7 +7,7 @@ use std::{future::Future, sync::atomic::AtomicUsize};
 use super::*;
 
 /// Requests the stand-in agent is holding: received, not yet answered.
-type Holding = Arc<AtomicUsize>;
+pub(crate) type Holding = Arc<AtomicUsize>;
 
 /// Runs `work` on paused time that moves, a second at a time, only while the
 /// stand-in agent holds a request, so time passes only for the delay under
@@ -18,7 +18,7 @@ type Holding = Arc<AtomicUsize>;
 /// manager's time limit would then fire before the request even reached the
 /// stand-in. A running blocking task stops those jumps, so the clock moves
 /// only here. Between steps a real millisecond lets sockets settle.
-async fn on_test_clock<F: Future>(holding: &Holding, work: F) -> F::Output {
+pub(crate) async fn on_test_clock<F: Future>(holding: &Holding, work: F) -> F::Output {
     let (release, held) = std::sync::mpsc::channel::<()>();
     let hold = tokio::task::spawn_blocking(move || held.recv());
     let mut work = std::pin::pin!(work);
@@ -38,12 +38,14 @@ async fn on_test_clock<F: Future>(holding: &Holding, work: F) -> F::Output {
 
 const TOKEN: &str = "route-timeout-test-token";
 const LEASE: &str = "lease-tart-1";
+/// A Tart runner's ID as the manager routes it to the agent.
+const TART_RUNNER: &str = "tart-0123456789abcdef0123456789abcdef";
 
 /// What the Tart agent answers when no VM slot freed up within its wait.
 const NO_SLOT: &str = "no macOS VM slot became free within 180 seconds; the Mac allows two VMs at once, including VMs of other software";
 
-/// A stand-in Tart agent: `POST /v1/runners` and `GET /v1/runners` answer
-/// `status` with `body` after `delay`.
+/// A stand-in Tart agent: `POST /v1/runners`, `GET /v1/runners` and
+/// `DELETE /v1/runners/{id}` answer `status` with `body` after `delay`.
 async fn stand_in_agent(
     delay: Duration,
     status: StatusCode,
@@ -63,7 +65,9 @@ async fn stand_in_agent(
             }
         }
     };
-    let app = Router::new().route("/v1/runners", get(answer.clone()).post(answer));
+    let app = Router::new()
+        .route("/v1/runners", get(answer.clone()).post(answer.clone()))
+        .route("/v1/runners/{id}", delete(answer));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -254,18 +258,20 @@ async fn an_agent_error_without_a_message_is_still_explained() -> anyhow::Result
 
 #[tokio::test(start_paused = true)]
 async fn any_timed_out_request_says_what_timed_out() -> anyhow::Result<()> {
-    // Listing runners asks the Tart agent too, under the standard limit.
+    // Removing a Tart runner's VM waits on the agent under the standard
+    // limit. (Listing runners used to be the example; a hung agent now drops
+    // out of the list within seconds instead, see `tart_outage_tests`.)
     let (agent, holding) = stand_in_agent(
         Duration::from_mins(5),
         StatusCode::OK,
-        json!({ "runners": [] }).to_string(),
+        json!({ "deleted": true }).to_string(),
     )
     .await?;
     let manager = manager_in_front_of(agent).await?;
     let response = on_test_clock(
         &holding,
         reqwest::Client::new()
-            .get(format!("{manager}/v1/runners"))
+            .delete(format!("{manager}/v1/runners/{TART_RUNNER}"))
             .bearer_auth(TOKEN)
             .send(),
     )
@@ -275,7 +281,8 @@ async fn any_timed_out_request_says_what_timed_out() -> anyhow::Result<()> {
     assert_eq!(body["code"], "request_timeout", "{body}");
     let message = body["error"].as_str().unwrap_or_default();
     assert!(
-        message.contains("GET /v1/runners") && message.contains("180 seconds"),
+        message.contains(&format!("DELETE /v1/runners/{TART_RUNNER}"))
+            && message.contains("180 seconds"),
         "{message}"
     );
     Ok(())

@@ -50,6 +50,8 @@ mod route_timeout_tests;
 mod sandbox;
 #[cfg(test)]
 mod stand_in_docker;
+#[cfg(test)]
+mod tart_outage_tests;
 mod vm_slots;
 
 #[derive(Clone)]

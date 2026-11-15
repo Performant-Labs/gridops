@@ -5,6 +5,8 @@ mod tart_lane;
 
 #[cfg(test)]
 mod start_tests;
+#[cfg(test)]
+mod tart_outage_tests;
 
 use std::{
     collections::{HashMap, HashSet},

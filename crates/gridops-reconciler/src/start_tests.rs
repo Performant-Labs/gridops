@@ -14,22 +14,29 @@ use std::sync::{
 use tokio::sync::Semaphore;
 
 /// What the stand-in manager was asked and how it answers.
-struct ManagerLog {
+pub(crate) struct ManagerLog {
     /// Admissions asked for: pool, provider and the pass identifier sent.
     admissions: Mutex<Vec<(String, String, i64)>>,
     /// Runner starts asked for: pool and provider.
     starts: Mutex<Vec<(String, String)>>,
     /// The runners it started, as `GET /v1/runners` lists them.
-    running: Mutex<Vec<Value>>,
+    pub(crate) running: Mutex<Vec<Value>>,
     /// Refuse Tart admissions for want of a VM slot.
     refuse_tart: AtomicBool,
     /// A Tart start waits for a permit here, so a test decides when it ends.
-    tart_gate: Semaphore,
+    pub(crate) tart_gate: Semaphore,
     /// A Tart start that ends fails.
     tart_fails: AtomicBool,
     /// The slots in use and free, as `GET /v1/vm-slots` reports them.
     slots_in_use: AtomicU64,
     slots_free: AtomicU64,
+    /// The Tart agent is out of reach, as the real manager reports it: the
+    /// runner list leaves Tart's runners out and names `tart` under
+    /// `unavailableProviders`, and whatever must reach the agent (a Tart
+    /// admission, start or removal) answers `503 tart_agent_unavailable`.
+    pub(crate) tart_down: AtomicBool,
+    /// Runner removals asked for (`DELETE /v1/runners/{id}`): the IDs.
+    pub(crate) removed: Mutex<Vec<String>>,
 }
 
 impl Default for ManagerLog {
@@ -43,12 +50,14 @@ impl Default for ManagerLog {
             tart_fails: AtomicBool::default(),
             slots_in_use: AtomicU64::default(),
             slots_free: AtomicU64::default(),
+            tart_down: AtomicBool::default(),
+            removed: Mutex::default(),
         }
     }
 }
 
 impl ManagerLog {
-    fn admissions(&self, provider: &str) -> Vec<(String, i64)> {
+    pub(crate) fn admissions(&self, provider: &str) -> Vec<(String, i64)> {
         self.admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -58,7 +67,7 @@ impl ManagerLog {
             .collect()
     }
 
-    fn starts(&self, provider: &str) -> Vec<String> {
+    pub(crate) fn starts(&self, provider: &str) -> Vec<String> {
         self.starts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -67,15 +76,37 @@ impl ManagerLog {
             .map(|(pool, _)| pool.clone())
             .collect()
     }
+
+    pub(crate) fn removed(&self) -> Vec<String> {
+        self.removed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// What the real manager answers for a request that had to reach the Tart
+/// agent while it is out of reach.
+fn tart_agent_unavailable() -> (axum::http::StatusCode, axum::Json<Value>) {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(json!({
+            "code": "tart_agent_unavailable",
+            "error": "Tart agent is unavailable: error sending request for url (http://192.0.2.10:8787/v1/runners)",
+        })),
+    )
 }
 
 async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
     use axum::{
         Json, Router,
+        extract::Path,
         http::StatusCode as Status,
-        routing::{get, post, put},
+        response::IntoResponse as _,
+        routing::{delete, get, post, put},
     };
     let log = Arc::new(ManagerLog::default());
+    let removals = Arc::clone(&log);
     let admissions = Arc::clone(&log);
     let starts = Arc::clone(&log);
     let listing = Arc::clone(&log);
@@ -87,12 +118,17 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
             get(move || {
                 let log = Arc::clone(&listing);
                 async move {
+                    let tart_down = log.tart_down.load(Ordering::SeqCst);
                     let running = log
                         .running
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
-                    Json(json!({ "runners": running }))
+                        .iter()
+                        .filter(|runner| !(tart_down && runner["provider"] == "tart"))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let unavailable: &[&str] = if tart_down { &["tart"] } else { &[] };
+                    Json(json!({ "runners": running, "unavailableProviders": unavailable }))
                 }
             })
             .post(move |Json(body): Json<Value>| {
@@ -108,8 +144,15 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                             provider.clone(),
                         ));
                     if provider == "tart" {
+                        if log.tart_down.load(Ordering::SeqCst) {
+                            return tart_agent_unavailable();
+                        }
                         if let Ok(permit) = log.tart_gate.acquire().await {
                             permit.forget();
+                        }
+                        // The Mac went to sleep while the start waited.
+                        if log.tart_down.load(Ordering::SeqCst) {
+                            return tart_agent_unavailable();
                         }
                         if log.tart_fails.load(Ordering::SeqCst) {
                             return (
@@ -126,7 +169,7 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(json!({
-                            "id": id, "state": "running",
+                            "id": id, "state": "running", "provider": provider,
                             "labels": { "io.gridops.managed": "true", "io.gridops.runner-id": runner_id },
                         }));
                     (
@@ -150,6 +193,9 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                             provider.clone(),
                             body["reconcilePass"].as_i64().unwrap_or_default(),
                         ));
+                    if provider == "tart" && log.tart_down.load(Ordering::SeqCst) {
+                        return tart_agent_unavailable();
+                    }
                     if provider == "tart" && log.refuse_tart.load(Ordering::SeqCst) {
                         return (
                             Status::TOO_MANY_REQUESTS,
@@ -179,6 +225,22 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                 }
             }),
         )
+        .route(
+            "/v1/runners/{id}",
+            delete(move |Path(id): Path<String>| {
+                let log = Arc::clone(&removals);
+                async move {
+                    log.removed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(id.clone());
+                    if id.starts_with("tart-") && log.tart_down.load(Ordering::SeqCst) {
+                        return tart_agent_unavailable().into_response();
+                    }
+                    Status::NO_CONTENT.into_response()
+                }
+            }),
+        )
         // Lease releases and anything else: done.
         .fallback(|| async { Status::NO_CONTENT });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -187,11 +249,20 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
     Ok((url, log))
 }
 
+/// The runner registrations the fake GitHub was asked to remove: the paths.
+pub(crate) type GitHubRemovals = Arc<Mutex<Vec<String>>>;
+
 /// A fake GitHub that hands out installation tokens and just-in-time runner
-/// configurations.
-async fn fake_github() -> Result<String> {
-    use axum::{Json, Router, routing::post};
+/// configurations, and removes runner registrations.
+async fn fake_github() -> Result<(String, GitHubRemovals)> {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{delete, post},
+    };
     let next_runner = Arc::new(AtomicU64::new(1));
+    let removals = GitHubRemovals::default();
+    let removed = Arc::clone(&removals);
     let app = Router::new()
         .route(
             "/app/installations/{id}/access_tokens",
@@ -210,16 +281,31 @@ async fn fake_github() -> Result<String> {
                     }))
                 }
             }),
+        )
+        .route(
+            "/orgs/{org}/actions/runners/{id}",
+            delete(move |Path((org, id)): Path<(String, String)>| {
+                let removed = Arc::clone(&removed);
+                async move {
+                    removed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(format!("/orgs/{org}/actions/runners/{id}"));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
-    Ok(url)
+    Ok((url, removals))
 }
 
-struct Setup {
-    app: Reconciler,
-    manager: Arc<ManagerLog>,
+pub(crate) struct Setup {
+    pub(crate) app: Reconciler,
+    pub(crate) manager: Arc<ManagerLog>,
+    /// Runner registrations removed from GitHub.
+    pub(crate) github_removals: GitHubRemovals,
     directory: std::path::PathBuf,
 }
 
@@ -227,12 +313,12 @@ impl Setup {
     /// A Tart pool (`pool-mac`, visited first) and a Docker pool
     /// (`pool-linux`), each wanting one runner, plus the pools in `extra`
     /// (SQL), with the built-in host on.
-    async fn new(extra: &str, watch_interval: Duration) -> Result<Self> {
+    pub(crate) async fn new(extra: &str, watch_interval: Duration) -> Result<Self> {
         let directory =
             std::env::temp_dir().join(format!("gridops-starts-test-{}", uuid::Uuid::new_v4()));
         let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
         let (manager_url, manager) = fake_manager().await?;
-        let github_url = fake_github().await?;
+        let (github_url, github_removals) = fake_github().await?;
         let config = Config::from_env()?
             .with_github_api_url(reqwest::Url::parse(&github_url)?)
             .with_manager(reqwest::Url::parse(&manager_url)?, "manager-token")
@@ -274,13 +360,14 @@ impl Setup {
         Ok(Self {
             app,
             manager,
+            github_removals,
             directory,
         })
     }
 
     /// The pool's runners that are not deleted: status, and whether the
     /// manager has started them.
-    async fn runners(&self, pool_id: &str) -> Result<Vec<(String, bool)>> {
+    pub(crate) async fn runners(&self, pool_id: &str) -> Result<Vec<(String, bool)>> {
         Ok(sqlx::query_as::<_, (String, bool)>(
             "SELECT status,container_id IS NOT NULL FROM runners WHERE pool_id=? AND deleted_at IS NULL ORDER BY created_at",
         )
@@ -291,7 +378,7 @@ impl Setup {
 
     /// Waits, at most five seconds, for the Tart start the pass handed over
     /// to reach the manager: the pass does not wait for it.
-    async fn tart_start_reached_manager(&self) -> Result<()> {
+    pub(crate) async fn tart_start_reached_manager(&self) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             while self.manager.starts("tart").is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -302,7 +389,7 @@ impl Setup {
     }
 
     /// Waits, at most five seconds, for the Tart start under way to end.
-    async fn tart_start_ended(&self) -> Result<()> {
+    pub(crate) async fn tart_start_ended(&self) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             while self.app.tart.claimed() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -312,7 +399,7 @@ impl Setup {
         .context("the Tart start did not end")
     }
 
-    async fn finish(self) -> Result<()> {
+    pub(crate) async fn finish(self) -> Result<()> {
         self.app.database.close().await;
         fs::remove_dir_all(self.directory)?;
         Ok(())
@@ -321,7 +408,7 @@ impl Setup {
 
 /// A pass may take this long here; it would take as long as the Tart start
 /// if it waited for it, and that start never ends unless the test lets it.
-const PASS_LIMIT: Duration = Duration::from_secs(10);
+pub(crate) const PASS_LIMIT: Duration = Duration::from_secs(10);
 
 /// Part 1 of the task: a Tart start no longer holds up the pass. The pools
 /// after it, Docker's among them, get their runners while it runs, and the

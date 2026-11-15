@@ -29,6 +29,9 @@ pub(crate) struct Images {
     pub(crate) pull: Option<Duration>,
     /// Pulls the engine is working on now.
     pub(crate) pulling: Arc<AtomicUsize>,
+    /// `GET /containers/json` lists `CONTAINER_ID`, a running managed runner,
+    /// instead of nothing.
+    pub(crate) listed: bool,
 }
 
 /// Starts the engine on the current Tokio runtime; answers the path of its
@@ -106,7 +109,7 @@ async fn serve_connection(stream: UnixStream, images: Images) -> std::io::Result
             tokio::time::sleep(delay).await;
             images.pulling.fetch_sub(1, Ordering::SeqCst);
         }
-        let (status, answer) = answer(&method, &path, images.pull.is_none());
+        let (status, answer) = answer(&method, &path, images.pull.is_none(), images.listed);
         let response = if answer.is_empty() {
             format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n")
         } else {
@@ -119,9 +122,27 @@ async fn serve_connection(stream: UnixStream, images: Images) -> std::io::Result
     }
 }
 
-fn answer(method: &str, path: &str, images_present: bool) -> (&'static str, String) {
+fn answer(method: &str, path: &str, images_present: bool, listed: bool) -> (&'static str, String) {
     let container_path = format!("/containers/{CONTAINER_ID}");
     match (method, path) {
+        ("GET", "/containers/json") if listed => (
+            "200 OK",
+            json!([{
+                "Id": CONTAINER_ID,
+                "Names": ["/pool-1-abcd1234"],
+                "Image": "runner:fixture",
+                "State": "running",
+                "Status": "Up 5 minutes",
+                "Created": 1_762_128_000_i64,
+                "Labels": {
+                    "io.gridops.managed": "true",
+                    "io.gridops.runner-id": "runner-docker-1",
+                    "io.gridops.pool-id": "pool-docker",
+                    "io.gridops.mode": "persistent",
+                },
+            }])
+            .to_string(),
+        ),
         ("GET", "/containers/json") => ("200 OK", "[]".into()),
         ("GET", path) if path.starts_with("/networks/") => {
             ("200 OK", json!({ "Name": "gridops-runners" }).to_string())
