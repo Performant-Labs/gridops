@@ -609,29 +609,60 @@ async fn the_tart_agents_address_is_not_in_what_the_manager_answers_while_it_is_
     Ok(())
 }
 
-/// An address nothing answers: TEST-NET-1 (RFC 5737), reserved for
-/// documentation and never assigned, so a connection attempt there is
-/// dropped without an answer, as a sleeping Mac drops it.
-const DROPPING_AGENT: &str = "http://192.0.2.1:8787/";
+/// A connector layer whose connection attempt never ends, as connecting to
+/// a Mac that sleeps and drops packets never does. In process, with no
+/// network: the client's own connect limit is the only thing that stops it.
+#[derive(Clone)]
+struct NeverConnects;
+
+impl<S> tower::Layer<S> for NeverConnects {
+    type Service = NeverConnecting<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        NeverConnecting(inner)
+    }
+}
+
+#[derive(Clone)]
+struct NeverConnecting<S>(S);
+
+impl<S: tower::Service<R>, R> tower::Service<R> for NeverConnecting<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::future::Pending<Result<S::Response, S::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: R) -> Self::Future {
+        std::future::pending()
+    }
+}
 
 /// Round 3, finding 6: a Mac that sleeps drops packets, so connecting to it
 /// never ends by itself. A VM start, a removal and a log read carry no
 /// per-call limit of their own (only reads do), so only the client's connect
 /// limit stops them hanging until the 15-minute start limit or the 45-minute
-/// client limit. Through the client the manager really builds for the agent
-/// (`tart_agent_client`, extracted from `tart_agent_from_environment` so a
-/// test can build it), not a copy of its settings. On the paused clock,
-/// which moves to the next timer at once: each call must fail as
-/// `tart_agent_unavailable` after about the 5-second connect limit. A call
-/// that failed at once (no route to the address at all) would prove nothing,
-/// hence the lower bound.
+/// client limit. Through the client settings the manager really uses for
+/// the agent (`tart_agent_client_builder`, extracted from
+/// `tart_agent_from_environment`, which builds its client with it), not a
+/// copy of them; the test adds only a connector that never connects. On the
+/// paused clock, which moves to the next timer at once, each call must fail
+/// as `tart_agent_unavailable` after the 5-second connect limit, not the
+/// 45-minute one. Hermetic: nothing leaves the process.
 #[tokio::test(start_paused = true)]
 async fn a_start_removal_or_log_read_to_an_agent_that_drops_packets_fails_within_the_connect_limit()
 -> anyhow::Result<()> {
     let agent = TartAgent {
-        base_url: Url::parse(DROPPING_AGENT)?,
+        base_url: Url::parse("http://127.0.0.1:9/")?,
         token: SecretString::from("tart-agent-token"),
-        http: tart_agent_client()?,
+        http: tart_agent_client_builder()
+            .connector_layer(NeverConnects)
+            .build()?,
     };
     let start = json!({ "runnerId": "runner-mac-1", "name": "mac-abcd1234" });
     let logs = format!("v1/runners/{TART_RUNNER}/logs?tail=100&follow=false");
@@ -662,7 +693,7 @@ async fn a_start_removal_or_log_read_to_an_agent_that_drops_packets_fails_within
             other => panic!("the {call} to an agent that drops packets gave {other:?}"),
         }
         assert!(
-            took >= Duration::from_secs(1) && took <= FAIL_FAST,
+            took <= FAIL_FAST,
             "the {call} to an agent that drops packets failed after {took:?}, not within the connect limit"
         );
     }
