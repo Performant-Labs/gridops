@@ -1304,7 +1304,7 @@ pub async fn runner_pools(
           p.docker_image,p.tart_image,p.macos_runtime,p.desired_count,p.min_count,
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,p.paused,p.state,
           p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,i.account_login,
-          (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason,
+          (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason,
           CASE WHEN NOT EXISTS (
             SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
               AND NOT EXISTS (SELECT 1 FROM user_installations manage
@@ -4852,7 +4852,7 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
       p.provision_retry_at,p.provision_circuit_open,
-      (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason
+      (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason
       FROM runner_pools p JOIN installations i ON i.id=p.installation_id
       LEFT JOIN repositories repo ON repo.id=p.repository_id
       WHERE p.id=?
@@ -4934,13 +4934,14 @@ async fn manager_json(
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
+        let message = tart_agent_unavailable_message(path, status, &text)
+            .or_else(|| {
+                serde_json::from_str::<Value>(&text).ok().and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
             })
             .unwrap_or_else(|| format!("Runner manager request failed ({status})."));
         return Err(if status == StatusCode::NOT_FOUND {
@@ -5020,12 +5021,40 @@ async fn manager_get(state: &AppState, path: &str) -> ApiResult<reqwest::Respons
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(ApiError::ServiceUnavailable(format!(
-            "Runner manager request failed ({status}): {}",
-            text.chars().take(300).collect::<String>()
-        )));
+        return Err(ApiError::ServiceUnavailable(
+            tart_agent_unavailable_message(path, status, &text).unwrap_or_else(|| {
+                format!(
+                    "Runner manager request failed ({status}): {}",
+                    text.chars().take(300).collect::<String>()
+                )
+            }),
+        ));
     }
     Ok(response)
+}
+
+/// What a user is told when the runner manager could not pass a request on
+/// to the Tart agent (`tart_agent_unavailable`, as when the Mac sleeps).
+const TART_AGENT_UNAVAILABLE_MESSAGE: &str =
+    "Tart agent is unavailable: it could not be reached or stopped answering.";
+
+/// The fixed message for a manager error `text` with code
+/// `tart_agent_unavailable`, or `None` for any other answer. Every manager
+/// call (`manager_json`, `manager_get`) passes its error through this: what
+/// the manager says reaches the API's answers, runner failure reasons and
+/// events, and a manager from before round 3 of #122 names the agent's
+/// internal URL there, so its words go to the log only.
+fn tart_agent_unavailable_message(path: &str, status: StatusCode, text: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    if value.get("code").and_then(Value::as_str) != Some("tart_agent_unavailable") {
+        return None;
+    }
+    let detail = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    tracing::warn!(path, %status, detail, "the runner manager could not reach the Tart agent");
+    Some(TART_AGENT_UNAVAILABLE_MESSAGE.to_owned())
 }
 
 async fn archive_runner_logs(state: &AppState, runner: &RunnerAccess) -> ApiResult<Option<String>> {

@@ -773,6 +773,19 @@ fn shared_docker_socket(
     }))
 }
 
+/// The settings of the one client the manager uses for every call to the
+/// Tart agent. The 45-minute limit is for the longest VM start. Reads that
+/// should answer at once set their own, shorter limit per call
+/// (`TART_AGENT_READ_TIMEOUT`). A Mac that sleeps drops packets instead of
+/// refusing them, so even connecting gets a short limit, which bounds every
+/// call, starts and removals included.
+fn tart_agent_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent("GridOps manager/0.1")
+        .connect_timeout(TART_AGENT_CONNECT_TIMEOUT)
+        .timeout(Duration::from_mins(45))
+}
+
 fn tart_agent_from_environment() -> Result<Option<TartAgent>> {
     let url = env::var("GRIDOPS_TART_AGENT_URL")
         .ok()
@@ -788,16 +801,7 @@ fn tart_agent_from_environment() -> Result<Option<TartAgent>> {
                 matches!(base_url.scheme(), "http" | "https"),
                 "GRIDOPS_TART_AGENT_URL must use HTTP or HTTPS"
             );
-            // One client for every call: the 45-minute limit is for the
-            // longest VM start. Reads that should answer at once set their
-            // own, shorter limit per call (`TART_AGENT_READ_TIMEOUT`). A Mac
-            // that sleeps drops packets instead of refusing them, so even
-            // connecting gets a short limit.
-            let http = reqwest::Client::builder()
-                .user_agent("GridOps manager/0.1")
-                .connect_timeout(TART_AGENT_CONNECT_TIMEOUT)
-                .timeout(Duration::from_mins(45))
-                .build()?;
+            let http = tart_agent_client_builder().build()?;
             Ok(Some(TartAgent {
                 base_url,
                 token: SecretString::from(token),
@@ -816,18 +820,30 @@ fn tart_agent_from_environment() -> Result<Option<TartAgent>> {
 const TART_AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a read from the Tart agent may take in all: its runner list and
-/// its health, which it answers from what it already knows. An agent that
-/// takes longer is not answering (the Mac went to sleep with the connection
-/// open), and the list, health and Tart admission it holds up are on the
-/// reconciler's pass, which must not wait minutes for it (#122).
+/// its health. Both are quick but not free: the list runs `tart list`, and
+/// health runs four subprocesses one after another (`tart --version`,
+/// `tart list`, `df` and `ps`), so a heavily loaded Mac can be slow to
+/// answer. An agent that takes longer than this is taken for not answering
+/// (the Mac went to sleep with the connection open), and the list, health and
+/// Tart admission it holds up are on the reconciler's pass, which must not
+/// wait minutes for it (#122).
 const TART_AGENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The agent could not be reached, or stopped answering.
+/// What the manager answers, whatever the cause, when the agent could not be
+/// reached or stopped answering. It is passed on to users (the API's `503`,
+/// pool reasons and events), so it names no URL, host or port; the cause
+/// goes to the log.
+const TART_AGENT_UNAVAILABLE_MESSAGE: &str =
+    "Tart agent is unavailable: it could not be reached or stopped answering.";
+
+/// The agent could not be reached, or stopped answering. reqwest's error
+/// names the agent's URL, so only the log gets it.
 fn tart_agent_unavailable(error: &reqwest::Error) -> ManagerError {
+    tracing::warn!(error = %error, "the Tart agent could not be reached or stopped answering");
     ManagerError::Upstream {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "tart_agent_unavailable".into(),
-        message: format!("Tart agent is unavailable: {error}"),
+        message: TART_AGENT_UNAVAILABLE_MESSAGE.into(),
     }
 }
 
@@ -1500,7 +1516,7 @@ async fn list_runners(
             Ok(tart_runners) => runners.extend(tart_runners),
             Err(error) if !query.partial => return Err(error),
             Err(error) => {
-                tracing::warn!(error = ?error, "could not list the Tart agent's runners; listing the others");
+                tracing::info!(error = ?error, "could not list the Tart agent's runners; listing the others");
                 unavailable_providers.push("tart");
                 provider_errors.insert("tart".into(), provider_error(&error));
             }
@@ -1521,20 +1537,26 @@ async fn list_runners(
 /// (refused, timed out, cut off mid-answer), an outage that ends by itself
 /// when the Mac wakes; `error` when it answered but refused the manager or
 /// sent something that does not parse, which needs someone to fix it.
+/// `message` is passed on to users, so it is fixed per kind, with the
+/// agent's status where it answered one; it names no URL, host or port, and
+/// the detail goes to the log.
 fn provider_error(error: &ManagerError) -> Value {
     let (kind, message) = match error {
-        ManagerError::Upstream { code, message, .. } if code == "tart_agent_unavailable" => {
-            ("unreachable", message.clone())
+        ManagerError::Upstream { code, .. } if code == "tart_agent_unavailable" => {
+            ("unreachable", TART_AGENT_UNAVAILABLE_MESSAGE.to_owned())
         }
-        ManagerError::Upstream {
-            status, message, ..
-        } => ("error", format!("Tart agent answered {status}: {message}")),
-        ManagerError::Internal(error) => (
+        ManagerError::Upstream { status, code, .. } => (
             "error",
-            format!("Tart agent runner list could not be read: {error:#}"),
+            format!("Tart agent answered {status} [{code}]; see the runner manager's log."),
         ),
-        other => ("error", format!("Tart agent runner list failed: {other:?}")),
+        _ => (
+            "error",
+            "Tart agent runner list could not be read; see the runner manager's log.".to_owned(),
+        ),
     };
+    if kind == "error" {
+        tracing::warn!(error = ?error, "the Tart agent answered its runner list with an error");
+    }
     json!({ "kind": kind, "message": message })
 }
 

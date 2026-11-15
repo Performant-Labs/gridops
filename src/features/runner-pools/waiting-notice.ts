@@ -1,4 +1,4 @@
-/** How a pool waiting for capacity is explained on its page. */
+/** How a pool waiting for capacity, or for its runner provider, is explained on its page. */
 
 /** The runner manager's reason begins with this when a Tart VM waits for one of the Mac's slots (#95). */
 const VM_SLOT_WAIT = "Waiting for a macOS VM slot";
@@ -25,12 +25,30 @@ export type ProvisioningNotice = { title: string; body: string; tone: "danger" |
 type NoticePool = { state: string; provisionCircuitOpen: boolean; provisionFailureCount: number; provisionWaitReason?: string | null };
 
 /**
+ * The notice for a pool in the `provider-unavailable` state: every provider it may start runners
+ * with could not be asked (the Mac sleeps, or its agent is down or answers with an error), so the
+ * reconciler skips it and leaves its runners as they are (#122). The server's reason says which
+ * provider and how it fails.
+ */
+export function providerUnavailableNotice(pool: { provisionWaitReason?: string | null }): ProvisioningNotice {
+  const reason = pool.provisionWaitReason?.trim();
+  const generic =
+    "GridOps starts no runners for this pool and leaves its runners as they are until the provider answers again; it checks on every pass. This is not a failure and does not count towards the provisioning circuit.";
+  return { title: "Cannot run: runner provider unavailable", body: reason ? `${reason} ${generic}` : generic, tone: "danger" };
+}
+
+/**
  * What the pool page says about provisioning, or `null` when there is nothing to say. A pool the
- * server shows `waiting` gets its wait first, even with earlier failures or an open provisioning
- * circuit (#102), and the notice says what those are; otherwise an open circuit, then a backoff.
+ * server shows `provider-unavailable` gets that first: nothing else can happen until the provider
+ * answers. A pool shown `waiting` gets its wait first, even with earlier failures or an open
+ * provisioning circuit (#102), and the notice says what those are; otherwise an open circuit, then
+ * a backoff.
  */
 export function provisioningNotice(pool: NoticePool, when: string): ProvisioningNotice | null {
   const failures = pool.provisionFailureCount;
+  if (pool.state === "provider-unavailable") {
+    return providerUnavailableNotice(pool);
+  }
   if (pool.state === "waiting") {
     const notice = waitingNotice(pool, when);
     if (pool.provisionCircuitOpen) {

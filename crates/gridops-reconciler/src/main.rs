@@ -233,25 +233,30 @@ impl ManagerView {
         }
     }
 
-    /// What an operator is told about why `provider` could not be asked.
+    /// How `provider` failed: `unreachable` (refused, timed out or cut off,
+    /// as when the Mac sleeps), `error` (its agent answered, but with an
+    /// error), or `unknown` when the manager did not say.
+    fn failure_kind(&self, provider: &str) -> &'static str {
+        match self.provider_errors.get(provider) {
+            Some(error) if error.kind == "unreachable" => "unreachable",
+            Some(_) => "error",
+            None => "unknown",
+        }
+    }
+
+    /// What an operator is told about why `provider` could not be asked: a
+    /// fixed message per kind of failure. It reaches pool reasons and events,
+    /// which the API serves to anyone who may read the pool, so it does not
+    /// pass on the manager's own words, which may name the agent's internal
+    /// URL. Those go to the log (`unavailable_warning`).
     fn unavailable_reason(&self, provider: &str) -> String {
         let label = provider_label(provider);
-        match self.provider_errors.get(provider) {
-            Some(error) if error.kind == "unreachable" => format!(
-                "{label} provider unavailable: its agent cannot be reached (unreachable): {}",
-                error.message
+        match self.failure_kind(provider) {
+            "unreachable" => format!("{label} provider unavailable: its agent cannot be reached."),
+            "error" => format!(
+                "{label} provider unavailable: its agent answered with an error; see the runner manager's log."
             ),
-            Some(error) => format!(
-                "{label} provider unavailable: its agent answered with an error ({}): {}",
-                if error.kind.is_empty() {
-                    "error"
-                } else {
-                    error.kind.as_str()
-                },
-                error.message
-            ),
-            // A manager that did not say why.
-            None => format!("{label} provider unavailable: the runner manager could not ask it"),
+            _ => format!("{label} provider unavailable: the runner manager could not ask it."),
         }
     }
 
@@ -556,17 +561,17 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Some(warning) = view.unavailable_warning() {
         tracing::warn!("{warning}");
     }
-    if let Err(error) = record_provider_changes(app, &view).await {
+    let pools = load_pools(&app.database).await?;
+    if let Err(error) = record_provider_changes(app, &view, &pools).await {
         tracing::warn!(error = ?error, "could not record a change in runner provider availability");
     }
-    let pools = load_pools(&app.database).await?;
     app.tart.retain_finished(
         &pools
             .iter()
             .map(|pool| pool.id.as_str())
             .collect::<Vec<_>>(),
     );
-    for pool in pools {
+    for mut pool in pools {
         // Nothing to ask the provider and nothing to learn about its runners:
         // the pool keeps its state, runners and failure count until the
         // provider answers again. Said once for the pass, above.
@@ -579,8 +584,11 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
                 .is_ok_and(|profiles| profiles.is_empty())
         {
             tracing::debug!(pool_id = %pool.id, "skipping a pool whose providers are unavailable");
-            show_provider_unavailable(&app.database, &pool).await?;
+            show_provider_unavailable(&app.database, &view, &pool).await?;
             continue;
+        }
+        if pool.state == PROVIDER_UNAVAILABLE_STATE {
+            end_provider_unavailable(&app.database, &mut pool).await?;
         }
         if let Err(error) =
             reconcile_pool(app, &pool, &view, provisioning_paused, builtin_enabled).await
@@ -622,97 +630,140 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     Ok(())
 }
 
-/// Records a provider becoming unavailable, and answering again, once each:
-/// on the pass that sees the change, not on every pass it lasts. What was
-/// last recorded is read back from the events, so a reconciler restart
-/// neither repeats nor misses one.
-async fn record_provider_changes(app: &Reconciler, view: &ManagerView) -> Result<()> {
-    let recorded = sqlx::query_as::<_, (String, String)>(
-        "SELECT event,metadata FROM runner_events WHERE runner_id IS NULL AND event IN (?,?) ORDER BY created_at DESC,rowid DESC",
+/// Records a provider becoming unavailable, answering again, and failing in
+/// another way while it stays unavailable (unreachable, then answering with an
+/// error, or the reverse), once each: on the pass that sees the change, not
+/// on every pass it lasts. Each is written into the events of every pool that
+/// may start runners with the provider, with its `pool_id`, since the API
+/// shows a user the events of the pools they can see; a pool that does not
+/// need the provider is not told. What was last recorded for each pool is
+/// read back from the events, so a reconciler restart neither repeats nor
+/// misses one.
+async fn record_provider_changes(
+    app: &Reconciler,
+    view: &ManagerView,
+    pools: &[Pool],
+) -> Result<()> {
+    let recorded = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT pool_id,event,metadata FROM runner_events
+         WHERE runner_id IS NULL AND pool_id IS NOT NULL AND event IN (?,?)
+         ORDER BY created_at DESC,rowid DESC",
     )
     .bind(PROVIDER_UNAVAILABLE_EVENT)
     .bind(PROVIDER_AVAILABLE_EVENT)
     .fetch_all(&app.database)
     .await?;
-    // The latest event per provider says whether it is recorded as away.
-    let mut latest = HashMap::<String, bool>::new();
-    for (event, metadata) in recorded {
-        let Some(provider) = serde_json::from_str::<Value>(&metadata)
-            .ok()
-            .and_then(|value| value.get("provider")?.as_str().map(ToOwned::to_owned))
-        else {
+    // The latest event per pool and provider: the kind of failure it is
+    // recorded as unavailable with, or `None` when recorded as available.
+    let mut latest = HashMap::<(String, String), Option<String>>::new();
+    for (pool_id, event, metadata) in recorded {
+        let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_default();
+        let Some(provider) = metadata.get("provider").and_then(Value::as_str) else {
             continue;
         };
         latest
-            .entry(provider)
-            .or_insert(event == PROVIDER_UNAVAILABLE_EVENT);
+            .entry((pool_id, provider.to_owned()))
+            .or_insert_with(|| {
+                (event == PROVIDER_UNAVAILABLE_EVENT).then(|| {
+                    metadata
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+            });
     }
-    let mut went_away = view
-        .unavailable_providers
-        .iter()
-        .filter(|provider| latest.get(*provider) != Some(&true))
-        .collect::<Vec<_>>();
-    went_away.sort();
-    for provider in went_away {
-        let error = view
-            .provider_errors
-            .get(provider)
-            .cloned()
-            .unwrap_or_default();
-        system_event(
-            app,
-            None,
-            if error.kind == "unreachable" {
-                "warning"
-            } else {
-                "error"
-            },
-            PROVIDER_UNAVAILABLE_EVENT,
-            &format!(
-                "{}. Pools that need it are skipped and its runners are left as they are until it answers.",
-                view.unavailable_reason(provider)
-            ),
-            json!({ "provider": provider, "kind": error.kind, "message": error.message }),
-        )
-        .await?;
-    }
-    let mut came_back = latest
-        .iter()
-        .filter(|(provider, away)| **away && !view.provider_unavailable(provider))
-        .map(|(provider, _)| provider)
-        .collect::<Vec<_>>();
-    came_back.sort();
-    for provider in came_back {
-        system_event(
-            app,
-            None,
-            "info",
-            PROVIDER_AVAILABLE_EVENT,
-            &format!(
-                "{} provider available again: the runner manager can ask its agent, and its pools are reconciled as usual.",
-                provider_label(provider)
-            ),
-            json!({ "provider": provider }),
-        )
-        .await?;
+    for pool in pools {
+        let mut providers = pool_providers(pool);
+        providers.sort();
+        providers.dedup();
+        for provider in providers {
+            let recorded = latest
+                .get(&(pool.id.clone(), provider.clone()))
+                .cloned()
+                .flatten();
+            if view.provider_unavailable(&provider) {
+                let kind = view.failure_kind(&provider);
+                if recorded.as_deref() == Some(kind) {
+                    continue;
+                }
+                system_event(
+                    app,
+                    Some(&pool.id),
+                    if kind == "unreachable" {
+                        "warning"
+                    } else {
+                        "error"
+                    },
+                    PROVIDER_UNAVAILABLE_EVENT,
+                    &format!(
+                        "{} GridOps starts no runners with it, and leaves its runners as they are, until it answers.",
+                        view.unavailable_reason(&provider)
+                    ),
+                    json!({ "provider": provider, "kind": kind }),
+                )
+                .await?;
+            } else if recorded.is_some() {
+                system_event(
+                    app,
+                    Some(&pool.id),
+                    "info",
+                    PROVIDER_AVAILABLE_EVENT,
+                    &format!(
+                        "{} provider available again: the runner manager can ask its agent, and the pool is reconciled as usual.",
+                        provider_label(&provider)
+                    ),
+                    json!({ "provider": provider }),
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
 }
 
 /// Shows a pool the pass skips as unable to run for now, rather than in the
-/// state it last had, as if all were well. A paused pool stays paused. A wait
-/// recorded before is over: the pool asks again once the provider answers.
-async fn show_provider_unavailable(database: &SqlitePool, pool: &Pool) -> Result<()> {
-    if pool.paused || pool.state == PROVIDER_UNAVAILABLE_STATE {
+/// state it last had, as if all were well, and keeps why (which provider, and
+/// how it failed) as the pool's reason, which follows a change in how it
+/// fails. A paused pool stays paused: the operator's own block says more.
+async fn show_provider_unavailable(
+    database: &SqlitePool,
+    view: &ManagerView,
+    pool: &Pool,
+) -> Result<()> {
+    if pool.paused {
         return Ok(());
     }
-    sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
-        .bind(PROVIDER_UNAVAILABLE_STATE)
-        .bind(now_millis())
-        .bind(&pool.id)
-        .execute(database)
-        .await?;
-    set_pool_wait_reason(database, &pool.id, None).await
+    if pool.state != PROVIDER_UNAVAILABLE_STATE {
+        sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
+            .bind(PROVIDER_UNAVAILABLE_STATE)
+            .bind(now_millis())
+            .bind(&pool.id)
+            .execute(database)
+            .await?;
+    }
+    let mut providers = pool_providers(pool);
+    providers.sort();
+    providers.dedup();
+    let reason = providers
+        .iter()
+        .filter(|provider| view.provider_unavailable(provider))
+        .map(|provider| view.unavailable_reason(provider))
+        .collect::<Vec<_>>()
+        .join(" ");
+    set_pool_wait_reason(database, &pool.id, Some(&reason)).await
+}
+
+/// Ends the outage for a pool skipped in an earlier pass whose provider
+/// answers again, before it is reconciled. The reason kept while it was
+/// skipped (`show_provider_unavailable`) is the outage's, not a deferred
+/// start's, so it is cleared and does not count as a wait recorded: a pool
+/// that was in its backoff is back in `backoff`, not `waiting` with a reason
+/// saying the provider cannot be reached.
+async fn end_provider_unavailable(database: &SqlitePool, pool: &mut Pool) -> Result<()> {
+    set_pool_wait_reason(database, &pool.id, None).await?;
+    pool.wait_recorded = false;
+    Ok(())
 }
 
 async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
@@ -2665,9 +2716,8 @@ async fn start_admitted_runner(
             release_runner_capacity(app, &capacity_lease).await;
         }
         let message = error.to_string().chars().take(2_000).collect::<String>();
-        let manager_cleanup = match cleanup_unrecorded_manager_runner(app, &runner_id, &provider)
-            .await
-        {
+        let cleanup = cleanup_unrecorded_manager_runner(app, &runner_id, &provider).await;
+        let manager_cleanup = match cleanup.removed {
             Ok(Some(container_id)) => json!({ "status": "removed", "containerId": container_id }),
             Ok(None) => json!({ "status": "not-found" }),
             Err(cleanup_error) => {
@@ -2690,7 +2740,15 @@ async fn start_admitted_runner(
             json!({ "runnerId": runner_id, "managerContainerCleanup": manager_cleanup }),
         )
         .await?;
-        if deferred_manager_error(&error) {
+        // A start whose connection to the agent dropped, while the agent
+        // goes on answering the runner list (asked just now, by the cleanup):
+        // the Mac is not away, the agent failed on this start. It counts
+        // towards the circuit, or an agent that fails every start would be
+        // retried every 30 s for ever. The Mac really being away (the list
+        // could not ask it either) stays deferred and uncounted (#122).
+        let agent_failed_the_start =
+            cleanup.provider_answered && manager_error_code(&error, "tart_agent_unavailable");
+        if deferred_manager_error(&error) && !agent_failed_the_start {
             return Ok(StartOutcome::Deferred {
                 full_provider: host_capacity_exhausted(Some(&message)).then_some(provider),
                 reason: Some(message),
@@ -2893,15 +2951,39 @@ async fn remove_manager_container(app: &Reconciler, container_id: &str) -> Resul
     )
 }
 
+/// How the cleanup after a failed start went.
+struct UnrecordedCleanup {
+    /// The container or VM removed, `None` when the runner had none, or why
+    /// the cleanup could not be done.
+    removed: Result<Option<String>>,
+    /// Whether the manager listed the runners of the runner's own provider:
+    /// it could ask that provider's agent just now.
+    provider_answered: bool,
+}
+
 /// After a failed start of a runner with `provider`, removes the container
-/// or VM the manager may have made for it anyway. `None` when it has none.
+/// or VM the manager may have made for it anyway.
 async fn cleanup_unrecorded_manager_runner(
     app: &Reconciler,
     runner_id: &str,
     provider: &str,
-) -> Result<Option<String>> {
-    let managed =
-        manager_request::<ManagerRunners>(app, Method::GET, MANAGER_RUNNER_LIST, None).await?;
+) -> UnrecordedCleanup {
+    let managed = match manager_request::<ManagerRunners>(
+        app,
+        Method::GET,
+        MANAGER_RUNNER_LIST,
+        None,
+    )
+    .await
+    {
+        Ok(managed) => managed,
+        Err(error) => {
+            return UnrecordedCleanup {
+                removed: Err(error),
+                provider_answered: false,
+            };
+        }
+    };
     let own_provider_unavailable = managed
         .unavailable_providers
         .iter()
@@ -2920,13 +3002,23 @@ async fn cleanup_unrecorded_manager_runner(
         // Not listed may only mean not asked, when the runner's own provider
         // could not be: say so rather than "not found". Another provider
         // being out of reach says nothing about this runner.
-        if own_provider_unavailable {
-            bail!("the runner manager could not ask {provider} for this runner");
-        }
-        return Ok(None);
+        return UnrecordedCleanup {
+            removed: if own_provider_unavailable {
+                Err(anyhow::anyhow!(
+                    "the runner manager could not ask {provider} for this runner"
+                ))
+            } else {
+                Ok(None)
+            },
+            provider_answered: !own_provider_unavailable,
+        };
     };
-    remove_manager_container(app, &container_id).await?;
-    Ok(Some(container_id))
+    UnrecordedCleanup {
+        removed: remove_manager_container(app, &container_id)
+            .await
+            .map(|()| Some(container_id)),
+        provider_answered: true,
+    }
 }
 
 async fn cleanup_orphaned_manager_containers(
@@ -3269,6 +3361,14 @@ async fn manager_request<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_str(&text)?)
 }
 
+/// The reason a request that the manager could not pass on to the Tart agent
+/// is recorded with (`tart_agent_unavailable`), whatever the manager said. It
+/// reaches runner failure reasons, pool reasons and events, which the API
+/// serves to anyone who may read the pool, and a manager from before round 3
+/// of #122 says which URL it could not reach, so its words go to the log only.
+const TART_AGENT_UNAVAILABLE_REASON: &str =
+    "Tart agent is unavailable: it could not be reached or stopped answering.";
+
 /// What a failed manager request is recorded as: its status, the manager's
 /// error code and its reason, which is never left empty.
 fn manager_failure(status: StatusCode, text: &str) -> String {
@@ -3284,7 +3384,10 @@ fn manager_failure(status: StatusCode, text: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or(text)
         .trim();
-    let message = if message.is_empty() {
+    let message = if code == "tart_agent_unavailable" {
+        tracing::info!(%status, detail = %message, "the runner manager could not reach the Tart agent");
+        TART_AGENT_UNAVAILABLE_REASON
+    } else if message.is_empty() {
         "the runner manager answered without saying why"
     } else {
         message
@@ -3372,6 +3475,11 @@ fn deferred_manager_error(error: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|code| message.contains(code))
+}
+
+/// Whether the manager refused the request with error `code`.
+fn manager_error_code(error: &anyhow::Error, code: &str) -> bool {
+    error.to_string().contains(&format!("[{code}]"))
 }
 
 fn host_capacity_exhausted(reason: Option<&str>) -> bool {
