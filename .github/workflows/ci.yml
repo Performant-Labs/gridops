@@ -36,7 +36,7 @@ jobs:
     # repo whose author is in the org variable TRUSTED_CI_AUTHORS (a JSON list
     # of logins). A fork pull request, or any pull request while that variable
     # is unset, runs hosted.
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), 'some-untrusted-user'))) && 'self-hosted-linux' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -74,7 +74,7 @@ jobs:
   rust:
     name: Rust format, lint, and tests
     # The same runner rule as the web job.
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), 'some-untrusted-user'))) && 'self-hosted-linux' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux' || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
