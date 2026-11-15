@@ -300,3 +300,132 @@ async fn reconcile_does_not_trim_an_excess_mac_runner_while_the_mac_cannot_be_as
     )
     .await
 }
+
+// ---------------------------------------------------------------------------
+// Round 3 (second review of PR #123).
+// ---------------------------------------------------------------------------
+
+/// Makes the fixture's user a member who may only read the seeded
+/// installation's pools, as a `pools:read` user.
+async fn as_pools_reader(f: &Fixture) -> Result<()> {
+    sqlx::raw_sql(
+        "UPDATE users SET role='member' WHERE id='fleet-user';
+         UPDATE user_installations SET permission='read' WHERE user_id='fleet-user';",
+    )
+    .execute(&f.database)
+    .await?;
+    Ok(())
+}
+
+/// `GET path` as the fixture's user: the status and the JSON body.
+async fn read(f: &Fixture, path: &str) -> Result<(reqwest::StatusCode, Value)> {
+    let response = f
+        .client
+        .get(format!("{}{path}", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+}
+
+/// Round 3, finding 1a, the API's side of the chosen design: the reconciler
+/// writes the Mac going away into the events of each pool that needs it,
+/// with the pool's `pool_id` (the reconciler's
+/// `every_pool_that_needs_the_mac_records_it_going_away_and_coming_back`).
+/// A `pools:read` user then sees it in that pool's events tab and in the
+/// overview's activity.
+#[tokio::test]
+async fn a_pools_reader_sees_the_mac_going_away_in_the_pools_events_and_the_overview() -> Result<()>
+{
+    let f = Fixture::new().await?;
+    seed_mac_pool(&f).await?;
+    as_pools_reader(&f).await?;
+    sqlx::query(
+        "INSERT INTO runner_events (id,pool_id,level,event,message,metadata,created_at)
+         VALUES ('event-mac-away','pool-mac','warning','Runner provider unavailable',
+                 'macOS (Tart) provider unavailable: its agent cannot be reached.',
+                 '{\"provider\":\"tart\",\"kind\":\"unreachable\"}',?)",
+    )
+    .bind(chrono::Utc::now().timestamp_millis())
+    .execute(&f.database)
+    .await?;
+
+    let (status, events) = read(&f, "/api/v1/runner-pools/pool-mac/events").await?;
+    assert!(
+        status.is_success(),
+        "pool events answered {status}: {events}"
+    );
+    assert!(
+        events["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["event"] == "Runner provider unavailable"),
+        "the pool's events tab does not show the Mac going away: {events}"
+    );
+    let (status, overview) = read(&f, "/api/v1/overview").await?;
+    assert!(
+        status.is_success(),
+        "overview answered {status}: {overview}"
+    );
+    assert!(
+        overview["activity"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item["event"] == "Runner provider unavailable"),
+        "the overview's activity does not show the Mac going away: {overview}"
+    );
+    Ok(())
+}
+
+/// Round 3, finding 1b: a pool the reconciler skipped as
+/// `provider-unavailable` keeps its reason where the API finds a pool's
+/// reason (`runner_pool_waits`, the reconciler's
+/// `a_skipped_mac_pool_says_which_provider_is_unavailable_and_how`). A
+/// `pools:read` user gets it as `provisionWaitReason`, on the pool page and
+/// in the pool list, as for a waiting pool. Today the API gives it only in
+/// the state `waiting`.
+#[tokio::test]
+async fn a_pools_reader_gets_the_reason_a_pools_provider_is_unavailable() -> Result<()> {
+    const REASON: &str = "macOS (Tart) provider unavailable: its agent cannot be reached.";
+    let f = Fixture::new().await?;
+    seed_mac_pool(&f).await?;
+    as_pools_reader(&f).await?;
+    sqlx::query("UPDATE runner_pools SET state='provider-unavailable' WHERE id='pool-mac'")
+        .execute(&f.database)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_pool_waits (pool_id,reason,updated_at) VALUES ('pool-mac',?,1)",
+    )
+    .bind(REASON)
+    .execute(&f.database)
+    .await?;
+
+    let (status, pool) = read(&f, "/api/v1/runner-pools/pool-mac").await?;
+    assert!(status.is_success(), "the pool answered {status}: {pool}");
+    assert_eq!(pool["state"], "provider-unavailable", "{pool}");
+    assert_eq!(
+        pool["provisionWaitReason"], REASON,
+        "the pool page does not say why its provider is unavailable: {pool}"
+    );
+    let (status, pools) = read(&f, "/api/v1/runner-pools").await?;
+    assert!(
+        status.is_success(),
+        "the pool list answered {status}: {pools}"
+    );
+    let listed = pools["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["id"] == "pool-mac")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        listed["provisionWaitReason"], REASON,
+        "the pool list does not say why its provider is unavailable: {pools}"
+    );
+    Ok(())
+}

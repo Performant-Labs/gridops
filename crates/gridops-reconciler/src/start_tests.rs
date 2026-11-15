@@ -45,6 +45,11 @@ pub(crate) struct ManagerLog {
     pub(crate) tart_down_error: Mutex<Value>,
     /// A Docker start fails (`500 docker_error`) without leaving a container.
     pub(crate) docker_fails: AtomicBool,
+    /// A Tart start that ends answers `503 tart_agent_unavailable`, as the
+    /// manager does whenever the connection to the agent drops, while the
+    /// agent goes on answering the runner list: it crashed on the start, it
+    /// is not away (round 3 of PR #123, finding 2).
+    pub(crate) tart_start_drops: AtomicBool,
 }
 
 impl Default for ManagerLog {
@@ -63,6 +68,7 @@ impl Default for ManagerLog {
             list_queries: Mutex::default(),
             tart_down_error: Mutex::new(tart_unreachable()),
             docker_fails: AtomicBool::default(),
+            tart_start_drops: AtomicBool::default(),
         }
     }
 }
@@ -216,8 +222,11 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                         if let Ok(permit) = log.tart_gate.acquire().await {
                             permit.forget();
                         }
-                        // The Mac went to sleep while the start waited.
-                        if log.tart_down.load(Ordering::SeqCst) {
+                        // The Mac went to sleep while the start waited, or
+                        // the agent dropped the connection on this start.
+                        if log.tart_down.load(Ordering::SeqCst)
+                            || log.tart_start_drops.load(Ordering::SeqCst)
+                        {
                             return tart_agent_unavailable();
                         }
                         if log.tart_fails.load(Ordering::SeqCst) {

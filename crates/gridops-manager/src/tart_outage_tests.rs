@@ -558,3 +558,113 @@ async fn a_tart_agent_that_refuses_the_token_or_answers_garbage_is_reported_as_a
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Round 3 (second review of PR #123).
+// ---------------------------------------------------------------------------
+
+/// Round 3, finding 3, the manager's side: its message for an agent it
+/// cannot reach is passed on, by the API, to users who may only read pools,
+/// and by the reconciler into pool reasons and events. It must not name the
+/// agent's internal URL, host or port (reqwest's error does: `error sending
+/// request for url (http://<mac>:8787/...)`); that detail goes to the log.
+/// Through the partial list's `providerErrors` and a removal's `503`.
+#[tokio::test]
+async fn the_tart_agents_address_is_not_in_what_the_manager_answers_while_it_is_unavailable()
+-> anyhow::Result<()> {
+    let tart = refused_url()?;
+    let address = tart.authority().to_owned();
+    let docker = listed_docker()?;
+    let manager = manager(Some(&docker), &tart).await?;
+
+    let listed = get_runners(&manager).send().await?;
+    let list = listed.json::<Value>().await.unwrap_or(Value::Null);
+    let removal = reqwest::Client::new()
+        .delete(format!("{manager}/v1/runners/{TART_RUNNER}"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?;
+    let removal_status = removal.status();
+    let removed = removal.json::<Value>().await.unwrap_or(Value::Null);
+    let _ = std::fs::remove_file(&docker);
+
+    assert_eq!(
+        list["providerErrors"]["tart"]["kind"], "unreachable",
+        "{list}"
+    );
+    let message = list["providerErrors"]["tart"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !message.is_empty() && !message.contains(&address) && !message.contains("http://"),
+        "the list names the agent's address ({address}): {message:?}"
+    );
+    assert_eq!(removal_status, StatusCode::SERVICE_UNAVAILABLE, "{removed}");
+    assert_eq!(removed["code"], "tart_agent_unavailable", "{removed}");
+    let error = removed["error"].as_str().unwrap_or_default();
+    assert!(
+        !error.is_empty() && !error.contains(&address) && !error.contains("http://"),
+        "the removal's error names the agent's address ({address}): {error:?}"
+    );
+    Ok(())
+}
+
+/// An address nothing answers: TEST-NET-1 (RFC 5737), reserved for
+/// documentation and never assigned, so a connection attempt there is
+/// dropped without an answer, as a sleeping Mac drops it.
+const DROPPING_AGENT: &str = "http://192.0.2.1:8787/";
+
+/// Round 3, finding 6: a Mac that sleeps drops packets, so connecting to it
+/// never ends by itself. A VM start, a removal and a log read carry no
+/// per-call limit of their own (only reads do), so only the client's connect
+/// limit stops them hanging until the 15-minute start limit or the 45-minute
+/// client limit. Through the client the manager really builds for the agent
+/// (`tart_agent_client`, extracted from `tart_agent_from_environment` so a
+/// test can build it), not a copy of its settings. On the paused clock,
+/// which moves to the next timer at once: each call must fail as
+/// `tart_agent_unavailable` after about the 5-second connect limit. A call
+/// that failed at once (no route to the address at all) would prove nothing,
+/// hence the lower bound.
+#[tokio::test(start_paused = true)]
+async fn a_start_removal_or_log_read_to_an_agent_that_drops_packets_fails_within_the_connect_limit()
+-> anyhow::Result<()> {
+    let agent = TartAgent {
+        base_url: Url::parse(DROPPING_AGENT)?,
+        token: SecretString::from("tart-agent-token"),
+        http: tart_agent_client()?,
+    };
+    let start = json!({ "runnerId": "runner-mac-1", "name": "mac-abcd1234" });
+    let logs = format!("v1/runners/{TART_RUNNER}/logs?tail=100&follow=false");
+    let removal = format!("v1/runners/{TART_RUNNER}");
+    for call in ["start", "removal", "logs"] {
+        let started = tokio::time::Instant::now();
+        let result = match call {
+            "start" => tart_agent_value(
+                &agent,
+                reqwest::Method::POST,
+                "v1/runners",
+                Some(start.clone()),
+            )
+            .await
+            .map(|_| ()),
+            "removal" => tart_agent_value(&agent, reqwest::Method::DELETE, &removal, None)
+                .await
+                .map(|_| ()),
+            _ => tart_agent_response(&agent, reqwest::Method::GET, &logs, None, None)
+                .await
+                .map(|_| ()),
+        };
+        let took = started.elapsed();
+        match result {
+            Err(ManagerError::Upstream { code, .. }) => {
+                assert_eq!(code, "tart_agent_unavailable", "the {call}");
+            }
+            other => panic!("the {call} to an agent that drops packets gave {other:?}"),
+        }
+        assert!(
+            took >= Duration::from_secs(1) && took <= FAIL_FAST,
+            "the {call} to an agent that drops packets failed after {took:?}, not within the connect limit"
+        );
+    }
+    Ok(())
+}
