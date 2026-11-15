@@ -1309,3 +1309,49 @@ async fn a_change_in_how_the_tart_agent_fails_is_recorded_once() -> Result<()> {
     );
     setup.finish().await
 }
+
+/// Round 3, GREEN review B1 (a regression against round 2): a skipped pool
+/// keeps the outage as its reason in `runner_pool_waits`, and any row there
+/// counts as a wait recorded (`wait_recorded`), which makes a pool held back
+/// or still in its backoff show `waiting`. So once the Mac answers, the
+/// outage must be over for the pool too: a pool in backoff before the Mac went
+/// away is back in `backoff`, with no reason left saying the Mac cannot be
+/// reached, not `waiting` with that stale reason.
+#[tokio::test]
+async fn a_pool_in_backoff_when_the_mac_went_away_is_back_in_backoff_without_the_outage_reason_once_it_answers()
+-> Result<()> {
+    let setup = Setup::new(
+        "UPDATE runner_pools SET desired_count=1,provision_failure_count=1,
+           provision_retry_at=9999999999999,state='backoff' WHERE id='pool-mac';",
+        tart_lane::SLOT_WATCH_INTERVAL,
+    )
+    .await?;
+    tokio::time::timeout(PASS_LIMIT, run_pass(&setup.app)).await?;
+    assert_eq!(
+        pool_state(&setup, "pool-mac").await?,
+        ("backoff".to_owned(), None),
+        "the setup: the pool waits out its backoff"
+    );
+
+    setup.manager.tart_down.store(true, Ordering::SeqCst);
+    tokio::time::timeout(PASS_LIMIT, run_pass(&setup.app)).await?;
+    let (during, _) = pool_state(&setup, "pool-mac").await?;
+    assert_eq!(
+        during, "provider-unavailable",
+        "the setup: the pool is skipped"
+    );
+
+    setup.manager.tart_down.store(false, Ordering::SeqCst);
+    tokio::time::timeout(PASS_LIMIT, run_pass(&setup.app)).await?;
+    let (state, reason) = pool_state(&setup, "pool-mac").await?;
+    assert!(
+        !reason.as_deref().is_some_and(says_unavailable),
+        "the Mac answers again, but the pool's reason still says it is unavailable: state {state:?}, reason {reason:?}"
+    );
+    assert_eq!(
+        (state.as_str(), reason.as_deref()),
+        ("backoff", None),
+        "the pool is not back in its backoff once the Mac answers"
+    );
+    setup.finish().await
+}

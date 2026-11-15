@@ -13,7 +13,7 @@ use axum::{
     extract::{Path, RawQuery},
     http::StatusCode as Status,
     response::IntoResponse as _,
-    routing::{delete, get},
+    routing::{delete, get, post, put},
 };
 
 use super::*;
@@ -428,4 +428,374 @@ async fn a_pools_reader_gets_the_reason_a_pools_provider_is_unavailable() -> Res
         "the pool list does not say why its provider is unavailable: {pools}"
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Round 3, GREEN review B2: a runner manager from before round 3 (0.2.0).
+// ---------------------------------------------------------------------------
+
+/// The Tart agent's address, as a 0.2.0 runner manager's errors name it.
+const AGENT_HOST: &str = "192.0.2.10";
+const AGENT_PORT: &str = "8787";
+
+/// Whether `text` names the Tart agent's URL, host or port.
+fn names_the_agent(text: &str) -> bool {
+    text.contains("http://") || text.contains(AGENT_HOST) || text.contains(AGENT_PORT)
+}
+
+/// What a 0.2.0 runner manager answers to any call it could not pass on to
+/// the sleeping Mac's agent: reqwest's error, which names the agent's URL.
+fn old_tart_agent_unavailable(path: &str) -> axum::response::Response {
+    (
+        Status::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "code": "tart_agent_unavailable",
+            "error": format!(
+                "Tart agent is unavailable: error sending request for url (http://{AGENT_HOST}:{AGENT_PORT}/{path})"
+            ),
+        })),
+    )
+        .into_response()
+}
+
+/// A 0.2.0 runner manager while the Mac sleeps. It ignores `partial=true`
+/// and fails the whole runner list, and fails every call that reaches the
+/// agent, naming the agent's URL as that manager does. Admission and a
+/// runner start fail the same way when `start_fails` / `admission_fails`
+/// say so: the API sends those only for Docker today, so they guard the
+/// one path all manager errors take (`manager_json`). It remembers each
+/// call, so a test knows its request reached the manager.
+struct OldManagerMacAsleep {
+    url: String,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl OldManagerMacAsleep {
+    async fn start(admission_fails: bool) -> Result<Self> {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&calls);
+        let record = move |call: String| {
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call);
+        };
+        let (r1, r2, r3, r4, r5, r6) = (
+            record.clone(),
+            record.clone(),
+            record.clone(),
+            record.clone(),
+            record.clone(),
+            record,
+        );
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async {
+                    Json(json!({
+                        "status": "degraded",
+                        "providers": {"tart": {"available": false, "error": "Tart agent is unavailable."}},
+                    }))
+                }),
+            )
+            .route("/v1/policy", put(|| async { Json(json!({})) }))
+            .route(
+                "/v1/runners",
+                get(move || {
+                    r1("list".into());
+                    async { old_tart_agent_unavailable("v1/runners") }
+                })
+                .post(move || {
+                    r2("start".into());
+                    async { old_tart_agent_unavailable("v1/runners") }
+                }),
+            )
+            .route(
+                "/v1/runners/{id}",
+                delete(move |Path(id): Path<String>| {
+                    r3(format!("removal {id}"));
+                    async move { old_tart_agent_unavailable(&format!("v1/runners/{id}")) }
+                }),
+            )
+            .route(
+                "/v1/runners/{id}/logs",
+                get(move |Path(id): Path<String>| {
+                    r4(format!("logs {id}"));
+                    async move { old_tart_agent_unavailable(&format!("v1/runners/{id}/logs")) }
+                }),
+            )
+            .route(
+                "/v1/runners/{id}/{action}",
+                post(move |Path((id, action)): Path<(String, String)>| {
+                    r5(format!("{action} {id}"));
+                    async move {
+                        old_tart_agent_unavailable(&format!("v1/runners/{id}/{action}"))
+                    }
+                }),
+            )
+            .route(
+                "/v1/admissions",
+                post(move || {
+                    r6("admission".into());
+                    async move {
+                        if admission_fails {
+                            old_tart_agent_unavailable("v1/capacity")
+                        } else {
+                            Json(json!({ "leaseId": "lease-1" })).into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/admissions/{lease_id}",
+                delete(|| async { Json(json!({})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok(Self { url, calls })
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// `method path` as the fixture's admin, with a JSON body: the status and
+/// the body as text.
+async fn send(
+    f: &Fixture,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<(reqwest::StatusCode, String)> {
+    let mut request = f
+        .client
+        .request(method, format!("{}{path}", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    Ok((status, response.text().await.unwrap_or_default()))
+}
+
+/// Checks that `what` reached the manager (`call`), that the API answered
+/// it with the manager's 503, and that neither that answer nor anything the
+/// API keeps and serves (each runner's failure reason, each event's message
+/// and metadata) names the agent's URL, host or port.
+async fn assert_the_agent_is_not_named(
+    f: &Fixture,
+    manager: &OldManagerMacAsleep,
+    what: &str,
+    call: &str,
+    (status, body): (reqwest::StatusCode, String),
+) -> Result<()> {
+    assert!(
+        manager.calls().iter().any(|made| made.starts_with(call)),
+        "the setup: {what} did not reach the manager ({call}); it made {:?} and the API answered {status}: {body}",
+        manager.calls()
+    );
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the setup: {what} did not fail with the manager's 503: {body}"
+    );
+    assert!(
+        !names_the_agent(&body),
+        "the API's answer to {what} names the agent's address: {body}"
+    );
+    let kept: Vec<String> = sqlx::query_scalar(
+        "SELECT COALESCE(failure_reason,'') FROM runners
+         UNION ALL SELECT event||' '||COALESCE(message,'')||' '||COALESCE(metadata,'') FROM runner_events",
+    )
+    .fetch_all(&f.database)
+    .await?;
+    let leaks = kept
+        .iter()
+        .filter(|text| names_the_agent(text))
+        .collect::<Vec<_>>();
+    assert!(
+        leaks.is_empty(),
+        "after {what}, a failure reason or event names the agent's address: {leaks:?}"
+    );
+    Ok(())
+}
+
+/// B2: with a 0.2.0 manager the API passes the manager's error text on as
+/// its own 503 (`manager_json`), so a removal, a stop or another control
+/// action on a Mac runner while the Mac sleeps must not name the agent.
+#[tokio::test]
+async fn with_an_older_manager_removing_or_controlling_a_mac_runner_does_not_name_the_agent()
+-> Result<()> {
+    for action in ["delete", "stop", "pause", "resume", "start", "restart"] {
+        let manager = OldManagerMacAsleep::start(false).await?;
+        let f = Fixture::with_manager(&manager.url).await?;
+        seed_mac_pool(&f).await?;
+        // A persistent runner, so `start` and `restart` are not refused
+        // before they reach the manager.
+        sqlx::raw_sql(
+            "INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES ('builtinRunnerHostEnabled','true',1);
+             UPDATE runners SET ephemeral=0 WHERE id='runner-mac-1';",
+        )
+        .execute(&f.database)
+        .await?;
+        let answer = send(
+            &f,
+            reqwest::Method::POST,
+            "/api/v1/runners/runner-mac-1/action",
+            Some(json!({ "action": action })),
+        )
+        .await?;
+        let call = if action == "delete" {
+            "removal"
+        } else {
+            action
+        };
+        assert_the_agent_is_not_named(&f, &manager, &format!("a runner {action}"), call, answer)
+            .await?;
+    }
+    Ok(())
+}
+
+/// B2, the same defect in the other path a manager error takes
+/// (`manager_get`, which passes the manager's whole body on): reading a Mac
+/// runner's logs, or following them, while the Mac sleeps.
+#[tokio::test]
+async fn with_an_older_manager_reading_a_mac_runners_logs_does_not_name_the_agent() -> Result<()> {
+    for path in [
+        "/api/v1/runners/runner-mac-1/logs",
+        "/api/v1/runners/runner-mac-1/logs/stream?tail=10",
+    ] {
+        let manager = OldManagerMacAsleep::start(false).await?;
+        let f = Fixture::with_manager(&manager.url).await?;
+        seed_mac_pool(&f).await?;
+        let answer = send(&f, reqwest::Method::GET, path, None).await?;
+        assert_the_agent_is_not_named(&f, &manager, &format!("GET {path}"), "logs", answer).await?;
+    }
+    Ok(())
+}
+
+/// B2: a 0.2.0 manager fails the whole runner list while the Mac sleeps, and
+/// the API's pool reconcile passes that failure on: it must not name the
+/// agent.
+#[tokio::test]
+async fn with_an_older_manager_reconciling_a_mac_pool_does_not_name_the_agent() -> Result<()> {
+    let manager = OldManagerMacAsleep::start(false).await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    seed_mac_pool(&f).await?;
+    let answer = reconcile(&f).await?;
+    assert_the_agent_is_not_named(&f, &manager, "a pool reconcile", "list", answer).await
+}
+
+/// A Docker pool on the built-in host that wants one runner more than it
+/// has, so a reconcile starts one in the request.
+async fn seed_docker_pool(f: &Fixture) -> Result<()> {
+    sqlx::raw_sql(
+        "INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+           VALUES (1,1,'octo-org','Organization','Organization','all',1,1);
+         INSERT INTO runner_pools (id,installation_id,name,scope,provider,providers,labels,image,docker_image,tart_image,desired_count,ephemeral,runner_group_id,created_at,updated_at)
+           VALUES ('pool-docker',1,'docker','organization','docker','[\"docker\"]','[\"self-hosted\"]','ubuntu','ghcr.io/actions/actions-runner:latest','',1,0,1,1,1);
+         INSERT INTO user_installations (user_id,installation_id,permission,created_at) VALUES ('fleet-user',1,'admin',1);
+         INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES ('builtinRunnerHostEnabled','true',1);",
+    )
+    .execute(&f.database)
+    .await?;
+    Ok(())
+}
+
+/// B2, admission: the API's own start asks the manager for capacity first
+/// (`reserve_runner_capacity`), and passes its refusal on. Only Docker
+/// starts go this way today, so this guards the shared path.
+#[tokio::test]
+async fn with_an_older_manager_a_refused_admission_does_not_name_the_agent() -> Result<()> {
+    let manager = OldManagerMacAsleep::start(true).await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    seed_docker_pool(&f).await?;
+    let answer = send(
+        &f,
+        reqwest::Method::POST,
+        "/api/v1/runner-pools/pool-docker/action",
+        Some(json!({ "action": "reconcile" })),
+    )
+    .await?;
+    assert_the_agent_is_not_named(&f, &manager, "an admission", "admission", answer).await
+}
+
+fn app_private_key() -> Result<String> {
+    use rsa::pkcs1::{EncodeRsaPrivateKey as _, LineEnding};
+    let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)?;
+    Ok(key.to_pkcs1_pem(LineEnding::LF)?.to_string())
+}
+
+/// Stands in for api.github.com as far as a non-ephemeral start needs it:
+/// an installation token and a registration token.
+async fn fake_github() -> Result<String> {
+    let expires = || (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let app = Router::new()
+        .route(
+            "/app",
+            get(|| async {
+                Json(json!({ "slug": "gridops", "owner": { "login": "octo-org", "type": "Organization" } }))
+            }),
+        )
+        .route(
+            "/app/installations/{id}/access_tokens",
+            post(move || async move { Json(json!({ "token": "installation-token", "expires_at": expires() })) }),
+        )
+        .route(
+            "/orgs/{org}/actions/runners/registration-token",
+            post(move || async move { Json(json!({ "token": "registration-token", "expires_at": expires() })) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok(url)
+}
+
+/// B2, manual start: when the manager fails the start itself, the API keeps
+/// its error as the runner's failure reason and in a `Runner provisioning
+/// failed` event, both served later, and answers with it. None may name the
+/// agent. Only Docker starts go this way today, so this guards the shared
+/// path.
+#[tokio::test]
+async fn with_an_older_manager_a_failed_start_does_not_name_the_agent_in_its_answer_reason_or_event()
+-> Result<()> {
+    let manager = OldManagerMacAsleep::start(false).await?;
+    let github = fake_github().await?;
+    let f = Fixture::start(
+        Some(manager.url.clone()),
+        vec![
+            ("GRIDOPS_GITHUB_API_URL".into(), github),
+            ("GITHUB_APP_ID".into(), "1".into()),
+            ("GITHUB_APP_PRIVATE_KEY".into(), app_private_key()?),
+        ],
+    )
+    .await?;
+    seed_docker_pool(&f).await?;
+    let answer = send(
+        &f,
+        reqwest::Method::POST,
+        "/api/v1/runner-pools/pool-docker/action",
+        Some(json!({ "action": "reconcile" })),
+    )
+    .await?;
+    let (failed, events): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM runners WHERE pool_id='pool-docker' AND status='failed' AND failure_reason IS NOT NULL),
+                (SELECT COUNT(*) FROM runner_events WHERE pool_id='pool-docker' AND event='Runner provisioning failed')",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    assert_eq!(
+        (failed, events),
+        (1, 1),
+        "the setup: the failed start was not recorded ({:?}: {})",
+        answer.0,
+        answer.1
+    );
+    assert_the_agent_is_not_named(&f, &manager, "a runner start", "start", answer).await
 }
