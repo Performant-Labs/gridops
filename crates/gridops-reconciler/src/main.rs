@@ -156,8 +156,90 @@ struct PendingGitHubCleanup {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ManagerRunners {
     runners: Vec<ManagedRunner>,
+    /// Providers the manager could not ask for their runners (the Mac
+    /// sleeps): their runners are left out of `runners`, not gone. A manager
+    /// from before #122 never sends it.
+    #[serde(default)]
+    unavailable_providers: Vec<String>,
+}
+
+/// What the runner manager could see in this pass: the state of each runner
+/// container or VM it listed, and the providers it could not ask. A runner of
+/// such a provider is out of sight, not missing, so the pass neither takes it
+/// for failed nor removes it, and starts nothing with that provider (#122).
+#[derive(Debug)]
+struct ManagerView {
+    container_states: HashMap<String, String>,
+    unavailable_providers: HashSet<String>,
+}
+
+impl ManagerView {
+    fn from_list(list: ManagerRunners) -> Self {
+        Self {
+            container_states: list
+                .runners
+                .into_iter()
+                .map(|runner| (runner.id, runner.state))
+                .collect(),
+            unavailable_providers: list.unavailable_providers.into_iter().collect(),
+        }
+    }
+
+    fn provider_unavailable(&self, provider: &str) -> bool {
+        self.unavailable_providers.contains(provider)
+    }
+
+    /// A runner whose container or VM the manager could not ask about.
+    fn out_of_sight(&self, runner: &Runner) -> bool {
+        runner.container_id.as_ref().is_some_and(|container_id| {
+            self.provider_unavailable(&runner.provider)
+                && !self.container_states.contains_key(container_id)
+        })
+    }
+
+    /// Whether every provider the pool may start runners with is
+    /// unavailable, so there is nothing this pass can do for it.
+    fn pool_unreachable(&self, pool: &Pool) -> bool {
+        !self.unavailable_providers.is_empty()
+            && pool_providers(pool)
+                .iter()
+                .all(|provider| self.provider_unavailable(provider))
+    }
+
+    /// The one warning a pass gives about the providers it could not ask,
+    /// or `None` when every provider answered.
+    fn unavailable_warning(&self) -> Option<String> {
+        if self.unavailable_providers.is_empty() {
+            return None;
+        }
+        let mut names = self
+            .unavailable_providers
+            .iter()
+            .map(|provider| match provider.as_str() {
+                "tart" => "macOS (Tart)".to_owned(),
+                "docker" => "Docker".to_owned(),
+                other => other.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        Some(format!(
+            "runner provider unavailable: {}; the runner manager could not reach it, so this pass skips the pools that need it and leaves its runners as they are",
+            names.join(", ")
+        ))
+    }
+}
+
+/// The providers a pool may start runners with: its list, or its single
+/// provider when the list is empty.
+fn pool_providers(pool: &Pool) -> Vec<String> {
+    let mut providers = serde_json::from_str::<Vec<String>>(&pool.providers).unwrap_or_default();
+    if providers.is_empty() {
+        providers.push(pool.provider.clone());
+    }
+    providers
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,20 +464,22 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     let managed = match manager_request::<ManagerRunners>(app, Method::GET, "v1/runners", None)
         .await
     {
-        Ok(value) => value.runners,
+        Ok(value) => value,
         Err(error) => {
             tracing::warn!(error = ?error, "runner manager unavailable; skipping runner reconciliation");
             cleanup_retention(app).await?;
             return Ok(());
         }
     };
-    if let Err(error) = cleanup_orphaned_manager_containers(app, &managed).await {
+    // It acts only on runners the manager listed, so a provider it could not
+    // ask loses nothing here.
+    if let Err(error) = cleanup_orphaned_manager_containers(app, &managed.runners).await {
         tracing::warn!(error = ?error, "could not complete orphaned runner container cleanup");
     }
-    let container_states = managed
-        .into_iter()
-        .map(|runner| (runner.id, runner.state))
-        .collect::<HashMap<_, _>>();
+    let view = ManagerView::from_list(managed);
+    if let Some(warning) = view.unavailable_warning() {
+        tracing::warn!("{warning}");
+    }
     let pools = load_pools(&app.database).await?;
     app.tart.retain_finished(
         &pools
@@ -404,14 +488,22 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
             .collect::<Vec<_>>(),
     );
     for pool in pools {
-        if let Err(error) = reconcile_pool(
-            app,
-            &pool,
-            &container_states,
-            provisioning_paused,
-            builtin_enabled,
-        )
-        .await
+        // Nothing to ask the provider and nothing to learn about its runners:
+        // the pool keeps its state, runners and failure count until the
+        // provider answers again. Said once for the pass, above.
+        // A pool with fleet platforms can still run on its machines, so it
+        // is reconciled; the runners and starts the provider would need are
+        // left alone there.
+        if view.pool_unreachable(&pool)
+            && fleet::profiles(app, &pool.id)
+                .await
+                .is_ok_and(|profiles| profiles.is_empty())
+        {
+            tracing::debug!(pool_id = %pool.id, "skipping a pool whose providers are unavailable");
+            continue;
+        }
+        if let Err(error) =
+            reconcile_pool(app, &pool, &view, provisioning_paused, builtin_enabled).await
         {
             tracing::error!(pool_id = %pool.id, pool = %pool.name, error = ?error, "pool reconciliation failed");
             system_event(
@@ -468,14 +560,20 @@ async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
 async fn reconcile_pool(
     app: &Reconciler,
     pool: &Pool,
-    container_states: &HashMap<String, String>,
+    view: &ManagerView,
     provisioning_paused: bool,
     builtin_enabled: bool,
 ) -> Result<()> {
     let known_runners = runners(app, &pool.id).await?;
     for runner in &known_runners {
+        // Not listed because the manager could not ask, not because it is
+        // gone: it keeps the status it had.
+        if view.out_of_sight(runner) {
+            continue;
+        }
         if let Some(container_id) = &runner.container_id {
-            let docker_state = container_states
+            let docker_state = view
+                .container_states
                 .get(container_id)
                 .map(String::as_str)
                 .unwrap_or("missing");
@@ -507,7 +605,7 @@ async fn reconcile_pool(
         .filter(|runner| runner.status == "failed")
         .collect::<Vec<_>>();
     for runner in &failed {
-        delete_runner(app, pool, runner).await?;
+        delete_runner(app, view, pool, runner).await?;
     }
 
     // With the built-in host off, idle runners on it are wound down; busy ones
@@ -519,7 +617,7 @@ async fn reconcile_pool(
             .iter()
             .filter(|runner| builtin_host::retire_when_off(builtin_enabled, runner))
         {
-            if delete_runner(app, pool, runner).await? {
+            if delete_runner(app, view, pool, runner).await? {
                 retired += 1;
             }
         }
@@ -551,7 +649,7 @@ async fn reconcile_pool(
             runner.ci_platform != "bitbucket" && !runner.busy && runner_needs_update(pool, runner)
         })
     {
-        if delete_runner(app, pool, stale).await? {
+        if delete_runner(app, view, pool, stale).await? {
             rotated = 1;
         }
     }
@@ -574,7 +672,7 @@ async fn reconcile_pool(
     let mut rebalanced = if provisioning_blocked {
         0
     } else {
-        rebalance_repository_capacity(app, pool, desired).await?
+        rebalance_repository_capacity(app, view, pool, desired).await?
     };
     let refreshed = runners(app, &pool.id).await?;
     let active = refreshed
@@ -615,7 +713,7 @@ async fn reconcile_pool(
     }
     if !provisioning_blocked && !start_ended && active.len() < desired as usize {
         for _ in active.len()..desired as usize {
-            let mut attempt = provision(app, pool, builtin_enabled).await?;
+            let mut attempt = provision(app, view, pool, builtin_enabled).await?;
             // An idle runner parked on a repository without work does not make
             // the host full: reclaim its slot and retry straight away.
             // Rebalancing waits for the pool to reach its desired size, which
@@ -626,9 +724,9 @@ async fn reconcile_pool(
             } = &attempt
             {
                 let current = runners(app, &pool.id).await?;
-                if evict_surplus_runner(app, pool, &current, Some(provider)).await? > 0 {
+                if evict_surplus_runner(app, view, pool, &current, Some(provider)).await? > 0 {
                     rebalanced += 1;
-                    attempt = provision(app, pool, builtin_enabled).await?;
+                    attempt = provision(app, view, pool, builtin_enabled).await?;
                 }
             }
             match attempt {
@@ -664,12 +762,12 @@ async fn reconcile_pool(
             .filter(|runner| runner.ci_platform != "bitbucket" && !runner.busy)
             .take(excess)
         {
-            if delete_runner(app, pool, runner).await? {
+            if delete_runner(app, view, pool, runner).await? {
                 removed += 1;
             }
         }
     }
-    if !provisioning_blocked && evict_idle_fleet_runner(app, pool).await? {
+    if !provisioning_blocked && evict_idle_fleet_runner(app, view, pool).await? {
         removed += 1;
     }
     let final_runners = runners(app, &pool.id).await?;
@@ -892,7 +990,12 @@ async fn maybe_scale_up(app: &Reconciler, pool: &Pool, runners: &[Runner]) -> Re
     Ok(())
 }
 
-async fn rebalance_repository_capacity(app: &Reconciler, pool: &Pool, desired: i64) -> Result<i64> {
+async fn rebalance_repository_capacity(
+    app: &Reconciler,
+    view: &ManagerView,
+    pool: &Pool,
+    desired: i64,
+) -> Result<i64> {
     if pool.paused {
         return Ok(0);
     }
@@ -904,7 +1007,7 @@ async fn rebalance_repository_capacity(app: &Reconciler, pool: &Pool, desired: i
     if active < usize::try_from(desired).unwrap_or(usize::MAX) {
         return Ok(0);
     }
-    evict_surplus_runner(app, pool, &current, None).await
+    evict_surplus_runner(app, view, pool, &current, None).await
 }
 
 /// How long a fleet runner must sit idle before queued fleet work may take its
@@ -916,7 +1019,11 @@ const FLEET_IDLE_EVICTION_GRACE_MS: i64 = 2 * 60 * 1_000;
 /// while fleet work in the pool waits for host capacity. Rebalancing leaves
 /// fleet runners alone, and the fleet scheduler queues rather than reporting a
 /// full host, so without this idle runners hold a machine indefinitely.
-async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> {
+async fn evict_idle_fleet_runner(
+    app: &Reconciler,
+    view: &ManagerView,
+    pool: &Pool,
+) -> Result<bool> {
     let Some(idle) = idle_fleet_runner_to_evict(&app.database, &pool.id, now_millis()).await?
     else {
         return Ok(false);
@@ -926,7 +1033,7 @@ async fn evict_idle_fleet_runner(app: &Reconciler, pool: &Pool) -> Result<bool> 
         return Ok(false);
     };
     tracing::info!(pool = %pool.id, runner = %runner.name, "evicting an idle fleet runner for queued work");
-    delete_runner(app, pool, runner).await
+    delete_runner(app, view, pool, runner).await
 }
 
 /// The idle fleet runner of `pool_id` that [`evict_idle_fleet_runner`] would
@@ -962,6 +1069,7 @@ async fn idle_fleet_runner_to_evict(
 /// With `provider`, only that provider's runners are considered.
 async fn evict_surplus_runner(
     app: &Reconciler,
+    view: &ManagerView,
     pool: &Pool,
     current: &[Runner],
     provider: Option<&str>,
@@ -992,7 +1100,7 @@ async fn evict_surplus_runner(
     ) else {
         return Ok(0);
     };
-    Ok(i64::from(delete_runner(app, pool, runner).await?))
+    Ok(i64::from(delete_runner(app, view, pool, runner).await?))
 }
 
 fn surplus_runner<'a>(
@@ -1941,13 +2049,14 @@ fn bitbucket_runner_labels(pool_name: &str, labels: &[String]) -> Result<Vec<Str
 /// the pool's fleet platforms and placement say.
 async fn provision(
     app: &Reconciler,
+    view: &ManagerView,
     pool: &Pool,
     builtin_enabled: bool,
 ) -> Result<ProvisionAttempt> {
     use gridops_core::fleet::targets::Placement;
     let profiles = fleet::profiles(app, &pool.id).await?;
     let Some((profile, behind)) = fleet::choose_profile(app, pool, &profiles).await? else {
-        return provision_on_host(app, pool, builtin_enabled).await;
+        return provision_on_host(app, view, pool, builtin_enabled).await;
     };
     // With the built-in host off a Linux platform runs on machines only,
     // whatever placement was saved.
@@ -1977,14 +2086,14 @@ async fn provision(
             if !host || fleet::machine_ready(app, pool, profile).await? {
                 fleet::provision(app, pool, &profiles, profile).await
             } else {
-                provision_on_host(app, pool, builtin_enabled).await
+                provision_on_host(app, view, pool, builtin_enabled).await
             }
         }
         Placement::HostFirst => {
             if !host {
                 return fleet::provision(app, pool, &profiles, profile).await;
             }
-            let attempt = provision_on_host(app, pool, builtin_enabled).await?;
+            let attempt = provision_on_host(app, view, pool, builtin_enabled).await?;
             if matches!(attempt, ProvisionAttempt::Deferred { .. })
                 && fleet::machine_ready(app, pool, profile).await?
             {
@@ -1997,6 +2106,7 @@ async fn provision(
 
 async fn provision_on_host(
     app: &Reconciler,
+    view: &ManagerView,
     pool: &Pool,
     builtin_enabled: bool,
 ) -> Result<ProvisionAttempt> {
@@ -2012,12 +2122,10 @@ async fn provision_on_host(
     } else {
         None
     };
-    let mut providers = serde_json::from_str::<Vec<String>>(&pool.providers).unwrap_or_default();
-    if providers.is_empty() {
-        providers.push(pool.provider.clone());
-    }
     // The manager would refuse Docker while the host is off; do not ask.
-    let providers = builtin_host::host_providers(builtin_enabled, providers);
+    let mut providers = builtin_host::host_providers(builtin_enabled, pool_providers(pool));
+    // Nor a provider it could not reach this pass: it would only refuse.
+    providers.retain(|provider| !view.provider_unavailable(provider));
     if providers.is_empty() {
         return Ok(ProvisionAttempt::NoDemand);
     }
@@ -2412,11 +2520,22 @@ async fn start_admitted_runner(
 /// known to be gone: its busy flag was missed, as happens when the
 /// `in_progress` webhook arrives while the API is restarting, and removing it
 /// would kill the job.
-async fn delete_runner(app: &Reconciler, pool: &Pool, runner: &Runner) -> Result<bool> {
+async fn delete_runner(
+    app: &Reconciler,
+    view: &ManagerView,
+    pool: &Pool,
+    runner: &Runner,
+) -> Result<bool> {
     // A Tart start running beside the pass has no VM to remove yet; removing
     // its runner now would leave the VM it is about to start without one.
     // Whatever wanted it removed asks again once the start has ended.
     if app.tart.starting(&runner.id) {
+        return Ok(false);
+    }
+    // Its provider could not be asked this pass (the Mac sleeps): it may be
+    // running a job, and its VM could not be removed anyway. It stays, and
+    // whatever wanted it removed asks again once the provider answers.
+    if view.out_of_sight(runner) {
         return Ok(false);
     }
     if runner.container_id.is_some()
@@ -2578,6 +2697,7 @@ async fn cleanup_unrecorded_manager_runner(
     runner_id: &str,
 ) -> Result<Option<String>> {
     let managed = manager_request::<ManagerRunners>(app, Method::GET, "v1/runners", None).await?;
+    let unavailable = managed.unavailable_providers;
     let Some(container_id) = managed
         .runners
         .into_iter()
@@ -2589,6 +2709,13 @@ async fn cleanup_unrecorded_manager_runner(
         })
         .map(|runner| runner.id)
     else {
+        // Not listed may only mean not asked: say so rather than "not found".
+        if !unavailable.is_empty() {
+            bail!(
+                "the runner manager could not ask {} for this runner",
+                unavailable.join(", ")
+            );
+        }
         return Ok(None);
     };
     remove_manager_container(app, &container_id).await?;
@@ -3031,6 +3158,10 @@ fn deferred_manager_error(error: &anyhow::Error) -> bool {
         "[provisioning_paused]",
         "[vm_slot_busy]",
         "[vm_slot_unavailable]",
+        // The Mac went to sleep, or its agent stopped, during the admission
+        // or the start: the Mac is away, the pool's start is not broken
+        // (#122). Counting it opened the pool's circuit after a few nights.
+        "[tart_agent_unavailable]",
     ]
     .iter()
     .any(|code| message.contains(code))

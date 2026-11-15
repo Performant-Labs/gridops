@@ -138,6 +138,18 @@ The installer reads the installed launchd agent with `python3` (part of the Xcod
 
 - **`Error: InitializationFailed(why: "softnet not found in PATH")`**, which GridOps shows as `tart run exited (exit status: 1) before the guest agent became ready`: Tart could not find `softnet` on the agent's PATH. Every start fails this way, and three in a row open the pool's provisioning circuit for a cool-down. Run `command -v softnet` in a shell to check that Softnet is installed, then re-run `./scripts/install-tart-agent.sh` so the launchd agent gets a PATH that includes its directory.
 
+### When the Mac sleeps or its agent is down
+
+GridOps keeps running Linux runners while it cannot reach the Tart agent: the Mac is asleep, or the agent is not running. The runner manager's runner list (`GET /v1/runners`) still answers with the Docker runners and names the provider it could not ask in `unavailableProviders` (`["tart"]`; `[]` when every provider answered). A read from the agent (the runner list, the manager's health, the health check inside a macOS admission) gives up after 5 seconds, and connecting to the agent after 5 seconds, so a sleeping Mac costs a reconciliation pass seconds, not minutes. A macOS VM start keeps its 15-minute limit.
+
+While the agent cannot be reached, each reconciliation pass logs one warning, `runner provider unavailable: macOS (Tart)`, and:
+
+- reconciles every pool that does not need the Mac as usual;
+- skips the macOS pools: they keep their state, runners and failure count, and no macOS runner is asked for;
+- leaves the Mac's runners as they are: they are not marked failed, deregistered from GitHub or removed, because missing from the list only means they could not be listed. The **Reconcile** action on a pool page leaves them alone too.
+
+A macOS start the Mac's sleep cut short (`tart_agent_unavailable`) is treated like a start that waited for a slot: the pool waits and asks again after half a minute, and it does not count towards the provisioning circuit. When the agent answers again the next pass sees its runners and everything resumes; nothing about the outage is kept. Upgrade the runner manager and reconciler together: an older reconciler would take the Mac's runners for gone.
+
 ## Host guardrails
 
 The Tart agent independently enforces a CPU budget, memory budget, runner-count ceiling, and minimum free-disk reserve before cloning a VM. Conservative defaults are:

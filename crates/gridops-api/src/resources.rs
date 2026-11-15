@@ -4489,7 +4489,26 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
             ))
         })
         .collect::<HashMap<_, _>>();
+    // Providers the manager could not ask (the Mac sleeps). Their runners are
+    // left out of the list because they could not be listed, not because they
+    // are gone, so they are neither taken for failed nor removed (#122).
+    let unavailable = managed
+        .get("unavailableProviders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    let out_of_sight = |runner: &RunnerAccess| {
+        runner.container_id.as_ref().is_some_and(|container_id| {
+            unavailable.contains(&runner.provider) && !states.contains_key(container_id)
+        })
+    };
     for runner in &known {
+        if out_of_sight(runner) {
+            continue;
+        }
         if let Some(container_id) = &runner.container_id {
             let docker_state = states
                 .get(container_id)
@@ -4519,7 +4538,7 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
     let failed = runners_for_pool(state, pool_id)
         .await?
         .into_iter()
-        .filter(|runner| runner.runner_status == "failed")
+        .filter(|runner| runner.runner_status == "failed" && !out_of_sight(runner))
         .collect::<Vec<_>>();
     for runner in &failed {
         delete_runner_resources(state, user, runner).await?;
@@ -4532,6 +4551,7 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
             runner.ci_platform != "bitbucket"
                 && !runner.busy
                 && runner.configuration_version < pool.configuration_version
+                && !out_of_sight(runner)
         })
     {
         delete_runner_resources(state, user, &stale).await?;
@@ -4541,7 +4561,9 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         let idle = runners_for_pool(state, pool_id)
             .await?
             .into_iter()
-            .filter(|runner| !runner.busy && active_status(&runner.runner_status))
+            .filter(|runner| {
+                !runner.busy && active_status(&runner.runner_status) && !out_of_sight(runner)
+            })
             .collect::<Vec<_>>();
         let removed = idle.len();
         for runner in &idle {
@@ -4589,7 +4611,9 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         let count = active.len() - pool.desired_count as usize;
         for runner in active
             .into_iter()
-            .filter(|runner| runner.ci_platform != "bitbucket" && !runner.busy)
+            .filter(|runner| {
+                runner.ci_platform != "bitbucket" && !runner.busy && !out_of_sight(runner)
+            })
             .take(count)
         {
             delete_runner_resources(state, user, runner).await?;

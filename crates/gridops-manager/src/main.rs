@@ -788,8 +788,14 @@ fn tart_agent_from_environment() -> Result<Option<TartAgent>> {
                 matches!(base_url.scheme(), "http" | "https"),
                 "GRIDOPS_TART_AGENT_URL must use HTTP or HTTPS"
             );
+            // One client for every call: the 45-minute limit is for the
+            // longest VM start. Reads that should answer at once set their
+            // own, shorter limit per call (`TART_AGENT_READ_TIMEOUT`). A Mac
+            // that sleeps drops packets instead of refusing them, so even
+            // connecting gets a short limit.
             let http = reqwest::Client::builder()
                 .user_agent("GridOps manager/0.1")
+                .connect_timeout(TART_AGENT_CONNECT_TIMEOUT)
                 .timeout(Duration::from_mins(45))
                 .build()?;
             Ok(Some(TartAgent {
@@ -804,11 +810,35 @@ fn tart_agent_from_environment() -> Result<Option<TartAgent>> {
     }
 }
 
+/// How long connecting to the Tart agent may take. The Mac is on the local
+/// network, so a connection that is not made within this is not coming: the
+/// Mac is asleep or away.
+const TART_AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a read from the Tart agent may take in all: its runner list and
+/// its health, which it answers from what it already knows. An agent that
+/// takes longer is not answering (the Mac went to sleep with the connection
+/// open), and the list, health and Tart admission it holds up are on the
+/// reconciler's pass, which must not wait minutes for it (#122).
+const TART_AGENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The agent could not be reached, or stopped answering.
+fn tart_agent_unavailable(error: &reqwest::Error) -> ManagerError {
+    ManagerError::Upstream {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "tart_agent_unavailable".into(),
+        message: format!("Tart agent is unavailable: {error}"),
+    }
+}
+
+/// Sends a request to the agent. `limit` bounds this call alone, body
+/// included; without one the client's own limits apply.
 async fn tart_agent_response(
     agent: &TartAgent,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
+    limit: Option<Duration>,
 ) -> Result<reqwest::Response, ManagerError> {
     let url = agent
         .base_url
@@ -818,31 +848,56 @@ async fn tart_agent_response(
         .http
         .request(method, url)
         .bearer_auth(agent.token.expose_secret());
+    if let Some(limit) = limit {
+        request = request.timeout(limit);
+    }
     if let Some(body) = body {
         request = request.json(&body);
     }
     request
         .send()
         .await
-        .map_err(|error| ManagerError::Upstream {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "tart_agent_unavailable".into(),
-            message: format!("Tart agent is unavailable: {error}"),
-        })
+        .map_err(|error| tart_agent_unavailable(&error))
 }
 
+/// A read from the agent (`GET`), given up after `TART_AGENT_READ_TIMEOUT`.
+async fn tart_agent_read(agent: &TartAgent, path: &str) -> Result<Value, ManagerError> {
+    tart_agent_call(
+        agent,
+        reqwest::Method::GET,
+        path,
+        None,
+        Some(TART_AGENT_READ_TIMEOUT),
+    )
+    .await
+}
+
+/// A call to the agent that may take as long as the route allows: a VM
+/// start, removal or control.
 async fn tart_agent_value(
     agent: &TartAgent,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, ManagerError> {
-    let response = tart_agent_response(agent, method, path, body).await?;
+    tart_agent_call(agent, method, path, body, None).await
+}
+
+async fn tart_agent_call(
+    agent: &TartAgent,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    limit: Option<Duration>,
+) -> Result<Value, ManagerError> {
+    let response = tart_agent_response(agent, method, path, body, limit).await?;
     let status = response.status();
+    // The connection can drop, or the call's limit run out, while the body
+    // is on its way: the agent went away mid-answer.
     let text = response
         .text()
         .await
-        .map_err(|error| ManagerError::Internal(error.into()))?;
+        .map_err(|error| tart_agent_unavailable(&error))?;
     if !status.is_success() {
         let payload = serde_json::from_str::<Value>(&text).ok();
         let message = payload
@@ -1076,8 +1131,7 @@ async fn health(
     _auth: ManagerAuth,
 ) -> Result<Json<Value>, ManagerError> {
     let (status, tart) = match &state.tart {
-        Some(agent) => match tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await
-        {
+        Some(agent) => match tart_agent_read(agent, "v1/health").await {
             Ok(health) => {
                 let vm_slots = vm_slots_report(&state, &health).await;
                 (
@@ -1186,7 +1240,7 @@ async fn vm_slots_view(
     let Some(agent) = &state.tart else {
         return Ok(Json(json!({ "vmSlots": null })));
     };
-    let health = tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await?;
+    let health = tart_agent_read(agent, "v1/health").await?;
     Ok(Json(
         json!({ "vmSlots": vm_slots_report(&state, &health).await }),
     ))
@@ -1389,17 +1443,33 @@ async fn list_runners(
             provider: "docker".into(),
         })
         .collect::<Vec<_>>();
+    // The Mac sleeps, or its agent is down: its runners cannot be listed,
+    // but the Docker runners have nothing to do with it. The list still
+    // answers, and names the providers it could not ask, so a caller can tell
+    // "no runners there" from "could not ask" before taking a runner for
+    // gone (#122).
+    let mut unavailable_providers = Vec::<&str>::new();
     if let Some(agent) = &state.tart {
-        let response = tart_agent_value(agent, reqwest::Method::GET, "v1/runners", None).await?;
-        let tart_runners = response.get("runners").cloned().ok_or_else(|| {
-            ManagerError::Internal(anyhow::anyhow!("Tart agent runner list is invalid"))
-        })?;
-        runners.extend(
-            serde_json::from_value::<Vec<ManagedRunner>>(tart_runners)
-                .map_err(|error| ManagerError::Internal(error.into()))?,
-        );
+        match tart_runners(agent).await {
+            Ok(tart_runners) => runners.extend(tart_runners),
+            Err(error) => {
+                tracing::warn!(error = ?error, "could not list the Tart agent's runners; listing the others");
+                unavailable_providers.push("tart");
+            }
+        }
     }
-    Ok(Json(json!({ "runners": runners })))
+    Ok(Json(
+        json!({ "runners": runners, "unavailableProviders": unavailable_providers }),
+    ))
+}
+
+async fn tart_runners(agent: &TartAgent) -> Result<Vec<ManagedRunner>, ManagerError> {
+    let response = tart_agent_read(agent, "v1/runners").await?;
+    let tart_runners = response.get("runners").cloned().ok_or_else(|| {
+        ManagerError::Internal(anyhow::anyhow!("Tart agent runner list is invalid"))
+    })?;
+    serde_json::from_value::<Vec<ManagedRunner>>(tart_runners)
+        .map_err(|error| ManagerError::Internal(error.into()))
 }
 
 /// Capabilities dropped from every provisioned runner container.
@@ -1886,7 +1956,7 @@ async fn logs(
             "v1/runners/{container_id}/logs?tail={tail}&follow={}",
             query.follow
         );
-        let response = tart_agent_response(agent, reqwest::Method::GET, &path, None).await?;
+        let response = tart_agent_response(agent, reqwest::Method::GET, &path, None, None).await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -2215,7 +2285,7 @@ async fn containers_usage(
 }
 
 async fn tart_capacity(agent: &TartAgent) -> Result<TartCapacity, ManagerError> {
-    let health = tart_agent_value(agent, reqwest::Method::GET, "v1/health", None).await?;
+    let health = tart_agent_read(agent, "v1/health").await?;
     tart_capacity_from_health(&health)
 }
 
