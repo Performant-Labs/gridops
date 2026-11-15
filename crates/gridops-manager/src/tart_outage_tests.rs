@@ -690,7 +690,7 @@ async fn a_start_removal_or_log_read_to_an_agent_that_drops_packets_fails_within
             Err(ManagerError::Upstream { code, .. }) => {
                 assert_eq!(code, "tart_agent_unavailable", "the {call}");
             }
-            other => panic!("the {call} to an agent that drops packets gave {other:?}"),
+            other => anyhow::bail!("the {call} to an agent that drops packets gave {other:?}"),
         }
         assert!(
             took <= FAIL_FAST,
