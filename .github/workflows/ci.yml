@@ -30,13 +30,25 @@ concurrency:
 jobs:
   web:
     name: Web build, lint, and tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted-linux]
+    # Trusted runs use the self-hosted fleet; the rest use GitHub-hosted runners
+    # (free for this public repo). Trusted: a push or dispatch (only
+    # collaborators can trigger those), or a pull request from a branch of this
+    # repo whose author is in the org variable TRUSTED_CI_AUTHORS (a JSON list
+    # of logins). A fork pull request, or any pull request while that variable
+    # is unset, runs hosted.
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
         timeout-minutes: 5
+
+      # The self-hosted image carries Node 22; a hosted runner may not.
+      - name: Set up Node.js (hosted runner only)
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Verify Node.js toolchain
         run: |
@@ -61,13 +73,23 @@ jobs:
 
   rust:
     name: Rust format, lint, and tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted-linux]
+    # The same runner rule as the web job.
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux' || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
         timeout-minutes: 5
+
+      # A hosted runner gets the Rust the self-hosted image carries (1.98.1,
+      # printed by the step below on that image), not the newest stable: a
+      # newer clippy brings new lints that fail `-D warnings` on code the
+      # fleet passes. Move this with the image.
+      - name: Set up Rust (hosted runner only)
+        if: runner.environment == 'github-hosted'
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.98.1
 
       - name: Verify Rust toolchain
         run: |
