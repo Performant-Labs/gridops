@@ -37,6 +37,14 @@ pub(crate) struct ManagerLog {
     pub(crate) tart_down: AtomicBool,
     /// Runner removals asked for (`DELETE /v1/runners/{id}`): the IDs.
     pub(crate) removed: Mutex<Vec<String>>,
+    /// The query string of every runner list asked for (`GET /v1/runners`),
+    /// empty when there was none.
+    pub(crate) list_queries: Mutex<Vec<String>>,
+    /// How the manager says the Tart agent failed while `tart_down`: the
+    /// entry under `providerErrors.tart` of a partial list.
+    pub(crate) tart_down_error: Mutex<Value>,
+    /// A Docker start fails (`500 docker_error`) without leaving a container.
+    pub(crate) docker_fails: AtomicBool,
 }
 
 impl Default for ManagerLog {
@@ -52,6 +60,9 @@ impl Default for ManagerLog {
             slots_free: AtomicU64::default(),
             tart_down: AtomicBool::default(),
             removed: Mutex::default(),
+            list_queries: Mutex::default(),
+            tart_down_error: Mutex::new(tart_unreachable()),
+            docker_fails: AtomicBool::default(),
         }
     }
 }
@@ -83,6 +94,34 @@ impl ManagerLog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    pub(crate) fn list_queries(&self) -> Vec<String> {
+        self.list_queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Whether a runner list request opts in to a partial list: one that
+/// answers with the runners it could see and names the providers it could
+/// not ask, instead of failing whole. A caller from before #122 does not ask,
+/// and treats every runner missing from a list as gone, so the manager
+/// gives it the old answer: the whole list fails while a provider is down.
+pub(crate) fn asks_for_partial_list(query: Option<&str>) -> bool {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .any(|pair| pair == "partial=true")
+}
+
+/// How the manager names a Tart agent it could not reach at all: the
+/// connection was refused or timed out, or the answer was cut off.
+pub(crate) fn tart_unreachable() -> Value {
+    json!({
+        "kind": "unreachable",
+        "message": "Tart agent is unavailable: error sending request for url (http://192.0.2.10:8787/v1/runners): connection timed out",
+    })
 }
 
 /// What the real manager answers for a request that had to reach the Tart
@@ -100,7 +139,7 @@ fn tart_agent_unavailable() -> (axum::http::StatusCode, axum::Json<Value>) {
 async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
     use axum::{
         Json, Router,
-        extract::Path,
+        extract::{Path, RawQuery},
         http::StatusCode as Status,
         response::IntoResponse as _,
         routing::{delete, get, post, put},
@@ -115,10 +154,18 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
         .route("/v1/policy", put(|| async { Json(json!({})) }))
         .route(
             "/v1/runners",
-            get(move || {
+            get(move |RawQuery(query): RawQuery| {
                 let log = Arc::clone(&listing);
                 async move {
                     let tart_down = log.tart_down.load(Ordering::SeqCst);
+                    log.list_queries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(query.clone().unwrap_or_default());
+                    // The old answer, for a caller that did not opt in.
+                    if tart_down && !asks_for_partial_list(query.as_deref()) {
+                        return tart_agent_unavailable().into_response();
+                    }
                     let running = log
                         .running
                         .lock()
@@ -128,7 +175,17 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                         .cloned()
                         .collect::<Vec<_>>();
                     let unavailable: &[&str] = if tart_down { &["tart"] } else { &[] };
-                    Json(json!({ "runners": running, "unavailableProviders": unavailable }))
+                    let errors = if tart_down {
+                        json!({ "tart": log.tart_down_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() })
+                    } else {
+                        json!({})
+                    };
+                    Json(json!({
+                        "runners": running,
+                        "unavailableProviders": unavailable,
+                        "providerErrors": errors,
+                    }))
+                    .into_response()
                 }
             })
             .post(move |Json(body): Json<Value>| {
@@ -143,6 +200,15 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                             body["poolId"].as_str().unwrap_or_default().to_owned(),
                             provider.clone(),
                         ));
+                    if provider == "docker" && log.docker_fails.load(Ordering::SeqCst) {
+                        return (
+                            Status::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "code": "docker_error",
+                                "error": "Docker could not create the runner container",
+                            })),
+                        );
+                    }
                     if provider == "tart" {
                         if log.tart_down.load(Ordering::SeqCst) {
                             return tart_agent_unavailable();

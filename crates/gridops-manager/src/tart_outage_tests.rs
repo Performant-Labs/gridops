@@ -215,7 +215,16 @@ async fn timed(
     ))
 }
 
+/// The runner list as the reconciler and the API ask for it since #122:
+/// opted in to a partial list (review finding 1 of PR #123).
 fn get_runners(manager: &str) -> reqwest::RequestBuilder {
+    reqwest::Client::new()
+        .get(format!("{manager}/v1/runners?partial=true"))
+        .bearer_auth(TOKEN)
+}
+
+/// The runner list as a reconciler or API from before #122 asks for it.
+fn get_runners_without_opting_in(manager: &str) -> reqwest::RequestBuilder {
     reqwest::Client::new()
         .get(format!("{manager}/v1/runners"))
         .bearer_auth(TOKEN)
@@ -255,6 +264,10 @@ async fn a_refused_tart_agent_leaves_the_docker_runners_listed_and_names_tart_un
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(listed(&body), docker_runner_only(), "{body}");
     assert_eq!(body["unavailableProviders"], json!(["tart"]), "{body}");
+    assert_eq!(
+        body["providerErrors"]["tart"]["kind"], "unreachable",
+        "a refused connection is a network failure: {body}"
+    );
     Ok(())
 }
 
@@ -273,6 +286,10 @@ async fn a_hung_tart_agent_drops_out_of_the_runner_list_within_seconds() -> anyh
     assert!(took <= FAIL_FAST, "the list waited {took:?} for the agent");
     assert_eq!(listed(&body), docker_runner_only(), "{body}");
     assert_eq!(body["unavailableProviders"], json!(["tart"]), "{body}");
+    assert_eq!(
+        body["providerErrors"]["tart"]["kind"], "unreachable",
+        "a timed-out read is a network failure: {body}"
+    );
     Ok(())
 }
 
@@ -357,5 +374,187 @@ async fn the_tart_runners_are_listed_again_as_soon_as_the_agent_answers() -> any
         "{awake}"
     );
     assert_eq!(awake["unavailableProviders"], json!([]), "{awake}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Round 2 (review of PR #123).
+// ---------------------------------------------------------------------------
+
+/// Review finding 1: the partial list is opt-in. A reconciler or API from
+/// before #122, still running against this manager during a per-service
+/// deploy or rollback, ignores `unavailableProviders` and takes every runner
+/// missing from the list for gone: it would fail the Mac's runners,
+/// deregister them and remove their VMs. So a caller that does not ask for
+/// the partial list (`?partial=true`) gets the old answer: the whole list
+/// fails, `503 tart_agent_unavailable`, and its pass is skipped as before.
+#[tokio::test]
+async fn a_caller_that_does_not_opt_in_gets_the_old_failed_list_while_tart_is_unavailable()
+-> anyhow::Result<()> {
+    let docker = listed_docker()?;
+    let manager = manager(Some(&docker), &refused_url()?).await?;
+    let response = get_runners_without_opting_in(&manager).send().await?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    let _ = std::fs::remove_file(&docker);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "tart_agent_unavailable", "{body}");
+    Ok(())
+}
+
+/// Review finding 1: while every provider answers, opting in or not makes
+/// no difference: an older caller keeps the whole list it always had.
+#[tokio::test]
+async fn a_caller_that_does_not_opt_in_still_gets_every_runner_while_tart_answers()
+-> anyhow::Result<()> {
+    let docker = listed_docker()?;
+    let tart = stand_in_tart(false).await?;
+    let manager = manager(Some(&docker), &tart.url).await?;
+    let response = get_runners_without_opting_in(&manager).send().await?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    let _ = std::fs::remove_file(&docker);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut runners = listed(&body);
+    runners.sort();
+    assert_eq!(
+        runners,
+        [
+            (CONTAINER_ID.to_owned(), "docker".to_owned()),
+            (TART_RUNNER.to_owned(), "tart".to_owned()),
+        ],
+        "{body}"
+    );
+    Ok(())
+}
+
+/// Review finding 3: compose checks the manager's health with
+/// `curl --max-time 2`, and `api` waits for the manager to be healthy before
+/// it starts. Health must therefore answer well inside two seconds while the
+/// Mac drops packets, reporting Tart as unavailable (or what it last knew,
+/// marked stale), or a sleeping Mac blocks every deploy.
+const HEALTH_LIMIT: Duration = Duration::from_millis(1_500);
+
+#[tokio::test(start_paused = true)]
+async fn health_answers_within_the_compose_healthcheck_while_the_tart_agent_hangs()
+-> anyhow::Result<()> {
+    let tart = stand_in_tart(true).await?;
+    let manager = manager(None, &tart.url).await?;
+    let (status, body, took) = timed(
+        &tart.holding,
+        reqwest::Client::new()
+            .get(format!("{manager}/v1/health"))
+            .bearer_auth(TOKEN),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "after {took:?}: {body}");
+    assert!(
+        took < HEALTH_LIMIT,
+        "health waited {took:?} for the agent; compose gives it 2 s: {body}"
+    );
+    let tart_health = &body["providers"]["tart"];
+    assert!(
+        tart_health["available"] == false || tart_health["stale"] == true,
+        "a hung agent is reported available and current: {body}"
+    );
+    Ok(())
+}
+
+/// A stand-in Tart agent whose runner list answers `status` with `body`.
+async fn answering_tart(status: StatusCode, body: &'static str) -> anyhow::Result<Url> {
+    let app = Router::new().route(
+        "/v1/runners",
+        get(move || async move {
+            (
+                status,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok(url)
+}
+
+/// A stand-in Tart agent that starts answering and drops the connection
+/// halfway through the body, as when the Mac goes to sleep mid-answer.
+async fn cut_off_tart() -> anyhow::Result<Url> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0_u8; 4_096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{\"runners\":[{\"id\":\"tart-",
+                    )
+                    .await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    Ok(url)
+}
+
+/// The partial list's account of why Tart could not be listed.
+async fn tart_failure(tart: &Url) -> anyhow::Result<Value> {
+    let docker = listed_docker()?;
+    let manager = manager(Some(&docker), tart).await?;
+    let response = get_runners(&manager).send().await?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    let _ = std::fs::remove_file(&docker);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(listed(&body), docker_runner_only(), "{body}");
+    assert_eq!(body["unavailableProviders"], json!(["tart"]), "{body}");
+    Ok(body["providerErrors"]["tart"].clone())
+}
+
+/// Review finding 5: a body cut off mid-answer is the Mac going away, a
+/// network failure like a refused connection or a timeout.
+#[tokio::test]
+async fn a_tart_list_cut_off_mid_answer_is_reported_unreachable() -> anyhow::Result<()> {
+    let failure = tart_failure(&cut_off_tart().await?).await?;
+    assert_eq!(failure["kind"], "unreachable", "{failure}");
+    Ok(())
+}
+
+/// Review finding 5: an agent that answers, but refuses the manager's token
+/// or sends a list that does not parse, is not asleep: it is broken and
+/// needs someone. The Docker runners are still listed, but the list tells
+/// this apart from a network failure and says what went wrong.
+#[tokio::test]
+async fn a_tart_agent_that_refuses_the_token_or_answers_garbage_is_reported_as_an_error()
+-> anyhow::Result<()> {
+    let refused = tart_failure(
+        &answering_tart(
+            StatusCode::UNAUTHORIZED,
+            r#"{"code":"unauthorized","error":"invalid token"}"#,
+        )
+        .await?,
+    )
+    .await?;
+    assert_eq!(refused["kind"], "error", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("401")),
+        "the reason does not say the agent refused the manager: {refused}"
+    );
+
+    let garbage =
+        tart_failure(&answering_tart(StatusCode::OK, r#"{"runners":"none"}"#).await?).await?;
+    assert_eq!(garbage["kind"], "error", "{garbage}");
+    assert!(
+        garbage["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{garbage}"
+    );
     Ok(())
 }

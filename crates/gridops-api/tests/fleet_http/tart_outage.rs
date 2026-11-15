@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
-    extract::Path,
+    extract::{Path, RawQuery},
     http::StatusCode as Status,
+    response::IntoResponse as _,
     routing::{delete, get},
 };
 
@@ -19,21 +20,68 @@ use super::*;
 
 const MAC_CONTAINER: &str = "tart-0123456789abcdef0123456789abcdef";
 
-/// A runner manager whose Tart agent is out of reach. It remembers the
-/// runner removals it is asked for.
+/// Whether a runner list request opts in to the partial list (review
+/// finding 1 of PR #123): `GET /v1/runners?partial=true`.
+fn asks_for_partial_list(query: Option<&str>) -> bool {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .any(|pair| pair == "partial=true")
+}
+
+/// What the runner manager answers for a request that had to reach the
+/// Tart agent while it is out of reach.
+fn tart_agent_unavailable() -> (Status, Json<Value>) {
+    (
+        Status::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "code": "tart_agent_unavailable",
+            "error": "Tart agent is unavailable",
+        })),
+    )
+}
+
+/// A runner manager whose Tart agent is out of reach. As the real manager
+/// does, it gives the partial list only to a caller that asks for it, and
+/// fails the whole list for any other (an API from before #122 would take
+/// every runner missing from a partial list for gone). It remembers the
+/// runner lists and removals it is asked for.
 struct MacAsleep {
     url: String,
     removed: Arc<Mutex<Vec<String>>>,
+    list_queries: Arc<Mutex<Vec<String>>>,
 }
 
 impl MacAsleep {
     async fn start() -> Result<Self> {
         let removed = Arc::new(Mutex::new(Vec::<String>::new()));
         let removals = Arc::clone(&removed);
+        let list_queries = Arc::new(Mutex::new(Vec::<String>::new()));
+        let lists = Arc::clone(&list_queries);
         let app = Router::new()
             .route(
                 "/v1/runners",
-                get(|| async { Json(json!({ "runners": [], "unavailableProviders": ["tart"] })) }),
+                get(move |RawQuery(query): RawQuery| {
+                    let lists = Arc::clone(&lists);
+                    async move {
+                        lists
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(query.clone().unwrap_or_default());
+                        if !asks_for_partial_list(query.as_deref()) {
+                            return tart_agent_unavailable().into_response();
+                        }
+                        Json(json!({
+                            "runners": [],
+                            "unavailableProviders": ["tart"],
+                            "providerErrors": { "tart": {
+                                "kind": "unreachable",
+                                "message": "Tart agent is unavailable: connection timed out",
+                            }},
+                        }))
+                        .into_response()
+                    }
+                }),
             )
             .route(
                 "/v1/runners/{id}",
@@ -44,24 +92,29 @@ impl MacAsleep {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .push(id);
-                        (
-                            Status::SERVICE_UNAVAILABLE,
-                            Json(json!({
-                                "code": "tart_agent_unavailable",
-                                "error": "Tart agent is unavailable",
-                            })),
-                        )
+                        tart_agent_unavailable()
                     }
                 }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
         tokio::spawn(async move { axum::serve(listener, app).await });
-        Ok(Self { url, removed })
+        Ok(Self {
+            url,
+            removed,
+            list_queries,
+        })
     }
 
     fn removed(&self) -> Vec<String> {
         self.removed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn list_queries(&self) -> Vec<String> {
+        self.list_queries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -101,6 +154,9 @@ async fn reconciling_a_mac_pool_while_the_mac_cannot_be_asked_leaves_its_runners
         .await?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    // A reconcile that failed outright would leave the runner alone too, and
+    // prove nothing: the partial list must have been asked for and used.
+    assert!(status.is_success(), "reconcile answered {status}: {body}");
 
     let (runner_status, deleted_at): (String, Option<i64>) =
         sqlx::query_as("SELECT status,deleted_at FROM runners WHERE id='runner-mac-1'")
@@ -118,4 +174,129 @@ async fn reconciling_a_mac_pool_while_the_mac_cannot_be_asked_leaves_its_runners
     assert_eq!(cleanups, 0, "a GitHub deregistration was queued");
     assert_eq!(manager.removed(), Vec::<String>::new());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Round 2 (review of PR #123).
+// ---------------------------------------------------------------------------
+
+/// Review finding 1, the API's side: its pool reconcile asks the manager for
+/// the partial list, so it goes on for the pool's Docker runners while the
+/// Mac sleeps; a manager fails the list whole for a caller that does not ask.
+#[tokio::test]
+async fn reconciling_a_pool_asks_the_manager_for_the_partial_runner_list() -> Result<()> {
+    let manager = MacAsleep::start().await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    seed_mac_pool(&f).await?;
+
+    let (status, body) = reconcile(&f).await?;
+
+    let queries = manager.list_queries();
+    assert!(!queries.is_empty(), "the runner list was not asked for");
+    assert!(
+        queries
+            .iter()
+            .all(|query| asks_for_partial_list(Some(query))),
+        "a runner list did not ask for the partial list: {queries:?} (reconcile answered {status}: {body})"
+    );
+    assert!(status.is_success(), "reconcile answered {status}: {body}");
+    Ok(())
+}
+
+async fn reconcile(f: &Fixture) -> Result<(reqwest::StatusCode, String)> {
+    let response = f
+        .client
+        .post(format!("{}/api/v1/runner-pools/pool-mac/action", f.origin))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(&json!({ "action": "reconcile" }))
+        .send()
+        .await?;
+    let status = response.status();
+    Ok((status, response.text().await.unwrap_or_default()))
+}
+
+/// Reconciles `pool-mac` while the Mac sleeps, after `change` (SQL) to the
+/// seeded pool and runner, and checks the runner was left exactly as it was:
+/// with `status`, not deleted, no GitHub deregistration queued, its VM not
+/// asked to be removed. The reconcile itself must succeed, or it would leave
+/// the runner alone without testing anything.
+async fn assert_reconcile_leaves_the_mac_runner_alone(change: &str, status: &str) -> Result<()> {
+    let manager = MacAsleep::start().await?;
+    let f = Fixture::with_manager(&manager.url).await?;
+    seed_mac_pool(&f).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(change.to_owned()))
+        .execute(&f.database)
+        .await?;
+
+    let (answered, body) = reconcile(&f).await?;
+    assert!(
+        answered.is_success(),
+        "reconcile answered {answered}: {body}"
+    );
+
+    let (runner_status, deleted_at): (String, Option<i64>) =
+        sqlx::query_as("SELECT status,deleted_at FROM runners WHERE id='runner-mac-1'")
+            .fetch_one(&f.database)
+            .await?;
+    assert_eq!(
+        (runner_status.as_str(), deleted_at),
+        (status, None),
+        "the Mac's runner was changed or removed ({body})"
+    );
+    let cleanups: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM github_runner_cleanup WHERE id='runner-mac-1'")
+            .fetch_one(&f.database)
+            .await?;
+    assert_eq!(cleanups, 0, "a GitHub deregistration was queued ({body})");
+    assert_eq!(manager.removed(), Vec::<String>::new(), "{body}");
+    Ok(())
+}
+
+/// Review finding 2: a runner already marked failed when the Mac went to
+/// sleep is out of sight like any other; its cleanup waits for the Mac.
+#[tokio::test]
+async fn reconcile_leaves_a_failed_mac_runner_for_later_while_the_mac_cannot_be_asked() -> Result<()>
+{
+    assert_reconcile_leaves_the_mac_runner_alone(
+        "UPDATE runners SET status='failed' WHERE id='runner-mac-1';",
+        "failed",
+    )
+    .await
+}
+
+/// Review finding 2: an outdated runner on the sleeping Mac is not rotated.
+#[tokio::test]
+async fn reconcile_does_not_rotate_an_outdated_mac_runner_while_the_mac_cannot_be_asked()
+-> Result<()> {
+    assert_reconcile_leaves_the_mac_runner_alone(
+        "UPDATE runner_pools SET configuration_version=2 WHERE id='pool-mac';
+         UPDATE runners SET configuration_version=1 WHERE id='runner-mac-1';",
+        "online",
+    )
+    .await
+}
+
+/// Review finding 2: a paused pool drains its idle runners, but not one on
+/// the sleeping Mac.
+#[tokio::test]
+async fn reconcile_does_not_drain_a_paused_pools_mac_runner_while_the_mac_cannot_be_asked()
+-> Result<()> {
+    assert_reconcile_leaves_the_mac_runner_alone(
+        "UPDATE runner_pools SET paused=1 WHERE id='pool-mac';",
+        "online",
+    )
+    .await
+}
+
+/// Review finding 2: a pool with more runners than it wants trims the
+/// excess, but not a runner on the sleeping Mac.
+#[tokio::test]
+async fn reconcile_does_not_trim_an_excess_mac_runner_while_the_mac_cannot_be_asked() -> Result<()>
+{
+    assert_reconcile_leaves_the_mac_runner_alone(
+        "UPDATE runner_pools SET desired_count=0 WHERE id='pool-mac';",
+        "online",
+    )
+    .await
 }
