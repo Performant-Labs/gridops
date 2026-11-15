@@ -140,15 +140,32 @@ The installer reads the installed launchd agent with `python3` (part of the Xcod
 
 ### When the Mac sleeps or its agent is down
 
-GridOps keeps running Linux runners while it cannot reach the Tart agent: the Mac is asleep, or the agent is not running. The runner manager's runner list (`GET /v1/runners`) still answers with the Docker runners and names the provider it could not ask in `unavailableProviders` (`["tart"]`; `[]` when every provider answered). A read from the agent (the runner list, the manager's health, the health check inside a macOS admission) gives up after 5 seconds, and connecting to the agent after 5 seconds, so a sleeping Mac costs a reconciliation pass seconds, not minutes. A macOS VM start keeps its 15-minute limit.
+GridOps keeps running Linux runners while it cannot ask the Tart agent: the Mac is asleep, the agent is not running, or the agent answers but is broken.
 
-While the agent cannot be reached, each reconciliation pass logs one warning, `runner provider unavailable: macOS (Tart)`, and:
+**The runner list is partial only when asked for.** The reconciler and the API ask the runner manager for `GET /v1/runners?partial=true`. While the agent cannot be asked, that list still answers `200` with the Docker runners and names the provider it could not ask beside `runners`:
+
+- `unavailableProviders`: `["tart"]`, or `[]` when every provider answered;
+- `providerErrors`: why, per provider, as `{"tart": {"kind": "...", "message": "..."}}` (`{}` when every provider answered). `kind` is `unreachable` when the agent could not be reached or stopped answering (connection refused, timed out, or cut off mid-answer, as when the Mac goes to sleep); this ends by itself. It is `error` when the agent answered but refused the manager (for example `401` for a wrong token) or sent a list that does not parse; this needs someone to fix it. `message` says what happened.
+
+A caller that does not send `partial=true` gets the list as it was before #122: while Tart cannot be asked the whole list fails with `503 tart_agent_unavailable`, and while it answers the list holds every runner. An older reconciler or API takes every runner missing from a list for gone, so it never sees a partial one.
+
+**Reads give up quickly.** A read from the agent (the runner list, the VM-slots view, the health check inside a macOS admission) gives up after 5 seconds, and connecting to the agent after 5 seconds, so a sleeping Mac costs a reconciliation pass seconds, not minutes. The manager's own health (`GET /v1/health`) waits at most 1 second for the agent's, and asks the agent and Docker at the same time, so it answers well inside the 2 seconds the compose healthcheck allows; it then reports `providers.tart.available: false` and the status `degraded`. A Mac that is busy rather than asleep can therefore show as unavailable on the Tart host card for a moment; nothing else reads it, and a macOS admission makes its own 5-second read. A macOS VM start keeps its 15-minute limit.
+
+While the agent cannot be asked, each reconciliation pass logs one warning, `runner provider unavailable: macOS (Tart) (<kind>: <message>)`, and:
 
 - reconciles every pool that does not need the Mac as usual;
-- skips the macOS pools: they keep their state, runners and failure count, and no macOS runner is asked for;
-- leaves the Mac's runners as they are: they are not marked failed, deregistered from GitHub or removed, because missing from the list only means they could not be listed. The **Reconcile** action on a pool page leaves them alone too.
+- skips the pools that can only run on the Mac. They are shown in the state `provider-unavailable` (**Cannot run: runner provider unavailable**, listed under the pools that need attention) instead of the state they last had; they keep their runners and failure count, and no macOS runner is asked for. A paused pool stays paused;
+- still reconciles a macOS pool that has a fleet platform: a host-first pool whose fleet machine is ready starts its runner there, as it does when the Mac has no room. Otherwise the pool is `waiting`, with the reason `macOS (Tart) provider unavailable: …`, and asks again after half a minute;
+- leaves the Mac's runners as they are: they are not marked failed, deregistered from GitHub or removed, because missing from the list only means they could not be listed. In a pool that also runs on Docker, rotation, trimming of excess runners and rebalancing skip the Mac's runners before choosing one, so its Docker runners are still rotated, trimmed and moved. The **Reconcile** action on a pool page leaves the Mac's runners alone too.
 
-A macOS start the Mac's sleep cut short (`tart_agent_unavailable`) is treated like a start that waited for a slot: the pool waits and asks again after half a minute, and it does not count towards the provisioning circuit. When the agent answers again the next pass sees its runners and everything resumes; nothing about the outage is kept. Upgrade the runner manager and reconciler together: an older reconciler would take the Mac's runners for gone.
+The events list records `Runner provider unavailable` once, when the pass first sees the agent unavailable (a warning for `unreachable`, an error for `error`, with the manager's reason), and `Runner provider available again` once when it answers again. Neither is repeated on the passes in between, and a reconciler restart neither repeats nor misses one.
+
+A macOS start the Mac's sleep cut short (`tart_agent_unavailable`) is treated like a start that waited for a slot: the pool waits and asks again after half a minute, and it does not count towards the provisioning circuit. Its failed-start event says the VM could not be looked for (`managerContainerCleanup.status` `failed`, naming `tart`); a failed Docker start during the outage still reports its container `not-found`, because the Docker runners were all listed. When the agent answers again the next pass sees its runners and everything resumes; nothing about the outage is kept beyond the two events.
+
+**Any mix of versions is safe to run during an upgrade or rollback**, because the partial list is opt-in:
+
+- a new reconciler or API with an old runner manager: the old manager ignores `partial=true` and fails the whole list while Tart is down, so the pass is skipped as before;
+- an old reconciler or API with a new runner manager: it does not ask for the partial list, so it gets the old all-or-nothing answer.
 
 ## Host guardrails
 

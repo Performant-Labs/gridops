@@ -155,6 +155,15 @@ struct PendingGitHubCleanup {
     attempts: i64,
 }
 
+/// The runner manager's runner list, opted in to a partial list: while a
+/// provider cannot be asked (the Mac sleeps) the manager still lists the
+/// others and names it in `unavailableProviders`. A manager answers a caller
+/// that does not opt in with the old all-or-nothing list, so a reconciler
+/// that cannot tell "out of sight" from "gone" never sees a partial one. A
+/// manager from before #122 ignores the parameter and fails the whole list
+/// while Tart is down, and the pass is skipped as it always was (#122).
+const MANAGER_RUNNER_LIST: &str = "v1/runners?partial=true";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagerRunners {
@@ -164,6 +173,40 @@ struct ManagerRunners {
     /// from before #122 never sends it.
     #[serde(default)]
     unavailable_providers: Vec<String>,
+    /// Why each unavailable provider could not be asked. A manager from
+    /// before round 2 of #122 does not send it.
+    #[serde(default)]
+    provider_errors: HashMap<String, ProviderError>,
+}
+
+/// Why the runner manager could not ask a provider for its runners.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProviderError {
+    /// `unreachable`: refused, timed out or cut off, as when the Mac sleeps;
+    /// it ends by itself. `error`: the agent answered but refused the manager
+    /// or sent a list that does not parse; someone has to fix it.
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// The event a pass records once when a provider becomes unavailable, and
+/// the one it records once when it answers again (`record_provider_changes`).
+const PROVIDER_UNAVAILABLE_EVENT: &str = "Runner provider unavailable";
+const PROVIDER_AVAILABLE_EVENT: &str = "Runner provider available again";
+
+/// The state of a pool a pass skips because every provider it may start
+/// runners with is unavailable. The next pass that reconciles it replaces it.
+const PROVIDER_UNAVAILABLE_STATE: &str = "provider-unavailable";
+
+/// How a provider is named to an operator.
+fn provider_label(provider: &str) -> String {
+    match provider {
+        "tart" => "macOS (Tart)".to_owned(),
+        "docker" => "Docker".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 /// What the runner manager could see in this pass: the state of each runner
@@ -174,6 +217,7 @@ struct ManagerRunners {
 struct ManagerView {
     container_states: HashMap<String, String>,
     unavailable_providers: HashSet<String>,
+    provider_errors: HashMap<String, ProviderError>,
 }
 
 impl ManagerView {
@@ -185,6 +229,29 @@ impl ManagerView {
                 .map(|runner| (runner.id, runner.state))
                 .collect(),
             unavailable_providers: list.unavailable_providers.into_iter().collect(),
+            provider_errors: list.provider_errors,
+        }
+    }
+
+    /// What an operator is told about why `provider` could not be asked.
+    fn unavailable_reason(&self, provider: &str) -> String {
+        let label = provider_label(provider);
+        match self.provider_errors.get(provider) {
+            Some(error) if error.kind == "unreachable" => format!(
+                "{label} provider unavailable: its agent cannot be reached (unreachable): {}",
+                error.message
+            ),
+            Some(error) => format!(
+                "{label} provider unavailable: its agent answered with an error ({}): {}",
+                if error.kind.is_empty() {
+                    "error"
+                } else {
+                    error.kind.as_str()
+                },
+                error.message
+            ),
+            // A manager that did not say why.
+            None => format!("{label} provider unavailable: the runner manager could not ask it"),
         }
     }
 
@@ -218,15 +285,19 @@ impl ManagerView {
         let mut names = self
             .unavailable_providers
             .iter()
-            .map(|provider| match provider.as_str() {
-                "tart" => "macOS (Tart)".to_owned(),
-                "docker" => "Docker".to_owned(),
-                other => other.to_owned(),
+            .map(|provider| match self.provider_errors.get(provider) {
+                Some(error) => format!(
+                    "{} ({}: {})",
+                    provider_label(provider),
+                    error.kind,
+                    error.message
+                ),
+                None => provider_label(provider),
             })
             .collect::<Vec<_>>();
         names.sort();
         Some(format!(
-            "runner provider unavailable: {}; the runner manager could not reach it, so this pass skips the pools that need it and leaves its runners as they are",
+            "runner provider unavailable: {}; the runner manager could not ask it, so this pass skips the pools that need it and leaves its runners as they are",
             names.join(", ")
         ))
     }
@@ -461,8 +532,13 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     {
         tracing::warn!(error = ?error, "could not synchronize runner provisioning policy");
     }
-    let managed = match manager_request::<ManagerRunners>(app, Method::GET, "v1/runners", None)
-        .await
+    let managed = match manager_request::<ManagerRunners>(
+        app,
+        Method::GET,
+        MANAGER_RUNNER_LIST,
+        None,
+    )
+    .await
     {
         Ok(value) => value,
         Err(error) => {
@@ -479,6 +555,9 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     let view = ManagerView::from_list(managed);
     if let Some(warning) = view.unavailable_warning() {
         tracing::warn!("{warning}");
+    }
+    if let Err(error) = record_provider_changes(app, &view).await {
+        tracing::warn!(error = ?error, "could not record a change in runner provider availability");
     }
     let pools = load_pools(&app.database).await?;
     app.tart.retain_finished(
@@ -500,6 +579,7 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
                 .is_ok_and(|profiles| profiles.is_empty())
         {
             tracing::debug!(pool_id = %pool.id, "skipping a pool whose providers are unavailable");
+            show_provider_unavailable(&app.database, &pool).await?;
             continue;
         }
         if let Err(error) =
@@ -540,6 +620,99 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
         .execute(&app.database)
         .await?;
     Ok(())
+}
+
+/// Records a provider becoming unavailable, and answering again, once each:
+/// on the pass that sees the change, not on every pass it lasts. What was
+/// last recorded is read back from the events, so a reconciler restart
+/// neither repeats nor misses one.
+async fn record_provider_changes(app: &Reconciler, view: &ManagerView) -> Result<()> {
+    let recorded = sqlx::query_as::<_, (String, String)>(
+        "SELECT event,metadata FROM runner_events WHERE runner_id IS NULL AND event IN (?,?) ORDER BY created_at DESC,rowid DESC",
+    )
+    .bind(PROVIDER_UNAVAILABLE_EVENT)
+    .bind(PROVIDER_AVAILABLE_EVENT)
+    .fetch_all(&app.database)
+    .await?;
+    // The latest event per provider says whether it is recorded as away.
+    let mut latest = HashMap::<String, bool>::new();
+    for (event, metadata) in recorded {
+        let Some(provider) = serde_json::from_str::<Value>(&metadata)
+            .ok()
+            .and_then(|value| value.get("provider")?.as_str().map(ToOwned::to_owned))
+        else {
+            continue;
+        };
+        latest
+            .entry(provider)
+            .or_insert(event == PROVIDER_UNAVAILABLE_EVENT);
+    }
+    let mut went_away = view
+        .unavailable_providers
+        .iter()
+        .filter(|provider| latest.get(*provider) != Some(&true))
+        .collect::<Vec<_>>();
+    went_away.sort();
+    for provider in went_away {
+        let error = view
+            .provider_errors
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        system_event(
+            app,
+            None,
+            if error.kind == "unreachable" {
+                "warning"
+            } else {
+                "error"
+            },
+            PROVIDER_UNAVAILABLE_EVENT,
+            &format!(
+                "{}. Pools that need it are skipped and its runners are left as they are until it answers.",
+                view.unavailable_reason(provider)
+            ),
+            json!({ "provider": provider, "kind": error.kind, "message": error.message }),
+        )
+        .await?;
+    }
+    let mut came_back = latest
+        .iter()
+        .filter(|(provider, away)| **away && !view.provider_unavailable(provider))
+        .map(|(provider, _)| provider)
+        .collect::<Vec<_>>();
+    came_back.sort();
+    for provider in came_back {
+        system_event(
+            app,
+            None,
+            "info",
+            PROVIDER_AVAILABLE_EVENT,
+            &format!(
+                "{} provider available again: the runner manager can ask its agent, and its pools are reconciled as usual.",
+                provider_label(provider)
+            ),
+            json!({ "provider": provider }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Shows a pool the pass skips as unable to run for now, rather than in the
+/// state it last had, as if all were well. A paused pool stays paused. A wait
+/// recorded before is over: the pool asks again once the provider answers.
+async fn show_provider_unavailable(database: &SqlitePool, pool: &Pool) -> Result<()> {
+    if pool.paused || pool.state == PROVIDER_UNAVAILABLE_STATE {
+        return Ok(());
+    }
+    sqlx::query("UPDATE runner_pools SET state=?,updated_at=? WHERE id=?")
+        .bind(PROVIDER_UNAVAILABLE_STATE)
+        .bind(now_millis())
+        .bind(&pool.id)
+        .execute(database)
+        .await?;
+    set_pool_wait_reason(database, &pool.id, None).await
 }
 
 async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
@@ -644,9 +817,16 @@ async fn reconcile_pool(
     let provisioning_blocked = provisioning_paused || retry_deferred || host_blocked;
     let current = runners(app, &pool.id).await?;
     let mut rotated = 0;
+    // A runner out of sight (its provider could not be asked) is skipped
+    // before one is chosen, here and wherever a pass picks runners to remove:
+    // `delete_runner` would refuse it, and picking it would stop the pass
+    // from acting on the runners it can see (#122).
     if !provisioning_blocked
         && let Some(stale) = current.iter().find(|runner| {
-            runner.ci_platform != "bitbucket" && !runner.busy && runner_needs_update(pool, runner)
+            runner.ci_platform != "bitbucket"
+                && !runner.busy
+                && runner_needs_update(pool, runner)
+                && !view.out_of_sight(runner)
         })
     {
         if delete_runner(app, view, pool, stale).await? {
@@ -759,7 +939,9 @@ async fn reconcile_pool(
         let excess = active.len() - desired as usize;
         for runner in active
             .into_iter()
-            .filter(|runner| runner.ci_platform != "bitbucket" && !runner.busy)
+            .filter(|runner| {
+                runner.ci_platform != "bitbucket" && !runner.busy && !view.out_of_sight(runner)
+            })
             .take(excess)
         {
             if delete_runner(app, view, pool, runner).await? {
@@ -1084,10 +1266,11 @@ async fn evict_surplus_runner(
     let provider_capacities =
         provider_capacities(&app.database, &pool.id, &providers, &labels).await?;
     // Fleet runners are placed by the fleet scheduler; the provider and
-    // repository counts here don't describe them.
+    // repository counts here don't describe them. A runner out of sight may
+    // not be removed, so it is not a candidate either.
     let current = current
         .iter()
-        .filter(|runner| !runner.fleet)
+        .filter(|runner| !runner.fleet && !view.out_of_sight(runner))
         .cloned()
         .collect::<Vec<_>>();
     let Some(runner) = surplus_runner(
@@ -2125,8 +2308,24 @@ async fn provision_on_host(
     // The manager would refuse Docker while the host is off; do not ask.
     let mut providers = builtin_host::host_providers(builtin_enabled, pool_providers(pool));
     // Nor a provider it could not reach this pass: it would only refuse.
+    let unavailable = providers
+        .iter()
+        .find(|provider| view.provider_unavailable(provider))
+        .cloned();
     providers.retain(|provider| !view.provider_unavailable(provider));
     if providers.is_empty() {
+        // The host cannot start the runner now, as when it has no room: the
+        // pool waits, and a host-first pool falls back to a ready fleet
+        // machine. It is not "nothing to do".
+        if let Some(provider) = unavailable {
+            return Ok(ProvisionAttempt::Deferred {
+                reason: Some(format!(
+                    "[provider_unavailable]: {}",
+                    view.unavailable_reason(&provider)
+                )),
+                full_provider: None,
+            });
+        }
         return Ok(ProvisionAttempt::NoDemand);
     }
     let labels = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
@@ -2466,7 +2665,9 @@ async fn start_admitted_runner(
             release_runner_capacity(app, &capacity_lease).await;
         }
         let message = error.to_string().chars().take(2_000).collect::<String>();
-        let manager_cleanup = match cleanup_unrecorded_manager_runner(app, &runner_id).await {
+        let manager_cleanup = match cleanup_unrecorded_manager_runner(app, &runner_id, &provider)
+            .await
+        {
             Ok(Some(container_id)) => json!({ "status": "removed", "containerId": container_id }),
             Ok(None) => json!({ "status": "not-found" }),
             Err(cleanup_error) => {
@@ -2692,12 +2893,19 @@ async fn remove_manager_container(app: &Reconciler, container_id: &str) -> Resul
     )
 }
 
+/// After a failed start of a runner with `provider`, removes the container
+/// or VM the manager may have made for it anyway. `None` when it has none.
 async fn cleanup_unrecorded_manager_runner(
     app: &Reconciler,
     runner_id: &str,
+    provider: &str,
 ) -> Result<Option<String>> {
-    let managed = manager_request::<ManagerRunners>(app, Method::GET, "v1/runners", None).await?;
-    let unavailable = managed.unavailable_providers;
+    let managed =
+        manager_request::<ManagerRunners>(app, Method::GET, MANAGER_RUNNER_LIST, None).await?;
+    let own_provider_unavailable = managed
+        .unavailable_providers
+        .iter()
+        .any(|unavailable| unavailable == provider);
     let Some(container_id) = managed
         .runners
         .into_iter()
@@ -2709,12 +2917,11 @@ async fn cleanup_unrecorded_manager_runner(
         })
         .map(|runner| runner.id)
     else {
-        // Not listed may only mean not asked: say so rather than "not found".
-        if !unavailable.is_empty() {
-            bail!(
-                "the runner manager could not ask {} for this runner",
-                unavailable.join(", ")
-            );
+        // Not listed may only mean not asked, when the runner's own provider
+        // could not be: say so rather than "not found". Another provider
+        // being out of reach says nothing about this runner.
+        if own_provider_unavailable {
+            bail!("the runner manager could not ask {provider} for this runner");
         }
         return Ok(None);
     };

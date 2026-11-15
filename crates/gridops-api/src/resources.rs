@@ -4465,11 +4465,20 @@ async fn set_pool_paused(
     Ok(())
 }
 
+/// The runner manager's runner list, opted in to a partial list: while a
+/// provider cannot be asked (the Mac sleeps) the manager still lists the
+/// others and names it in `unavailableProviders`. A manager answers a caller
+/// that does not opt in with the old all-or-nothing list, so a caller that
+/// cannot tell "out of sight" from "gone" never sees a partial one (#122).
+/// A manager from before #122 ignores the parameter and fails the whole list
+/// while Tart is down, which this handles as before.
+const MANAGER_RUNNER_LIST: &str = "v1/runners?partial=true";
+
 async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiResult<Value> {
     let pool = pool_access(state, user, pool_id).await?;
     assert_pool_admin(state, user, pool_id).await?;
     let known = runners_for_pool(state, pool_id).await?;
-    let managed = match manager_json(state, Method::GET, "v1/runners", None).await {
+    let managed = match manager_json(state, Method::GET, MANAGER_RUNNER_LIST, None).await {
         Ok(value) => value,
         Err(error) if known.iter().all(|runner| runner.container_id.is_none()) => {
             tracing::warn!(pool_id, error = ?error, "runner manager unavailable before first provision");

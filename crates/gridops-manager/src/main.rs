@@ -1126,35 +1126,60 @@ async fn explain_timeouts(
     .into_response()
 }
 
+/// How long the manager's own health waits for the Tart agent's. Compose
+/// checks the manager's health with `curl --max-time 2`, and the API waits
+/// for the manager to be healthy before it starts, so health must answer
+/// inside two seconds whatever the Mac does: a Mac asleep with the
+/// connection open would otherwise hold every deploy. An agent slower than
+/// this is reported unavailable for this answer only. Nothing gates on that
+/// (admission reads the agent's health itself, with `TART_AGENT_READ_TIMEOUT`),
+/// so a busy Mac costs at most a moment of "unavailable" on the Tart host
+/// card.
+const TART_AGENT_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The Tart provider's part of the manager's health, and whether it makes
+/// the manager `degraded`.
+async fn tart_health(state: &ManagerState) -> (&'static str, Value) {
+    let Some(agent) = &state.tart else {
+        return ("ok", json!({ "available": false, "configured": false }));
+    };
+    match tart_agent_call(
+        agent,
+        reqwest::Method::GET,
+        "v1/health",
+        None,
+        Some(TART_AGENT_HEALTH_TIMEOUT),
+    )
+    .await
+    {
+        Ok(health) => {
+            let vm_slots = vm_slots_report(state, &health).await;
+            (
+                "ok",
+                json!({ "available": true, "health": health, "vmSlots": vm_slots }),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(error = ?error, "Tart agent health check failed");
+            (
+                "degraded",
+                json!({ "available": false, "error": "Tart agent is unavailable." }),
+            )
+        }
+    }
+}
+
 async fn health(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
 ) -> Result<Json<Value>, ManagerError> {
-    let (status, tart) = match &state.tart {
-        Some(agent) => match tart_agent_read(agent, "v1/health").await {
-            Ok(health) => {
-                let vm_slots = vm_slots_report(&state, &health).await;
-                (
-                    "ok",
-                    json!({ "available": true, "health": health, "vmSlots": vm_slots }),
-                )
-            }
-            Err(error) => {
-                tracing::warn!(error = ?error, "Tart agent health check failed");
-                (
-                    "degraded",
-                    json!({ "available": false, "error": "Tart agent is unavailable." }),
-                )
-            }
-        },
-        None => ("ok", json!({ "available": false, "configured": false })),
-    };
     let builtin_host = json!({
         "enabled": state.builtin_host.setting(),
         "dockerAvailable": state.builtin_host.docker_available(),
     });
     if !state.builtin_host.docker_available() {
         // Running without Docker access: nothing on this host to measure.
+        let (status, tart) = tart_health(&state).await;
         return Ok(Json(json!({
             "status": status,
             "providers": { "docker": { "available": false }, "tart": tart },
@@ -1162,13 +1187,20 @@ async fn health(
             "builtinHost": builtin_host,
         })));
     }
-    state.docker.ping().await?;
-    let version = state.docker.version().await?;
+    // The Mac and the Docker host are asked at once, so the agent's bound is
+    // not added to Docker's own time.
+    let docker = async {
+        state.docker.ping().await?;
+        let version = state.docker.version().await?;
+        // `active` includes agent sandboxes, which hold runner slots on this
+        // host; `agentSandboxes` breaks them out.
+        let usage = docker_active_usage(&state.docker).await?;
+        Ok::<_, ManagerError>((version, usage))
+    };
+    let ((status, tart), docker) = tokio::join!(tart_health(&state), docker);
+    let (version, usage) = docker?;
     // `capacity` describes the Docker host only; Tart reports its own budget
     // and usage under `providers.tart.health.capacity`.
-    // `active` includes agent sandboxes, which hold runner slots on this host;
-    // `agentSandboxes` breaks them out.
-    let usage = docker_active_usage(&state.docker).await?;
     let reserved = reserved_capacity(&state, "docker").await;
     let disk = disk_capacity(&state.limits)?;
     let budget = state.effective_budget();
@@ -1408,9 +1440,18 @@ async fn release_capacity(
     Json(json!({ "released": released }))
 }
 
+/// `GET /v1/runners` query. `partial=true` opts in to a list that answers
+/// with the runners it could see while a provider cannot be asked (#122).
+#[derive(Debug, Default, Deserialize)]
+struct ListRunnersQuery {
+    #[serde(default)]
+    partial: bool,
+}
+
 async fn list_runners(
     State(state): State<ManagerState>,
     _auth: ManagerAuth,
+    Query(query): Query<ListRunnersQuery>,
 ) -> Result<Json<Value>, ManagerError> {
     let filters = HashMap::from([(
         "label".to_owned(),
@@ -1444,23 +1485,57 @@ async fn list_runners(
         })
         .collect::<Vec<_>>();
     // The Mac sleeps, or its agent is down: its runners cannot be listed,
-    // but the Docker runners have nothing to do with it. The list still
-    // answers, and names the providers it could not ask, so a caller can tell
-    // "no runners there" from "could not ask" before taking a runner for
-    // gone (#122).
+    // but the Docker runners have nothing to do with it. A caller that opts
+    // in (`?partial=true`) still gets a list: the providers it could not ask
+    // are named in `unavailableProviders`, and why in `providerErrors`, so it
+    // can tell "no runners there" from "could not ask" before taking a runner
+    // for gone (#122). A caller that does not opt in is from before #122 and
+    // takes every runner missing from a list for gone, so it gets the old
+    // answer: the whole list fails. That is what keeps any mix of manager,
+    // reconciler and API versions safe.
     let mut unavailable_providers = Vec::<&str>::new();
+    let mut provider_errors = serde_json::Map::new();
     if let Some(agent) = &state.tart {
         match tart_runners(agent).await {
             Ok(tart_runners) => runners.extend(tart_runners),
+            Err(error) if !query.partial => return Err(error),
             Err(error) => {
                 tracing::warn!(error = ?error, "could not list the Tart agent's runners; listing the others");
                 unavailable_providers.push("tart");
+                provider_errors.insert("tart".into(), provider_error(&error));
             }
         }
     }
-    Ok(Json(
-        json!({ "runners": runners, "unavailableProviders": unavailable_providers }),
-    ))
+    if !query.partial {
+        return Ok(Json(json!({ "runners": runners })));
+    }
+    Ok(Json(json!({
+        "runners": runners,
+        "unavailableProviders": unavailable_providers,
+        "providerErrors": provider_errors,
+    })))
+}
+
+/// Why a provider could not be listed, for `providerErrors`: `kind` is
+/// `unreachable` when the agent could not be reached or stopped answering
+/// (refused, timed out, cut off mid-answer), an outage that ends by itself
+/// when the Mac wakes; `error` when it answered but refused the manager or
+/// sent something that does not parse, which needs someone to fix it.
+fn provider_error(error: &ManagerError) -> Value {
+    let (kind, message) = match error {
+        ManagerError::Upstream { code, message, .. } if code == "tart_agent_unavailable" => {
+            ("unreachable", message.clone())
+        }
+        ManagerError::Upstream {
+            status, message, ..
+        } => ("error", format!("Tart agent answered {status}: {message}")),
+        ManagerError::Internal(error) => (
+            "error",
+            format!("Tart agent runner list could not be read: {error:#}"),
+        ),
+        other => ("error", format!("Tart agent runner list failed: {other:?}")),
+    };
+    json!({ "kind": kind, "message": message })
 }
 
 async fn tart_runners(agent: &TartAgent) -> Result<Vec<ManagedRunner>, ManagerError> {
