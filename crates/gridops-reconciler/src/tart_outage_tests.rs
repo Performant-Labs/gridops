@@ -896,3 +896,77 @@ async fn an_unreachable_tart_agent_and_a_broken_one_are_recorded_differently() -
     );
     Ok(())
 }
+
+/// Review finding (GREEN round): a macOS pool placed host-first, with a
+/// macOS fleet machine ready to take its runners. With the Mac's Tart agent
+/// out of reach the host cannot start the runner, exactly as when it has no
+/// room, so the pool falls back to the fleet machine as it does then. It
+/// must not stop at "nothing to do" because the host's only provider was
+/// left out for being unavailable.
+#[tokio::test]
+async fn a_host_first_mac_pool_falls_back_to_its_fleet_machine_while_the_mac_cannot_be_asked()
+-> Result<()> {
+    const PROFILE: &str = "40000000-0000-4000-8000-0000000000bb";
+    const HOST: &str = "10000000-0000-4000-8000-0000000000bb";
+    let setup = Setup::new(
+        &format!(
+            r#"INSERT INTO pool_execution_profiles (id,pool_id,name,enabled,runtime_kind,execution_os,architecture,mode,image,cpu_millis,memory_mib,disk_bytes,placement,created_at,updated_at)
+                 VALUES ('{PROFILE}','pool-mac','macos',1,'tart_vm','macos','arm64','ephemeral','base',4000,4096,0,'host_first',1,1);
+               INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,pressure_state,last_heartbeat_at,authority_expires_at,created_at,updated_at)
+                 VALUES ('{HOST}','Mac mini','macos','arm64','approved','active','verified','normal',{now},{expires},1,1);
+               INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes)
+                 VALUES ('11000000-0000-4000-8000-0000000000bb','{HOST}',NULL,'Physical',16000,32768,1099511627776);
+               INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
+                 VALUES ('13000000-0000-4000-8000-0000000000bb','{HOST}','11000000-0000-4000-8000-0000000000bb','tart_vm','macos','arm64','ready',1,1,1);"#,
+            now = now_millis(),
+            expires = now_millis() + 3_600_000,
+        ),
+        tart_lane::SLOT_WATCH_INTERVAL,
+    )
+    .await?;
+    // The pool's organization target, granted to the machine.
+    let target = gridops_core::fleet::targets::pool_targets(&setup.app.database, "pool-mac")
+        .await?
+        .into_iter()
+        .next()
+        .context("pool-mac has an organization fleet target")?;
+    sqlx::query("INSERT INTO profile_ci_targets (profile_id,target_id,enabled) VALUES (?,?,1)")
+        .bind(PROFILE)
+        .bind(&target)
+        .execute(&setup.app.database)
+        .await?;
+    sqlx::query("INSERT INTO host_target_grants (host_id,target_id,allow_schedule) VALUES (?,?,1)")
+        .bind(HOST)
+        .bind(&target)
+        .execute(&setup.app.database)
+        .await?;
+    assert!(
+        gridops_core::fleet::targets::machine_ready(&setup.app.database, "pool-mac", PROFILE)
+            .await?,
+        "the setup gives pool-mac a ready macOS fleet machine"
+    );
+    setup.manager.tart_down.store(true, Ordering::SeqCst);
+
+    tokio::time::timeout(PASS_LIMIT, run_pass(&setup.app)).await?;
+
+    assert_eq!(
+        setup.runners("pool-linux").await?,
+        [("online".to_owned(), true)],
+        "the pass went on for the Linux pool"
+    );
+    assert_eq!(
+        setup.manager.admissions("tart"),
+        [],
+        "a Tart runner was asked of the unreachable Mac"
+    );
+    let intents: Vec<String> =
+        sqlx::query_scalar("SELECT profile_id FROM workload_intents WHERE pool_id='pool-mac'")
+            .fetch_all(&setup.app.database)
+            .await?;
+    assert_eq!(
+        intents,
+        [PROFILE],
+        "pool-mac did not fall back to its fleet machine while the Mac's Tart agent was unreachable"
+    );
+    setup.finish().await
+}
