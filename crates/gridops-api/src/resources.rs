@@ -1304,7 +1304,7 @@ pub async fn runner_pools(
           p.docker_image,p.tart_image,p.macos_runtime,p.desired_count,p.min_count,
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,p.paused,p.state,
           p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,i.account_login,
-          (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason,
+          (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason,
           CASE WHEN NOT EXISTS (
             SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
               AND NOT EXISTS (SELECT 1 FROM user_installations manage
@@ -4465,11 +4465,20 @@ async fn set_pool_paused(
     Ok(())
 }
 
+/// The runner manager's runner list, opted in to a partial list: while a
+/// provider cannot be asked (the Mac sleeps) the manager still lists the
+/// others and names it in `unavailableProviders`. A manager answers a caller
+/// that does not opt in with the old all-or-nothing list, so a caller that
+/// cannot tell "out of sight" from "gone" never sees a partial one (#122).
+/// A manager from before #122 ignores the parameter and fails the whole list
+/// while Tart is down, which this handles as before.
+const MANAGER_RUNNER_LIST: &str = "v1/runners?partial=true";
+
 async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiResult<Value> {
     let pool = pool_access(state, user, pool_id).await?;
     assert_pool_admin(state, user, pool_id).await?;
     let known = runners_for_pool(state, pool_id).await?;
-    let managed = match manager_json(state, Method::GET, "v1/runners", None).await {
+    let managed = match manager_json(state, Method::GET, MANAGER_RUNNER_LIST, None).await {
         Ok(value) => value,
         Err(error) if known.iter().all(|runner| runner.container_id.is_none()) => {
             tracing::warn!(pool_id, error = ?error, "runner manager unavailable before first provision");
@@ -4489,7 +4498,26 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
             ))
         })
         .collect::<HashMap<_, _>>();
+    // Providers the manager could not ask (the Mac sleeps). Their runners are
+    // left out of the list because they could not be listed, not because they
+    // are gone, so they are neither taken for failed nor removed (#122).
+    let unavailable = managed
+        .get("unavailableProviders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<HashSet<_>>();
+    let out_of_sight = |runner: &RunnerAccess| {
+        runner.container_id.as_ref().is_some_and(|container_id| {
+            unavailable.contains(&runner.provider) && !states.contains_key(container_id)
+        })
+    };
     for runner in &known {
+        if out_of_sight(runner) {
+            continue;
+        }
         if let Some(container_id) = &runner.container_id {
             let docker_state = states
                 .get(container_id)
@@ -4519,7 +4547,7 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
     let failed = runners_for_pool(state, pool_id)
         .await?
         .into_iter()
-        .filter(|runner| runner.runner_status == "failed")
+        .filter(|runner| runner.runner_status == "failed" && !out_of_sight(runner))
         .collect::<Vec<_>>();
     for runner in &failed {
         delete_runner_resources(state, user, runner).await?;
@@ -4532,6 +4560,7 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
             runner.ci_platform != "bitbucket"
                 && !runner.busy
                 && runner.configuration_version < pool.configuration_version
+                && !out_of_sight(runner)
         })
     {
         delete_runner_resources(state, user, &stale).await?;
@@ -4541,7 +4570,9 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         let idle = runners_for_pool(state, pool_id)
             .await?
             .into_iter()
-            .filter(|runner| !runner.busy && active_status(&runner.runner_status))
+            .filter(|runner| {
+                !runner.busy && active_status(&runner.runner_status) && !out_of_sight(runner)
+            })
             .collect::<Vec<_>>();
         let removed = idle.len();
         for runner in &idle {
@@ -4589,7 +4620,9 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
         let count = active.len() - pool.desired_count as usize;
         for runner in active
             .into_iter()
-            .filter(|runner| runner.ci_platform != "bitbucket" && !runner.busy)
+            .filter(|runner| {
+                runner.ci_platform != "bitbucket" && !runner.busy && !out_of_sight(runner)
+            })
             .take(count)
         {
             delete_runner_resources(state, user, runner).await?;
@@ -4819,7 +4852,7 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
       p.provision_retry_at,p.provision_circuit_open,
-      (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state='waiting') AS provision_wait_reason
+      (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason
       FROM runner_pools p JOIN installations i ON i.id=p.installation_id
       LEFT JOIN repositories repo ON repo.id=p.repository_id
       WHERE p.id=?
@@ -4901,13 +4934,14 @@ async fn manager_json(
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
+        let message = tart_agent_unavailable_message(path, status, &text)
+            .or_else(|| {
+                serde_json::from_str::<Value>(&text).ok().and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
             })
             .unwrap_or_else(|| format!("Runner manager request failed ({status})."));
         return Err(if status == StatusCode::NOT_FOUND {
@@ -4987,12 +5021,40 @@ async fn manager_get(state: &AppState, path: &str) -> ApiResult<reqwest::Respons
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(ApiError::ServiceUnavailable(format!(
-            "Runner manager request failed ({status}): {}",
-            text.chars().take(300).collect::<String>()
-        )));
+        return Err(ApiError::ServiceUnavailable(
+            tart_agent_unavailable_message(path, status, &text).unwrap_or_else(|| {
+                format!(
+                    "Runner manager request failed ({status}): {}",
+                    text.chars().take(300).collect::<String>()
+                )
+            }),
+        ));
     }
     Ok(response)
+}
+
+/// What a user is told when the runner manager could not pass a request on
+/// to the Tart agent (`tart_agent_unavailable`, as when the Mac sleeps).
+const TART_AGENT_UNAVAILABLE_MESSAGE: &str =
+    "Tart agent is unavailable: it could not be reached or stopped answering.";
+
+/// The fixed message for a manager error `text` with code
+/// `tart_agent_unavailable`, or `None` for any other answer. Every manager
+/// call (`manager_json`, `manager_get`) passes its error through this: what
+/// the manager says reaches the API's answers, runner failure reasons and
+/// events, and a manager from before round 3 of #122 names the agent's
+/// internal URL there, so its words go to the log only.
+fn tart_agent_unavailable_message(path: &str, status: StatusCode, text: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    if value.get("code").and_then(Value::as_str) != Some("tart_agent_unavailable") {
+        return None;
+    }
+    let detail = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    tracing::warn!(path, %status, detail, "the runner manager could not reach the Tart agent");
+    Some(TART_AGENT_UNAVAILABLE_MESSAGE.to_owned())
 }
 
 async fn archive_runner_logs(state: &AppState, runner: &RunnerAccess) -> ApiResult<Option<String>> {

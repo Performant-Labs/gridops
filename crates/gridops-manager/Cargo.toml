@@ -27,6 +27,8 @@ url.workspace = true
 [dev-dependencies]
 # Paused time, so tests can wait out the route time limits instantly.
 tokio = { workspace = true, features = ["test-util"] }
+# A connector layer that never connects, for the agent client's connect limit.
+tower.workspace = true
 
 [lints]
 workspace = true

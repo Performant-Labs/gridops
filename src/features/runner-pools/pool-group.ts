@@ -13,14 +13,16 @@ type GroupedPool = {
 };
 
 /**
- * A real block comes first (paused, provisioning paused, built-in host off). A pool the server
- * shows `waiting` is listed as waiting even with earlier failures or an open provisioning
- * circuit, because a wait for capacity or a macOS VM slot is not a failure (#102); its row still
- * carries the circuit's badge.
+ * A real block comes first (paused, provisioning paused, built-in host off, provider
+ * unavailable). A pool the server shows `waiting` is listed as waiting even with earlier failures
+ * or an open provisioning circuit, because a wait for capacity or a macOS VM slot is not a
+ * failure (#102); its row still carries the circuit's badge.
  */
 export function poolGroup(pool: GroupedPool): PoolGroupKey {
   if (pool.paused || pool.state === "paused" || pool.state === "provisioning-paused") return "paused";
   if (isBuiltinHostOff(pool)) return "attention";
+  // The reconciler skips a pool whose every provider it could not ask (the Mac sleeps, #122).
+  if (pool.state === "provider-unavailable") return "attention";
   if (pool.state === "waiting") return "waiting";
   if (pool.provisionCircuitOpen || pool.failedRunners > 0 || pool.state === "blocked") return "attention";
   if (pool.state === "backoff") return "waiting";

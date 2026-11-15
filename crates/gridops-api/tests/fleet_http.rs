@@ -56,6 +56,8 @@ mod recovery;
 mod release_preflight;
 #[path = "fleet_http/start_retry.rs"]
 mod start_retry;
+#[path = "fleet_http/tart_outage.rs"]
+mod tart_outage;
 #[path = "fleet_http/token_access.rs"]
 mod token_access;
 
