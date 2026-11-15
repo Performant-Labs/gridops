@@ -50,7 +50,7 @@ jobs:
     # Tart VM guest started by GridOps (docs/macos-runners.md) or a Mac. Any
     # other pull request runs on a GitHub-hosted macOS runner (free for this
     # public repo).
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), 'some-untrusted-user'))) && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
     timeout-minutes: 15
     steps:
       # The test skips (and exits 0) without zsh or python3. Here that would be
