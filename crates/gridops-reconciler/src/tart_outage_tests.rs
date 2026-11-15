@@ -42,6 +42,22 @@ impl std::io::Write for Captured {
 
 /// Runs one pass and gives what it logged at `WARN` and above.
 async fn logged_pass(app: &Reconciler) -> Result<Vec<String>> {
+    // The tests run in parallel, each pass under its own scoped subscriber.
+    // With no subscriber that lives for the whole run, one test's subscriber
+    // being dropped while another registers can leave tracing's global
+    // maximum level and callsite interest computed without the live one, and
+    // the pass's warnings are then dropped before they reach it. A global
+    // subscriber that lives for the run, writing nowhere, keeps `WARN`
+    // enabled throughout; the scoped one still gets the pass's lines.
+    static ALWAYS_ON: std::sync::Once = std::sync::Once::new();
+    ALWAYS_ON.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+    });
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
