@@ -503,6 +503,13 @@ async fn a_mac_pool_with_a_fleet_platform_leaves_its_tart_runners_alone_while_th
     for runner in &runners {
         assert_left_alone(&setup, runner).await?;
     }
+    // A pass that was skipped whole would leave them alone too, and prove
+    // nothing.
+    assert_eq!(
+        setup.runners("pool-linux").await?,
+        [("online".to_owned(), true)],
+        "the pass went on for the Linux pool"
+    );
     setup.finish().await
 }
 
