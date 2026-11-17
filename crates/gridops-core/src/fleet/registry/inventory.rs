@@ -313,6 +313,12 @@ impl RegistryService {
                 })
                 .collect();
         insert_samples(&mut tx, &session, &request.samples, &known_domains, now).await?;
+        // Commands that can no longer be delivered are swept here as well as
+        // on a poll. An agent without work authority never polls, so a start
+        // left pending for an earlier session (a reboot) on a placement that
+        // already counts as uncertain would otherwise hold the host without
+        // work for good: the 2026-11-05 Jupiter lockout.
+        super::commands::cancel_undeliverable(&mut tx, &session.host_id.to_string(), now).await?;
         // A reconciling session becomes ready once its complete inventory is
         // current and no placement on the host awaits review.
         let state = if session.state == ObservationSessionState::Reconciling

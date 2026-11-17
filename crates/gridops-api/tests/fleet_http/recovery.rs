@@ -946,6 +946,60 @@ async fn a_start_for_a_replaced_session_fails_as_a_lost_session() -> Result<()> 
     .await
 }
 
+/// The 2026-11-05 Jupiter lockout: the machine rebooted with a start still in
+/// the API's outbox, never delivered, and its placement was already counted
+/// uncertain. An uncertain placement withholds work authority; without
+/// authority the agent never polls; and only a poll swept commands that can't
+/// be delivered, so the start stayed pending and the machine took no work for
+/// twelve days. Heartbeats now sweep them too, so the machine recovers by
+/// itself.
+#[tokio::test]
+async fn a_machine_back_with_an_undelivered_start_on_an_uncertain_placement_works_again()
+-> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let runtime = Arc::new(FakeDocker::default());
+    let machine = active_machine(&f, &f.origin, Arc::clone(&runtime)).await?;
+    let host = machine.host.to_string();
+    let workload = Uuid::new_v4();
+    let placement_id = prepared_placement(&f, &machine, workload).await?;
+    let session = agent_session(&f, &host).await?;
+    // The machine goes down before it can take the start.
+    machine.running.abort();
+    issue_start(&f, placement_id, workload, 30_000).await?;
+    sqlx::query("UPDATE workload_placements SET state='uncertain' WHERE id=?")
+        .bind(placement_id.to_string())
+        .execute(&f.database)
+        .await?;
+
+    let restarted = Arc::new(FakeDocker::default());
+    let (stop, running) = run(supervisor(
+        &f.origin,
+        machine.journal.clone(),
+        Arc::clone(&restarted),
+    )?);
+    within("a new session", || async {
+        Ok((agent_session(&f, &host).await? != session).then_some(()))
+    })
+    .await?;
+    within("the stranded start to settle", || async {
+        Ok((placement_state(&f, placement_id).await? == "failed").then_some(()))
+    })
+    .await?;
+    assert_eq!(start_command(&f, placement_id).await?.0, "cancelled");
+    let failure = the_failure(&f, placement_id, "agent_session_lost").await?;
+    assert_eq!(failure["command_kind"], "start_runner");
+    assert_eq!(failure["delivered"], false);
+    assert_eq!(failure["session"], "replaced");
+    assert_eq!(allocation_states(&f, placement_id).await?, ["released"]);
+    within("work authority", || has_authority(&f, &host)).await?;
+    assert_eq!(starts(&restarted)?, 0);
+
+    let _ = stop.send(());
+    assert_eq!(running.await??, Stop::Shutdown);
+    Ok(())
+}
+
 /// The machine's read groups the last day's failures by reason, newest group
 /// first, and counts the last hour on its own.
 #[tokio::test]
