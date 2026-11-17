@@ -732,7 +732,7 @@ fn undeliverable_cause(
 /// unanswered `inspect` leaves the placement as it was, and a later inspect
 /// checks again. An unanswered prepare fails its placement, as an uncertain
 /// one does (see `apply_to_placement`).
-async fn cancel_undeliverable(
+pub(super) async fn cancel_undeliverable(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: &str,
     now: i64,
