@@ -835,7 +835,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, router).await });
         let config = gridops_core::Config::from_env()?
             .with_github_api_url(url::Url::parse(&format!("http://{address}"))?);
-        Ok(gridops_core::GitHubClient::new(config)?)
+        gridops_core::GitHubClient::new(config)
     }
 
     fn config_for(base_url: &str, orgs: &[&str]) -> anyhow::Result<gridops_core::Config> {
@@ -869,7 +869,7 @@ mod tests {
         database: &sqlx::SqlitePool,
     ) -> anyhow::Result<Option<SignInDenial>> {
         let github = fake_github().await?;
-        Ok(enforce_org_gate(
+        enforce_org_gate(
             &config_for(base_url, orgs)?,
             &github,
             database,
@@ -877,7 +877,7 @@ mod tests {
             token,
         )
         .await
-        .map_err(|_| anyhow::anyhow!("gate errored"))?)
+        .map_err(|_| anyhow::anyhow!("gate errored"))
     }
 
     async fn rows(database: &sqlx::SqlitePool) -> anyhow::Result<(i64, i64)> {
