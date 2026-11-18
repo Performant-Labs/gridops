@@ -24,6 +24,7 @@ struct Inner {
     github_webhook_active: Option<bool>,
     github_webhook_url: Option<Url>,
     github_api_url: Url,
+    allowed_orgs: Vec<String>,
     session_secret: Option<SecretString>,
     encryption_key: Option<SecretString>,
     manager_url: Url,
@@ -70,6 +71,7 @@ impl Config {
             github_webhook_secret: secret("GITHUB_WEBHOOK_SECRET"),
             github_webhook_active: optional_bool("GRIDOPS_GITHUB_WEBHOOK_ACTIVE")?,
             github_webhook_url,
+            allowed_orgs: parse_org_list(optional("GRIDOPS_ALLOWED_ORGS").as_deref()),
             github_api_url: Url::parse(&github_api_url)
                 .context("GRIDOPS_GITHUB_API_URL must be a URL")?,
             session_secret: secret("GRIDOPS_SESSION_SECRET"),
@@ -166,6 +168,37 @@ impl Config {
         inner.log_directory = directory;
         Self(Arc::new(inner))
     }
+    /// This configuration with sign-in limited to members of `orgs`.
+    #[must_use]
+    pub fn with_allowed_orgs(&self, orgs: &[&str]) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.allowed_orgs = parse_org_list(Some(&orgs.join(",")));
+        Self(Arc::new(inner))
+    }
+    /// This configuration served from `base_url`.
+    #[must_use]
+    pub fn with_base_url(&self, base_url: Url) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.base_url = base_url;
+        Self(Arc::new(inner))
+    }
+    /// Organization logins (`GRIDOPS_ALLOWED_ORGS`) whose active members may
+    /// sign in. Empty means none was configured.
+    pub fn allowed_orgs(&self) -> &[String] {
+        &self.0.allowed_orgs
+    }
+    /// Whether sign-in is open to any GitHub account: only when no allowed
+    /// organization is configured and the base URL is loopback (local
+    /// development). Everywhere else an empty list refuses every sign-in.
+    pub fn sign_in_open_to_any_account(&self) -> bool {
+        self.0.allowed_orgs.is_empty()
+            && match self.0.base_url.host() {
+                Some(url::Host::Domain(name)) => name == "localhost",
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                None => false,
+            }
+    }
     pub fn webhook_delivery_active(&self) -> bool {
         self.0.github_webhook_active.unwrap_or_else(|| {
             self.0.base_url.scheme() == "https"
@@ -228,6 +261,18 @@ fn token_retire_min_offline_minutes(value: Option<&str>) -> Result<u64> {
 
 use secrecy::ExposeSecret;
 
+/// Splits a comma-separated organization list, dropping blanks and repeats
+/// (GitHub logins are case-insensitive).
+fn parse_org_list(value: Option<&str>) -> Vec<String> {
+    let mut orgs: Vec<String> = Vec::new();
+    for org in value.unwrap_or_default().split(',').map(str::trim) {
+        if !org.is_empty() && !orgs.iter().any(|known| known.eq_ignore_ascii_case(org)) {
+            orgs.push(org.to_owned());
+        }
+    }
+    orgs
+}
+
 fn optional(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
@@ -274,6 +319,16 @@ fn validate_fleet_endpoint(url: &Url, allow_loopback_http: bool) -> Result<()> {
 #[cfg(test)]
 mod fleet_endpoint_tests {
     use super::*;
+
+    #[test]
+    fn allowed_orgs_parse_trim_and_dedupe() {
+        assert_eq!(parse_org_list(None).len(), 0);
+        assert_eq!(parse_org_list(Some(" , ,")).len(), 0);
+        assert_eq!(
+            parse_org_list(Some(" Performant-Labs, other ,performant-labs,")),
+            ["Performant-Labs", "other"]
+        );
+    }
 
     #[test]
     fn token_retire_quiet_period_defaults_and_rejects_values_out_of_range() -> Result<()> {
