@@ -140,6 +140,19 @@ pub async fn callback(
         .get("/user", &access_token)
         .await
         .map_err(ApiError::Internal)?;
+    // Nothing below this point runs for an account outside the allowed
+    // organizations: no user row is written and no session is created.
+    if let Some(denial) = enforce_org_gate(
+        &state.config,
+        &state.github,
+        &state.database,
+        &profile,
+        &access_token,
+    )
+    .await?
+    {
+        return Ok(error_redirect(&state, denial.message()));
+    }
     let now = now_millis();
     let existing = sqlx::query("SELECT id FROM users WHERE github_id = ?")
         .bind(profile.id)
@@ -662,6 +675,91 @@ fn parse_date(value: Option<&str>) -> Option<i64> {
         .map(|date| date.timestamp_millis())
 }
 
+/// Why a GitHub account that completed OAuth is not admitted.
+#[derive(Debug, PartialEq, Eq)]
+enum SignInDenial {
+    /// No allowed organization is configured and the server is not loopback.
+    NoOrgsConfigured,
+    /// GitHub answered, and the account has no active membership in any
+    /// allowed organization (not a member, or an invitation still pending).
+    NotActiveMember,
+    /// GitHub could not tell us; refuse rather than guess.
+    LookupFailed,
+}
+
+impl SignInDenial {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::NoOrgsConfigured => {
+                "Sign-in is restricted and no organization is allowed yet. Ask the GridOps administrator to set GRIDOPS_ALLOWED_ORGS."
+            }
+            Self::NotActiveMember => {
+                "Your GitHub account is not an active member of an organization allowed to sign in to GridOps."
+            }
+            Self::LookupFailed => {
+                "GridOps could not verify your organization membership with GitHub. Try again shortly."
+            }
+        }
+    }
+}
+
+/// Decides whether `login` may sign in: an active member of at least one
+/// allowed organization, per the user's own token. Fails closed.
+async fn check_org_membership(
+    config: &gridops_core::Config,
+    github: &gridops_core::GitHubClient,
+    login: &str,
+    access_token: &str,
+) -> Result<(), SignInDenial> {
+    if config.sign_in_open_to_any_account() {
+        return Ok(());
+    }
+    if config.allowed_orgs().is_empty() {
+        return Err(SignInDenial::NoOrgsConfigured);
+    }
+    let mut lookup_failed = false;
+    for org in config.allowed_orgs() {
+        match github.organization_membership(org, access_token).await {
+            Ok(Some(membership)) if membership.state == "active" => return Ok(()),
+            Ok(_) => {} // pending invitation, or not a member (404)
+            Err(error) => {
+                tracing::warn!(user = %login, organization = %org, error = %error, "organization membership lookup failed");
+                lookup_failed = true;
+            }
+        }
+    }
+    Err(if lookup_failed {
+        SignInDenial::LookupFailed
+    } else {
+        SignInDenial::NotActiveMember
+    })
+}
+
+/// Applies the organization gate. On denial, revokes every session of an
+/// existing account with this GitHub id (a member removed from the
+/// organization loses access now, not in 30 days) and logs the refusal.
+async fn enforce_org_gate(
+    config: &gridops_core::Config,
+    github: &gridops_core::GitHubClient,
+    database: &sqlx::SqlitePool,
+    profile: &GitHubUser,
+    access_token: &str,
+) -> ApiResult<Option<SignInDenial>> {
+    let Err(denial) = check_org_membership(config, github, &profile.login, access_token).await
+    else {
+        return Ok(None);
+    };
+    let revoked = sqlx::query(
+        "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE github_id = ?)",
+    )
+    .bind(profile.id)
+    .execute(database)
+    .await?
+    .rows_affected();
+    tracing::warn!(user = %profile.login, github_id = profile.id, reason = ?denial, revoked_sessions = revoked, "sign-in refused: not an active member of an allowed organization");
+    Ok(Some(denial))
+}
+
 fn error_redirect(state: &AppState, message: &str) -> Response {
     let mut url = state.config.base_url().clone();
     url.set_path("/login");
@@ -699,5 +797,213 @@ mod tests {
             permission_for_account("User", "someone-else", "octocat", None),
             "read"
         );
+    }
+
+    /// A fake GitHub answering `/user/memberships/orgs/{org}` for a user
+    /// token of `good-token`; `member-org` is active, `pending-org` is a
+    /// pending invitation, `broken-org` errors, anything else is a 404.
+    async fn fake_github() -> anyhow::Result<gridops_core::GitHubClient> {
+        use axum::{extract::Path, routing::get};
+        async fn membership(
+            Path(org): Path<String>,
+            headers: HeaderMap,
+        ) -> (StatusCode, Json<Value>) {
+            let authorized = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("good-token"));
+            match (authorized, org.as_str()) {
+                (false, _) => (StatusCode::UNAUTHORIZED, Json(json!({}))),
+                (_, "member-org") => (
+                    StatusCode::OK,
+                    Json(json!({ "state": "active", "role": "member" })),
+                ),
+                (_, "pending-org") => (
+                    StatusCode::OK,
+                    Json(json!({ "state": "pending", "role": "member" })),
+                ),
+                (_, "broken-org") => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))),
+                _ => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "message": "Not Found" })),
+                ),
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let router = axum::Router::new().route("/user/memberships/orgs/{org}", get(membership));
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let config = gridops_core::Config::from_env()?
+            .with_github_api_url(url::Url::parse(&format!("http://{address}"))?);
+        Ok(gridops_core::GitHubClient::new(config)?)
+    }
+
+    fn config_for(base_url: &str, orgs: &[&str]) -> anyhow::Result<gridops_core::Config> {
+        Ok(gridops_core::Config::from_env()?
+            .with_base_url(url::Url::parse(base_url)?)
+            .with_allowed_orgs(orgs))
+    }
+
+    const PUBLIC: &str = "https://gridops.example";
+
+    async fn test_database() -> anyhow::Result<sqlx::SqlitePool> {
+        let path =
+            std::env::temp_dir().join(format!("gridops-oauth-{}.sqlite", uuid::Uuid::new_v4()));
+        gridops_core::connect_database_path(&path).await
+    }
+
+    fn profile() -> GitHubUser {
+        GitHubUser {
+            id: 7,
+            login: "octocat".into(),
+            name: None,
+            email: None,
+            avatar_url: String::new(),
+        }
+    }
+
+    async fn gate(
+        orgs: &[&str],
+        base_url: &str,
+        token: &str,
+        database: &sqlx::SqlitePool,
+    ) -> anyhow::Result<Option<SignInDenial>> {
+        let github = fake_github().await?;
+        Ok(enforce_org_gate(
+            &config_for(base_url, orgs)?,
+            &github,
+            database,
+            &profile(),
+            token,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("gate errored"))?)
+    }
+
+    async fn rows(database: &sqlx::SqlitePool) -> anyhow::Result<(i64, i64)> {
+        let users = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(database)
+            .await?;
+        let sessions = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(database)
+            .await?;
+        Ok((users, sessions))
+    }
+
+    #[tokio::test]
+    async fn active_member_of_an_allowed_org_is_admitted() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        assert_eq!(
+            gate(&["member-org"], PUBLIC, "good-token", &database).await?,
+            None
+        );
+        // One failing org does not block a membership proven in another.
+        assert_eq!(
+            gate(
+                &["broken-org", "member-org"],
+                PUBLIC,
+                "good-token",
+                &database
+            )
+            .await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_member_is_denied_and_no_user_row_exists() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        assert_eq!(
+            gate(&["other-org"], PUBLIC, "good-token", &database).await?,
+            Some(SignInDenial::NotActiveMember)
+        );
+        // The gate runs before the users upsert; it writes nothing itself.
+        assert_eq!(rows(&database).await?, (0, 0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_invitation_is_denied() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        assert_eq!(
+            gate(&["pending-org"], PUBLIC, "good-token", &database).await?,
+            Some(SignInDenial::NotActiveMember)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_errors_deny_instead_of_falling_back() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        for token in ["good-token", "rejected-token"] {
+            let orgs: &[&str] = if token == "good-token" {
+                &["broken-org"]
+            } else {
+                &["member-org"]
+            };
+            assert_eq!(
+                gate(orgs, PUBLIC, token, &database).await?,
+                Some(SignInDenial::LookupFailed),
+                "{token}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removed_member_is_refused_and_loses_sessions() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        let now = now_millis();
+        sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('u7',7,'octocat','member','',?,?,?)")
+            .bind(now).bind(now).bind(now).execute(&database).await?;
+        sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('u8',8,'other','member','',?,?,?)")
+            .bind(now).bind(now).bind(now).execute(&database).await?;
+        for (id, user) in [("s1", "u7"), ("s2", "u7"), ("s3", "u8")] {
+            sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES (?,?,?,?,?,?)")
+                .bind(id).bind(id).bind(user).bind(now + 60_000).bind(now).bind(now)
+                .execute(&database).await?;
+        }
+        assert_eq!(
+            gate(&["other-org"], PUBLIC, "good-token", &database).await?,
+            Some(SignInDenial::NotActiveMember)
+        );
+        let left: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions ORDER BY id")
+            .fetch_all(&database)
+            .await?;
+        assert_eq!(left, ["s3"], "only the other user's session survives");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_allow_list_fails_closed_except_on_loopback() -> anyhow::Result<()> {
+        let database = test_database().await?;
+        assert_eq!(
+            gate(&[], PUBLIC, "good-token", &database).await?,
+            Some(SignInDenial::NoOrgsConfigured)
+        );
+        for loopback in [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            assert_eq!(
+                gate(&[], loopback, "good-token", &database).await?,
+                None,
+                "{loopback}"
+            );
+        }
+        // A configured list is enforced on loopback too.
+        assert_eq!(
+            gate(
+                &["other-org"],
+                "http://localhost:3000",
+                "good-token",
+                &database
+            )
+            .await?,
+            Some(SignInDenial::NotActiveMember)
+        );
+        Ok(())
     }
 }

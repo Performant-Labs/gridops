@@ -51,6 +51,8 @@ For organization-scoped pools, grant organization self-hosted runners read and w
 
 Grant organization members read access as well. GridOps uses that permission to distinguish organization owners, who may manage runner infrastructure, from members with read-only visibility.
 
+Restrict who may sign in with `GRIDOPS_ALLOWED_ORGS`, a comma-separated list of organization logins. After GitHub authenticates a user, GridOps requires an active membership (not a pending invitation) in at least one listed organization, checked with the user's own token against `GET /user/memberships/orgs/{org}`, before it creates a user or session. The check fails closed: a GitHub error denies sign-in. An existing user who has left the organization is refused at the next sign-in and their sessions are revoked. With the variable empty, sign-in is open to any GitHub account only when `GRIDOPS_BASE_URL` is loopback (local development); on any other origin an empty list refuses every sign-in, so set it before exposing GridOps publicly.
+
 Configure:
 
 - Callback URL: `${GRIDOPS_BASE_URL}/auth/github/callback`

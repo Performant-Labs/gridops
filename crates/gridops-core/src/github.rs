@@ -93,6 +93,33 @@ impl GitHubClient {
         Ok(response)
     }
 
+    /// The user's membership in `org`, read with the user's own token.
+    /// `Ok(None)` when GitHub answers 404, which is how it reports "not a
+    /// member"; any other failure is an error, never a guess.
+    pub async fn organization_membership(
+        &self,
+        org: &str,
+        token: &str,
+    ) -> Result<Option<GitHubOrganizationMembership>> {
+        let response = self
+            .api_request(Method::GET, &format!("/user/memberships/orgs/{org}"), token)
+            .send()
+            .await?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            bail!("GitHub membership lookup failed ({status})");
+        }
+        Ok(Some(
+            response
+                .json()
+                .await
+                .context("invalid GitHub membership response")?,
+        ))
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str, token: &str) -> Result<T> {
         self.request(Method::GET, path, token, None).await
     }
