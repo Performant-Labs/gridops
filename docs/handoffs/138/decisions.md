@@ -63,3 +63,29 @@
   - API: `crates/gridops-api/src/{state.rs,main.rs,access.rs,oauth.rs (tests),resources.rs (pool create/update/delete, delete_runner_resources, effective_webhook_url),fleet/mod.rs,fleet/profiles.rs,fleet/openapi.rs}` and `Cargo.toml`.
   - Reconciler: `crates/gridops-reconciler/src/{fleet.rs,main.rs}`.
   - Schema and spec: `migrations/0014_runner_pool_installations.sql`, `migrations/0047_gitlab.sql`, and the runner-pool paths of `docs/openapi/gridops-v1.json`.
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:42:02-08:00
+- **Decided:** PASS, with 0 block findings and 5 warn findings (see `handoff-A.md`).
+  - **Round 2 is resolved.**
+    - The block: the `"gitlab"` arm of `fleet/targets.rs::pool_targets`, the deviation, Owns, the `save_pool_fleet` test, and the rewritten #139 hand-off.
+    - The three warnings: forcing `runner_group_id = 1`, CORS listed consistently across the `main.rs` edits, the keep-list extension, D17's explicit `match` with platform-neutral text, and the `RunnerAccess` columns.
+  - **The code hasn't moved since round 2.** `git diff b22c451 a88360c` touches only `docs/handoffs/`.
+  - **The warnings:**
+    - (1) The `ensure_target_access` test is listed among the gridops-api in-crate tests, but that function and `ensure_pool_access` are private to gridops-core. They are reached only through `FleetService::submit_intent` / `load_operation`, which gridops-api never calls. Move both tests to `gridops-core/src/fleet/admission_tests.rs`, following `:2867`; add that file to Owns as add-only; don't widen visibility.
+    - (2) `save_pool_fleet` disables every `profile_ci_targets` row that `pool_targets` doesn't return. The hand-off to #139 must say that #139 fills the `"gitlab"` arm with the pool's GitLab targets.
+    - (3) The pool update should count changes to the GitLab connection set and to `run_untagged` in `runtime_changed`, as it does `bitbucket_connections_changed`. Add `gitlabConnectionIds` and `runUntagged` to the pool audit metadata.
+    - (4) "Whatever the client sends" contradicts `validate_pool_configuration` (`runner_group_id > 0`), and `UpdateRunnerPool` has no scope. Follow the repository precedent: validate a positive value, store 1.
+    - (5) The `resources.rs` keep-list omits the pool detail (`:1471`), the options (`:2388/:2419`) and the audit metadata.
+- **Assumed:**
+  - #141 or an API client saves fleet settings for a GitLab pool through `PUT /api/v1/fleet/pools/{pool_id}/profile`, as in round 2.
+  - GitLab fixes `run_untagged` when the runner registers, so an idle runner keeps the old value until it is rotated.
+- **Hedged:**
+  - **Warn 1 is a warning, not a block.** The production plan is right, the fix is one placement line, and T reads this handoff. It would become a block only if F or T widened a private authorization function to reach it.
+  - **Warn 3's rule is my reading of the Bitbucket precedent.** O may decide that a `run_untagged` change applies to new runners only, but should say so.
+  - **The task text named no earlier BLOCK findings to re-mark,** so round 2's status is recorded in a table in `handoff-A.md`.
+- **Evidence:**
+  - Read: the amended brief and its diff against a88360c; the brief-gate result r1; round 2's `handoff-A.md`; epic #136's D11 and D14 (via `gh issue view`).
+  - Core: `crates/gridops-core/src/{fleet/targets.rs (sync, ensure_target, save_pool_fleet, link_pool_target, pool_targets),fleet/service.rs (submit_intent, ensure_* access and identity),fleet/admission_tests.rs:2867,fleet/mod.rs,models.rs:40-520,autoscaling.rs:468-493}`.
+  - API: `crates/gridops-api/src/{resources.rs (RunnerAccess, selected_bitbucket_connections, pool detail, update, options, create and delete, D14 predicate and callers, the rotate and scale-down filters, delete_runner_resources, :5281),state.rs,webhooks.rs:423/780,oauth.rs:633,resources/ (layout)}`.
+  - Reconciler: `crates/gridops-reconciler/src/{fleet.rs:158,346,main.rs:1167,1312,2352,2669}`.
+  - Schema and spec: `migrations/{0001_initial.sql (runner_pools.scope has no CHECK),0014_runner_pool_installations.sql,0047_gitlab.sql}`; the runner-pool and GitLab paths of `docs/openapi/gridops-v1.json` (the pool bodies are loose objects).
