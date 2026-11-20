@@ -255,16 +255,73 @@ The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet
   - It rejects another `kind` ("unknown variant `github_registration`, expected `gitlab_runner`").
   - It rejects an extra field ("unknown field `extra`").
   - Consumers read the fields with `let GitlabRunnerMaterial::GitlabRunner { token, url, wait_timeout_seconds } = material;`. That pattern is irrefutable while the enum has one variant.
-- `Debug` is implemented by hand and prints `token: "[redacted]"`.
-- Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected; a payload with another `kind` is rejected; and `format!("{:?}")` doesn't contain the token.
+  - Why `deny_unknown_fields` is honoured here, from the serde source and not only the scratch crate (brief review R2 of this gate, B-3). The version is fixed: `Cargo.lock` pins exactly `serde` 1.0.229, `serde_derive` 1.0.229 and `serde_json` 1.0.151 (the lockfile holds one version of each, not a range), and the tests below fail on any upgrade that changes the behaviour. In `serde_derive-1.0.229/src/de/enum_internally.rs`, a struct variant of an internally tagged enum is deserialized by the ordinary struct deserializer with the **enum's** container attributes (`cattrs`), after the tag is split off by `TaggedContentVisitor`, verbatim:
+
+        Style::Struct => struct_::deserialize(
+            params,
+            &variant.fields,
+            cattrs,
+            StructForm::InternallyTagged(variant_ident),
+        ),
+
+    and in `serde_derive-1.0.229/src/de/struct_.rs`, `deserialize_field_identifier`, `deny_unknown_fields` removes the ignore fallthrough from the field identifier, so an unknown key is an error instead of being skipped, verbatim:
+
+        } else if cattrs.deny_unknown_fields() {
+            (None, None)
+        } else {
+            let ignore_variant = quote!(__ignore,);
+
+    The issue the reviewer names concerns `flatten`; `GitlabRunnerMaterial` has no `#[serde(flatten)]` field, so the `has_flatten` branch above it (which buffers unknown keys as `Content`) is never taken. Re-run in this worktree's scratchpad against the locked versions: `{"kind":"gitlab_runner","token":"t","url":"u","wait_timeout_seconds":1,"extra":1}` and the same payload with `"extra":1` first both fail with ``unknown field `extra`, expected one of `token`, `url`, `wait_timeout_seconds` ``, and the four fields in the order `url`, `wait_timeout_seconds`, `token`, `kind` deserialize.
+  - The extra-field test below sends the extra field both last and before `kind`, so it covers both positions shown above.
+- `Debug` is implemented by hand on the enum `GitlabRunnerMaterial` (brief review R2 of this gate, B-2). It prints the variant name and **every** field, with only the token's value replaced, using `f.debug_struct("GitlabRunner").field("token", &"[redacted]").field("url", url).field("wait_timeout_seconds", wait_timeout_seconds).finish()`. For the value of the literal above, `format!("{:?}", material)` is exactly:
+
+        GitlabRunner { token: "[redacted]", url: "https://gitlab.example.com", wait_timeout_seconds: 600 }
+
+  `url` and `wait_timeout_seconds` are printed in full. This output was produced by that `debug_struct` call in a scratch crate against the locked versions.
+- Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected (with the extra field last, and again with it before `kind`); a payload with another `kind` is rejected; `format!("{:?}")` doesn't contain the token; and `format!("{:?}")` equals the exact `Debug` string above (string equality).
 - Why the byte-for-byte comparison is deterministic (brief review R1 of this gate, B-4). serde's derived `Serialize` for an internally tagged enum writes the tag (`kind`) first and then the variant's fields in their declaration order, every time; `serde_json::to_string` keeps that order. So the field order of the literal is fixed by the declaration order `token`, `url`, `wait_timeout_seconds`, and that declaration order is part of this contract: reordering the fields is a contract change, and the byte-for-byte test is there to catch it. The test keeps the exact string comparison and also asserts `serde_json::from_str::<serde_json::Value>` of the output equals that of the literal, so a failure says whether the content or only the order differs. Deserialization accepts the fields in any order (see above).
+  - The source that makes this order part of serde's generated code, not an observed accident (brief review R2 of this gate, B-1). In `serde_derive-1.0.229/src/ser.rs`, `serialize_struct_variant` generates, for `StructVariant::InternallyTagged`, a `serialize_struct` call, then the tag, then the fields, verbatim:
+
+        _serde::ser::SerializeStruct::serialize_field(
+            &mut __serde_state,
+            #tag,
+            #variant_name,
+        )?;
+        #(#serialize_fields)*
+        _serde::ser::SerializeStruct::end(__serde_state)
+
+    and `serialize_fields` comes from `serialize_struct_visitor`, which walks the fields in declaration order (`for field in fields {`, skipping only `skip_serializing` fields, of which this type has none). `serde_json-1.0.151/src/ser.rs`, `impl ser::SerializeStruct for Compound`, writes each field as it is called: `Compound::Map { .. } => ser::SerializeMap::serialize_entry(self, key, value)`. So the output order is tag, `token`, `url`, `wait_timeout_seconds`, by construction of the generated code at the locked versions. The lockfile pins one version of each crate, so a serde patch release only reaches this code through a `Cargo.lock` change, and that change runs this test.
+  - The test is not circular: the expected value is the string literal written in the test, not the output of the code under test. If a future serde version ever changed the order, the fix is a hand-written `Serialize` that emits the same literal; the literal, not the derive, is the contract.
 - `token` carries a doc comment saying it is the secret `glrt-` runner authentication token and must never be logged, put in an error message, or passed as an argument or environment variable (brief review R1 of this gate, W-3). The hand-written `Debug` above is what enforces this for `{:?}`.
 - A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
 - The base URL is carried **only** in `GitlabRunnerMaterial.url` (brief review R1 of this gate, B-7; this restates deviation D1 as an acceptance criterion and changes nothing in it):
   - no field is added to `ExecutionConfiguration` or `PrepareEnvironment` by this issue, for the GitLab base URL or for anything else. In the PR diff against `master`, the definitions of both structs in `crates/gridops-core/src/fleet/protocol/agent.rs` (fields, attributes and derives) are unchanged;
   - a test in `crates/gridops-core/tests/fleet_agent_commands.rs` pins the field set: `serde_json::to_value(ExecutionConfiguration::default())` is exactly `{"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false}` (the four fields it has today, none of which has `skip_serializing_if`), and deserializing an `ExecutionConfiguration` from `{"base_url":"https://gitlab.example.com"}` or from `{"url":"https://gitlab.example.com"}` is rejected as an unknown field. A field added with `skip_serializing_if` would leave the `PrepareEnvironment` byte test passing; this test catches it.
+  - The definition this literal is checked against (brief review R2 of this gate, B-5), verbatim from `crates/gridops-core/src/fleet/protocol/agent.rs` (identical on `master`; `git diff master -- crates/gridops-core` is empty in this worktree). `Default` is derived, not hand-written, so every field takes its type's default (`None`, `None`, `false`, `false`), and no field has `skip_serializing_if`:
+
+        /// Safe profile configuration. Unknown configuration cannot become arbitrary
+        /// runtime flags. Each new field needs an explicit backend interpretation.
+        #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct ExecutionConfiguration {
+            #[serde(default)]
+            pub network: Option<UpstreamText>,
+            #[serde(default)]
+            pub session_id: Option<SessionId>,
+            #[serde(default)]
+            pub requires_interactive: bool,
+            #[serde(default)]
+            pub requires_docker_socket: bool,
+        }
+
+    `serde_json::to_string(&ExecutionConfiguration::default())` was run against this definition in a scratch crate and printed exactly `{"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false}`.
   - The fixture is the existing `fixture()` in `crates/gridops-core/tests/fleet_agent_commands.rs`, an envelope whose operation is `prepare_environment` with target `{"platform":"github_repository","installation_id":1,"repository_id":10}` and `"configuration":{}`. The new test goes in the same file.
   - The expected bytes are a string literal in the test: the output of `serde_json::to_string(&command(fixture())?)`, captured on `master` before any change in this issue. The literal is checked in as captured and is not edited by hand.
+  - The captured bytes (brief review R2 of this gate, B-4). They were produced in this worktree, whose `crates/gridops-core` is identical to `master` (`7d4a87f`), by a scratch crate that copies `id()`, `fixture()` and `command()` from `fleet_agent_commands.rs` verbatim and prints `serde_json::to_string(&command(fixture())?)?`. The test's expected literal is exactly this one line (the implementer re-captures on `master` and must get the same bytes; if they differ, `master` moved and the re-captured `master` bytes win, never bytes from the branch):
+
+        {"protocol_version":1,"command_id":"00000001-0000-4000-8000-000000000001","operation_id":"00000002-0000-4000-8000-000000000001","idempotency_key":"prepare:fixture","host_id":"00000003-0000-4000-8000-000000000001","host_epoch":1,"control_plane_incarnation":"00000004-0000-4000-8000-000000000001","authority_session_id":"00000005-0000-4000-8000-000000000001","scope":{"kind":"placement","placement_id":"00000006-0000-4000-8000-000000000001","backend_id":"00000007-0000-4000-8000-000000000001","generation":1},"expected_revision":1,"issued_at":"2026-10-09T12:00:00.000Z","deadline_at":"2026-10-09T12:20:00.000Z","request_hash":"k7OHSRahbs20kmTpOly-Er4Ng0a84gO60v4Zef4pKrE","operation":{"kind":"prepare_environment","execution_profile_id":"00000008-0000-4000-8000-000000000001","profile_revision":1,"workload":"ci_runner","target":{"platform":"github_repository","installation_id":1,"repository_id":10},"runtime_kind":"docker","execution_os":"linux","architecture":"x64","mode":"ephemeral","image":"runner:fixture","labels":["self-hosted","Linux"],"configuration":{"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false},"resource_request":{"cpu_millis":1000,"memory_mib":1024,"disk_bytes":1073741824},"allocation_ids":["00000009-0000-4000-8000-000000000001","0000000a-0000-4000-8000-000000000001"]}}
+
+    The `configuration` member is the full four-field object even though `fixture()` sends `"configuration":{}`, which is why this test and the `ExecutionConfiguration::default()` test together pin the field set.
 
 ### A-3 (block): `GitLabApi` takes credentials on every call, and `Scope` is defined
 
@@ -332,7 +389,14 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 - **[deviation]** Every method gains a leading `credentials: &GitLabCredentials` argument.
 - **[deviation]** `resolve_scope` also takes `kind: ScopeKind`. The operator chooses project or group (#141), and #146 calls `/projects/:path` or `/groups/:path` from it.
 - **[deviation]** There is a new method, `group_projects`. GitLab has no group-level jobs list, so #148 polls a group connection by listing its projects and then calling `pending_jobs` on each. #146 implements it as `GET /groups/:id/projects?include_subgroups=true`, paginated.
-- `RateLimited.retry_after` is `Option<Duration>`, taken from `Retry-After`. Every id is `ExternalId`. `tag_list` is `Vec<String>`.
+- `RateLimited.retry_after` is `Option<Duration>`, taken from `Retry-After`.
+  - The parsing rule, for #146's real client (brief review R2 of this gate, B-6). GitLab documents `Retry-After` on throttled responses as a number of seconds ("Remaining duration in seconds until the quota is reset", example `30`, in the "Additional headers for throttled requests" table of https://docs.gitlab.com/administration/settings/user_and_ip_rate_limits/). So:
+    - a header value that is a non-negative decimal integer `n` (surrounding whitespace trimmed) gives `Some(Duration::from_secs(n))`;
+    - an absent header gives `None`;
+    - any other value, an HTTP-date included, gives `None`. GitLab does not send the HTTP-date form, and `None` means the caller uses its own backoff, so no date arithmetic and no new date dependency is needed.
+  - `FakeGitLab` parses no headers: `fail_next` queues a `GitLabError::RateLimited { retry_after }` value as given, so the fake and the real client cannot disagree on parsing.
+  - A unit test of this rule (`"30"`, `" 30 "`, absent, `"Tue, 05 Jan 2021 11:00:00 GMT"`, `"-1"`) lands with the parser in #146; #137 has no HTTP code to test it on.
+- Every id is `ExternalId`. `tag_list` is `Vec<String>`.
 - No function body outside the fake is `todo!()`: the trait has no default methods, and the real implementation is #146's.
 
 **`gitlab::fake::FakeGitLab`** (`crates/gridops-core/src/gitlab/fake.rs`), behind `#[cfg(any(test, feature = "test-support"))]`. `crates/gridops-core/Cargo.toml` gains `[features] test-support = []`.
@@ -668,6 +732,18 @@ The runner script's exit status gives the value. The constants are pinned in `gr
     pub const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
     pub const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
 
+- The exit-code-to-`exitReason` mapping is pinned as data too, so both listings use the same three pairs (brief review R2 of this gate, B-8). Next to the constants, `gridops-core/src/provisioning.rs` gets:
+
+      pub const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+          (GITLAB_EXIT_COMPLETED, "completed"),
+          (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
+          (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+      ];
+
+  - `gridops-manager` depends on `gridops-core` (`gridops-core = { path = "../gridops-core" }` in its `Cargo.toml`), so the manager's listing (#147) uses the core constants and `GITLAB_EXIT_REASONS` directly and keeps no copy.
+  - `gridops-tart-agent` gets a private copy of the three `i32` constants **and** of `GITLAB_EXIT_REASONS`, with the same names and values.
+  - Tests, one in each crate that holds a definition: a test in `gridops-core` (`provisioning.rs`) and a test in `gridops-tart-agent` (`src/main.rs`) each assert, with `assert_eq!` on the whole array, that `GITLAB_EXIT_REASONS == [(0, "completed"), (75, "idle_expired"), (77, "registration_refused")]`, written as integer and string literals in the test, not through the constants. Both tests therefore pin the same three integers and the same three strings, so a typo in either copy fails its crate's test.
+  - #147 and #142 map an exited GitLab runner's exit status to `exitReason` by looking it up in `GITLAB_EXIT_REASONS` (the core one or the Tart agent's copy). What the listing does for an exit status not in the table is not pinned by this contract, as before.
 - The GitLab runner script exits with these codes. #147 owns the copy in `provisioning.rs`, and #142 the copy in the VM image.
 - The reconciler (#139) maps `idle_expired` to "removed without error" and `registration_refused` to a failure with a readable diagnostic. These are the meanings W-4 gives the fleet path.
 - #137 pins the field's name, its values and the exit codes, but doesn't add the field to either listing. The agent that launches the runner adds `exitReason` to its own listing, and #139 reads it.
@@ -818,6 +894,23 @@ All of this was read in this worktree.
 - **NV-14.** Re-run in this worktree with the local `sqlite3` 3.54.0 on scratch files. With `PRAGMA foreign_keys=OFF` and one child row pointing at a missing parent, the guard statements inside `BEGIN`/`COMMIT` failed with `CHECK constraint failed: violations = 0` (exit status 1). The same statements on the same schema with no dangling row succeeded (exit status 0). The W-8 test pins this in `fleet_schema.rs`.
 - NV-5, NV-10, NV-11, NV-12 and NV-13 were confirmed true by the reviewer and need no change.
 
+## Amendments (brief review R2 of this gate, B-1 to B-8)
+
+Each applied finding is resolved in place above, marked "brief review R2 of this gate". These changes add evidence, exact expected values and tests; no acceptance criterion, scope item, deviation or earlier decision is removed, loosened or changed.
+
+| Finding | Where it is resolved |
+|---|---|
+| B-1 | A-2, under "Why the byte-for-byte comparison is deterministic": the `serde_derive` 1.0.229 and `serde_json` 1.0.151 source that fixes tag-then-declaration order, and why the literal test is not circular |
+| B-2 | A-2, `Debug`: the exact `debug_struct` call and the exact output string, with `url` and `wait_timeout_seconds` in full, and a string-equality test |
+| B-3 | A-2, under the scratch-crate list: the `serde_derive` source showing `deny_unknown_fields` reaches an internally tagged struct variant, the exact lockfile pin, and an extra-field test in two positions |
+| B-4 | A-2, under the fixture: the captured `master` bytes of `serde_json::to_string(&command(fixture())?)` |
+| B-5 | A-2, under the field-set test: `ExecutionConfiguration` verbatim, with its derived `Default` and no `skip_serializing_if` |
+| B-6 | A-3, under `RateLimited.retry_after`: the `Retry-After` parsing rule, from GitLab's documented seconds format |
+| B-7 | Not applied: whether `Manual` and `Scheduled` count as concluded is a design decision for the operator (see below) |
+| B-8 | R2-1 item 3: `GITLAB_EXIT_REASONS` pins the code-to-string mapping, and a test in `gridops-core` and in `gridops-tart-agent` asserts the same three pairs |
+
+**Open for the operator (B-7).** The contract today says a job is concluded exactly when `JobStatus::is_terminal()` (`Success | Failed | Canceled | Skipped`), so `Manual` and `Scheduled` jobs stay in `gitlab_jobs_open_created_idx` until a writer records a terminal status. The reviewer asks for either making them terminal for the open index or adding a separate "needs a runner" predicate. Either choice changes the conclusion rule that #140 and #148 share, so it is left unchanged here pending a decision.
+
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
 - migrations/0046_gitlab.sql (not found)
@@ -890,3 +983,16 @@ All of this was read in this worktree.
 - crates/gridops-core/tests/fleet_agent_commands.rs (`fixture()`, `command()`, for B-7)
 - issues #140 and #148 (`gh issue view`, for B-1 and W-1); #138, #139, #141, #142, #145, #146 and #147 searched for `gitlab_jobs` and project-path use (W-1)
 - the local `sqlite3` 3.54.0, re-run on scratch files to check the FK guard with `foreign_keys` OFF (NV-14)
+- crates/gridops-core/src/fleet/protocol/agent.rs (`ExecutionConfiguration` definition and derived `Default`, for B-5)
+- crates/gridops-core/tests/fleet_agent_commands.rs (`id()`, `fixture()`, `command()`, copied into a scratchpad crate to capture the `master` bytes, for B-4)
+- `git diff master -- crates/gridops-core` (empty: core is identical to `master` `7d4a87f`, for B-4 and B-5)
+- ~/.cargo/registry serde_derive-1.0.229/src/ser.rs (`serialize_struct_variant`, `serialize_struct_visitor`, for B-1)
+- ~/.cargo/registry serde_derive-1.0.229/src/de/enum_internally.rs (`deserialize_internally_tagged_variant`, for B-3)
+- ~/.cargo/registry serde_derive-1.0.229/src/de/struct_.rs (`deserialize_field_identifier`, ignored-field arm, for B-3)
+- ~/.cargo/registry serde_json-1.0.151/src/ser.rs (`impl ser::SerializeStruct for Compound`, for B-1)
+- Cargo.lock (`serde` 1.0.229, `serde_derive` 1.0.229, `serde_json` 1.0.151, one version each, for B-1 and B-3)
+- a scratchpad crate against the locked versions: `GitlabRunnerMaterial` serialization, extra-field rejection in two positions, any-order acceptance and the hand-written `Debug` output (B-1, B-2, B-3)
+- https://docs.gitlab.com/administration/settings/user_and_ip_rate_limits/ ("Additional headers for throttled requests": `Retry-After` in seconds, for B-6)
+- crates/gridops-agent/src/session.rs and the `agent-runtime` checkout `src/error.rs` (searched for an in-repo `Retry-After` header precedent; none parses the header, for B-6)
+- crates/gridops-manager/Cargo.toml (`gridops-core` dependency, for B-8)
+- docs/handoffs/137/decisions.md (checked for a recorded decision on `Manual`/`Scheduled`; none, for B-7)
