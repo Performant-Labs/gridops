@@ -1,0 +1,30 @@
+import { chromium } from "playwright";
+import { createHmac } from "node:crypto";
+const OUT = process.argv[2];
+const SECRET = "audit-session-secret-for-s-walk";
+const b64u = (b) => Buffer.from(b).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const cookieFor = (t) => t + "." + b64u(createHmac("sha256", SECRET).update(t).digest());
+const browser = await chromium.launch();
+for (const [w, h] of [[360, 800], [768, 1024], [1280, 800]]) {
+  const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+  await ctx.addCookies([{ name: "gridops_session", value: cookieFor("audit-admin-token-0001"), url: "http://127.0.0.1:18098" }]);
+  const page = await ctx.newPage();
+  await page.goto("http://127.0.0.1:18098/settings/connections", { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Add connection" }).first().click();
+  const dlg = page.locator("[role=dialog]");
+  await dlg.waitFor();
+  await dlg.getByText("GitHub", { exact: true }).first().click();
+  await page.waitForTimeout(300);
+  await dlg.getByRole("button", { name: "Back" }).click();
+  await page.waitForTimeout(300);
+  console.log(w, "back to chooser:", (await dlg.innerText()).replace(/\n+/g, " | ").slice(0, 200));
+  await dlg.getByText("Bitbucket", { exact: true }).first().click();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: `${OUT}/s-add-bitbucket-form-${w}.png` });
+  console.log(w, "bitbucket form:", (await dlg.innerText()).replace(/\n+/g, " | ").slice(0, 400));
+  await dlg.getByRole("button", { name: "Back" }).click();
+  await page.waitForTimeout(200);
+  console.log(w, "back again:", (await dlg.innerText()).replace(/\n+/g, " | ").slice(0, 120));
+  await ctx.close();
+}
+await browser.close();
