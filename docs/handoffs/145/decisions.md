@@ -91,3 +91,28 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
   - Read in full: settings.github.tsx, settings.integrations.tsx, platform-connections.functions.ts and use-action.ts.
   - Read in the relevant ranges: runner-pools.new.tsx (29-80, 125-400, 440-500), runner-pools.$poolId.settings.tsx (28-215, 260-399), searchable-multi-select.tsx (1-140), api-tokens-section.tsx (1-80), runner-pools.functions.ts (1-60, 110-140) and lib/api.ts (1-45).
   - Grepped the settings file for `pool.scope`.
+
+## T (Tester, Phase 4 RED) - 2026-11-20T13:40:00-08:00
+- **Decided:**
+  - Authored 9 new test files and updated `tests/runner-pool-tart-image.test.ts`, all listed in `docs/handoffs/145/handoff-T-red.md`. RED is valid: 45 new or updated tests fail on the missing feature, the 4 files that import only new modules fail on those modules, and every pre-existing test still passes apart from the 9 tart-image cases that now go through Targets.
+  - Captured the frozen old-form payloads at tip `ef65745` (`git diff 5550cf5 ef65745 -- src tests` empty) with a one-off harness, then deleted it. There are 6 constants: the brief's 5, with the repository case using two installations clicked in reverse list order (A finding 1), plus a manual runner-group-ID case (A finding 3).
+  - Pinned the names the brief leaves to D/F that the tests need. This is the "Test contract" in the handoff:
+    - descriptor fields `targetKinds`, `connections.list` (`{ kind: "fetch", load }`), `connections.create`, `platformOptions` (`{ help, Component }`) and `labelRules.validate`;
+    - function signatures `targetPlanCheck(descriptors, selection, { maxCount })` and `anyStandaloneKindAvailable(descriptors, context)`;
+    - component props for `TargetsRow`, `PlatformOptionsSection`, `ConnectionsSection` and `GitHubAppSection`;
+    - the DOM names the tests find: the `Targets` trigger, the `Platform options` disclosure, and the disabled reasons.
+  - Encoded the brief's grep criteria as `tests/platform-neutral-source.test.ts`, so `npm test` enforces them.
+- **Assumed:**
+  - Where the brief and the wireframe differ, the brief wins. So the generic Tart script stays in the Tart base VM row, and only the Bitbucket script moves to Platform options.
+  - A fetching list binding resolves the platform's own records (`{ canManage, items }`), and the descriptor describes each row (wireframe B note 1, `describeConnection`).
+  - A successful create closes the Add dialog (wireframe C note 3).
+  - A member sees exactly one Read-only callout, owned by the route (A finding 4a).
+- **Hedged:**
+  - Four test files can only fail at import until the modules exist. I checked their code instead with `tsc` (exit 0) and `eslint` (exit 0) against a declaration-only sketch of the contract in a scratch worktree, which I then removed. Their runtime mechanics (Radix dialogs, react-query retries) are unproven until F's code exists; T repairs any test-side defect in Phase 6.
+  - Five tests pass before and after the change on purpose (characterization guards; see the handoff).
+- **Evidence:**
+  - `npm ci`, then `npx vitest run` gave a baseline of 364/364.
+  - The capture command and its verbatim output, and the harness source, are in the handoff.
+  - After the change, `npx vitest run --reporter=json` gave 405 tests, 360 passed and 45 failed, summarised per test in the handoff.
+  - `npm run lint` exited 0.
+  - `npx vite build`, then `tsc --noEmit`, failed only with TS2307 for the new modules and the implicit-`any` errors that follow from them.

@@ -24,6 +24,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
+import { TooltipProvider } from "../src/components/ui/tooltip";
 import { Route as NewPoolRoute } from "../src/routes/_app/runner-pools.new";
 import { Route as PoolSettingsRoute } from "../src/routes/_app/runner-pools.$poolId.settings";
 
@@ -89,7 +90,7 @@ afterEach(() => {
 
 async function render(element: ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  await act(async () => root.render(createElement(QueryClientProvider, { client }, element)));
+  await act(async () => root.render(createElement(QueryClientProvider, { client }, createElement(TooltipProvider, null, element))));
   await settle();
 }
 
@@ -126,6 +127,21 @@ async function choose(control: string, label: string) {
   await settle();
 }
 
+/** Picks a target in the one Targets row (#145), opening the picker only if it is closed. */
+async function chooseTarget(label: string) {
+  const targets = button("Targets");
+  if (targets.getAttribute("aria-expanded") !== "true") act(() => targets.click());
+  const listbox = document.getElementById(targets.getAttribute("aria-controls") ?? "");
+  const found = [...(listbox ?? document).querySelectorAll<HTMLElement>("[role=option]")].find((element) => element.textContent?.includes(label));
+  if (!found) throw new Error(`No "${label}" target`);
+  act(() => found.click());
+  await settle();
+}
+
+/** The Platform options disclosure of #145 (collapsed by default). */
+const platformOptionsToggle = () => [...document.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")]
+  .find((element) => element.textContent?.includes("Platform options")) ?? null;
+
 function type(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   act(() => {
@@ -138,7 +154,7 @@ async function submitCreate() {
   const name = document.querySelector<HTMLInputElement>("#pool-name");
   if (!name) throw new Error("No pool name input");
   type(name, "macos-app");
-  await choose("Repositories", "octo-org/app");
+  await chooseTarget("octo-org/app");
   const form = document.querySelector("form");
   if (!form) throw new Error("No form");
   await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
@@ -181,11 +197,19 @@ describe("New runner pool: Tart base VM", () => {
     expect(tartInput()?.value).toBe(SERVER_DEFAULT_VM);
   });
 
-  it("points a Bitbucket pool at the Bitbucket preparation script", async () => {
+  // #145: the workspace is picked in the Targets row (after a GitHub target: Bitbucket is not
+  // standalone) and the Bitbucket script moves from the Tart base VM row to Platform options.
+  it("points a Bitbucket pool at the Bitbucket preparation script in Platform options", async () => {
     await renderCreateForm({ providers: ["docker"] });
-    await choose("Bitbucket Cloud workspaces", "Acme Bitbucket");
+    await chooseTarget("octo-org/app");
+    await chooseTarget("Acme Bitbucket");
     expect(tartInput()?.value).toBe(SERVER_DEFAULT_VM);
-    expect(descriptionFor("tart-image")).toContain("scripts/prepare-tart-bitbucket-runner-image.sh");
+    expect(descriptionFor("tart-image")).not.toContain("scripts/prepare-tart-bitbucket-runner-image.sh");
+
+    const toggle = platformOptionsToggle();
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+    act(() => toggle?.click());
+    expect(document.body.textContent).toContain("scripts/prepare-tart-bitbucket-runner-image.sh");
   });
 
   it("sends the typed Tart base VM, not the default, for a Tart pool", async () => {
