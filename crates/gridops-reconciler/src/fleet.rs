@@ -344,7 +344,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
         .context("prepare command is missing")?;
     let runner = sqlx::query(
         "SELECT r.id,r.name,r.status,p.installation_id AS pool_installation,inst.account_login,p.scope,
-                p.labels,p.exclusive_labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
+                p.labels,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
            FROM runners r JOIN runner_pools p ON p.id=r.pool_id
            JOIN installations inst ON inst.id=p.installation_id
            LEFT JOIN repositories repo ON repo.id=r.target_repository_id

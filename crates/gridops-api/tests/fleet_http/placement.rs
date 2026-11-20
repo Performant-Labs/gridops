@@ -792,7 +792,7 @@ async fn a_pool_can_be_made_exclusive_and_a_save_without_the_flag_keeps_it() -> 
     };
     let exclusive = || async {
         sqlx::query_scalar::<_, bool>(
-            "SELECT exclusive_labels FROM runner_pools WHERE id='fleet-pool'",
+            "SELECT EXISTS (SELECT 1 FROM runner_pool_exclusive_labels WHERE pool_id='fleet-pool')",
         )
         .fetch_one(&f.database)
         .await

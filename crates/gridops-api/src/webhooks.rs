@@ -731,7 +731,7 @@ async fn scale_for_queued_job(
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     let candidates = sqlx::query(
-        r#"SELECT p.id,p.providers,p.labels,p.exclusive_labels,p.desired_count,p.max_count,p.queue_scale_factor,
+        r#"SELECT p.id,p.providers,p.labels,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.desired_count,p.max_count,p.queue_scale_factor,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1
             AND r.status IN ('online','idle','busy') THEN 1 END) AS busy_count
         FROM runner_pools p JOIN repositories event_repo ON event_repo.id=?

@@ -4850,7 +4850,7 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       p.mode,p.provider,p.providers,p.labels,p.image,p.docker_image,p.tart_image,p.macos_runtime,
       p.desired_count,p.min_count,p.max_count,
       CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
-      p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.exclusive_labels,p.queue_scale_factor,
+      p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
       p.provision_retry_at,p.provision_circuit_open,
       (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason
@@ -5262,7 +5262,7 @@ async fn diagnose_queued_job(
 ) -> ApiResult<Value> {
     use gridops_core::{PoolStanding, WaitingJobOwner};
     let rows = sqlx::query(
-        r#"SELECT p.id,p.name,p.labels,p.providers,p.exclusive_labels,p.paused,p.provision_circuit_open,p.max_count,
+        r#"SELECT p.id,p.name,p.labels,p.providers,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.paused,p.provision_circuit_open,p.max_count,
           (SELECT json_group_array(json_array(fp.execution_os,fp.architecture,fp.placement))
             FROM pool_execution_profiles fp
             WHERE fp.pool_id=p.id AND fp.enabled=1 AND fp.archived_at IS NULL) AS platforms,

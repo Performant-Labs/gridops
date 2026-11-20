@@ -311,11 +311,12 @@ pub async fn pool_fleet(
     let mut target_ids = first.target_ids.clone();
     target_ids.sort();
     let host_ids = first.host_ids.clone();
-    let exclusive_labels: bool =
-        sqlx::query_scalar("SELECT exclusive_labels FROM runner_pools WHERE id=?")
-            .bind(pool_id)
-            .fetch_one(pool)
-            .await?;
+    let exclusive_labels: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_pool_exclusive_labels WHERE pool_id=?)",
+    )
+    .bind(pool_id)
+    .fetch_one(pool)
+    .await?;
     Ok(Some(FleetSettings {
         enabled: profiles.iter().any(|profile| profile.input.enabled),
         placement: shared.placement,
@@ -600,13 +601,20 @@ pub async fn save_pool_fleet(
         .execute(&mut *tx)
         .await?;
     }
-    if let Some(exclusive) = input.exclusive_labels {
-        sqlx::query("UPDATE runner_pools SET exclusive_labels=?,updated_at=? WHERE id=?")
-            .bind(exclusive)
-            .bind(now)
-            .bind(pool_id)
-            .execute(&mut *tx)
-            .await?;
+    match input.exclusive_labels {
+        Some(true) => {
+            sqlx::query("INSERT OR IGNORE INTO runner_pool_exclusive_labels (pool_id) VALUES (?)")
+                .bind(pool_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        Some(false) => {
+            sqlx::query("DELETE FROM runner_pool_exclusive_labels WHERE pool_id=?")
+                .bind(pool_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        None => {}
     }
     tx.commit().await?;
     pool_fleet(pool, pool_id)

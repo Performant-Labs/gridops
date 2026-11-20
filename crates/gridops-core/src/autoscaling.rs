@@ -475,15 +475,15 @@ async fn queued_job_candidates(
                 WHERE NOT (
                   lower(CAST(requested.value AS TEXT))='self-hosted' OR
                   (lower(CAST(requested.value AS TEXT)) NOT IN ('linux','macos','windows','x64','arm64','arm','x86')
-                    AND NOT (candidate.exclusive_labels=1 AND lower(CAST(requested.value AS TEXT)) IN ('self-hosted-linux','self-hosted-macos')) AND EXISTS (
+                    AND NOT (EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=candidate.id) AND lower(CAST(requested.value AS TEXT)) IN ('self-hosted-linux','self-hosted-macos')) AND EXISTS (
                     SELECT 1 FROM json_each(candidate.labels) assigned
                     WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
                   )) OR
                   lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch) OR
                   -- Every Linux and macOS runner takes its platform label, configured or not,
                   -- unless its pool is exclusive (#134).
-                  (candidate.exclusive_labels=0 AND lower(CAST(requested.value AS TEXT))='self-hosted-linux' AND platform.os='linux') OR
-                  (candidate.exclusive_labels=0 AND lower(CAST(requested.value AS TEXT))='self-hosted-macos' AND platform.os='macos')
+                  (NOT EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=candidate.id) AND lower(CAST(requested.value AS TEXT))='self-hosted-linux' AND platform.os='linux') OR
+                  (NOT EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=candidate.id) AND lower(CAST(requested.value AS TEXT))='self-hosted-macos' AND platform.os='macos')
                 )
               )
             )
@@ -522,7 +522,7 @@ pub async fn pool_platform_labels(
     database: &SqlitePool,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, sqlx::Error> {
     let rows = sqlx::query(concat!(
-        r#"SELECT candidate.id AS pool_id,candidate.exclusive_labels AS exclusive,
+        r#"SELECT candidate.id AS pool_id,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=candidate.id) AS exclusive,
           (SELECT json_group_array(json_array(platform.os,platform.arch)) FROM ("#,
         pool_platforms!(),
         r#") platform) AS platforms
@@ -1327,7 +1327,7 @@ mod tests {
             "{}{}{}{}{}",
             org_pool("main", 1, 1),
             org_pool("light", 2, 10),
-            "UPDATE runner_pools SET exclusive_labels=1 WHERE id='light';",
+            "INSERT INTO runner_pool_exclusive_labels (pool_id) VALUES ('light');",
             pool_runners("main", "busy", 1, "busy", true),
             "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
               VALUES
