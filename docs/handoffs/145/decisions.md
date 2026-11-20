@@ -70,3 +70,24 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Assumed:** Frames A, C1, C2, C4, D1-D3, D5-D7, E and G stand as in revision 3. The brief's "preserves today's page" means members keep the ungated Refresh access, Install and "Adding another GitHub account" callout. The three App actions sit in the Connection section's header.
 - **Hedged:** Three new open questions (9-11 in handoff-D.md) carry defaults that preserve today's behaviour: what a wholly empty list shows when the App is configured, member visibility of Refresh/Install/the callout, and which SettingsSection holds the App actions. Selection-shape types, context and payload builders are contracts, not layout, so they appear only as annotations.
 - **Evidence:** Read the brief diff `8341b5e..HEAD` (the Reuse-map row, GitHub App wiring, and the round-3 decisions block), `handoff-A.md` (round 3), `handoff-D.md` (revision 3), the wireframe frames A-G, and the sources `settings.github.tsx`, `settings.integrations.tsx` (copy, toasts, error handling) and `runner-pools.new.tsx` lines 440-452 (labels row). Rendered B and the legend with Chrome headless to PNG in the scratchpad and inspected them; fixed one wrapping defect in the B1 App header and re-inspected it. Div/section/li/p tag balance verified (470/470 div).
+
+## A (Architecture review, up front, round 4) - 2026-11-20T13:15:30-08:00
+- **Decided:** PASS, with 0 block findings and 5 warns (docs/handoffs/145/handoff-A.md, which replaces the round-3 file).
+  - The round-3 block is resolved. Installations render once, as GitHub rows in `ConnectionsSection` (brief line 127). `GitHubAppSection` takes `configuration`, `githubApp` and `user`, and its Refresh access, Install and Manage App controls are `SettingsSection` actions. Line 198 and trace (d) match, and wireframe REV4 draws the same split. All six round-3 warns are folded into the binding "Round-3 architecture decisions" block (lines 754-760).
+  - Warns:
+    - The selection must carry both orders. `repositoryIds` is in click order (`searchable-multi-select.tsx:84`), and `installationId` comes from loaded-list order (`runner-pools.new.tsx:172, 233-235`). `TargetOption` has no load position, so add `loadIndex` and make the reverse-order case a frozen constant.
+    - A static `offeredIn` can't express "the settings form offers only the pool's own kind" (brief line 143, wireframe E1/E2). Replace it with `offered(context)`. Gate both Priority sections on it, and add `ReadOnlyPool`'s `pool.scope` test (settings :388) to the baseline.
+    - `manualEntry.parse` needs the connection.
+    - Connections split leftovers: one owner for the single Read-only callout; the Installations section's description; a neutral page-data prop instead of `installations`; which `SettingsSection` holds the actions.
+    - Stale text the round-3 block supersedes (lines 145, 147, 149, 151, 171, 185 and 696).
+- **Assumed:** The brief's Reuse map plus the round-3 block stand in for survey.md. Wireframe revision 4 is the approved wireframe. This is the gate the workflow doc calls Phase 4 (the role doc's "Phase 3"). The round-3 block's explicit precedence clause makes the stale earlier sentences non-binding.
+- **Hedged:**
+  - Findings 1 and 2 are contract gaps that could produce the wrong payload or the wrong settings UI. They are warns, not blocks: the frozen old-form payload constants catch finding 1, provided the reverse-order case is captured as a constant. The brief already fixes the behaviour for finding 2 (line 143, "its GitHub kind is fixed by `pool.scope`"), so S's audit against wireframe E1/E2 catches it. Neither is a parallel path or layering drift.
+  - A fourth BLOCK would have escalated to the operator for one-line amendments that T and F can apply as the reading of the binding block.
+- **Evidence:**
+  - Confirmed `git diff 5550cf5 HEAD --stat -- src tests` is empty at 4fdd6c8, and `git diff 5550cf5 master -- src tests` is empty.
+  - Checked local branches for overlapping src/ or tests/ changes: `claude/gitlab-137-contract-fa3bbe` has none. `fix/134-exclusive-pools` touches only fleet/admin-contracts.ts and tests/fleet-admin-api.test.ts.
+  - Read the brief diff 19a2d72..HEAD, brief lines 1-234 and 683-760, the round-3 handoff-A.md, decisions.md and handoff-D.md (revision 4). Extracted the wireframe text for click order, Read-only, `raisesMinMaxCount`, manual runner-group entry and resolved selection.
+  - Read in full: settings.github.tsx, settings.integrations.tsx, platform-connections.functions.ts and use-action.ts.
+  - Read in the relevant ranges: runner-pools.new.tsx (29-80, 125-400, 440-500), runner-pools.$poolId.settings.tsx (28-215, 260-399), searchable-multi-select.tsx (1-140), api-tokens-section.tsx (1-80), runner-pools.functions.ts (1-60, 110-140) and lib/api.ts (1-45).
+  - Grepped the settings file for `pool.scope`.
