@@ -207,3 +207,28 @@ These resolve the round-2 Phase 3 findings in `docs/handoffs/140/handoff-A.md`. 
 ### Outside #140
 
 A project connection plus its parent group's connection give one GitLab job two `gitlab_jobs` rows, because identity is `(connection_id, job_id)`. #148's demand scan or the contract has to deduplicate (for example on `(base_url, job_id)`). This is recorded on #136.
+
+## Amendments (architecture review, round 3)
+
+These resolve the round-3 Phase 3 findings in `docs/handoffs/140/handoff-A.md`.
+
+### Block 1: column rules for the guarded upsert
+
+The status rule (round 2, Block 1) decides `status` and `status_changed_at`. Two columns follow their own rules, because each writer lacks one of them:
+
+- **`gitlab_runner_id`:** a `running` event that carries `runner.id`, arriving at a stored `running` row whose `gitlab_runner_id` is NULL, fills it (`COALESCE`), even when the status rule rejects the status write. `status` and `status_changed_at` are left as the status rule decides. That fill counts as a change for the busy gate: it marks that runner busy and writes the `runner_events` row. A terminal row is never filled. No writer clears `gitlab_runner_id`.
+- **`tag_list`:** written only from a `pending` event's `GitLabApi::job` fetch. An insert at any other status writes `[]`, and an update without a fetch keeps the stored value.
+
+Both rules live in the same Rust source as the tier table.
+
+### Done when (added)
+
+- **The runner is filled after the poll wins.** A row stored as `running` with `gitlab_runner_id` NULL and `status_changed_at` T, as #148's poll writes it, followed by a webhook `running` event with `runner.id` R and an older `status_changed_at`. Afterwards `gitlab_runner_id` = R, the runner with `gitlab_runner_id` R is busy, `status` and `status_changed_at` are unchanged, and one `runner_events` row is written. The same event against a terminal row changes nothing.
+- **The tags survive a later event.** After a `pending` event's fetch stored tags `["a","b"]`, a `running` event and then a `success` event leave `tag_list` = `["a","b"]`.
+- **A non-`pending` insert writes `[]`.** A first-seen `created` event inserts a row with `tag_list` = `[]` and makes no `GitLabApi::job` call.
+
+### Warnings settled
+
+- **Where the rule lives (W-2): no shared helper in wave 1.** #140 keeps its tier table and guarded write in `webhooks/gitlab.rs`, and #148 keeps its own. The two must match #136's one status rule, and that rule is the specification. Moving both into a `gridops-core` helper is the follow-up already recorded on #136, done after both merge. #140 adds nothing to `gridops-core`. Recorded on #136.
+- **Busy match (W-3):** both writers match the busy runner by `gitlab_runner_id` among live (`deleted_at IS NULL`) `ci_platform = 'gitlab'` runners whose connection has the same `base_url` as the job's connection. Recorded on #136.
+- **Pins (W-4):** `runner_events.message` = `"{build_name} · pipeline {pipeline_id}"` (`build_name` from the payload, `Job` if absent). The retry arm strips the `gitlab:` prefix and splits once at the next `:` to get `<connection_id>` and `<key>`.
