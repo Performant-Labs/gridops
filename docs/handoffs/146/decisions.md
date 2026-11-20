@@ -36,3 +36,25 @@
     - `crates/gridops-manager/src/{stand_in_docker.rs,route_timeout_tests.rs}`, `crates/gridops-reconciler/src/start_tests.rs` and `crates/gridops-api/src/oauth.rs` (mock servers);
     - `crates/gridops-agent/tests/sandbox_live.rs` (the ignored live test);
     - a `#[path = …]` grep across `crates/*/src` (the sibling test-module pattern).
+
+## T (Phase 4, RED): 2026-11-20T15:33:50-08:00
+- **Decided:** RED is valid. I wrote 18 unit tests in `crates/gridops-core/src/gitlab/http_tests.rs`, all run against a hand-written tokio `TcpListener` mock, and 1 ignored live test in `crates/gridops-core/tests/gitlab_live.rs`. Both files are staged by path.
+  - On the real tree the RED is at compile time: E0432 unresolved `gridops_core::gitlab::GitLabClient`.
+  - With a throwaway stub it is at runtime: 18 of 18 fail on their assertions.
+  - The suite pins behaviour over HTTP, not private names. No test references `MAX_PAGES`, the timeouts or a Retry-After helper.
+  - A's warnings W1 and W4 are adopted. The `pub use` re-export is required, because the live test imports it. The tests are in `http_tests.rs`, and the live test uses the reasoned `#[ignore = …]` form.
+- **Assumed:**
+  - GitLab's non-admin `GET /user` omits `is_admin`, so the mock omits it, which means F must default it to false.
+  - Query parameter order and `[]` percent-encoding are F's choice, so the tests compare decoded, sorted pairs.
+  - Paths are compared raw, with uppercase `%2F`.
+  - `tag_list` may be sent as an array or as a comma-joined string.
+- **Hedged:**
+  - Three items are left to a Phase 6 code read: the request timeout, "never log a body" (there is no log-capture dependency, and no new one is allowed), and `set_sensitive`.
+  - The `" 30 "` trim isn't separately observable, because hyper strips surrounding whitespace.
+  - I did not run the live test, because I have no `GITLAB_TEST_TOKEN`.
+  - The clippy `-D warnings` gate already fails on `autoscaling.rs:1615/1701`, a file outside #146. I flagged it for O.
+- **Evidence:**
+  - I checked that the suite can be satisfied with a throwaway draft `http.rs`: 18 of 18 GREEN, and no clippy or fmt findings in either test file. The draft was deleted and mod.rs restored.
+  - I ran 17 single mutations of that draft (listed in `handoff-T-red.md`). Each one turns at least one test red, and none hangs.
+  - I fixed two invalid tests along the way. The later-page test passed against the stub; it now asserts page 2 was reached. The page-cap test hung when the cap was removed; its mock now stops at page 1001.
+  - A 1000-page cap runs in 0.36s.
