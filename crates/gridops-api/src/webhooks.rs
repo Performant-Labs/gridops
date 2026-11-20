@@ -731,7 +731,7 @@ async fn scale_for_queued_job(
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     let candidates = sqlx::query(
-        r#"SELECT p.id,p.providers,p.labels,p.desired_count,p.max_count,p.queue_scale_factor,
+        r#"SELECT p.id,p.providers,p.labels,p.exclusive_labels,p.desired_count,p.max_count,p.queue_scale_factor,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1
             AND r.status IN ('online','idle','busy') THEN 1 END) AS busy_count
         FROM runner_pools p JOIN repositories event_repo ON event_repo.id=?
@@ -752,7 +752,14 @@ async fn scale_for_queued_job(
             serde_json::from_str(candidate.get::<&str, _>("providers")).unwrap_or_default();
         let labels: Vec<String> =
             serde_json::from_str(candidate.get::<&str, _>("labels")).unwrap_or_default();
-        if compatible_runner_provider(&providers, &requested_labels, &labels).is_none() {
+        if compatible_runner_provider(
+            &providers,
+            &requested_labels,
+            &labels,
+            candidate.get::<bool, _>("exclusive_labels"),
+        )
+        .is_none()
+        {
             continue;
         }
         let pool_id = candidate.get::<String, _>("id");

@@ -118,6 +118,7 @@ struct PoolAccess {
     paused: bool,
     state: String,
     autoscaling_enabled: bool,
+    exclusive_labels: bool,
     queue_scale_factor: i64,
     idle_timeout_minutes: i64,
     configuration_version: i64,
@@ -4342,7 +4343,7 @@ async fn provision(
             if pool.ephemeral {
                 let jit = state.github.generate_jit_config(target, &token, &JitRequest {
                     name: runner_name.clone(), runner_group_id: pool.runner_group_id,
-                    labels: effective_runner_labels(&provider, &labels), work_folder: "_work".into(),
+                    labels: effective_runner_labels(&provider, &labels, pool.exclusive_labels), work_folder: "_work".into(),
                 }).await.map_err(ApiError::Internal)?;
                 request["jitConfig"] = Value::String(jit.encoded_jit_config);
                 (Some(jit.runner.id), None)
@@ -4849,7 +4850,7 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       p.mode,p.provider,p.providers,p.labels,p.image,p.docker_image,p.tart_image,p.macos_runtime,
       p.desired_count,p.min_count,p.max_count,
       CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
-      p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.queue_scale_factor,
+      p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,p.exclusive_labels,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
       p.provision_retry_at,p.provision_circuit_open,
       (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason
@@ -5261,7 +5262,7 @@ async fn diagnose_queued_job(
 ) -> ApiResult<Value> {
     use gridops_core::{PoolStanding, WaitingJobOwner};
     let rows = sqlx::query(
-        r#"SELECT p.id,p.name,p.labels,p.providers,p.paused,p.provision_circuit_open,p.max_count,
+        r#"SELECT p.id,p.name,p.labels,p.providers,p.exclusive_labels,p.paused,p.provision_circuit_open,p.max_count,
           (SELECT json_group_array(json_array(fp.execution_os,fp.architecture,fp.placement))
             FROM pool_execution_profiles fp
             WHERE fp.pool_id=p.id AND fp.enabled=1 AND fp.archived_at IS NULL) AS platforms,
@@ -5311,6 +5312,7 @@ async fn diagnose_queued_job(
             {
                 configured_labels.push(pool_name.clone());
             }
+            let exclusive = row.get::<bool, _>("exclusive_labels");
             let platforms = serde_json::from_str::<Vec<(String, String, String)>>(
                 row.get::<&str, _>("platforms"),
             )
@@ -5323,23 +5325,28 @@ async fn diagnose_queued_job(
             } else {
                 json_array(row.get::<&str, _>("providers"))
             };
-            let matching_provider =
-                compatible_runner_provider(&providers, requested_labels, &configured_labels)
-                    .or_else(|| {
-                        platforms.iter().find_map(|(os, arch, _)| {
-                            let platform = (
-                                serde_json::from_value(json!(os)).ok()?,
-                                serde_json::from_value(json!(arch)).ok()?,
-                            );
-                            gridops_core::fleet::targets::platform_supports_labels(
-                                platform.0,
-                                platform.1,
-                                requested_labels,
-                                &configured_labels,
-                            )
-                            .then(|| format!("machines ({os} {arch})"))
-                        })
-                    });
+            let matching_provider = compatible_runner_provider(
+                &providers,
+                requested_labels,
+                &configured_labels,
+                exclusive,
+            )
+            .or_else(|| {
+                platforms.iter().find_map(|(os, arch, _)| {
+                    let platform = (
+                        serde_json::from_value(json!(os)).ok()?,
+                        serde_json::from_value(json!(arch)).ok()?,
+                    );
+                    gridops_core::fleet::targets::platform_supports_labels(
+                        platform.0,
+                        platform.1,
+                        requested_labels,
+                        &configured_labels,
+                        exclusive,
+                    )
+                    .then(|| format!("machines ({os} {arch})"))
+                })
+            });
             let active = row.get::<i64, _>("active_runners");
             let maximum = row.get::<i64, _>("max_count");
             let paused = row.get::<bool, _>("paused");

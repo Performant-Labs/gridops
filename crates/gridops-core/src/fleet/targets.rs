@@ -212,6 +212,12 @@ pub struct FleetSettingsInput {
     /// they are approved for its repositories and have room).
     #[serde(default)]
     pub host_ids: Option<Vec<String>>,
+    /// Whether the pool's runners skip the catch-all `self-hosted-linux` /
+    /// `self-hosted-macos` label, so only jobs asking for one of the pool's
+    /// own labels run on them (#134). Left out, the pool keeps its setting
+    /// (off for a new pool). Applies to runners started after the save.
+    #[serde(default)]
+    pub exclusive_labels: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,6 +246,9 @@ pub struct FleetSettings {
     /// The machines the pool is pinned to; empty when it may run on any
     /// approved machine.
     pub host_ids: Vec<String>,
+    /// Whether the pool's runners skip the catch-all `self-hosted-linux` /
+    /// `self-hosted-macos` label.
+    pub exclusive_labels: bool,
 }
 
 /// The pool's current (not archived) profiles, oldest first.
@@ -302,6 +311,11 @@ pub async fn pool_fleet(
     let mut target_ids = first.target_ids.clone();
     target_ids.sort();
     let host_ids = first.host_ids.clone();
+    let exclusive_labels: bool =
+        sqlx::query_scalar("SELECT exclusive_labels FROM runner_pools WHERE id=?")
+            .bind(pool_id)
+            .fetch_one(pool)
+            .await?;
     Ok(Some(FleetSettings {
         enabled: profiles.iter().any(|profile| profile.input.enabled),
         placement: shared.placement,
@@ -323,6 +337,7 @@ pub async fn pool_fleet(
             .collect(),
         target_ids,
         host_ids,
+        exclusive_labels,
     }))
 }
 
@@ -585,6 +600,14 @@ pub async fn save_pool_fleet(
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(exclusive) = input.exclusive_labels {
+        sqlx::query("UPDATE runner_pools SET exclusive_labels=?,updated_at=? WHERE id=?")
+            .bind(exclusive)
+            .bind(now)
+            .bind(pool_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     pool_fleet(pool, pool_id)
         .await?
@@ -600,6 +623,7 @@ pub fn platform_supports_labels(
     architecture: super::Architecture,
     requested: &[String],
     configured: &[String],
+    exclusive: bool,
 ) -> bool {
     let os = match execution_os {
         super::ExecutionOs::Linux => "linux",
@@ -614,8 +638,11 @@ pub fn platform_supports_labels(
         label.eq_ignore_ascii_case("self-hosted")
             || label.eq_ignore_ascii_case(os)
             || label.eq_ignore_ascii_case(arch)
-            || (os == "linux" && label.eq_ignore_ascii_case(crate::LINUX_RUNNER_LABEL))
+            || (os == "linux"
+                && !exclusive
+                && label.eq_ignore_ascii_case(crate::LINUX_RUNNER_LABEL))
             || (!crate::is_runner_system_label(label)
+                && (!exclusive || !crate::is_catch_all_label(label))
                 && configured
                     .iter()
                     .any(|item| item.eq_ignore_ascii_case(label)))
@@ -1218,6 +1245,9 @@ async fn attribute_queued_jobs(
                         profiles[*index].input.architecture,
                         &job.labels,
                         configured_labels,
+                        // The job is already this pool's, so the pool took it
+                        // on labels it offers.
+                        false,
                     )
                 })
                 .collect::<Vec<_>>();

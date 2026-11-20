@@ -107,21 +107,32 @@ pub fn runner_system_labels(provider: &str) -> [&'static str; 3] {
     }
 }
 
-pub fn effective_runner_labels(provider: &str, configured: &[String]) -> Vec<String> {
+/// The labels a runner registers with. An `exclusive` pool's runners skip the
+/// catch-all [`LINUX_RUNNER_LABEL`] / [`MACOS_RUNNER_LABEL`], so GitHub only
+/// hands them jobs that ask for one of the pool's own labels (#134); the
+/// catch-all is also dropped from its configured labels.
+pub fn effective_runner_labels(
+    provider: &str,
+    configured: &[String],
+    exclusive: bool,
+) -> Vec<String> {
     let mut labels = runner_system_labels(provider)
         .into_iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    labels.push(
-        if provider == "tart" {
-            MACOS_RUNNER_LABEL
-        } else {
-            LINUX_RUNNER_LABEL
-        }
-        .to_owned(),
-    );
+    if !exclusive {
+        labels.push(
+            if provider == "tart" {
+                MACOS_RUNNER_LABEL
+            } else {
+                LINUX_RUNNER_LABEL
+            }
+            .to_owned(),
+        );
+    }
     for label in configured {
         if !is_runner_system_label(label)
+            && (!exclusive || !is_catch_all_label(label))
             && !labels
                 .iter()
                 .any(|existing| existing.eq_ignore_ascii_case(label))
@@ -130,6 +141,12 @@ pub fn effective_runner_labels(provider: &str, configured: &[String]) -> Vec<Str
         }
     }
     labels
+}
+
+/// Whether `label` is one of the catch-all labels every non-exclusive Linux
+/// or macOS runner carries.
+pub fn is_catch_all_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case(LINUX_RUNNER_LABEL) || label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL)
 }
 
 pub fn runner_supports_system_label(provider: &str, label: &str) -> bool {
@@ -142,10 +159,11 @@ pub fn compatible_runner_provider(
     providers: &[String],
     requested: &[String],
     configured: &[String],
+    exclusive: bool,
 ) -> Option<String> {
     providers
         .iter()
-        .find(|provider| provider_supports_labels(provider, requested, configured))
+        .find(|provider| provider_supports_labels(provider, requested, configured, exclusive))
         .cloned()
 }
 
@@ -153,10 +171,14 @@ pub fn provider_supports_labels(
     provider: &str,
     requested: &[String],
     configured: &[String],
+    exclusive: bool,
 ) -> bool {
     requested.iter().all(|requested| {
         if requested.eq_ignore_ascii_case("self-hosted") {
             return true;
+        }
+        if exclusive && is_catch_all_label(requested) {
+            return false;
         }
         if requested.eq_ignore_ascii_case(LINUX_RUNNER_LABEL) {
             return provider != "tart";
@@ -452,14 +474,16 @@ async fn queued_job_candidates(
                 SELECT 1 FROM json_each(wj.labels) requested
                 WHERE NOT (
                   lower(CAST(requested.value AS TEXT))='self-hosted' OR
-                  (lower(CAST(requested.value AS TEXT)) NOT IN ('linux','macos','windows','x64','arm64','arm','x86') AND EXISTS (
+                  (lower(CAST(requested.value AS TEXT)) NOT IN ('linux','macos','windows','x64','arm64','arm','x86')
+                    AND NOT (candidate.exclusive_labels=1 AND lower(CAST(requested.value AS TEXT)) IN ('self-hosted-linux','self-hosted-macos')) AND EXISTS (
                     SELECT 1 FROM json_each(candidate.labels) assigned
                     WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
                   )) OR
                   lower(CAST(requested.value AS TEXT)) IN (platform.os,platform.arch) OR
-                  -- Every Linux and macOS runner takes its platform label, configured or not.
-                  (lower(CAST(requested.value AS TEXT))='self-hosted-linux' AND platform.os='linux') OR
-                  (lower(CAST(requested.value AS TEXT))='self-hosted-macos' AND platform.os='macos')
+                  -- Every Linux and macOS runner takes its platform label, configured or not,
+                  -- unless its pool is exclusive (#134).
+                  (candidate.exclusive_labels=0 AND lower(CAST(requested.value AS TEXT))='self-hosted-linux' AND platform.os='linux') OR
+                  (candidate.exclusive_labels=0 AND lower(CAST(requested.value AS TEXT))='self-hosted-macos' AND platform.os='macos')
                 )
               )
             )
@@ -492,13 +516,13 @@ async fn queued_job_candidates(
 /// without repeats: the OS and architecture of each platform it runs on (the
 /// same platforms queue ownership matches system labels against), plus
 /// [`LINUX_RUNNER_LABEL`] or [`MACOS_RUNNER_LABEL`] for a Linux or macOS
-/// platform. A pool's configured labels never offer these; a pool with no
-/// platform maps to an empty list.
+/// platform, unless the pool is exclusive (#134). A pool's configured labels
+/// never offer these; a pool with no platform maps to an empty list.
 pub async fn pool_platform_labels(
     database: &SqlitePool,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, sqlx::Error> {
     let rows = sqlx::query(concat!(
-        r#"SELECT candidate.id AS pool_id,
+        r#"SELECT candidate.id AS pool_id,candidate.exclusive_labels AS exclusive,
           (SELECT json_group_array(json_array(platform.os,platform.arch)) FROM ("#,
         pool_platforms!(),
         r#") platform) AS platforms
@@ -513,13 +537,14 @@ pub async fn pool_platform_labels(
             let platforms =
                 serde_json::from_str::<Vec<(String, String)>>(row.get::<&str, _>("platforms"))
                     .unwrap_or_default();
+            let exclusive = row.get::<bool, _>("exclusive");
             let mut labels = platforms
                 .into_iter()
                 .flat_map(|(os, arch)| {
                     let os = os.to_lowercase();
                     let named = match os.as_str() {
-                        "linux" => Some(LINUX_RUNNER_LABEL.to_owned()),
-                        "macos" => Some(MACOS_RUNNER_LABEL.to_owned()),
+                        "linux" if !exclusive => Some(LINUX_RUNNER_LABEL.to_owned()),
+                        "macos" if !exclusive => Some(MACOS_RUNNER_LABEL.to_owned()),
                         _ => None,
                     };
                     [Some(os), Some(arch.to_lowercase()), named]
@@ -584,7 +609,7 @@ pub async fn provider_capacities(
         .collect::<Vec<_>>();
     for job in queued_job_assignments(database, pool_id).await? {
         if let Some(provider) =
-            compatible_runner_provider(providers, &job.labels, configured_labels)
+            compatible_runner_provider(providers, &job.labels, configured_labels, false)
             && let Some(capacity) = capacities
                 .iter_mut()
                 .find(|capacity| capacity.provider == provider)
@@ -636,7 +661,7 @@ pub async fn next_runner_provider(
     for job in &assignments {
         if repository_id.is_none_or(|repository_id| repository_id == job.repository_id)
             && let Some(provider) =
-                compatible_runner_provider(providers, &job.labels, configured_labels)
+                compatible_runner_provider(providers, &job.labels, configured_labels, false)
             && let Some(capacity) = capacities
                 .iter_mut()
                 .find(|capacity| capacity.provider == provider)
@@ -835,6 +860,7 @@ mod tests {
         let labels = effective_runner_labels(
             "docker",
             &["gridops".into(), "SELF-HOSTED".into(), "pool-a".into()],
+            false,
         );
         assert!(labels.iter().any(|label| label == "self-hosted"));
         assert!(labels.iter().any(|label| label == "linux"));
@@ -860,7 +886,7 @@ mod tests {
         assert!(runner_supports_system_label("tart", "arm64"));
         assert!(!runner_supports_system_label("tart", "linux"));
         assert!(
-            !effective_runner_labels("docker", &["macOS".into()])
+            !effective_runner_labels("docker", &["macOS".into()], false)
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case("macos"))
         );
@@ -870,7 +896,7 @@ mod tests {
     fn every_linux_runner_takes_the_shared_linux_label() {
         // Docker runners carry it whether or not the pool lists it, once.
         for configured in [vec![], vec!["Self-Hosted-Linux".to_owned()]] {
-            let labels = effective_runner_labels("docker", &configured);
+            let labels = effective_runner_labels("docker", &configured, false);
             assert_eq!(
                 labels
                     .iter()
@@ -883,16 +909,18 @@ mod tests {
         assert!(provider_supports_labels(
             "docker",
             &["self-hosted-linux".into()],
-            &[]
+            &[],
+            false
         ));
         // A macOS VM isn't a Linux runner, even if its pool lists the label.
         assert!(!provider_supports_labels(
             "tart",
             &["self-hosted-linux".into()],
-            &["self-hosted-linux".into()]
+            &["self-hosted-linux".into()],
+            false
         ));
         assert!(
-            !effective_runner_labels("tart", &[])
+            !effective_runner_labels("tart", &[], false)
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case(LINUX_RUNNER_LABEL))
         );
@@ -900,20 +928,22 @@ mod tests {
         assert!(provider_supports_labels(
             "tart",
             &["self-hosted-macos".into()],
-            &[]
+            &[],
+            false
         ));
         assert!(!provider_supports_labels(
             "docker",
             &["self-hosted-macos".into()],
-            &["self-hosted-macos".into()]
+            &["self-hosted-macos".into()],
+            false
         ));
         assert!(
-            effective_runner_labels("tart", &[])
+            effective_runner_labels("tart", &[], false)
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL))
         );
         assert!(
-            !effective_runner_labels("docker", &[])
+            !effective_runner_labels("docker", &[], false)
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case(MACOS_RUNNER_LABEL))
         );
@@ -928,6 +958,7 @@ mod tests {
                 &providers,
                 &["self-hosted".into(), "macOS".into(), "release".into()],
                 &configured,
+                false,
             ),
             Some("tart".into())
         );
@@ -936,6 +967,7 @@ mod tests {
                 &providers,
                 &["self-hosted".into(), "linux".into()],
                 &configured,
+                false,
             ),
             Some("docker".into())
         );
@@ -944,13 +976,50 @@ mod tests {
                 &providers,
                 &["self-hosted".into(), "windows".into()],
                 &configured,
+                false,
             ),
             None
         );
         assert_eq!(
-            compatible_runner_provider(&providers, &["self-hosted".into()], &configured),
+            compatible_runner_provider(&providers, &["self-hosted".into()], &configured, false),
             Some("docker".into())
         );
+    }
+
+    #[test]
+    fn an_exclusive_pool_skips_the_catch_all_labels() {
+        for provider in ["docker", "tart"] {
+            let labels = effective_runner_labels(
+                provider,
+                &["gridops".into(), "Self-Hosted-Linux".into()],
+                true,
+            );
+            assert!(labels.iter().any(|label| label == "gridops"), "{labels:?}");
+            assert!(
+                !labels.iter().any(|label| is_catch_all_label(label)),
+                "{labels:?}"
+            );
+        }
+        // Its own labels still match; the catch-all does not, even listed.
+        let own = ["self-hosted".to_owned(), "gridops".to_owned()];
+        assert!(provider_supports_labels(
+            "docker",
+            &own,
+            &["gridops".into()],
+            true
+        ));
+        for catch_all in ["self-hosted-linux", "self-hosted-macos"] {
+            assert!(!provider_supports_labels(
+                if catch_all.ends_with("linux") {
+                    "docker"
+                } else {
+                    "tart"
+                },
+                &[catch_all.into()],
+                &[catch_all.into()],
+                true
+            ));
+        }
     }
 
     #[test]
@@ -1242,6 +1311,57 @@ mod tests {
         assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
         // The same state gives the same owners.
         assert_eq!(owned(&database, "newer").await?, vec![100, 101, 102]);
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_exclusive_pool_never_owns_a_catch_all_job_but_owns_its_own_labels()
+    -> anyhow::Result<()> {
+        // 'main' is saturated, so a catch-all job would normally pass to
+        // 'light'; 'light' is exclusive, so it stays with 'main' and 'light'
+        // offers no catch-all label. A job that asks for 'light' still goes there.
+        let (directory, database) = ownership_fixture(&format!(
+            "{}{}{}{}{}",
+            org_pool("main", 1, 1),
+            org_pool("light", 2, 10),
+            "UPDATE runner_pools SET exclusive_labels=1 WHERE id='light';",
+            pool_runners("main", "busy", 1, "busy", true),
+            "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES
+              (100,20,'a','queued','[\"self-hosted\",\"self-hosted-linux\"]','https://github.com/octo-org/gridops/actions/runs/20/job/100',1,1),
+              (101,20,'b','queued','[\"self-hosted\",\"self-hosted-linux\",\"shared\"]','https://github.com/octo-org/gridops/actions/runs/20/job/101',2,2);"
+        ))
+        .await?;
+
+        assert_eq!(owned(&database, "light").await?, Vec::<i64>::new());
+        assert_eq!(owned(&database, "main").await?, vec![1, 2]);
+        let labels = pool_platform_labels(&database).await?;
+        assert!(
+            !labels["light"]
+                .iter()
+                .any(|label| is_catch_all_label(label)),
+            "{labels:?}"
+        );
+        assert!(
+            labels["main"]
+                .iter()
+                .any(|label| label == LINUX_RUNNER_LABEL)
+        );
+
+        // A job asking for the pool's own name still goes to it.
+        sqlx::query(
+            "INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+              VALUES (102,20,'c','queued','[\"self-hosted\",\"light\"]','https://github.com/octo-org/gridops/actions/runs/20/job/102',3,3)",
+        )
+        .execute(&database)
+        .await?;
+        sqlx::query("UPDATE runner_pools SET labels='[\"light\"]' WHERE id='light'")
+            .execute(&database)
+            .await?;
+        assert_eq!(owned(&database, "light").await?, vec![3]);
 
         database.close().await;
         fs::remove_dir_all(directory)?;

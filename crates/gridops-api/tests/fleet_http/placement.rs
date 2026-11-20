@@ -771,6 +771,55 @@ async fn saving_a_fleet_profile_is_recorded_in_the_audit_trail() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_pool_can_be_made_exclusive_and_a_save_without_the_flag_keeps_it() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let linux = json!({"runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64"});
+    let save = |extra: Value| {
+        let mut body = json!({
+            "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024,
+            "diskBytes": 0, "platforms": [linux],
+        });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        f.client
+            .put(f.url("/pools/fleet-pool/profile"))
+            .header(header::COOKIE, &f.cookie)
+            .header(header::ORIGIN, &f.origin)
+            .json(&body)
+            .send()
+    };
+    let exclusive = || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT exclusive_labels FROM runner_pools WHERE id='fleet-pool'",
+        )
+        .fetch_one(&f.database)
+        .await
+    };
+    // A new pool is not exclusive.
+    let saved: Value = save(json!({})).await?.json().await?;
+    assert_eq!(saved["item"]["exclusiveLabels"], false);
+    assert!(!exclusive().await?);
+    // Turning it on is stored and returned.
+    let saved: Value = save(json!({"exclusiveLabels": true})).await?.json().await?;
+    assert_eq!(saved["item"]["exclusiveLabels"], true);
+    assert!(exclusive().await?);
+    // A save that leaves the flag out (the web form) keeps it.
+    let saved: Value = save(json!({})).await?.json().await?;
+    assert_eq!(saved["item"]["exclusiveLabels"], true);
+    assert!(exclusive().await?);
+    // And it can be turned off again.
+    let saved: Value = save(json!({"exclusiveLabels": false}))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(saved["item"]["exclusiveLabels"], false);
+    assert!(!exclusive().await?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn pool_runs_on_several_platforms_and_keeps_unchanged_ones() -> Result<()> {
     let f = Fixture::new().await?;
     seed_pool(&f).await?;
@@ -825,12 +874,14 @@ async fn pool_runs_on_several_platforms_and_keeps_unchanged_ones() -> Result<()>
         gridops_core::fleet::Architecture::X64,
         &requested,
         &[],
+        false,
     ));
     assert!(!gridops_core::fleet::targets::platform_supports_labels(
         gridops_core::fleet::ExecutionOs::Linux,
         gridops_core::fleet::Architecture::Arm64,
         &requested,
         &[],
+        false,
     ));
     Ok(())
 }
