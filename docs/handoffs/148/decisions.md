@@ -71,3 +71,46 @@
     - `crates/gridops-reconciler/src/main.rs:30-140,340-520,1145-1230,1396-1445,1555-1600,1975-2260,3650-3730`;
     - `crates/gridops-core/src/db.rs:195-240`.
   - Commands: a grep for every `Reconciler {` literal (three sites, all listed in A-W1).
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:51:03-08:00
+- **Decided:** PASS, with 0 block findings and 4 warn findings (see `handoff-A.md`, round 3). The brief was reviewed at `c48f951`.
+  - The round-2 block is resolved by A2-B1. Rows are selected on `gitlab_jobs.updated_at`, which the poll stamps before each `job` request through `retry_when_busy`, so there is one named mechanism and no map. Rows are ordered `pending` first and `running` last, oldest first in each group, and capped at `GITLAB_JOB_CHECK_LIMIT`. Two Done-when tests pin this.
+  - Round-2 warns 2 to 7 are addressed:
+    - A2-W2/W3: the rank order includes `manual`/`scheduled`, the poll never writes `unknown`, and the rank decides over timestamps;
+    - A2-W4: the busy flag is cleared on conclusion, with a test;
+    - A2-W5: the bare platform `EXISTS` is kept;
+    - A2-W6: time limits are per request, and a failed project is not concluded;
+    - A2-W7: `gitlab_credentials` is in `main.rs` beside `runtime_secret`, and `UnavailableGitLab` is `pub(crate)`.
+  - Warns:
+    - (1) The `gitlab_jobs` write rule and the busy clear live in `gitlab_poll.rs`, with #140 given the same rule as prose on #136. For GitHub, both writers share `gridops-core` helpers (`associate_runner_with_job`, `record_job_report`, `finish_earlier_attempts`). Recommended: one core helper, added by whichever of #140 and #148 lands first; otherwise record why there are two copies.
+    - (2) An identical status counts as a same-rank write, so the poll rewrites `status_changed_at` on every pending row each poll.
+    - (3) A failed `group_projects` isn't covered by A2-W6.
+    - (4) Pin the interval to `setting_i64`. A2-W4 says "the row's `gitlab_connection_id`", but the `gitlab_jobs` column is `connection_id`.
+- **Assumed:**
+  - GitLab runners run one job and exit. This is from D9 and `137-brief.md:246,678` (`mode: "ephemeral"`, `gitlab-runner run-single --wait-timeout`). It makes A2-W4's busy clear by `gitlab_runner_id` safe: the runner can't have taken another job since, which is the case `confirm_jobs` guards against for closed GitHub jobs.
+  - `Job` has no runner id (`gitlab/mod.rs:118-125`), so the poll can't mirror the busy-set half of `associate_runner_with_job` without a contract change. Leaving that to #140 is therefore correct and is not a finding.
+- **Hedged:**
+  - Warn 1 is a warning, not a block:
+    - #148 alone implements the rule once;
+    - the brief records the coordination decision in writing (#136);
+    - rounds 1 and 2 accepted a prose rule;
+    - no GitLab write helper exists on master to extend.
+
+    A block on it now would move the goalposts in a third round.
+  - Warn 3 duplicates the brief gate's NV-5/W-5 on this same brief. It is kept so the stop result carries it if O doesn't act on the gate's copy.
+- **Evidence:**
+  - Read:
+    - the amended brief (all 233 lines) and `git diff f8be658 c48f951`;
+    - the working-tree brief-gate result `148-brief-result-r1.md`, on this brief;
+    - the round-2 `handoff-A.md` and `decisions.md`;
+    - `docs/handoffs/137-brief.md`, by search for `ephemeral`, `IdleExpired` and `wait_timeout`;
+    - issues #139 and #140 via `gh issue view`.
+  - Source:
+    - `migrations/0047_gitlab.sql`, in full;
+    - `crates/gridops-core/src/db.rs:180-300`;
+    - `crates/gridops-core/src/gitlab/mod.rs:110-200`;
+    - `crates/gridops-core/src/autoscaling.rs:40-80,213-300,436-520,595-660`;
+    - `crates/gridops-reconciler/src/main.rs:370-520,1296-1460,2026-2225,3685-3730`.
+  - Commands:
+    - a grep across `crates` for every caller of `associate_runner_with_job`, `record_job_report` and `finish_earlier_attempts`, in `gridops-api/src/webhooks.rs` and `gridops-reconciler/src/main.rs`;
+    - a grep for `access_token_key` and `runtime_secret` in the reconciler.
