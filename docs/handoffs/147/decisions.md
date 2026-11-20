@@ -64,3 +64,25 @@
   - Reconciler: `crates/gridops-reconciler/src/fleet.rs:36-56,446-478`.
   - Manager: `crates/gridops-manager/src/main.rs:320-610,770-810,1485-1600,1700-2000,2645-2730`.
   - Every `HelperResponse::Failed` literal in the workspace: `grep -rn "HelperResponse::Failed" crates/`.
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:49:45-08:00
+- **Decided:** PASS, with 0 block findings and 2 warn findings (see `handoff-A.md`; round 1 is at `5339e22`, round 2 at `2df6790`).
+  - The round-2 block is resolved. `GITLAB_START_READY_TIMEOUT_SECS = 15` and `GITLAB_VERIFY_MAX_TIME_SECS = 10` are pinned with a doc comment and a test, `START_COMMAND_DEADLINE_MILLIS` is unchanged, and a slow verify exits with `GITLAB_EXIT_VERIFY_UNAVAILABLE` as a retryable runtime failure. The verify runs inside the readiness wait, so the budget is create + `feed_secret` + at most 15 s, which is under 25 s. The brief review's round-2 W-1 ("10 + 15 = 25 s") double-counts, and the constants should not be shrunk on that basis.
+  - The four round-2 warnings are resolved: all 15 `HelperResponse::Failed` sites in 8 files are owned; values reach the script as env vars; D147-2 is recorded and the `outcomes.rs` doc-comment edit is spec'd (no wave-1 issue owns that file); `--docker-disable-cache` is set, and orphaned job containers are a known gap for #143.
+  - The brief-review amendments add no drift. The fleet URL check sits at Start next to today's material parse (`docker.rs:117-119`), the token read matches `docker.rs:128`, and NIT-2's ownership list is complete.
+  - (W-1) **[cross-cutting]** Only Start can remove a container that a failed Start leaves: later commands need the journaled `local_identity` (`dispatch.rs:256`, `:269`), and the reconciler cleans up only with `RunnerStarted` evidence (`fleet.rs:505`, `:593`). The brief doesn't say to remove the container on exit 77. A fast 403 also lands inside `feed_secret`, whose `running || exit == 0` check (`docker.rs:523-526`) would turn it into `rm -f` plus `Runtime, retryable`. The fix: read `State.ExitCode` first, then `rm -f`, then report.
+  - (W-2) **[abstraction]** With the GitLab script shared in core, its env names (three places) and the http(s) URL rule (two places) should live in `provisioning.rs`, as an env builder or name constants plus one URL check.
+- **Assumed:**
+  - `docker create` is fast because Prepare has already pulled the image (`docker.rs:89-95`), and `feed_secret`'s Running poll ends within about 1 s on a healthy daemon.
+  - A GitLab 403 to the verify call can arrive within about 1 s on a nearby instance. I didn't measure this; it only shows that the race in W-1 is realistic.
+- **Hedged:**
+  - Both findings are warn, not block. W-1 follows the existing failed-start pattern that F would see in the code, and T can test it from this handoff. W-2 has no dominant pattern to cite, because no runner script is shared today.
+  - The 15 s cap can still overrun a Start that was delivered late, with only the 5 s margin left. GitHub's Start has the same exposure, and I accepted that bound in round 2.
+  - No Reuse map (`survey.md`) was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - Read: the amended brief, `147-brief-result-r1.md`, `147-brief-result-r2.md`, round-2 `handoff-A.md`, `decisions.md`, and `git diff 3404250 52ff7bb -- docs/handoffs/147-brief.md`. Also epic #136's ownership table (`gh issue view 136`).
+  - Host agent: `crates/gridops-host-agent/src/docker.rs` (full), `helper.rs:55-80` and `dispatch.rs:140-300,405-425`.
+  - Reconciler: `crates/gridops-reconciler/src/fleet.rs:30-60,440-640`.
+  - Core: `crates/gridops-core/src/fleet/placement.rs:150-300`, `registry/commands.rs:32`, `fleet/protocol/outcomes.rs:30-50`, `fleet/protocol/agent.rs:120-180`, `provisioning.rs` (the `GITLAB_*` items) and `admission.rs` (the `docker_socket` matching).
+  - Manager: `crates/gridops-manager/src/main.rs:380-490,593-610,2655-2736,2760-2790`.
+  - `grep -rn "HelperResponse::Failed" crates/` and `grep -rn GRIDOPS_REGISTRATION_URL crates/`.
