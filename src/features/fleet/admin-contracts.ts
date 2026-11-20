@@ -66,6 +66,7 @@ export const profileInputSchema = z.strictObject({
 export const profileSchema = profileInputSchema.extend({
   platforms: z.array(platformInputSchema.extend({ id: fleetIdSchema, revision: fleetCounterSchema })).max(12),
   targetIds: z.array(fleetIdSchema).max(10_000),
+  hostIds: z.array(fleetIdSchema).max(64),
 });
 export const profileResultSchema = z.strictObject({ item: profileSchema.nullable() });
 export const savedProfileResultSchema = z.strictObject({ item: profileSchema });

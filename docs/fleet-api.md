@@ -45,7 +45,7 @@ bot-driven automation.
 | PUT | `/api/v1/fleet/hosts/{host_id}/budget` | browser, `fleet:operate` | Set the machine's physical budget (CPU, memory, disk), up to what it reports |
 | POST | `/api/v1/fleet/hosts/{host_id}/backends/{backend_id}/enabled` | browser, `fleet:operate` | Turn a runtime on or off |
 | POST | `/api/v1/fleet/hosts/{host_id}/grants/{target_id}` | browser, `fleet:operate` | Set a target grant |
-| PUT | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:operate` | Save the pool's fleet execution profile |
+| PUT | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:operate` | Save the pool's fleet execution profile, and the machines it is pinned to (see [Pinning a pool to machines](#pinning-a-pool-to-machines)) |
 | PUT | `/api/v1/fleet/pools/{pool_id}/capacity` | browser, `fleet:operate` | Set the pool's runner counts; runners above the new count finish their job and are not replaced |
 | POST | `/api/v1/fleet/api-tokens` | browser (admin, cookie only) | Create an API token |
 | GET | `/api/v1/fleet/api-tokens` | browser (cookie only) | List own API tokens |
@@ -336,6 +336,29 @@ refusals (`401 unauthenticated`, `403 forbidden` with or without
 `details.requiredScope`) use the fleet error envelope; a browser session
 gets the same answers as before. Pool actions (pause, resume, scale, retry,
 reconcile) stay cookie-only.
+
+## Pinning a pool to machines
+
+A pool's fleet execution profile can name the machines the pool may run on.
+`PUT /api/v1/fleet/pools/{pool_id}/profile` takes an optional `hostIds`, a
+list of machine ids (at most 64):
+
+- **left out**: the pool keeps the machines it is pinned to. The web form
+  sends no `hostIds`, so saving the form never clears a pin;
+- **`[]`**: the pin is cleared, and the pool runs on any machine approved for
+  its repositories;
+- **a list**: the pool runs only on these machines, and still only where
+  each is approved for the pool's repositories and has room.
+
+Every platform of the pool gets the same pins. A machine that does not exist,
+or is retired or deleted, is refused with `400`, and so is a list that names a
+machine twice; a refused save changes nothing. `GET` (and the `PUT` response)
+returns the pins as `hostIds`, sorted, empty when the pool is not pinned.
+
+Pinning splits capacity: a pinned pool waits for its machines even when
+others are idle. The usual use is keeping one machine for jobs it suits, for
+example a slow machine that runs only a pool of short jobs, while the pool
+for everything else is pinned to the other machines.
 
 ## Deleting a machine
 

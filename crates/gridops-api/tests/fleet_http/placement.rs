@@ -1622,3 +1622,126 @@ async fn abandoning_an_unstarted_placement_records_why_once() -> Result<()> {
     assert_eq!(machine.running.await??, Stop::Shutdown);
     Ok(())
 }
+
+/// Saves the pool's profile unchanged apart from `host_ids` (left out when
+/// `None`), keeping its platform, and returns the response status and body.
+async fn save_profile_pins(f: &Fixture, host_ids: Option<Value>) -> Result<(StatusCode, Value)> {
+    let platform: String = sqlx::query_scalar(
+        "SELECT id FROM pool_execution_profiles WHERE pool_id='fleet-pool' AND archived_at IS NULL",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    let mut body = json!({
+        "enabled": true, "mode": "ephemeral", "cpuMillis": 1000, "memoryMib": 1024, "diskBytes": 0,
+        "platforms": [{"id": platform, "runtimeKind": "docker", "executionOs": "linux", "architecture": "arm64", "image": "runner:fixture"}],
+    });
+    if let Some(host_ids) = host_ids {
+        body["hostIds"] = host_ids;
+    }
+    let response = f
+        .client
+        .put(f.url("/pools/fleet-pool/profile"))
+        .header(header::COOKIE, &f.cookie)
+        .header(header::ORIGIN, &f.origin)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    Ok((status, response.json().await?))
+}
+
+/// A pool pinned to machines runs only on them. A save that leaves `hostIds`
+/// out (the web form) keeps the pins; an empty list clears them.
+#[tokio::test]
+async fn a_pool_pinned_to_a_machine_runs_only_there_and_keeps_the_pin() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let mut first = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let mut second = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let docker: String = sqlx::query_scalar(
+        "SELECT id FROM pool_execution_profiles
+          WHERE pool_id='fleet-pool' AND runtime_kind='docker' AND enabled=1 AND archived_at IS NULL",
+    )
+    .fetch_one(&f.database)
+    .await?;
+    first.profile_id.clone_from(&docker);
+    second.profile_id.clone_from(&docker);
+    // Both machines have room for several runners, the first more than the
+    // second, so without a pin the first (the roomiest) would be chosen.
+    for (host, cpu) in [(&first.host, 8000), (&second.host, 4000)] {
+        sqlx::query(
+            "UPDATE host_resource_domains SET cpu_millis=?,revision=revision+1
+              WHERE host_id=? AND parent_domain_id IS NULL",
+        )
+        .bind(cpu)
+        .bind(host.to_string())
+        .execute(&f.database)
+        .await?;
+    }
+    let placed_on = |placement: PlacementId| {
+        let database = f.database.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT host_id FROM workload_placements WHERE id=?")
+                .bind(placement.to_string())
+                .fetch_one(&database)
+                .await
+        }
+    };
+
+    let (status, saved) = save_profile_pins(&f, Some(json!([second.host.to_string()]))).await?;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["item"]["hostIds"], json!([second.host.to_string()]));
+    for _ in 0..2 {
+        let placement = admitted_placement(&f, &second, Uuid::new_v4()).await?;
+        assert_eq!(
+            placed_on(placement).await?,
+            second.host.to_string(),
+            "pinned to the second machine"
+        );
+    }
+
+    // The web form does not send hostIds: its save keeps the pin.
+    let (status, saved) = save_profile_pins(&f, None).await?;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["item"]["hostIds"], json!([second.host.to_string()]));
+    let read: Value = f
+        .client
+        .get(f.url("/pools/fleet-pool/profile"))
+        .header(header::COOKIE, &f.cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(read["item"]["hostIds"], json!([second.host.to_string()]));
+
+    // An empty list clears the pin: the roomiest machine is chosen again.
+    let (status, saved) = save_profile_pins(&f, Some(json!([]))).await?;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["item"]["hostIds"], json!([]));
+    let placement = admitted_placement(&f, &first, Uuid::new_v4()).await?;
+    assert_eq!(
+        placed_on(placement).await?,
+        first.host.to_string(),
+        "unpinned, the roomiest machine"
+    );
+    Ok(())
+}
+
+/// A pin names machines that exist, each once.
+#[tokio::test]
+async fn a_pin_to_an_unknown_or_repeated_machine_is_refused() -> Result<()> {
+    let f = Fixture::new().await?;
+    seed_pool(&f).await?;
+    let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    let host = machine.host.to_string();
+    let (status, body) = save_profile_pins(&f, Some(json!([Uuid::new_v4().to_string()]))).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = save_profile_pins(&f, Some(json!([host, host]))).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Nothing was pinned by the refused saves.
+    let pins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM profile_host_selectors")
+        .fetch_one(&f.database)
+        .await?;
+    assert_eq!(pins, 0);
+    Ok(())
+}
