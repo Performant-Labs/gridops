@@ -82,6 +82,8 @@ struct Pool {
     ephemeral: bool,
     paused: bool,
     autoscaling_enabled: bool,
+    /// Its runners skip the catch-all `self-hosted-linux` / `self-hosted-macos` label.
+    exclusive_labels: bool,
     queue_scale_factor: i64,
     idle_timeout_minutes: i64,
     configuration_version: i64,
@@ -771,7 +773,7 @@ async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
         r#"SELECT p.id,p.installation_id,i.account_login,p.scope,p.name,p.state,p.mode,p.provider,p.providers,p.labels,p.docker_image,p.tart_image,p.macos_runtime,p.desired_count,p.min_count,
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
           p.runner_group_id,p.ephemeral,p.paused,
-          p.autoscaling_enabled,p.queue_scale_factor,p.idle_timeout_minutes,p.configuration_version,
+          p.autoscaling_enabled,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.queue_scale_factor,p.idle_timeout_minutes,p.configuration_version,
           p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,
           EXISTS(SELECT 1 FROM runner_pool_waits w WHERE w.pool_id=p.id) AS wait_recorded FROM runner_pools p
           JOIN installations i ON i.id=p.installation_id
@@ -2643,7 +2645,7 @@ async fn start_admitted_runner(
                         &JitRequest {
                             name: runner_name.clone(),
                             runner_group_id: pool.runner_group_id,
-                            labels: effective_runner_labels(&provider, &labels),
+                            labels: effective_runner_labels(&provider, &labels, pool.exclusive_labels),
                             work_folder: "_work".into(),
                         },
                     )
@@ -3814,6 +3816,7 @@ mod tests {
             ephemeral: true,
             paused: false,
             autoscaling_enabled: true,
+            exclusive_labels: false,
             queue_scale_factor: 1,
             idle_timeout_minutes: 5,
             configuration_version,

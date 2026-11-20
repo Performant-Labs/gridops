@@ -344,7 +344,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
         .context("prepare command is missing")?;
     let runner = sqlx::query(
         "SELECT r.id,r.name,r.status,p.installation_id AS pool_installation,inst.account_login,p.scope,
-                p.labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
+                p.labels,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
            FROM runners r JOIN runner_pools p ON p.id=r.pool_id
            JOIN installations inst ON inst.id=p.installation_id
            LEFT JOIN repositories repo ON repo.id=r.target_repository_id
@@ -383,6 +383,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
     };
     let labels: Vec<String> =
         serde_json::from_str(&runner.get::<String, _>("labels")).unwrap_or_default();
+    let exclusive = runner.get::<bool, _>("exclusive_labels");
     let material = if prepare.mode == RunnerMode::Ephemeral {
         let jit = app
             .github
@@ -392,7 +393,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
                 &JitRequest {
                     name: name.clone(),
                     runner_group_id: runner.get("runner_group_id"),
-                    labels: runner_labels(&prepare, &labels),
+                    labels: runner_labels(&prepare, &labels, exclusive),
                     // A Docker runner whose jobs share the host daemon needs a work folder at the same
                     // absolute path on the host, or Docker actions get empty bind mounts.
                     work_folder: gridops_core::fleet::job_work_folder(
@@ -440,7 +441,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
             "token": registration.token,
             "url": runner_registration_url(&account_login, repository_target.as_ref()),
             "name": name,
-            "labels": runner_labels(&prepare, &labels),
+            "labels": runner_labels(&prepare, &labels, exclusive),
             "group": null,
         })
     };
@@ -620,6 +621,7 @@ async fn finish(app: &Reconciler, placement: &Placement) -> Result<bool> {
 fn runner_labels(
     prepare: &gridops_core::fleet::protocol::agent::PrepareEnvironment,
     configured: &[String],
+    exclusive: bool,
 ) -> Vec<String> {
     let os = match prepare.execution_os {
         gridops_core::fleet::ExecutionOs::Linux => "Linux",
@@ -631,14 +633,17 @@ fn runner_labels(
         gridops_core::fleet::Architecture::Arm64 => "ARM64",
     };
     let mut labels = vec!["self-hosted".to_owned(), os.to_owned(), arch.to_owned()];
-    if matches!(
-        prepare.execution_os,
-        gridops_core::fleet::ExecutionOs::Linux
-    ) {
+    if !exclusive
+        && matches!(
+            prepare.execution_os,
+            gridops_core::fleet::ExecutionOs::Linux
+        )
+    {
         labels.push(gridops_core::LINUX_RUNNER_LABEL.to_owned());
     }
     for label in configured {
         if !gridops_core::is_runner_system_label(label)
+            && (!exclusive || !gridops_core::is_catch_all_label(label))
             && !labels
                 .iter()
                 .any(|existing| existing.eq_ignore_ascii_case(label))

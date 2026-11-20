@@ -672,7 +672,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         compatible_runner_provider(
             &["docker".into(), "tart".into()],
             &docker_labels,
-            &["gridops".into()]
+            &["gridops".into()],
+            false
         ),
         Some("docker".into())
     );
@@ -680,7 +681,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         compatible_runner_provider(
             &["docker".into(), "tart".into()],
             &tart_labels,
-            &["gridops".into()]
+            &["gridops".into()],
+            false
         ),
         Some("tart".into())
     );
@@ -688,7 +690,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         compatible_runner_provider(
             &["docker".into()],
             &["runs-on:macos".into()],
-            &["gridops".into()]
+            &["gridops".into()],
+            false
         ),
         None
     );

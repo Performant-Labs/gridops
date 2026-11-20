@@ -308,6 +308,7 @@ async fn record_profile_saved(
             "mode": body.mode,
             "platformCount": body.platforms.len(),
             "hostIds": body.host_ids,
+            "exclusiveLabels": body.exclusive_labels,
         })
         .to_string(),
     )
