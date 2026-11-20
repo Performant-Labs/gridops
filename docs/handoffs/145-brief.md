@@ -2,7 +2,7 @@
 
 **Issue:** Performant-Labs/gridops#145 (part of epic #136, wave 0)
 **Branch:** claude/ui-145-platform-neutral-cf5832 (this worktree)
-**Review-rigor:** second-opinion — foundational, component-creating: the platform registry is a contract that #141 (GitLab) and later platforms consume.
+**Review-rigor:** in-session — operator decision 2026-11-20: the outside brief reviewer did not converge over 5 runs (repeated structural objections to test-first criteria); in-session A/T/U/S review, the up-front architecture review and the anti-duplication gate still run.
 **Forward-compat:** required — see the "Forward-compat" section below; record the table in `docs/handoffs/145/survey.md`.
 **Design (Phase 3):** UI surface — wireframe the Connections page, the Targets row and the Platform options section.
 
