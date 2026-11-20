@@ -176,16 +176,53 @@ The Phase-3 review (`docs/handoffs/137/handoff-A.md`) blocked the plan on three 
 Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so a GitLab `CiTarget` can be stored, granted, admitted and loaded into `PrepareEnvironment.target`.
 
 - New columns, all nullable: `gitlab_connection_id TEXT REFERENCES gitlab_connections(id)`, `gitlab_project_id INTEGER`, `gitlab_group_id INTEGER`. They come after `repository_uuid`, in that order.
+- The `gitlab_connection_id` FK has no `ON DELETE` clause, so its action is SQLite's default, NO ACTION. That is the same as the Bitbucket column beside it, which 0022 declares as `bitbucket_connection_id TEXT REFERENCES bitbucket_connections(id)`. The other two actions are impossible here (brief review R1, B-3):
+  - SET NULL would break the shape CHECK, which requires the column to be non-NULL for both GitLab kinds.
+  - CASCADE would delete the target row, but every inbound FK of `fleet_ci_targets` is plain NO ACTION, so that delete is refused while a grant, intent, placement, event or observation references the target.
+  - **Consequence:** while a `fleet_ci_targets` row references a GitLab connection, a `DELETE FROM gitlab_connections` for that connection fails with an FK error. This holds whether or not a pool targets it. Bitbucket behaves the same way today: `delete_bitbucket_connection` in `crates/gridops-api/src/resources.rs` checks pool memberships and live runners before deleting, but it doesn't check fleet targets.
+  - #138's DELETE handler must check for a referencing `fleet_ci_targets` row (`WHERE gitlab_connection_id=?`) before it deletes, and refuse with the same 409 it returns for pools. The spec's 409 for that operation covers both cases (see W-7).
+  - This contract adds no way to delete a fleet target.
 - `kind` CHECK becomes `IN ('github_repository','github_organization','bitbucket_workspace','bitbucket_repository','gitlab_project','gitlab_group')`.
 - The per-kind shape CHECK keeps its four arms. Each existing arm also requires `gitlab_connection_id IS NULL AND gitlab_project_id IS NULL AND gitlab_group_id IS NULL`. Two arms are added in the same style:
   - `kind='gitlab_project'`: `gitlab_connection_id` NOT NULL, `gitlab_project_id` NOT NULL and > 0, `gitlab_group_id` NULL, and every GitHub and Bitbucket column NULL.
   - `kind='gitlab_group'`: `gitlab_connection_id` NOT NULL, `gitlab_group_id` NOT NULL and > 0, `gitlab_project_id` NULL, and every GitHub and Bitbucket column NULL.
-- The table stays `STRICT`, `canonical_key` stays `NOT NULL UNIQUE`, and the trigger `fleet_ci_targets_immutable_identity` (BEFORE UPDATE, RAISE ABORT 'CI target identity is immutable') is recreated word for word.
-- These inbound foreign keys must keep every row and reference unchanged: `host_target_grants`, `host_session_target_grants`, `profile_ci_targets`, `workload_intents`, `workload_placements`, `fleet_events` (nullable `target_id`) and `external_runner_observations`. All of them are plain `REFERENCES fleet_ci_targets(id)` from 0022. No migration after 0022 touches the table.
+  - "Every GitHub and Bitbucket column" means exactly the six columns 0022 defines besides `id`, `kind` and `canonical_key`. The GitHub ones are `installation_id`, `repository_id` and `organization_id`; the Bitbucket ones are `bitbucket_connection_id`, `workspace_uuid` and `repository_uuid`. The existing four arms, verbatim from `migrations/0022_fleet_foundation.sql`, each of which gains the three GitLab `IS NULL` terms:
+
+        (kind = 'github_repository' AND installation_id IS NOT NULL AND installation_id > 0 AND repository_id IS NOT NULL AND repository_id > 0 AND organization_id IS NULL AND bitbucket_connection_id IS NULL AND workspace_uuid IS NULL AND repository_uuid IS NULL)
+        OR (kind = 'github_organization' AND installation_id IS NOT NULL AND installation_id > 0 AND organization_id IS NOT NULL AND organization_id > 0 AND repository_id IS NULL AND bitbucket_connection_id IS NULL AND workspace_uuid IS NULL AND repository_uuid IS NULL)
+        OR (kind = 'bitbucket_workspace' AND bitbucket_connection_id IS NOT NULL AND workspace_uuid IS NOT NULL AND repository_uuid IS NULL AND installation_id IS NULL AND repository_id IS NULL AND organization_id IS NULL)
+        OR (kind = 'bitbucket_repository' AND bitbucket_connection_id IS NOT NULL AND workspace_uuid IS NOT NULL AND repository_uuid IS NOT NULL AND installation_id IS NULL AND repository_id IS NULL AND organization_id IS NULL)
+- The table stays `STRICT`, `canonical_key` stays `NOT NULL UNIQUE`, and the trigger `fleet_ci_targets_immutable_identity` (BEFORE UPDATE, RAISE ABORT 'CI target identity is immutable') is recreated word for word. Here it is verbatim from `migrations/0022_fleet_foundation.sql`:
+
+      CREATE TRIGGER fleet_ci_targets_immutable_identity
+      BEFORE UPDATE ON fleet_ci_targets
+      BEGIN SELECT RAISE(ABORT,'CI target identity is immutable'); END;
+
+- These inbound foreign keys must keep every row and reference unchanged: `host_target_grants`, `host_session_target_grants`, `profile_ci_targets`, `workload_intents`, `workload_placements`, `fleet_events` (nullable `target_id`) and `external_runner_observations`. All of them are plain `REFERENCES fleet_ci_targets(id)` from 0022. No migration after 0022 touches the table (`grep fleet_ci_targets migrations/*.sql` matches only 0022). The seven clauses, at lines 101, 142, 175, 219, 246, 395 and 407 of 0022, are `target_id TEXT NOT NULL REFERENCES fleet_ci_targets(id),`, except that the `fleet_events` one at line 395 is `target_id TEXT REFERENCES fleet_ci_targets(id),`.
 - Canonical keys, persisted UNIQUE and immutable, and mirroring Bitbucket's format: `gitlab:project:{connection_id}:{project_id}` and `gitlab:group:{connection_id}:{group_id}`, with the decimal id. `CiTarget::canonical_key` returns these. It is infallible, so the "return an error" rule doesn't apply.
 - `TargetKind` (`fleet/capabilities.rs`) gains `GitlabProject` and `GitlabGroup` (wire `gitlab_project`, `gitlab_group`) and a `const fn is_gitlab(self) -> bool`. `From<&CiTarget> for TargetKind` maps the two new variants to them. This is what the host agents of #147 and #142 advertise in `SupportedRunner`.
+  - Wire format (brief review R1, B-6). `TargetKind` is a plain unit-variant enum, and its serde attributes stay exactly as they are today. It is not tagged. Each variant serializes as a bare snake_case string, so the two new variants are `"gitlab_project"` and `"gitlab_group"`, the same strings as the `CiTarget` `platform` tag values and the `fleet_ci_targets.kind` values. The definition today, verbatim:
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum TargetKind {
+            GithubRepository,
+            GithubOrganization,
+            BitbucketWorkspace,
+            BitbucketRepository,
+        }
+
+  - `SupportedRunner` (`#[serde(deny_unknown_fields)] struct { target_kind: TargetKind, mode: RunnerMode }`) is unchanged, so a GitLab advertisement is `{"target_kind":"gitlab_project","mode":...}`.
+  - `TargetKind::is_bitbucket` is already explicit (`matches!(self, Self::BitbucketWorkspace | Self::BitbucketRepository)`), so it needs no change.
+  - A serde test pins both new wire strings.
 - Storage glue, so the round trip works and is tested in this issue:
   - `fleet::targets::ensure_target` accepts the two GitLab variants and inserts the matching row. It still refuses Bitbucket with the existing error.
+    - Signature (brief review R1, B-9), unchanged from today: `pub async fn ensure_target(pool: &SqlitePool, target: &CiTarget) -> Result<String, FleetError>`. The `Ok` value is the `fleet_ci_targets.id` of the row for `target.canonical_key()`. That id is a UUID v4 string made with `Uuid::new_v4().to_string()` on first insert.
+    - It is idempotent. The insert is `... ON CONFLICT(canonical_key) DO NOTHING`, followed by `SELECT id FROM fleet_ci_targets WHERE canonical_key=?`, so a second call for the same target returns the first id.
+    - For a GitLab variant it binds `kind` (`gitlab_project` or `gitlab_group`), `canonical_key`, `gitlab_connection_id` (`connection_id.as_str()`) and either `gitlab_project_id` or `gitlab_group_id`. All six GitHub and Bitbucket columns stay NULL.
+    - A Bitbucket variant (`BitbucketWorkspace` or `BitbucketRepository`) still returns exactly today's error, `Err(FleetError::InvalidRequest("only GitHub targets are synced"))`, and writes nothing. Its `&'static str` is kept word for word.
+    - An id that doesn't fit `i64` returns `FleetError::InvalidRequest` with a field name (`"project"` or `"group"`), the way today's code uses `"installation"`, `"repository"` and `"organization"`. `ExternalId` caps ids at `i64::MAX`, so this can't happen in practice.
+    - `FleetError` is the enum in `crates/gridops-core/src/fleet/service.rs`, and this contract doesn't change it.
   - `fleet::admission::target_from_db` parses `gitlab_project` and `gitlab_group` rows back into the `CiTarget` variants.
   - Syncing a pool's GitLab connections into fleet targets (the GitLab counterpart of the GitHub pool-target sync at the top of `fleet/targets.rs`) is behaviour, and it belongs to **#139**. **[deviation: #139 gains this ownership]**
 
@@ -200,16 +237,27 @@ The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet
     /// (#147 Linux Docker, #142 Tart/macOS). `token` goes to the runner's stdin;
     /// `url` is not secret and may be passed as an argument.
     #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(tag = "kind", rename = "gitlab_runner", deny_unknown_fields)]
-    pub struct GitlabRunnerMaterial {
-        pub token: String, // the `glrt-` runner authentication token
-        pub url: String,   // the connection's base_url, e.g. https://gitlab.com
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum GitlabRunnerMaterial {
+        GitlabRunner {
+            token: String, // the `glrt-` runner authentication token
+            url: String,   // the connection's base_url, e.g. https://gitlab.com
+        },
     }
 
 - The JSON is exactly `{"kind":"gitlab_runner","token":"glrt-…","url":"https://gitlab.example.com"}`. There are no other fields.
+- Why it is an enum with one variant and not a struct (brief review R1, B-4): `#[serde(tag = "kind", rename = "gitlab_runner", deny_unknown_fields)]` on a struct serializes the literal above, but it **can't deserialize its own output**. With `deny_unknown_fields`, the struct's deserializer rejects `kind` as an unknown field. Without `deny_unknown_fields`, it ignores `kind`, so a payload with another `kind` would be accepted. The internally tagged single-variant enum above was checked against the workspace's locked `serde` 1.0.229 and `serde_json` 1.0.151 in a scratch crate:
+  - It serializes as the literal above.
+  - It accepts the literal, with the fields in any order.
+  - It rejects a payload with no `kind` ("missing field `kind`").
+  - It rejects another `kind` ("unknown variant `github_registration`, expected `gitlab_runner`").
+  - It rejects an extra field ("unknown field `extra`").
+  - Consumers read the fields with `let GitlabRunnerMaterial::GitlabRunner { token, url } = material;`. That pattern is irrefutable while the enum has one variant.
 - `Debug` is implemented by hand and prints `token: "[redacted]"`.
 - Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected; a payload with another `kind` is rejected; and `format!("{:?}")` doesn't contain the token.
 - A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
+  - The fixture is the existing `fixture()` in `crates/gridops-core/tests/fleet_agent_commands.rs`, an envelope whose operation is `prepare_environment` with target `{"platform":"github_repository","installation_id":1,"repository_id":10}` and `"configuration":{}`. The new test goes in the same file.
+  - The expected bytes are a string literal in the test: the output of `serde_json::to_string(&command(fixture())?)`, captured on `master` before any change in this issue. The literal is checked in as captured and is not edited by hand.
 
 ### A-3 (block): `GitLabApi` takes credentials on every call, and `Scope` is defined
 
@@ -281,6 +329,11 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 
 - It is `Clone` (shared `Arc<Mutex<_>>` state), `Default`, and implements `GitLabApi`.
 - Its state is keyed by `base_url`, so two connections on different instances stay apart.
+  - What that means precisely (brief review R1, B-7 and W-8). An "instance" is one GitLab server, identified by `GitLabCredentials.base_url` and compared by `Url` equality. The fake keys **all** of its state by `base_url` alone: scopes, jobs, group projects, runners, the runner-id counter and the queued failures. `access_token` isn't part of the key.
+  - Two connections with different base URLs never see each other's state.
+  - Two connections on the **same** base URL with different access tokens share one instance's state, as two tokens on one real GitLab server do. A runner one creates is listed for, and can be deleted by, the other.
+  - The fake never inspects the token. It doesn't model token-level authorization. To simulate a refused token, a test queues `fail_next(base_url, method, GitLabError::Unauthorized)` (or `MissingScope`/`MissingRole`), and that failure applies to the next call on that base URL whatever the token.
+  - `FakeCall` holds no credential identity (see Recording below), so a test can't use `calls()` to prove which token a call used. #138, #139, #140 and #148 tests that need two connections isolated must give them different base URLs.
 - Setup methods:
   - `with_scope(base_url: &Url, scope: Scope)`, used by `resolve_scope` (looked up by kind and path) and by `verify_access`.
   - `with_job(base_url: &Url, job: Job)`, used by `job` and by `pending_jobs` (status `Pending`, same project).
@@ -361,7 +414,14 @@ The tables:
     CREATE INDEX `gitlab_jobs_open_created_idx` ON `gitlab_jobs` (`created_at`,`id`)
       WHERE `status` NOT IN ('success','failed','canceled','skipped');
 
+- `gitlab_jobs.id` (brief review R1, B-1) is a surrogate key.
+  - It is a UUID v4 string, `uuid::Uuid::new_v4().to_string()`, generated by whoever first records the job (#140, and #148 if it records a polled job first). This is the same way `bitbucket_connections.id` (`crates/gridops-api/src/resources.rs`) and `fleet_ci_targets.id` (`ensure_target`) are made.
+  - It is not the GitLab job id. The GitLab job id is `job_id`, and `Job.id` from `GitLabApi` maps to `job_id`. Likewise `Job.project_id` maps to `project_id` and `Job.pipeline_id` to `pipeline_id`.
+  - A job's identity is `(connection_id, job_id)`, which the unique index enforces. A writer that sees a job already recorded updates that row, for example with `INSERT ... ON CONFLICT(connection_id, job_id) DO UPDATE SET ...` that doesn't set `id`. So `id` never changes once written.
+  - No table references `gitlab_jobs.id` in this contract.
+- `gitlab_jobs.tag_list` encoding (brief review R1, W-4): `serde_json::to_string(&job.tag_list)` of the `Vec<String>`. That is compact JSON, an empty list is `[]` (the column default), and the tags stay in the order the GitLab API returned them. It is read back with `serde_json::from_str::<Vec<String>>`. #140 and #148 both use this encoding.
 - The open-jobs index follows 0043's `workflow_jobs_open_created_idx`, not 0045. `gitlab_jobs` has no `conclusion` column. A job is concluded exactly when `JobStatus::is_terminal()`, and #140 and #148 both use that one rule.
+  - It follows from that rule that `Created`, `WaitingForResource`, `Preparing`, `Pending`, `Running`, `Manual`, `Scheduled` and `Unknown` jobs are open and stay in the open-jobs index (NIT-4). Whether #148 acts on an open `Manual` or `Scheduled` job is #148's behaviour, not part of this contract.
 - `runners` gets `gitlab_connection_id text REFERENCES gitlab_connections(id) ON UPDATE no action ON DELETE set null` and `gitlab_runner_id integer`, appended after `runtime`, and **two** new indexes:
   - `runners_gitlab_connection_idx (pool_id, gitlab_connection_id, status)`, the pool lookup, after 0019's.
   - `runners_gitlab_runner_id_idx (gitlab_runner_id)`, #140's busy lookup by GitLab runner id, after `runners_github_id_idx`.
@@ -381,6 +441,7 @@ The tables:
     PRAGMA foreign_keys=ON;
 
 - Any dangling reference makes the guard's CHECK fail, so the migration errors before `COMMIT`.
+- The guard works while `foreign_keys` is OFF (brief review R1, W-7). `PRAGMA foreign_key_check` is an explicit check, not enforcement, and it reports violations whatever the `foreign_keys` setting is. This was checked with SQLite 3.54.0. With `foreign_keys` OFF, one dangling child row gave `count(*) FROM pragma_foreign_key_check` = 1, and the guard's `INSERT` failed with `CHECK constraint failed: v=0`. `PRAGMA foreign_keys` itself is a no-op inside a transaction, which is why it sits outside `BEGIN`/`COMMIT`.
 - `foreign_keys` is back on for the pooled connection once the migration finishes.
 - A test asserts `PRAGMA foreign_keys` is 1 on a connection taken from the pool after migrating.
 
@@ -409,6 +470,7 @@ New paths in `docs/openapi/gridops-v1.json`. Every operation description starts 
   - `POST /api/v1/platform-connections/gitlab`: body `CreateGitlabConnectionRequest { name, baseUrl (default "https://gitlab.com"), scopeKind ("project"|"group"), scopePath, accessToken }`. Responses: 201 `GitlabConnectionCreated { connection: GitlabConnection, webhookUrl, webhookSecret }`, the only response that carries the secret; 409 on a duplicate `(baseUrl, scope)`.
   - `PATCH /api/v1/platform-connections/gitlab/{connectionId}`: body `UpdateGitlabConnectionRequest { name?, accessToken? }`, response 200 `GitlabConnection`. PATCH is kept as #138 says, because it is a partial update. Bitbucket's PUT is a full replace.
   - `DELETE /api/v1/platform-connections/gitlab/{connectionId}`: 204, or 409 while a pool targets it.
+    - The 409 also covers a GitLab `fleet_ci_targets` row that still references the connection, whether or not any pool does. That FK is NO ACTION (see A-1), so the delete couldn't succeed anyway. The 409 description says "while a pool or a fleet target references it".
   - `POST /api/v1/platform-connections/gitlab/{connectionId}/verify`: 204, or an error that names the missing scope or role.
   - `POST /api/v1/platform-connections/gitlab/{connectionId}/webhook-secret/rotate`: 200 `GitlabWebhookSecret { webhookUrl, webhookSecret }`.
   - `GitlabConnection` is `{ id, provider: "gitlab", name, baseUrl, scopeKind, scopeId (integer), scopePath, createdAt, updatedAt (RFC 3339 strings, as Bitbucket's iso()), canManage }`. It has no secret, no token and no webhook URL.
@@ -438,6 +500,53 @@ New paths in `docs/openapi/gridops-v1.json`. Every operation description starts 
 | D6 | Schema list without `fleet_ci_targets` | 0046 also rebuilds `fleet_ci_targets` with the `gitlab_project` and `gitlab_group` kinds, adds `TargetKind::Gitlab*`, and adds `ensure_target`/`target_from_db` arms. Pool-target sync for GitLab is #139's. | #139, #147, #142 |
 | D7 | "an index" on the new `runners` columns | Two indexes: `runners_gitlab_connection_idx` and `runners_gitlab_runner_id_idx` | #139, #140 |
 | D8 | Unconcluded-jobs index "like 0045's" | An open-jobs partial index like 0043's, `WHERE status NOT IN ('success','failed','canceled','skipped')` | #140, #148 |
+
+## Amendments (brief review, round 1)
+
+The outside brief review blocked on B-1, B-3, B-4, B-6, B-7 and B-9. Each one is now resolved in place above, marked "brief review R1":
+
+| Finding | Where it is resolved |
+|---|---|
+| B-1 | W-5/W-6, under the `gitlab_jobs` table: what `id` is and how it is made |
+| B-3 | A-1, under the new columns: the `gitlab_connection_id` FK action and its consequence; and W-7, the DELETE 409 |
+| B-4 | A-2: `GitlabRunnerMaterial` becomes a single-variant internally tagged enum, with the same JSON |
+| B-6 | A-1, under `TargetKind`: the serde attributes and wire strings |
+| B-7 | A-3, under `FakeGitLab`: keyed by `base_url` alone, and what that means for tokens |
+| B-9 | A-1, under the storage glue: the signature of `ensure_target`, its return value and its refusal error |
+
+These changes add detail and don't loosen anything. No acceptance criterion, scope item or earlier decision is changed.
+
+### Evidence for the review's needs-verification items
+
+All of this was verified in this worktree.
+
+- **NV-1.** `BitbucketConnectionId` in `crates/gridops-core/src/fleet/domain.rs`:
+
+      #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+      #[serde(try_from = "String", into = "String")]
+      pub struct BitbucketConnectionId(UpstreamText);
+
+  It has `new(value: impl Into<String>) -> Result<Self, FleetTextError>`, `as_str(&self) -> &str`, `impl TryFrom<String>` (calls `new`) and `impl From<BitbucketConnectionId> for String`.
+- **NV-2.** `CiPlatform` is `#[serde(rename_all = "snake_case")] pub enum CiPlatform { Github, Bitbucket }` in `domain.rs`. Searching `crates/` for `CiPlatform` finds only that definition and the re-export in `crates/gridops-core/src/fleet/mod.rs`, so it has no `match` site.
+- **NV-3.**
+  - `redocly.yaml` is, apart from its two comment lines, exactly `extends: [minimal]`.
+  - `package.json` has `"validate:openapi": "redocly lint docs/openapi/gridops-v1.json"` and `"@redocly/cli": "2.72.1"`.
+- **NV-4.** `crates/gridops-core/tests/fixtures/fleet_ready.sql` contains no `runners` text at all, so it has no `runners` rows.
+- **NV-5.** The header comment of `migrations/0020_native_macos_runtime.sql` says, in part, that widening the `provider` CHECK "would require rebuilding `runners`", and that because foreign keys are enabled and `runner_events.runner_id` cascades on delete, a `DROP TABLE` would take the runner event history with it.
+- **NV-6 and NV-7.** Quoted verbatim in A-1 above.
+- **NV-8.**
+  - `target_from_db` in `crates/gridops-core/src/fleet/admission.rs` matches `kind` with the arms `"github_repository"`, `"github_organization"` and `"bitbucket_workspace" | "bitbucket_repository"`.
+  - It ends with `_ => Err(FleetError::Invariant("invalid target kind")),`.
+- **NV-9.**
+  - `domain.rs` defines `pub const fn is_bitbucket(&self) -> bool { !self.is_github() }`.
+  - Its callers are the two `prepare.target.is_bitbucket()` conditions in the `PrepareEnvironment` check in `crates/gridops-core/src/fleet/protocol/agent.rs`: `mode != RunnerMode::Persistent`, and `execution_os == ExecutionOs::Windows && architecture == Architecture::Arm64`.
+  - `capabilities.rs` calls `TargetKind::is_bitbucket` (already explicit) in two places.
+- **NV-12.** Every `/api/v1/...` path in `docs/openapi/gridops-v1.json` starts with `/api/v1/fleet`, `/api/v1/installations`, `/api/v1/operations`, `/api/v1/overview` or `/api/v1/runner-pools`. None starts with `/api/v1/platform-connections` or `/api/v1/webhooks`.
+- **NV-13.** The `SECRET_PREFIXES` list is quoted in "Redaction" above. In `crates/gridops-agent/src/session.rs`:
+  - `const SECRET_MIN_LEN: usize = 16;`
+  - `fn redact` treats a char as part of a token when `c.is_ascii_alphanumeric() || c == '_' || c == '-'`. It replaces a run that starts with a listed prefix and has at least `SECRET_MIN_LEN` characters after it with the prefix followed by `[redacted]`.
+  - The fake's token `glrt-fake-runner-token-0001` has 22 characters after `glrt-`, so it is masked too.
+- **NV-14.** Settled by B-4 above, which tested it against the locked serde versions.
 
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
@@ -482,3 +591,9 @@ New paths in `docs/openapi/gridops-v1.json`. Every operation description starts 
 - crates/gridops-api/src/main.rs and resources.rs (Bitbucket routes and JSON)
 - crates/gridops-api/src/error.rs (`ApiError` body)
 - issues #146 #138 #139 #147 #140 #148 #142 #141 (names they depend on)
+- docs/handoffs/137/decisions.md (brief review round 1)
+- crates/gridops-core/src/fleet/service.rs (`FleetError`)
+- crates/gridops-core/tests/fleet_agent_commands.rs (`fixture()`, the GitHub `PrepareEnvironment`)
+- crates/gridops-api/src/resources.rs (`delete_bitbucket_connection`, and the id generation in Bitbucket connection create)
+- Cargo.lock (`serde` 1.0.229, `serde_json` 1.0.151), used to build a scratch crate that checked the `GitlabRunnerMaterial` serde shape
+- the local `sqlite3` 3.54.0, used to check `pragma_foreign_key_check` with `foreign_keys` OFF and `PRAGMA foreign_keys` inside a transaction
