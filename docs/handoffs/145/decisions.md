@@ -194,3 +194,9 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Assumed:** F's reading of "can manage at least one platform" as "at least one addable platform" is acceptable, since with the production registry the two readings match.
 - **Hedged:** Client-visual behaviour (layout, new-tab link, SPA navigation) is not covered by jsdom; U's walkthrough owns it.
 - **Evidence:** full suite 461/461, typecheck, lint and build clean; four mutations (empty state, connectLink in chooser, toast, per-platform empty text) each failed the matching tests and were reverted; `docs/handoffs/145/handoff-T-green.md`, section "Round 4".
+
+## A (Architecture Reviewer, Phase 7 anti-duplication gate, round 4) - 2026-11-20T15:30:00-08:00
+- **Decided:** PASS. Round 4 (932879f..14fc5b7) only modifies existing objects: `ConnectionsSection` and its dialog, the descriptor contract, the GitHub and Bitbucket descriptors, the registry fallback and `runner-row.tsx`. No new files, no parallel add-connection path, no platform names in shared components.
+- **Assumed:** The brief's round-4 decisions justify the `connectLink` contract field and the GitHub App section's separate Install link remaining as a different surface.
+- **Hedged:** Two warn findings (duplicate install entry point; GitHub-shaped `scope === "repository"` branches in pool pages) are follow-ups, not blocks.
+- **Evidence:** `git diff --name-status 932879f HEAD`, platform-name grep on shared components, `externalLinks` grep, empty diff on `crates`/`migrations`/`docs/openapi`; `docs/handoffs/145/handoff-A-dup.md`.
