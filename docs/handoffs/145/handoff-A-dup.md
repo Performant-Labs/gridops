@@ -1,28 +1,28 @@
-# Handoff-A-dup: Phase 7 - One Connections page and one Targets picker for every CI platform (#145)  (anti-duplication gate, round 4)
+# Handoff-A-dup: Phase 7 - One Connections page and one Targets picker for every CI platform (#145)  (anti-duplication gate, round 5)
 
 **Date:** 2026-11-20
 **Branch:** claude/ui-145-platform-neutral-cf5832
-**Diff base:** 932879f (the cycle-1 gate's head; cycle 1 passed at c2e91ac)   **Diff head:** 14fc5b7
-**Reuse map:** docs/handoffs/145-brief.md ("Reuse map" + round-3 and round-4 blocks), docs/handoffs/145/survey.md
+**Diff base:** 14fc5b7 (round-4 gate head)   **Diff head:** 1124233
+**Reuse map:** docs/handoffs/145-brief.md ("Reuse map" + round blocks), docs/handoffs/145/survey.md
 **Verdict:** PASS
 
 ## Summary
-Round 4 extended the existing objects in place and built no parallel path. The nine non-handoff files changed are all modifications (no added files): `ConnectionsSection` and its Add connection dialog, the descriptor contract in `types.ts`, the GitHub and Bitbucket descriptors, the registry fallback, and `runner-row.tsx`. The earlier cycle-1 PASS still holds; nothing from it regressed.
+Round 5 (F's fix for S's 360 px REWORK) edited two existing objects in place, `SettingsSection` and `ConnectionRow`, with layout classes only. No file, component, prop, export or dependency was added. No parallel path. The round-4 PASS and the two warns stand.
 
 ## Findings
 | # | Severity | File:line | Finding | Suggested fix |
 |---|---|---|---|---|
-| 1 | warn | `src/features/platform-connections/github-app-section.tsx:50` and `src/features/platform-connections/github.tsx:195` | The GitHub App section still renders its own "Install" link from `githubApp.installUrl`, while the GitHub descriptor's new `connectLink` offers the same URL through Add connection. Two entry points to one destination, but they are different surfaces (App management vs Add connection chooser) and the brief's round-4 decisions require the chooser link. Not a parallel implementation: both read the same page data. | Optional follow-up: leave as is, or have the App section reuse the descriptor's `connectLink` if the two ever drift. |
-| 2 | warn | `src/routes/_app/runner-pools.index.tsx:81`, `src/routes/_app/runner-pools.$poolId.index.tsx:130` | Carried over from cycle 1: pool list and detail still branch on `pool.scope === "repository"`. Out of scope of the brief; #141 will revisit. | Track as follow-up: render through `readOnlySummary`. |
+| 1 | warn | `src/components/settings-ui.tsx:28` | A shared component (used by about 14 settings and pool surfaces) was edited by a story that does not own it. This is spec'd (S's REWORK names `SettingsSection` as the place to fix) and F grepped the users. The header wraps only when actions plus 12rem do not fit, and F reports pixel-identical output at 768 and 1280 and for the fleet-profile Save at 360. Not drift. Of the `actions={...}` users, only `fleet-profile-section`, `connections-section` and `github-app-section` use `SettingsSection`; the rest use other components. | None. Track the other `SettingsSection` pages' 360 appearance in U's re-walk. |
+| 2 | warn | `src/features/platform-connections/github-app-section.tsx:50` | Carried over: App section keeps its own Install link beside the descriptor's `connectLink`. Same URL, different surfaces. | Follow-up only. |
+| 3 | warn | `src/routes/_app/runner-pools.index.tsx:81`, `src/routes/_app/runner-pools.$poolId.index.tsx:130` | Carried over: pool list and detail still branch on `pool.scope === "repository"`. | Track for #141. |
 
 Checked and clean:
-- **No new files, no new module.** `git diff --name-status 932879f HEAD` outside `docs/handoffs` is nine `M` lines: five platform-connections files, `runner-row.tsx` and three test files.
-- **One dialog, extended.** The Add connection dialog was lifted into `ConnectionsSection` and now steps platform chooser, then the `create` form or the `connectLink` step. The old per-platform add flow is gone, not kept beside it. The empty state reuses `EmptyState` from `~/components/page`, the unavailable text reuses `Callout`, the link button reuses `buttonVariants`, and the reveal reuses `SecretRevealDialog`.
-- **Contract extended, not forked.** `types.ts` gains `chooserDescription`, optional `connectLink` and a nullable `emptyText`, and loses `externalLinks`. No remaining reference to `externalLinks` in `src`, `tests` or the survey.
-- **Registry is still the single source.** `runner-row.tsx` only adds `title={link.label}` from `getPlatform().runnerLink`. No `platform ===` comparison reintroduced.
-- **Shared components stay platform-neutral.** `grep -niE "github|bitbucket"` on `targets-row.tsx`, `platform-options-section.tsx` and `connections-section.tsx` returns nothing. Dependency direction unchanged: `connections-section.tsx` imports `registry` and `types` from the platform side only.
-- **Cross-cutting.** `postCreate` failures go through the existing `toast` from `sonner`, matching `save` and `useAction` neighbours; `submit` catches only `create` errors. Query invalidation reuses `connectionsQueryKey`.
-- **Coexistence.** `git diff --stat master...HEAD -- crates migrations docs/openapi` is empty. No API, DB or OpenAPI change.
+- **No new files.** `git diff --name-status 14fc5b7 HEAD` outside `docs/handoffs` is two `M` lines: `src/components/settings-ui.tsx` and `src/features/platform-connections/connections-section.tsx`.
+- **Fix made in the shared object, not beside it.** F rejected a local header in `github-app-section.tsx` as a duplicate of `SettingsSection`'s markup; the diff confirms the header was fixed in `SettingsSection` itself.
+- **`ConnectionRow` extended in place.** The aside and Edit/Remove actions were regrouped in one trailing wrapper inside the same row; the `showActions` condition is the same as before; the descriptor contract (`types.ts`) is untouched. No `platform ===` branch and no platform name was added to shared code.
+- **Layering and dependency direction unchanged.** No import added or changed in either file.
+- **Cross-cutting.** Interactions (`run`, confirm, success text, `reload`) are unchanged.
+- **Coexistence.** `git diff --stat master...HEAD -- crates migrations docs/openapi` is empty.
 
 ## Notes for F
 None; no rework required.

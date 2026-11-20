@@ -220,3 +220,6 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Assumed:** F's pixel-identical 768/1280 comparison for the shared `SettingsSection` change holds; T did not re-render.
 - **Hedged:** Verified by mutation (`showActions = false`) that the restructured trailing wrapper is still pinned by 3 tests, then reverted.
 - **Evidence:** vitest 461/461, lint clean, `tsc` exit 0, build OK at `d21be14`; `git diff dd934c3 HEAD -- tests` empty.
+
+## A-dup round 5 (2026-11-20)
+- Reviewed 14fc5b7..1124233: two modified files (`settings-ui.tsx`, `connections-section.tsx`), layout classes only. The fix was made in the shared `SettingsSection` and `ConnectionRow`, not in a local copy. No parallel path. Verdict PASS; prior warns carried over; `SettingsSection` edit is spec'd by S's REWORK.
