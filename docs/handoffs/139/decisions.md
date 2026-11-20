@@ -40,3 +40,33 @@
 - **Evidence:**
   - Read: the amended brief (`git diff`), `139-brief-result-r1.md`, #136's comments (D1–D16 and D17), and issues #138, #140, #146, #147 and #148.
   - Source: `crates/gridops-reconciler/src/{main.rs (Reconciler, Runner, ManagerView, reconcile, reconcile_pool, provision, provision_on_host, start_admitted_runner, delete_runner, retry_github_runner_cleanup, maybe_sync_github, cleanup_retention, record_provision_failure, pool_state), fleet.rs (whole file), builtin_host.rs (tests), Cargo.toml}`, `crates/gridops-core/src/gitlab/{mod.rs,fake.rs}`, `crates/gridops-core/src/fleet/{domain.rs (ExternalId), targets.rs (pool_docker_image, save_pool_fleet, link_pool_target, pool_targets, delete_pool), service.rs (ensure_target_identity_for_pool), retry.rs (retry_failed_start), start_health.rs, placement.rs (reported_gone), protocol/agent.rs, protocol/outcomes.rs}`, `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`, `failure_cleanup`) and `migrations/0047_gitlab.sql`.
+
+## A (Phase 3, up-front plan review, round 3 on the round-2-amended brief): 2026-11-20T15:47:12-08:00
+- **Decided:** BLOCK, with 2 block findings and 3 warn findings (see `handoff-A.md`).
+  - Round-2 blocks 1-4 are resolved in substance:
+    - The reset now waits for proof of registration, and there is no reset at POST time for GitLab.
+    - The image substitution is in core `targets.rs`.
+    - The sweep covers every `gitlab_connections` row.
+    - `retry.rs` copies `gitlab_connection_id`.
+  - Round-2 warnings 5-9 are resolved.
+  - New blocks:
+    - (1) The count and the reset aren't tied to one event per runner. `fleet::finish` revisits every failed or cleaned placement on every tick (`fleet.rs:265`), and placements are deleted only with their pool. `follow` keeps seeing `exited` until the Cleanup lands. Counted per observation, one Start refusal blocks the pool permanently. Reset per observation, refusals never reach the threshold. The fix: one count or one reset per runner, when its row first leaves service (the guarded UPDATE's `rows_affected`, or the previous status on the manager path), with a freshly loaded `Pool`.
+    - (2) The manager-path half of the image rule refuses Tart. A Tart-only pool always stores `docker_image = ''` (#103's `selected_image`, migration 0044), so "a GitLab pool with an empty `docker_image` is refused before `create_runner`" refuses every manager-path GitLab Tart start. A Docker pool can't have an empty `docker_image`, so for Docker starts the rule never fires. Scope it to the `docker` provider.
+  - Warnings:
+    - The reset helper's home: next to `record_provision_failure` in `main.rs`, so there is no second copy of the inline query at `:2766`.
+    - Where busy is observed: the manager status loop only, because `follow` doesn't read `busy`. Pools show `blocked` after a successful probe.
+    - A failed fleet `create_runner` should count every error once, as the manager path's `StartOutcome::Failed` does. Otherwise the placeholder client sends a new prepare to a machine every pass.
+- **Assumed:**
+  - Failed and cleaned placements are never moved out of those states except by `delete_pool` (no retention found for `workload_placements`).
+  - The GitLab `runners.busy` signal comes from #140's webhook, per #148's issue text.
+- **Hedged:**
+  - Finding 1's gate can be any one-time transition. The guarded runner UPDATE is named because it already exists in both `follow` and `finish`.
+  - Finding 2 accepts dropping the manager-path call altogether, since #103's validation already guarantees a Docker pool has an image.
+- **Evidence:**
+  - Read: the amended brief (`git diff` against d88acd5), `139-brief-result-r1.md`, and issue #148.
+  - Source:
+    - `crates/gridops-reconciler/src/fleet.rs` (whole file);
+    - `crates/gridops-reconciler/src/main.rs`: `Reconciler`, `Runner`, `reconcile`, `reconcile_pool`, `pool_state`, `provision`, `provision_on_host`, `start_admitted_runner`, `delete_runner`, `record_provision_failure`, `provision_failure_policy`, `cleanup_retention`;
+    - `crates/gridops-core/src/fleet/`: `placement.rs` (`placements`, `reported_gone`, `abandon_unstarted`), `registry/commands.rs` (`apply_to_placement`), `failure.rs` (`fail_placement`), `retry.rs` (`retry_failed_start`), `start_health.rs` (`is_start_failure`), `targets.rs` (`pool_docker_image`, `save_pool_fleet`), `service.rs` (`ensure_target_identity_for_pool`);
+    - `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`), `crates/gridops-core/src/models.rs` (`selected_image`, the pool image rule), `crates/gridops-core/src/config.rs` (`base_url`), `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`, `GitLabApi`);
+    - `migrations/0044_clear_unused_provider_images.sql`.
