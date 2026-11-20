@@ -156,3 +156,21 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Decided:** PASS. F extended the objects the Reuse map named (`SearchableMultiSelect`, `SecretDialog` extracted, `validateBitbucketConnections`, moved Bitbucket/GitHub page logic) and built no parallel path; old pages are redirect-only.
 - **Hedged:** two warns, neither blocking: the pool list/detail pages still branch on `pool.scope` (out of scope, follow-up for #141), and `bitbucket.tsx` imports a rule from `runner-pools/schemas` (acyclic).
 - **Evidence:** `docs/handoffs/145/handoff-A-dup.md`.
+
+## T (Tester, Phase 4 RED, round 4) - 2026-11-20T14:48:58-08:00
+- **Decided:**
+  - Wrote 16 tests for the round-4 operator decisions, in the files that already own these surfaces: `tests/connections-page.test.ts` (W1 chooser x4, W2 empty states x5, `postCreate` toast x2), `tests/platform-registry.test.ts` (chooserDescription/no externalLinks x2, `expectTypeOf` contract, survey names) and `tests/runner-row-platform.test.ts` (runner link `title`/`aria-label`).
+  - Two W2 cases ("GitHub row only while the App is configured", and "no generic state while loading or failed") pair the guard half with a positive half in the same test, so each test is a real RED and not a guard that already passes.
+  - Added a test for the W4 clause ("F must render `runnerLink().label` as the link's title or aria-label"), because the brief makes it binding and nothing read the label.
+- **Assumed:**
+  - The round-4 section is binding without a fresh A pass, because it is an operator decision recorded in the brief.
+  - The chooser entries render as `button`, `[role=radio]` or `label`, as the existing helper already assumed. The disabled install control is a `button[disabled]` or `aria-disabled="true"` with no `href`.
+  - The admin generic state's CTA is an "Add connection" button. The test clicks the last one.
+- **Hedged:**
+  - Test #12 (types) is checked only by `npm run typecheck`, like the existing `PostCreateReveal` assertion.
+  - The survey check reads a handoff doc from the test suite. It is cheap, but it couples the suite to `docs/handoffs/145/survey.md`.
+- **Evidence:**
+  - Full suite: 15 failed | 446 passed (461), with every failure a round-4 behavioural assertion.
+  - Typecheck errors appear only on the new contract names.
+  - A scratch-copy implementation sketch made all 461 pass, except `build-info`, which needs `Cargo.toml` and is an artifact of the scratch copy.
+  - Handoff: `docs/handoffs/145/handoff-T-red.md`, section "Round 4".

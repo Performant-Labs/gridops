@@ -27,7 +27,7 @@ import { ConnectionsSection } from "../src/features/platform-connections/connect
 import { GitHubAppSection } from "../src/features/platform-connections/github-app-section";
 import type { BitbucketConnection } from "../src/features/platform-connections/platform-connections.functions";
 import { getPlatform } from "../src/features/platform-connections/registry";
-import type { PlatformDescriptor, PostCreateReveal } from "../src/features/platform-connections/types";
+import type { ConnectionList, PlatformDescriptor, PostCreateReveal } from "../src/features/platform-connections/types";
 import type { SettingsPage } from "../src/features/operations/operations.functions";
 import { Route as ConnectionsRoute } from "../src/routes/settings.connections";
 
@@ -45,7 +45,7 @@ const MOBILE: BitbucketConnection = {
 
 type PageData = NonNullable<SettingsPage["data"]>;
 
-function settingsPage(role: "admin" | "member", overrides: Partial<PageData["configuration"]> = {}): SettingsPage {
+function settingsPage(role: "admin" | "member", overrides: Partial<PageData["configuration"]> = {}, data: Partial<PageData> = {}): SettingsPage {
   return {
     authenticated: true,
     data: {
@@ -66,6 +66,7 @@ function settingsPage(role: "admin" | "member", overrides: Partial<PageData["con
       },
       user: { id: "u-1", login: role === "admin" ? "octocat" : "member-1", role },
       users: [],
+      ...data,
     },
   };
 }
@@ -142,6 +143,7 @@ async function startAddConnection(platformName: string) {
   if (!dialog) throw new Error("Add connection opened no dialog");
   const choice = [...dialog.querySelectorAll<HTMLElement>("button, [role=radio], label")]
     .find((element) => element.textContent?.includes(platformName) && !/^(Cancel|Continue)/.test(element.textContent.trim()));
+  if (!choice) throw new Error(`Add connection does not offer "${platformName}"`);
   await click(choice);
   const next = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.includes("Continue"));
   if (next && !next.disabled) await click(next);
@@ -322,6 +324,185 @@ describe("Post-create one-time reveal", () => {
     await startAddConnection("RevealCI");
     await fillBitbucketFields("Web platform");
     expect(document.querySelector("[role=dialog]")).toBeNull();
+  });
+
+  it.each([
+    ["throws", () => { throw new Error("Webhook setup failed"); }],
+    ["rejects", async () => { throw new Error("Webhook setup failed"); }],
+  ] as const)("a hook that %s after the dialog closed surfaces as an error toast with its message, and opens no reveal dialog", async (_verb, hook) => {
+    const descriptors = [github(), revealPlatform(hook)];
+    await render(createElement(ConnectionsSection, { descriptors, page: settingsPage("admin") }));
+    await startAddConnection("RevealCI");
+    await fillBitbucketFields("Web platform");
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error.mock.calls[0]?.[0]).toEqual(expect.stringContaining("Webhook setup failed"));
+    expect(document.querySelector("[role=dialog]")).toBeNull();
+  });
+});
+
+describe("Add connection offers every platform through its descriptor", () => {
+  const INSTALL_URL = "https://github.com/apps/gridops-self-hosted/installations/new";
+  const dialog = () => {
+    const found = document.querySelector<HTMLElement>("[role=dialog]");
+    if (!found) throw new Error("No dialog is open");
+    return found;
+  };
+  /** The platform choices of step 1, as their visible text, in the order they are listed. */
+  const choiceElements = () => [...dialog().querySelectorAll<HTMLElement>("button, [role=radio], label")].filter((element) => {
+    const text = element.textContent?.trim() ?? "";
+    return text !== "" && !/^(Cancel|Continue|Back|Close)$/.test(text);
+  });
+  const choices = () => choiceElements().map((element) => element.textContent?.trim() ?? "");
+  const listed = (name: string) => choices().findIndex((text) => text.startsWith(name));
+  const choose = (name: string) => click(choiceElements().find((element) => element.textContent?.trim().startsWith(name)));
+
+  /** A test-only platform with a page-derived list the user manages and no create binding. */
+  function managedPlatform(id: string, name: string, connectLink?: PlatformDescriptor["connections"]["connectLink"]): PlatformDescriptor {
+    const base = getPlatform(id);
+    return {
+      ...base,
+      name,
+      connections: {
+        ...base.connections,
+        list: { kind: "page", read: () => ({ canManage: true, items: [] }) },
+        emptyText: () => null,
+        chooserDescription: `${name} runners, connected on ${name}.`,
+        ...(connectLink ? { connectLink } : {}),
+      },
+    };
+  }
+
+  it("lists GitHub then Bitbucket for an administrator, each with its chooser description", async () => {
+    await render(createElement(ConnectionsSection, { page: settingsPage("admin") }));
+    await click(buttons("Add connection")[0]);
+    const github = listed("GitHub");
+    const bitbucket = listed("Bitbucket");
+    expect(github).toBeGreaterThanOrEqual(0);
+    expect(bitbucket).toBeGreaterThan(github);
+    expect(choices()[github]).toContain("Runners for GitHub Actions. Added by installing the GridOps GitHub App.");
+    expect(choices()[bitbucket]).toContain("Bitbucket Cloud workspaces with managed macOS runners for Pipelines.");
+  });
+
+  it("GitHub's step links to the App's install URL in a new tab, and Back returns to step 1 from it and from a form", async () => {
+    await render(createElement(ConnectionsSection, { page: settingsPage("admin") }));
+    await startAddConnection("GitHub");
+    const install = dialog().querySelector<HTMLAnchorElement>(`a[href="${INSTALL_URL}"]`);
+    expect(install?.textContent).toContain("Install GitHub App");
+    expect(install?.target).toBe("_blank");
+    expect(install?.rel).toContain("noreferrer");
+    expect(dialog().textContent).toContain("GitHub accounts are connected by installing the GridOps GitHub App on them.");
+
+    await click(buttons("Back")[0]);
+    expect(dialog().querySelector(`a[href="${INSTALL_URL}"]`)).toBeNull();
+    expect(listed("GitHub")).toBeGreaterThanOrEqual(0);
+    expect(listed("Bitbucket")).toBeGreaterThanOrEqual(0);
+
+    await choose("Bitbucket");
+    expect(() => field("Workspace slug")).not.toThrow();
+    await click(buttons("Back")[0]);
+    expect(() => field("Workspace slug")).toThrow();
+    expect(listed("GitHub")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("while the GitHub App is not configured, GitHub's install button is disabled and says why", async () => {
+    await render(createElement(ConnectionsSection, { page: settingsPage("admin", { githubAppControl: false }, { githubApp: null }) }));
+    await startAddConnection("GitHub");
+    expect(dialog().textContent).toContain("Create the GitHub App first (below on this page).");
+    const install = [...dialog().querySelectorAll<HTMLElement>("a, button")].find((element) => element.textContent?.includes("Install GitHub App"));
+    expect(install).toBeTruthy();
+    expect(install?.getAttribute("href")).toBeNull();
+    expect(install instanceof HTMLButtonElement ? install.disabled : install?.getAttribute("aria-disabled") === "true").toBe(true);
+  });
+
+  it("lists any platform with a connectLink and opens its link, and lists none with neither binding (registry-driven)", async () => {
+    const connectLink = () => ({ label: "Open LinkCI", description: "LinkCI connects from its own site.", href: "https://linkci.example/connect" });
+    const descriptors = [bitbucket(), managedPlatform("linkci", "LinkCI", connectLink), managedPlatform("bareci", "BareCI")];
+    await render(createElement(ConnectionsSection, { descriptors, page: settingsPage("admin") }));
+    await click(buttons("Add connection")[0]);
+    expect(listed("Bitbucket")).toBeGreaterThanOrEqual(0);
+    expect(listed("LinkCI")).toBeGreaterThan(listed("Bitbucket"));
+    expect(choices()[listed("LinkCI")]).toContain("LinkCI runners, connected on LinkCI.");
+    expect(listed("BareCI")).toBe(-1);
+
+    await choose("LinkCI");
+    const link = dialog().querySelector<HTMLAnchorElement>('a[href="https://linkci.example/connect"]');
+    expect(link?.textContent).toContain("Open LinkCI");
+    expect(link?.target).toBe("_blank");
+    expect(dialog().textContent).toContain("LinkCI connects from its own site.");
+  });
+});
+
+describe("Connections empty states", () => {
+  /** The settings page with no GitHub installations (App configured unless overridden). */
+  const noInstallations = (role: "admin" | "member", data: Partial<PageData> = {}) => settingsPage(role, {}, { installations: [], ...data });
+  const PER_PLATFORM_EMPTY = ["No installations are visible", "No Bitbucket workspaces are connected yet."];
+
+  it("an administrator with nothing connected sees one generic empty state whose Add connection opens the chooser", async () => {
+    bitbucketList = { canManage: true, items: [] };
+    await render(createElement(ConnectionsSection, { page: noInstallations("admin") }));
+    expect(body()).toContain("No connections yet");
+    expect(body()).toContain("Connect a CI platform to start assigning it to runner pools.");
+    expect(body()).not.toContain("A GridOps administrator can add platform connections.");
+    for (const text of PER_PLATFORM_EMPTY) expect(body()).not.toContain(text);
+    const add = buttons("Add connection");
+    expect(add.length).toBeGreaterThan(0);
+    await click(add.at(-1));
+    expect(document.querySelector("[role=dialog]")?.textContent).toContain("Bitbucket");
+  });
+
+  it("a member with nothing connected sees the generic empty state with the member copy and no Add connection", async () => {
+    bitbucketList = { canManage: false, items: [] };
+    await render(createElement(ConnectionsSection, { page: noInstallations("member") }));
+    expect(body()).toContain("No connections yet");
+    expect(body()).toContain("A GridOps administrator can add platform connections.");
+    expect(body()).not.toContain("Connect a CI platform to start assigning it to runner pools.");
+    for (const text of PER_PLATFORM_EMPTY) expect(body()).not.toContain(text);
+    expect(buttons("Add connection")).toHaveLength(0);
+  });
+
+  it("shows the GitHub empty row beside Bitbucket's rows only while the GitHub App is configured", async () => {
+    await render(createElement(ConnectionsSection, { page: noInstallations("admin", { githubApp: null }) }));
+    expect(body()).toContain("Mobile delivery");
+    expect(body()).not.toContain("No installations are visible");
+    expect(body()).not.toContain("No connections yet");
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    await render(createElement(ConnectionsSection, { page: noInstallations("admin") }));
+    expect(body()).toContain("Mobile delivery");
+    expect(body()).toContain("No installations are visible to @octocat.");
+    expect(body()).not.toContain("No connections yet");
+  });
+
+  it("holds the generic empty state back while a list is loading, and shows it once every list has loaded empty", async () => {
+    let finish: (list: ConnectionList) => void = () => undefined;
+    const pending = new Promise<ConnectionList>((resolve) => { finish = resolve; });
+    const descriptors = [github(), testPlatform("slowci", "SlowCI", { list: { kind: "fetch", load: () => pending } })];
+    await render(createElement(ConnectionsSection, { descriptors, page: noInstallations("admin") }));
+    expect(body()).not.toContain("No connections yet");
+
+    await act(async () => { finish({ canManage: true, items: [] }); });
+    await settle();
+    expect(body()).toContain("No connections yet");
+  });
+
+  it("while the Bitbucket list has failed shows its error with Retry and the per-platform rows, not the generic empty state, until Retry loads it empty", async () => {
+    let fail = true;
+    bitbucketList = { canManage: true, items: [] };
+    fetcher.mockImplementation(async (url: string, init?: RequestInit) => (fail && url === BITBUCKET_URL && (init?.method ?? "GET") === "GET")
+      ? Response.json({ error: "Bitbucket is unreachable" }, { status: 502 })
+      : apiFetch(url, init));
+    await render(createElement(ConnectionsSection, { page: noInstallations("admin") }));
+    const alerts = [...document.querySelectorAll<HTMLElement>("[role=alert]")];
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toContain("Bitbucket");
+    expect(body()).toContain("No installations are visible to @octocat.");
+    expect(body()).not.toContain("No connections yet");
+
+    fail = false;
+    await click([...(alerts[0]?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((element) => element.textContent?.includes("Retry")));
+    expect(document.querySelectorAll("[role=alert]")).toHaveLength(0);
+    expect(body()).toContain("No connections yet");
   });
 });
 

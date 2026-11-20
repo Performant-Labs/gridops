@@ -1,5 +1,7 @@
 # Handoff-T-red: Phase 4 (test-first RED) - One Connections page and one Targets picker for every CI platform (#145)
 
+> **Round 4 (2:48 PM PST):** the RED for the operator's round-4 decisions (W1, W2, the `postCreate` toast, the runner-link label) is the last section of this file, "Round 4 RED". Everything above is the original cycle's RED and still stands.
+
 **Date:** 2026-11-20 (1:40 PM PST)
 **Branch:** claude/ui-145-platform-neutral-cf5832 (tip `ef65745`)
 **Brief / wireframe reviewed:** `docs/handoffs/145-brief.md` (incl. the binding "Round-3 architecture decisions"), `docs/handoffs/145/wireframe.html` (revision 4), `docs/handoffs/145/handoff-D.md`, `docs/handoffs/145/handoff-A.md` (round 4), `docs/handoffs/145/decisions.md`
@@ -635,3 +637,98 @@ Per-test summary:
 
 ## Ready for F
 **RED is valid.** F may implement against these tests. F must not edit any test file, `tests/fixtures/pool-forms.ts` or the frozen constants. A test that looks wrong goes back to T.
+
+
+---
+
+# Handoff-T-red, Round 4: Add connection offers every platform; one generic empty state (#145)
+
+**Date:** 2026-11-20 (2:48 PM PST)
+**Branch:** claude/ui-145-platform-neutral-cf5832 (tip `05ab1de`)
+**Brief / wireframe reviewed:** `docs/handoffs/145-brief.md`, section "Round-4 operator decisions after the spec audit" (binding); `docs/handoffs/145/handoff-S.md` (W1-W4 and advisory 3); `docs/handoffs/145/handoff-F.md`; `docs/handoffs/145/survey.md`; the current `src/features/platform-connections/{types.ts, github.tsx, bitbucket.tsx, registry.tsx, connections-section.tsx}` and `src/features/runners/runner-row.tsx`.
+
+## A precondition
+The plan-level A PASS (`handoff-A.md`, round 4) and the A-dup PASS stand for everything outside the round-4 section. The round-4 section is an **operator decision** recorded in the brief (commit `05ab1de`) after S's ADVISORY-HOLD; it was not sent back through A, and I treat it as binding, as the brief says. It changes the descriptor contract in `types.ts` only by the fields the brief names, so nothing here re-opens an A finding.
+
+## Tests authored
+All new tests live in the three existing files that already own these surfaces. No new test file. No existing test was changed except two helpers in `tests/connections-page.test.ts` (below).
+
+**Helper changes (`tests/connections-page.test.ts`)**
+- `settingsPage(role, overrides, data)` gains a third optional argument that overrides page data (`installations`, `githubApp`). Existing callers are unchanged.
+- `startAddConnection(name)` now throws `Add connection does not offer "<name>"` when the chooser has no such entry, instead of the generic "Nothing to click". Existing callers behave the same when the entry exists.
+
+**W1: every platform is offered in Add connection, through the descriptor** (`tests/connections-page.test.ts`, describe "Add connection offers every platform through its descriptor"; component tier under jsdom, because the behaviour is what the dialog renders from the registry. A unit test on `connectLink` alone would duplicate it.)
+1. `lists GitHub then Bitbucket for an administrator, each with its chooser description`. Uses the production registry. Both are listed, in registry order (GitHub first), each entry containing the brief's exact `chooserDescription` copy.
+2. `GitHub's step links to the App's install URL in a new tab, and Back returns to step 1 from it and from a form`. Checks the link `a[href=installUrl]`: text "Install GitHub App", `target="_blank"`, `rel` contains `noreferrer`, plus the brief's description sentence. Back from the link step returns to the list. Choosing Bitbucket shows its form, and Back from the form returns to the list.
+3. `while the GitHub App is not configured, GitHub's install button is disabled and says why`. With `githubApp: null`: the text "Create the GitHub App first (below on this page)." shows, and the "Install GitHub App" control has no `href` and is disabled (`button[disabled]` or `aria-disabled="true"`).
+4. `lists any platform with a connectLink and opens its link, and lists none with neither binding (registry-driven)`. Uses the registry `[bitbucket, LinkCI (connectLink only), BareCI (neither)]`, both test-only page-list descriptors the user can manage. LinkCI is listed after Bitbucket with its `chooserDescription`. BareCI is not listed. Choosing LinkCI renders its link (href, label, `target="_blank"`) and description. This pins "shared code, no platform ids", and `platform-neutral-source.test.ts` still guards `connections-section.tsx` at source level.
+- "Non-admins never see Add connection" is already pinned by the existing `hides Add connection, Edit and Remove …` case. Not duplicated.
+
+**W2: one generic empty state; no GitHub empty row while the App is unconfigured** (`tests/connections-page.test.ts`, describe "Connections empty states"; component tier.)
+5. `an administrator with nothing connected sees one generic empty state whose Add connection opens the chooser`. "No connections yet" and the admin copy show. The member copy does not, and neither does either per-platform empty row. An Add connection button exists and its last instance (the CTA) opens the chooser.
+6. `a member with nothing connected sees the generic empty state with the member copy and no Add connection`.
+7. `shows the GitHub empty row beside Bitbucket's rows only while the GitHub App is configured`. Two renders in one test so the RED is real. First, App unconfigured with Bitbucket rows: no GitHub empty row and no generic state. Then, App configured with no installations and Bitbucket rows: "No installations are visible to @octocat." shows.
+8. `holds the generic empty state back while a list is loading, and shows it once every list has loaded empty`. A test-only fetch descriptor whose load is a deferred promise. While it is pending there is no generic state. Once it resolves empty, the generic state shows.
+9. `while the Bitbucket list has failed shows its error with Retry and the per-platform rows, not the generic empty state, until Retry loads it empty`. Uses the production registry. A 502 shows one alert naming Bitbucket and GitHub's per-platform empty row, with no generic state. After a successful Retry with an empty list, there is no alert and the generic state shows.
+
+**postCreate failure surfaces as a toast** (`tests/connections-page.test.ts`, in "Post-create one-time reveal"; component tier.)
+10. `a hook that {throws|rejects} after the dialog closed surfaces as an error toast with its message, and opens no reveal dialog` (2 cases). `toast.error` is called once and its first argument contains "Webhook setup failed". No `[role=dialog]` is open.
+
+**Contract and survey** (`tests/platform-registry.test.ts`, describe "Add connection contract (round-4 W1/W2)"; unit tier.)
+11. `{github|bitbucket} has a chooser description and no externalLinks field` (2 cases). Asserted at runtime over every registered descriptor.
+12. `the descriptor types carry chooserDescription, connectLink and a nullable emptyText, and no externalLinks (checked by npm run typecheck)`. Uses `expectTypeOf`: `PlatformDescriptor` has no `externalLinks`; `ConnectionBindings["chooserDescription"]` is `string`; `emptyText` is `(page: SettingsPage) => string | null`; `connectLink` is exactly the brief's signature. This test is a no-op at run time by design, like the existing `PostCreateReveal` assertion, so `tsc` is its gate.
+13. `the forward-compat survey names the chooser bindings and no longer names externalLinks`. Reads `docs/handoffs/145/survey.md`, as the brief asks that the survey table match.
+
+**Runner link label (W4 "accepted as built" clause)** (`tests/runner-row-platform.test.ts`; component tier.)
+14. `names the link with the descriptor's runnerLink label`. Opens a GitHub runner's details sheet (`githubRunnerId: 42`). The link to `https://github.com/acme/web/settings/actions/runners/42` has `title` or `aria-label` "Open on GitHub". The brief says F must render it, and no other test reads the label.
+
+## Contract the tests pin (for F)
+- `ConnectionBindings.chooserDescription: string` (required) and `ConnectionBindings.connectLink?: (page: SettingsPage) => { label: string; description: ReactNode; href: string | null; unavailableText?: string }`.
+- `ConnectionBindings.emptyText: (page: SettingsPage) => string | null`. `PlatformDescriptor.externalLinks` is deleted.
+- The chooser entries are `button`, `[role=radio]` or `label` elements in the dialog, each starting with the platform name and containing its `chooserDescription`. The connect-link step's primary is an `<a href target="_blank" rel="noreferrer">` with the link label. While `href` is null it is a disabled button (or `aria-disabled="true"`) with no `href`, plus the `unavailableText`. A "Back" button returns to step 1.
+- Generic empty-state copy: "No connections yet", then "Connect a CI platform to start assigning it to runner pools." (someone can manage) or "A GridOps administrator can add platform connections." (read-only). The admin form includes an "Add connection" button.
+- `postCreate` failure: `toast.error(<string containing the thrown message>, …)`.
+- The runner link's `title` or `aria-label` equals `runnerLink(runner).label`.
+- `survey.md` mentions `chooserDescription` and `connectLink` and not `externalLinks`. The registry's `unknownPlatform` fallback needs a `chooserDescription` too, for `tsc`.
+
+## RED confirmation
+`npx vitest run` (whole suite) at tip `05ab1de` plus these test edits: **Test Files 3 failed | 43 passed (46); Tests 15 failed | 446 passed (461)**. The 445 tests that existed before all still pass. Of the 16 new tests, 15 fail at a behavioural assertion and 1 is typecheck-gated (#12). Exact failures:
+
+    connections-page > Post-create … a hook that throws …            AssertionError: expected "vi.fn()" to be called 1 times, but got 0 times
+    connections-page > Post-create … a hook that rejects …           AssertionError: expected "vi.fn()" to be called 1 times, but got 0 times
+    connections-page > Add connection … lists GitHub then Bitbucket   AssertionError: expected -1 to be greater than or equal to 0   (GitHub not listed)
+    connections-page > Add connection … GitHub's step …               Error: Add connection does not offer "GitHub"
+    connections-page > Add connection … App is not configured …       Error: Add connection does not offer "GitHub"
+    connections-page > Add connection … registry-driven               AssertionError: expected -1 to be greater than 0   (LinkCI not listed)
+    connections-page > Empty states > administrator …                 AssertionError: expected 'ConnectionsEvery CI platform …' to contain 'No connections yet'
+    connections-page > Empty states > member …                        AssertionError: expected 'ConnectionsEvery CI platform …' to contain 'No connections yet'
+    connections-page > Empty states > GitHub empty row …              AssertionError: expected '…GitHubNo installations are visible to @octocat.Mobile delivery…' not to contain 'No installations are visible'
+    connections-page > Empty states > … while a list is loading …     AssertionError: expected '…' to contain 'No connections yet'   (after the load resolves; the "not while loading" half passes)
+    connections-page > Empty states > … Bitbucket list has failed …   AssertionError: expected '…' to contain 'No connections yet'   (after Retry; the alert/per-platform half passes)
+    platform-registry > github has a chooser description …            AssertionError: expected undefined to deeply equal StringMatching /\S/
+    platform-registry > bitbucket has a chooser description …         AssertionError: expected undefined to deeply equal StringMatching /\S/
+    platform-registry > the forward-compat survey …                   AssertionError: expected '# Survey: …' to contain 'chooserDescription'
+    runner-row-platform > names the link with the … label            AssertionError: expected [ null, null ] to include 'Open on GitHub'
+
+Every failure is the missing round-4 behaviour. None is an import, setup or typo error. The two "does not offer" errors come from the helper's explicit check that the GitHub entry exists, and that check is the W1 behaviour.
+
+`npm run typecheck` fails only on the new contract names, as expected in RED:
+
+    tests/connections-page.test.ts(360,102): TS2339 Property 'connectLink' does not exist on type 'ConnectionBindings'.
+    tests/connections-page.test.ts(368,26): TS2322 Type 'null' is not assignable to type 'string'.            (emptyText: () => null)
+    tests/platform-registry.test.ts(113,33): TS2339 Property 'chooserDescription' does not exist …
+    tests/platform-registry.test.ts(118,44): TS2554 Expected 2 arguments, but got 1.                          (not.toHaveProperty("externalLinks") while it exists)
+    tests/platform-registry.test.ts(119,37): TS2339 Property 'chooserDescription' does not exist …
+    tests/platform-registry.test.ts(120,67): TS2344 … emptyText is not (page) => string | null
+    tests/platform-registry.test.ts(121,49): TS2339 Property 'connectLink' does not exist …
+
+`npx eslint` on the three test files: clean.
+
+**Satisfiability check.** In a scratch copy outside this worktree (`node_modules` symlinked), I sketched a minimal implementation of the contract above: the types; GitHub's `chooserDescription`, `connectLink` and nullable `emptyText`; Bitbucket's `chooserDescription`; the chooser filter and link step; the generic empty state from the observed list statuses; `toast.error` in `onCreated`; `title={link.label}`; and the survey names. Against it, all 16 new tests and all 445 existing ones pass. The only failure, `build-info`, needs `Cargo.toml`, which the scratch copy lacks. `tsc --noEmit` and `eslint` were clean there. The sketch was never applied here: nothing under `src/` changed in this worktree.
+
+## Source facts in unchanged code the tests rely on
+- The `/settings` page type allows `githubApp: null` (`src/features/operations/operations.functions.ts:144`, `githubApp: null | { slug: string; appUrl: string; installUrl: string };`). Tests 3 and 7 use it. If the diff gate needs it, it goes in `evidence.md` in Phase 6.
+- `InlineError` renders `role="alert"` (`src/components/page.tsx:224`). Test 9 counts alerts, as the existing per-platform tests do.
+
+## Ready for F
+RED is valid. F may implement the round-4 changes against these tests. The test files are staged by explicit path.

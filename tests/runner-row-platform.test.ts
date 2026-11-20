@@ -49,3 +49,15 @@ describe("runner row platform badge", () => {
     expect(container.textContent).toContain(name);
   });
 });
+
+describe("runner details link to the runner's page on its platform", () => {
+  it("names the link with the descriptor's runnerLink label", async () => {
+    act(() => root.render(createElement(TooltipProvider, null, createElement(RunnerRow, { runner: { ...runner("github"), githubRunnerId: 42 } }))));
+    const open = document.querySelector<HTMLButtonElement>('button[aria-label="Show details for mac-runner-1"]');
+    if (!open) throw new Error("No details button");
+    await act(async () => { open.click(); });
+    const link = document.querySelector<HTMLAnchorElement>('a[href="https://github.com/acme/web/settings/actions/runners/42"]');
+    expect(link?.textContent).toContain("GitHub");
+    expect([link?.getAttribute("title"), link?.getAttribute("aria-label")]).toContain("Open on GitHub");
+  });
+});

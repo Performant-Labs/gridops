@@ -3,11 +3,13 @@
  * safe fallback, each well-formed enough for the Connections page, the Targets row and the
  * Platform options section to render it without platform-specific code.
  */
+import { readFileSync } from "node:fs";
 import type { ReactNode } from "react";
 import { describe, expect, expectTypeOf, it } from "vitest";
 
+import type { SettingsPage } from "../src/features/operations/operations.functions";
 import { getPlatform, platforms } from "../src/features/platform-connections/registry";
-import type { PostCreateReveal } from "../src/features/platform-connections/types";
+import type { ConnectionBindings, PlatformDescriptor, PostCreateReveal } from "../src/features/platform-connections/types";
 
 describe("platform registry lookups", () => {
   it("registers GitHub then Bitbucket, and nothing else", () => {
@@ -103,5 +105,27 @@ describe("GitHub and Bitbucket target kinds keep today's rules", () => {
 describe("post-create reveal contract", () => {
   it("PostCreateReveal has exactly the brief's shape (checked by npm run typecheck)", () => {
     expectTypeOf<PostCreateReveal>().toEqualTypeOf<{ title: string; description: string; secretLabel: string; value: string; details?: ReactNode; closeButtonText?: string }>();
+  });
+});
+
+describe("Add connection contract (round-4 W1/W2)", () => {
+  it.each(platforms.map((platform) => [platform.id, platform] as const))("%s has a chooser description and no externalLinks field", (_id, platform) => {
+    expect(platform.connections.chooserDescription).toEqual(expect.stringMatching(/\S/));
+    expect(platform).not.toHaveProperty("externalLinks");
+  });
+
+  it("the descriptor types carry chooserDescription, connectLink and a nullable emptyText, and no externalLinks (checked by npm run typecheck)", () => {
+    expectTypeOf<PlatformDescriptor>().not.toHaveProperty("externalLinks");
+    expectTypeOf<ConnectionBindings["chooserDescription"]>().toEqualTypeOf<string>();
+    expectTypeOf<ConnectionBindings["emptyText"]>().toEqualTypeOf<(page: SettingsPage) => string | null>();
+    expectTypeOf<NonNullable<ConnectionBindings["connectLink"]>>()
+      .toEqualTypeOf<(page: SettingsPage) => { label: string; description: ReactNode; href: string | null; unavailableText?: string }>();
+  });
+
+  it("the forward-compat survey names the chooser bindings and no longer names externalLinks", () => {
+    const survey = readFileSync(new URL("../docs/handoffs/145/survey.md", import.meta.url), "utf8");
+    expect(survey).toContain("chooserDescription");
+    expect(survey).toContain("connectLink");
+    expect(survey).not.toContain("externalLinks");
   });
 });
