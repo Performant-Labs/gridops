@@ -53,3 +53,55 @@ The shared contract merged in #137 (`b22c451`). Its full rationale is `docs/hand
 - Do not edit `crates/gridops-tart-agent` (#142), the reconciler (#139), the API (#138), the GitLab client (#146), webhooks (#140), scaling (#148) or the UI (#141).
 - Docker access: the GitLab Docker executor needs a Docker daemon. Use the access the agent already gives container jobs that require the Docker socket (`requires_docker_socket`), and document in the docs (for example `docs/fleet-agent.md` and the `compose.no-docker-socket.yaml` header comment) that a deployment without the Docker socket can't run GitLab runners. If the socket is unavailable, refuse the GitLab start with a clear configuration failure rather than starting a runner that can't run jobs.
 - The issue's manual check (a real `glrt-` token against a real GitLab project) **cannot be run in this issue**: no test project or token exists yet. It is **not run, deferred to #143** (the end-to-end test against real GitLab). Do not fake it; the PR says so.
+
+## Amendments (architecture review R1, `docs/handoffs/147/handoff-A.md`)
+
+Each finding is resolved here. Where this section and the text above differ, this section wins.
+
+### B-1: which image is which (deviation D147-1)
+
+- **The pool's `docker_image` is the gitlab-runner (runner) image** on both paths, exactly as the server already chooses images today: the fleet agent runs `PrepareEnvironment.image`, the manager runs `input.image`. **Neither `docker.rs` nor the manager's `main.rs` holds an image constant or picks a fallback image.**
+- #147 adds two pinned constants next to the other `GITLAB_*` constants in `crates/gridops-core/src/provisioning.rs` (additive; no existing contract item changes):
+  - `pub const GITLAB_RUNNER_IMAGE: &str = "gitlab/gitlab-runner:<pinned ubuntu-based tag>";` — the official image, pinned to an exact version tag (not `latest`), Ubuntu-based so the script's tools (`bash`, `curl`) exist. The implementor confirms the tag exists on Docker Hub headlessly (registry/tags API) and records the evidence.
+  - `pub const GITLAB_DEFAULT_JOB_IMAGE: &str = "<pinned image>";` — the `--docker-image` default job image for jobs whose `.gitlab-ci.yml` names none, pinned to an exact tag (for example a specific `alpine:3.x` or `ubuntu:24.04`), confirmed to exist the same way.
+  - A test pins both values and that neither ends in `:latest`.
+- Applying `GITLAB_RUNNER_IMAGE` as the default when a GitLab pool has no runner image of its own (today an empty `docker_image` becomes `STOCK_DOCKER_IMAGE`, the GitHub image, in `fleet/targets.rs::pool_docker_image`) is the **server's** job: #139 (profile and provisioning-plan image) and #138/#141 (pool form). #147 records this as deviation **D147-1** in the PR and on #136, and leaves a note for #139 in the shared notes folder. #147 does not edit `fleet/targets.rs`.
+- `--docker-image` is always `GITLAB_DEFAULT_JOB_IMAGE` on both paths.
+
+### B-2: `RegistrationRefused` is the **Start** result; exit semantics per command
+
+- The GitLab runner script (B-8 below) first verifies the token against GitLab's documented `POST {url}/api/v4/runners/verify` (200: valid; 403: refused), sending the token as form data from stdin (`printf 'token=%s' "$S" | curl ... --data @- ...`; `printf` is a shell builtin, so the token is never in any process's argv or environment). On 403 it exits `GITLAB_EXIT_REGISTRATION_REFUSED` (77). Any other verify failure (network, 5xx) exits with a distinct non-table code so it is a retryable runtime failure, not a refusal. After a successful verify it prints a fixed readiness marker line to stdout (pinned as a constant in `provisioning.rs`) and then runs `gitlab-runner run-single ...` with the token passed through a mechanism that keeps it out of argv and env of the container's **main process** (the implementor confirms from the pinned gitlab-runner version's source/docs how `run-single` takes its token — e.g. its flag/env var set only on the `exec`'d child is **not** acceptable for the main process if the child becomes PID 1; document the exact mechanism and test what `docker inspect` and `/proc/1/environ` show).
+- Distinguishing completed from idle expiry: the script maps `run-single`'s outcome to exit 0 (one job received and run) or 75 (wait timeout with no job). The implementor determines, from the pinned gitlab-runner version's source, the exact signal that a job was received (log line or exit status), pins it in a constant, and cites the source location in the handoff.
+- **Fleet Start** (`docker.rs`, GitLab branch): after writing the token on stdin, Start waits (bounded, a pinned timeout such as 60 s) until either the readiness marker appears in the container's output (→ `started`, as today) or the container exits. An exit with 77 during Start → `Failed { code: Configuration, retryable: false, diagnostic: Some(RegistrationRefused) }`. Any other exit or the timeout during Start → today's `Failed { Runtime, retryable: true }` behaviour.
+- **Fleet Inspect** of an exited GitLab container: always `Failed { code: ResourceUnavailable, retryable: false, .. }` so `placement::reported_gone` cleans it up, with `diagnostic: Some(IdleExpired)` for exit 75, `Some(RegistrationRefused)` for a late exit 77, and `None` for exit 0 (completed) and any other code. A running GitLab container inspects exactly as a running GitHub runner does today.
+- For #139 (recorded in the PR and in the shared notes): on the fleet path branch on `diagnostic.code` of the **Start** result for `RegistrationRefused` and of the **Inspect** result for `IdleExpired` (and a late `RegistrationRefused`); on the manager path branch on `exitReason`.
+
+### B-3: the diagnostic channel from helper to agent
+
+- **Owns, added:** `crates/gridops-host-agent/src/helper.rs`, `crates/gridops-host-agent/src/dispatch.rs`, and the `HelperResponse::Failed` constructors in `native.rs` and `runtime.rs` (mechanical: they pass `diagnostic: None`).
+- `HelperResponse::Failed` gains `#[serde(default, skip_serializing_if = "Option::is_none")] diagnostic: Option<DiagnosticReference>`. `HelperResponse` is private to the host agent (agent and helper ship as one binary/version), keeps `deny_unknown_fields`, and a GitHub/Bitbucket failure serializes byte-for-byte as before (test). `dispatch::outcome` passes it through to `CommandOutcome::Failed.diagnostic`. The helper creates the `DiagnosticReference.id` the way `cleaned()` creates its ids.
+- The GitLab branch is chosen from `prepared.target.is_gitlab()` (the `CiTarget` in the `PrepareEnvironment` the helper already receives on Start and Inspect). A GitHub or Bitbucket runner that exits 75 or 77 is never given a GitLab diagnostic (test).
+
+### W-4: parse the core material
+
+The GitLab branch parses `gridops_core::fleet::protocol::agent::GitlabRunnerMaterial` directly when the target is GitLab. No private copy is added to `docker.rs`'s `Material`. A GitLab target in Persistent mode is refused with `Failed { Configuration, retryable: false }`. Material that does not parse is refused as today.
+
+### W-5: refuse at Prepare without the socket
+
+A GitLab target whose profile does not set `requires_docker_socket` is refused at **Prepare** with `Failed { Configuration, retryable: false }`, before any token is minted. The existing `Permission` refusals for a socket the host does not grant are kept unchanged. That GitLab profiles set `requires_docker_socket` is #139/#141's (recorded in the notes and PR).
+
+### W-6: manager specifics
+
+- `runner_command` and `take_bootstrap_secret` branch on **platform** for GitLab (not mode only), so a GitLab request never takes the `jit_config` branch; the bootstrap secret is `gitlab_runner_token`.
+- GitLab containers get an `io.gridops.platform=gitlab` label, which the listing uses to know a runner is GitLab.
+- The listing reads the exit status with `inspect_container` (`State.ExitCode`), not from `list_containers` status text, and looks it up in `GITLAB_EXIT_REASONS`.
+- A GitLab Docker request is refused with `BadRequest` when `shared_docker_socket` is `None` (no Docker socket for runners).
+- The manager's Start does not need the readiness wait; a refusal surfaces as `exitReason: "registration_refused"` in the listing.
+
+### W-7: docs
+
+The docs (`docs/fleet-agent.md` and the header comment of `compose.no-docker-socket.yaml`) name `GRIDOPS_RUNNER_DOCKER_SOCKET` (manager path) and `GRIDOPS_AGENT_DOCKER_SOCKET` plus the profile's socket grant (fleet path) as what GitLab runners need, and state that `compose.no-docker-socket.yaml` turns off every built-in runner container, GitLab included.
+
+### W-8: a separate GitLab script
+
+The GitLab runner script is its own function in `provisioning.rs` (for example `gitlab_runner_script(url, wait_timeout_seconds, job_image) -> String`), not a wrapper around the GitHub-specific `instrumented_runner_script`; `gitlab-runner` output goes to the container's stdout/stderr so `docker logs` shows it. `url` is shell-quoted safely (test with a URL containing quotes/spaces is refused or quoted). The GitLab branch **skips** the GitHub shared work folder: the Docker executor keeps builds inside its own job containers and volumes, so no host path mapping is needed.
