@@ -40,3 +40,27 @@
   - Reconciler: `crates/gridops-reconciler/src/fleet.rs:480-560` (`follow`).
   - Manager: `crates/gridops-manager/src/main.rs` (`ProvisionRunner`, `GitlabBootstrap`, `validate`, `ManagedRunner`, `shared_docker_socket`, `list_runners`, `tart_runners`, `start_runner`, `provision_runner_inner`, `runner_command`, `take_bootstrap_secret`).
   - Deployment and docs: `compose.no-docker-socket.yaml` and `docs/fleet-agent.md` (the socket rows).
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:33:39-08:00
+- **Decided:** BLOCK, with 1 block finding and 4 warn findings (see `handoff-A.md`; round 1 is at `5339e22`).
+  - The three round-1 blocks and five round-1 warnings are resolved by the brief's "Amendments (architecture review R1)". Each was checked against the code: the image is chosen server-side (D147-1); Inspect always reports `ResourceUnavailable`, so `reported_gone` fires; `prepared` reaches Inspect; `is_gitlab()` exists; the helper's `CALL_TIMEOUT` is 330 s; manager containers are created with `auto_remove: false`.
+  - (1) **[correctness]** B-2's readiness wait, "a pinned timeout such as 60 s", is twice the reconciler's 30 s start-command deadline (`START_COMMAND_DEADLINE_MILLIS`, `gridops-reconciler/src/fleet.rs:48`). The agent runs one command at a time (`supervisor.rs` `in_flight`; one command per poll in `registry/commands.rs:91-97`). The heartbeat's `cancel_undeliverable` turns a late-running start `uncertain` and fails the placements queued behind it (`commands.rs:735-790`, the 2026-10-16 incident). Fix: pin the wait at 15 s or less, and give the script's verify `curl` a smaller `--max-time`. Or drop the Start wait and record a deviation from #137 D5.
+  - The warnings:
+    - the `HelperResponse::Failed` field addition breaks struct literals in `crates/gridops-host-agent/tests/` and `crates/gridops-api/tests/fleet_http/placement.rs`, which aren't in Owns;
+    - non-secret values reach runner scripts through env vars elsewhere (`GRIDOPS_REGISTRATION_URL`), not shell-quoted script text;
+    - the late `ResourceUnavailable` with `RegistrationRefused` pairing contradicts the `outcomes.rs:41-43` doc comment and needs deviation row D147-2;
+    - the Docker executor's sibling containers and cache volumes aren't covered by Stop or Cleanup.
+- **Assumed:**
+  - Start commands are normally delivered with close to 30 s left. The agent polls every 0.5 s, so the 15 s bound is a slow-path cap, and the typical verify takes a second or two.
+  - `run-single` accepts the runner-config Docker flags (for example `--docker-disable-cache`). I didn't verify this against the pinned gitlab-runner version; it's F's to confirm with the brief review's NV items.
+- **Hedged:**
+  - Finding 1 gives two resolutions: (a) a bounded wait, recommended because it keeps #137 D5; or (b) no wait, with the refusal reported only on Inspect.
+  - Finding 1 traces back to my own round-1 suggestion, which left the mechanism unbounded.
+  - W-2 is a warn, not a block. The seam is planned and reviewed; only the list of mechanical fallout sites is incomplete. No wave-1 issue owns `crates/gridops-api/tests/fleet_http/placement.rs` (epic #136 table).
+- **Evidence:**
+  - Read: the amended brief, `147-brief-result-r1.md`, round-1 `handoff-A.md`, epic #136 (`gh issue view 136`) and `docs/handoffs/137/handoff-A.md` (the round-numbering precedent).
+  - Host agent: `crates/gridops-host-agent/src/{docker.rs (full),helper.rs (full),dispatch.rs (full)}` and `supervisor.rs:430-500`.
+  - Core: `crates/gridops-core/src/fleet/registry/commands.rs:20-125,200-290,625-790`, `registry/inventory.rs:321`, `fleet/protocol/outcomes.rs:15-80,195-330`, `fleet/protocol/agent.rs:120-150`, `fleet/domain.rs:195-215`, `fleet/placement.rs:155-195,210-290`, `fleet/targets.rs:440-475` and `provisioning.rs:1-175`.
+  - Reconciler: `crates/gridops-reconciler/src/fleet.rs:36-56,446-478`.
+  - Manager: `crates/gridops-manager/src/main.rs:320-610,770-810,1485-1600,1700-2000,2645-2730`.
+  - Every `HelperResponse::Failed` literal in the workspace: `grep -rn "HelperResponse::Failed" crates/`.
