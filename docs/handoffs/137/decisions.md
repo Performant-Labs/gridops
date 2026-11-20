@@ -118,3 +118,9 @@
 - **Assumed:** The 12 remaining workspace failures (11 manager `SUN_LEN`, 1 macOS-host `release_preflight`) are workstation-specific, not #137: none of those files is in the diff, and the `SUN_LEN` error was re-observed directly.
 - **Hedged:** Server-start/HTTP smoke is not run because #137 adds no handlers; the OpenAPI spec tests stand in for it.
 - **Evidence:** `cargo test --workspace --no-fail-fast --locked` (843 passed, 12 failed, all host-specific); `cargo test -p gridops-core --locked` all ok; clippy and fmt clean; redocly valid (67 warnings); mutation spot-checks on exit code 75 and `run_untagged` default both turned tests red and were reverted.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20
+- **Decided:** PASS. F extended every object the brief named (CiTarget, CiPlatform, TargetKind, ensure_target, target_from_db, DiagnosticCode, for_selected_provider, SECRET_PREFIXES, the OpenAPI document). The new objects are all brief-placed.
+- **Assumed:** The Tart agent's private copies and the manager's private `GitlabBootstrap` are deliberate (brief R2-1). They are not parallel paths.
+- **Hedged:** Warn only on `ensure_gitlab_target`, a GitLab-only insert helper beside `ensure_target`. Fold it in if a third platform arrives.
+- **Evidence:** diff 78a1266..HEAD read for fleet/, provisioning.rs, manager, tart-agent, api, reconciler, agent session, db.rs and Cargo.toml, against the brief's deviation table D1-D13.
