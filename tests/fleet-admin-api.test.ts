@@ -48,7 +48,7 @@ describe("fleet admin browser transport", () => {
   });
 
   it("reads targets, grants and pool profiles and saves a profile with PUT", async () => {
-    const profile = { ...profileInput, platforms: profileInput.platforms.map((platform) => ({ ...platform, id: targetId, revision: 2 })), targetIds: [targetId] };
+    const profile = { ...profileInput, platforms: profileInput.platforms.map((platform) => ({ ...platform, id: targetId, revision: 2 })), targetIds: [targetId], hostIds: [hostId] };
     const fetcher = vi.fn()
       .mockResolvedValueOnce(Response.json({ items: [{ id: targetId, kind: "github_repository", label: "acme/api" }] }))
       .mockResolvedValueOnce(Response.json({ items: [{ targetId, label: "acme/api", allowSchedule: true, allowNative: false, allowDockerSocket: false }] }))
@@ -63,10 +63,16 @@ describe("fleet admin browser transport", () => {
     await expect(savePoolProfile("fleet-pool", profileInput)).resolves.toEqual({ item: profile });
     await expect(getPoolProfile("fleet-pool")).rejects.toMatchObject({ code: "invalid_response" });
 
+    // A server from before pinning (#131) sends no hostIds: the profile reads as unpinned.
+    const { hostIds: _pins, ...unpinned } = profile;
+    fetcher.mockResolvedValueOnce(Response.json({ item: unpinned }));
+    await expect(getPoolProfile("fleet-pool")).resolves.toEqual({ item: { ...unpinned, hostIds: [] } });
+
     const sent = calls(fetcher);
     expect(sent.map(([path]) => path)).toEqual([
       "/api/v1/fleet/targets",
       `/api/v1/fleet/hosts/${hostId}/grants`,
+      "/api/v1/fleet/pools/fleet-pool/profile",
       "/api/v1/fleet/pools/fleet-pool/profile",
       "/api/v1/fleet/pools/fleet-pool/profile",
       "/api/v1/fleet/pools/fleet-pool/profile",

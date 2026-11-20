@@ -172,6 +172,9 @@ pub struct Profile {
     #[serde(flatten)]
     pub input: ProfileInput,
     pub target_ids: Vec<String>,
+    /// The machines this profile is pinned to; empty when it may run on any
+    /// approved machine.
+    pub host_ids: Vec<String>,
 }
 
 /// One platform a pool runs on: how and where each runner is isolated.
@@ -203,6 +206,12 @@ pub struct FleetSettingsInput {
     pub memory_mib: u32,
     pub disk_bytes: u64,
     pub platforms: Vec<PlatformInput>,
+    /// The machines the pool may run on. Left out, the pool keeps the
+    /// machines it has; empty, it runs on any machine approved for its
+    /// repositories; otherwise only on these machines (and still only where
+    /// they are approved for its repositories and have room).
+    #[serde(default)]
+    pub host_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +237,9 @@ pub struct FleetSettings {
     pub disk_bytes: u64,
     pub platforms: Vec<Platform>,
     pub target_ids: Vec<String>,
+    /// The machines the pool is pinned to; empty when it may run on any
+    /// approved machine.
+    pub host_ids: Vec<String>,
 }
 
 /// The pool's current (not archived) profiles, oldest first.
@@ -250,6 +262,7 @@ pub async fn pool_profiles(pool: &SqlitePool, pool_id: &str) -> Result<Vec<Profi
         .bind(&id)
         .fetch_all(pool)
         .await?;
+        let host_ids = profile_host_ids(pool, &id).await?;
         let input = serde_json::from_value(serde_json::json!({
             "enabled": row.get::<bool, _>("enabled"),
             "runtimeKind": row.get::<String, _>("runtime_kind"),
@@ -270,6 +283,7 @@ pub async fn pool_profiles(pool: &SqlitePool, pool_id: &str) -> Result<Vec<Profi
             revision: row.get("revision"),
             input,
             target_ids,
+            host_ids,
         });
     }
     Ok(profiles)
@@ -287,6 +301,7 @@ pub async fn pool_fleet(
     let shared = first.input.clone();
     let mut target_ids = first.target_ids.clone();
     target_ids.sort();
+    let host_ids = first.host_ids.clone();
     Ok(Some(FleetSettings {
         enabled: profiles.iter().any(|profile| profile.input.enabled),
         placement: shared.placement,
@@ -307,7 +322,50 @@ pub async fn pool_fleet(
             })
             .collect(),
         target_ids,
+        host_ids,
     }))
+}
+
+/// The machines a profile is pinned to, sorted; empty when it has no host
+/// selector.
+async fn profile_host_ids(pool: &SqlitePool, profile_id: &str) -> Result<Vec<String>, FleetError> {
+    Ok(sqlx::query_scalar(
+        "SELECT host_id FROM profile_host_selectors WHERE profile_id=? AND kind='host' ORDER BY host_id",
+    )
+    .bind(profile_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The most machines one pool can be pinned to.
+const MAX_PINNED_HOSTS: usize = 64;
+
+/// Checks the machines a save pins the pool to: each listed once, and each a
+/// machine that exists and is not retired or deleted. Returns them sorted.
+async fn pinned_hosts(pool: &SqlitePool, host_ids: &[String]) -> Result<Vec<String>, FleetError> {
+    if host_ids.len() > MAX_PINNED_HOSTS {
+        return Err(FleetError::InvalidRequest("too many machines"));
+    }
+    let mut pinned = host_ids
+        .iter()
+        .map(|id| id.trim().to_owned())
+        .collect::<Vec<_>>();
+    pinned.sort();
+    if pinned.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FleetError::InvalidRequest("a machine is listed twice"));
+    }
+    for host in &pinned {
+        let known: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM fleet_hosts WHERE id=? AND deleted_at IS NULL AND retired_at IS NULL",
+        )
+        .bind(host)
+        .fetch_optional(pool)
+        .await?;
+        if known.is_none() {
+            return Err(FleetError::InvalidRequest("unknown machine"));
+        }
+    }
+    Ok(pinned)
 }
 
 /// The image a Docker platform runs when the pool has no Docker image of its own.
@@ -392,6 +450,15 @@ pub async fn save_pool_fleet(
         }
         seen.push(key);
     }
+    // Left out, the save keeps the machines the pool is pinned to, so a client
+    // that does not know about pinning (the web form) cannot clear it.
+    let pins = match &input.host_ids {
+        Some(host_ids) => pinned_hosts(pool, host_ids).await?,
+        None => match pool_profiles(pool, pool_id).await?.first() {
+            Some(profile) => profile.host_ids.clone(),
+            None => Vec::new(),
+        },
+    };
     sync_github_targets(pool).await?;
     let targets = pool_targets(pool, pool_id).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -487,6 +554,21 @@ pub async fn save_pool_fleet(
             )
             .bind(&id)
             .bind(target)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Every platform of the pool carries the same pins: placement checks
+        // them per profile (admission's host selector match).
+        sqlx::query("DELETE FROM profile_host_selectors WHERE profile_id=? AND kind='host'")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        for host in &pins {
+            sqlx::query(
+                "INSERT INTO profile_host_selectors (profile_id,kind,host_id) VALUES (?,'host',?)",
+            )
+            .bind(&id)
+            .bind(host)
             .execute(&mut *tx)
             .await?;
         }

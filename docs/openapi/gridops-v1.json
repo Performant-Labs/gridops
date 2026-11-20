@@ -675,6 +675,7 @@
       "put": {
         "tags": ["fleet-operate"],
         "summary": "Save the pool's fleet execution profile",
+        "description": "Saves the pool's fleet execution profile. An optional `hostIds` (a list of machine ids, at most 64) pins the pool to those machines; `[]` clears the pin, and leaving it out keeps the current pin. See docs/fleet-api.md, Pinning a pool to machines.",
         "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
         "requestBody": {
