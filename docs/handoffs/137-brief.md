@@ -167,6 +167,278 @@ The unconcluded-jobs index `gitlab_jobs` follows, from `migrations/0045_workflow
 `glpat-` is already present. The change is therefore to add `glrt-` (the array length becomes 11) and to extend the `events_mask_credentials` test so a `glrt-` token and a `glpat-` token are both masked. A whole token is masked, not just its prefix, because the run extends to the first character outside that set.
 
 
+## Amendments (architecture review, round 1)
+
+The Phase-3 review (`docs/handoffs/137/handoff-A.md`) blocked the plan on three contract-shape problems and raised eight warnings. This section resolves every one of them. **Where it conflicts with anything above, this section wins.** Each place it departs from the issue text is marked **[deviation]** and is listed again, with the wave-1 issue it affects, in the last subsection. The PR description and a comment on #136 repeat that list.
+
+### A-1 (block): GitLab fleet targets get storage in 0046
+
+Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so a GitLab `CiTarget` can be stored, granted, admitted and loaded into `PrepareEnvironment.target`.
+
+- New columns, all nullable: `gitlab_connection_id TEXT REFERENCES gitlab_connections(id)`, `gitlab_project_id INTEGER`, `gitlab_group_id INTEGER`. They come after `repository_uuid`, in that order.
+- `kind` CHECK becomes `IN ('github_repository','github_organization','bitbucket_workspace','bitbucket_repository','gitlab_project','gitlab_group')`.
+- The per-kind shape CHECK keeps its four arms. Each existing arm also requires `gitlab_connection_id IS NULL AND gitlab_project_id IS NULL AND gitlab_group_id IS NULL`. Two arms are added in the same style:
+  - `kind='gitlab_project'`: `gitlab_connection_id` NOT NULL, `gitlab_project_id` NOT NULL and > 0, `gitlab_group_id` NULL, and every GitHub and Bitbucket column NULL.
+  - `kind='gitlab_group'`: `gitlab_connection_id` NOT NULL, `gitlab_group_id` NOT NULL and > 0, `gitlab_project_id` NULL, and every GitHub and Bitbucket column NULL.
+- The table stays `STRICT`, `canonical_key` stays `NOT NULL UNIQUE`, and the trigger `fleet_ci_targets_immutable_identity` (BEFORE UPDATE, RAISE ABORT 'CI target identity is immutable') is recreated word for word.
+- These inbound foreign keys must keep every row and reference unchanged: `host_target_grants`, `host_session_target_grants`, `profile_ci_targets`, `workload_intents`, `workload_placements`, `fleet_events` (nullable `target_id`) and `external_runner_observations`. All of them are plain `REFERENCES fleet_ci_targets(id)` from 0022. No migration after 0022 touches the table.
+- Canonical keys, persisted UNIQUE and immutable, and mirroring Bitbucket's format: `gitlab:project:{connection_id}:{project_id}` and `gitlab:group:{connection_id}:{group_id}`, with the decimal id. `CiTarget::canonical_key` returns these. It is infallible, so the "return an error" rule doesn't apply.
+- `TargetKind` (`fleet/capabilities.rs`) gains `GitlabProject` and `GitlabGroup` (wire `gitlab_project`, `gitlab_group`) and a `const fn is_gitlab(self) -> bool`. `From<&CiTarget> for TargetKind` maps the two new variants to them. This is what the host agents of #147 and #142 advertise in `SupportedRunner`.
+- Storage glue, so the round trip works and is tested in this issue:
+  - `fleet::targets::ensure_target` accepts the two GitLab variants and inserts the matching row. It still refuses Bitbucket with the existing error.
+  - `fleet::admission::target_from_db` parses `gitlab_project` and `gitlab_group` rows back into the `CiTarget` variants.
+  - Syncing a pool's GitLab connections into fleet targets (the GitLab counterpart of the GitHub pool-target sync at the top of `fleet/targets.rs`) is behaviour, and it belongs to **#139**. **[deviation: #139 gains this ownership]**
+
+### A-2 (block): the base URL travels in the bootstrap material, not in `ExecutionConfiguration`
+
+**[deviation]** The issue says "with the base URL in `configuration`". `ExecutionConfiguration` is **not** changed. It is profile-derived runtime configuration and `deny_unknown_fields`, so a new field would break older host agents on every `PrepareEnvironment`. The registration URL already travels next to the token in the sealed bootstrap material (`github_registration { token, url, ... }`, produced in `gridops-reconciler/src/fleet.rs` and parsed by the private `Material` enums in the host agents).
+
+The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet/protocol/agent.rs`:
+
+    /// Bootstrap material for a GitLab runner, sealed by the reconciler (#139)
+    /// with `placement::store_bootstrap` and opened by the host agents
+    /// (#147 Linux Docker, #142 Tart/macOS). `token` goes to the runner's stdin;
+    /// `url` is not secret and may be passed as an argument.
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename = "gitlab_runner", deny_unknown_fields)]
+    pub struct GitlabRunnerMaterial {
+        pub token: String, // the `glrt-` runner authentication token
+        pub url: String,   // the connection's base_url, e.g. https://gitlab.com
+    }
+
+- The JSON is exactly `{"kind":"gitlab_runner","token":"glrt-…","url":"https://gitlab.example.com"}`. There are no other fields.
+- `Debug` is implemented by hand and prints `token: "[redacted]"`.
+- Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected; a payload with another `kind` is rejected; and `format!("{:?}")` doesn't contain the token.
+- A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
+
+### A-3 (block): `GitLabApi` takes credentials on every call, and `Scope` is defined
+
+One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` takes the token on each call. #138 injects it into `AppState`, and #139/#148 into the reconciler, next to `bitbucket`. Everything below lives in `crates/gridops-core/src/gitlab/mod.rs`. It uses the existing workspace deps `async-trait`, `secrecy`, `url` and `thiserror`, and `crates/gridops-core/Cargo.toml` gains `async-trait.workspace = true`.
+
+    pub struct GitLabCredentials { pub base_url: Url, pub access_token: SecretString }
+    // Debug prints base_url and "[redacted]" for the token.
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ScopeKind { Project, Group }          // as_str(): "project" | "group" (= gitlab_connections.scope_kind)
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Scope {
+        Project { id: ExternalId, path: String },  // id = scope_id, path = scope_path ("group/sub/project")
+        Group { id: ExternalId, path: String },
+    }
+    // Scope::kind() -> ScopeKind, Scope::id() -> ExternalId, Scope::path() -> &str,
+    // Scope::target(connection_id: GitlabConnectionId) -> CiTarget
+    //   (Project -> CiTarget::GitlabProject { project_id: id }, Group -> CiTarget::GitlabGroup { group_id: id })
+
+    pub struct CreatedRunner { pub id: ExternalId, pub token: SecretString }  // Debug redacts token
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Job {
+        pub id: ExternalId, pub project_id: ExternalId, pub pipeline_id: ExternalId,
+        pub status: JobStatus, pub tag_list: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum JobStatus {
+        Created, WaitingForResource, Preparing, Pending, Running,
+        Success, Failed, Canceled, Skipped, Manual, Scheduled,
+        #[serde(other)] Unknown,
+    }
+    // JobStatus::is_terminal(): true exactly for Success | Failed | Canceled | Skipped.
+    // as_str() gives the GitLab spelling stored in gitlab_jobs.status.
+
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    pub enum GitLabError {
+        Unauthorized,
+        MissingScope(String),                       // the missing token scope, e.g. "create_runner"
+        MissingRole,
+        NotFound,
+        RateLimited { retry_after: Option<Duration> },
+        Upstream(String),
+    }
+
+    #[async_trait]
+    pub trait GitLabApi: Send + Sync {
+        async fn create_runner(&self, credentials: &GitLabCredentials, scope: &Scope, tags: &[String],
+                               run_untagged: bool, description: &str) -> Result<CreatedRunner, GitLabError>;
+        async fn delete_runner(&self, credentials: &GitLabCredentials, runner_id: ExternalId) -> Result<(), GitLabError>;
+        async fn job(&self, credentials: &GitLabCredentials, project_id: ExternalId, job_id: ExternalId) -> Result<Job, GitLabError>;
+        async fn pending_jobs(&self, credentials: &GitLabCredentials, project_id: ExternalId) -> Result<Vec<Job>, GitLabError>;
+        async fn group_projects(&self, credentials: &GitLabCredentials, group_id: ExternalId) -> Result<Vec<ExternalId>, GitLabError>;
+        async fn resolve_scope(&self, credentials: &GitLabCredentials, kind: ScopeKind, path: &str) -> Result<Scope, GitLabError>;
+        async fn verify_access(&self, credentials: &GitLabCredentials, scope: &Scope) -> Result<(), GitLabError>;
+    }
+
+- **[deviation]** Every method gains a leading `credentials: &GitLabCredentials` argument.
+- **[deviation]** `resolve_scope` also takes `kind: ScopeKind`. The operator chooses project or group (#141), and #146 calls `/projects/:path` or `/groups/:path` from it.
+- **[deviation]** There is a new method, `group_projects`. GitLab has no group-level jobs list, so #148 polls a group connection by listing its projects and then calling `pending_jobs` on each. #146 implements it as `GET /groups/:id/projects?include_subgroups=true`, paginated.
+- `RateLimited.retry_after` is `Option<Duration>`, taken from `Retry-After`. Every id is `ExternalId`. `tag_list` is `Vec<String>`.
+- No function body outside the fake is `todo!()`: the trait has no default methods, and the real implementation is #146's.
+
+**`gitlab::fake::FakeGitLab`** (`crates/gridops-core/src/gitlab/fake.rs`), behind `#[cfg(any(test, feature = "test-support"))]`. `crates/gridops-core/Cargo.toml` gains `[features] test-support = []`.
+
+- It is `Clone` (shared `Arc<Mutex<_>>` state), `Default`, and implements `GitLabApi`.
+- Its state is keyed by `base_url`, so two connections on different instances stay apart.
+- Setup methods:
+  - `with_scope(base_url: &Url, scope: Scope)`, used by `resolve_scope` (looked up by kind and path) and by `verify_access`.
+  - `with_job(base_url: &Url, job: Job)`, used by `job` and by `pending_jobs` (status `Pending`, same project).
+  - `with_group_project(base_url: &Url, group_id, project_id)`.
+- Failures:
+  - `fail_next(base_url: &Url, method: FakeMethod, error: GitLabError)` queues a one-shot failure for that base URL and method. Queued failures for one method are returned first in, first out.
+  - `FakeMethod` has one variant per trait method.
+- Effects:
+  - `create_runner` returns ids 1, 2, 3, … per base URL, and tokens `glrt-fake-runner-token-{id:04}`.
+  - `delete_runner` removes the runner. `runners(base_url) -> Vec<FakeRunner { id, scope, tags, run_untagged, description }>` lists the live runners.
+  - `delete_runner` on an unknown id returns `NotFound`.
+  - `job` returns `NotFound` for an unknown job, and so does `resolve_scope` for an unknown path.
+- Recording: `calls() -> Vec<FakeCall>`. `FakeCall { base_url: Url, method: FakeMethod }` records every call, failed calls included, in order. The access token is never recorded.
+- Tests in `fake.rs` cover each method, the per-base-URL isolation, `fail_next` ordering, and the recorded calls.
+
+### W-4: the outcome codes are `DiagnosticCode` variants
+
+`IdleExpired` and `RegistrationRefused` are added to **`DiagnosticCode`** in `fleet/protocol/outcomes.rs` (wire `idle_expired`, `registration_refused`). `FailureCode` is unchanged, so `placement::reported_gone` still recognises an exited runner. The meaning, pinned for #147, #142 and #139:
+
+- Runner waited its timeout without a job: the Inspect result is `Failed { code: ResourceUnavailable, retryable: false, diagnostic: Some({ code: IdleExpired, .. }) }`.
+- GitLab refused the `glrt-` token: the start command's result is `Failed { code: Configuration, retryable: false, diagnostic: Some({ code: RegistrationRefused, .. }) }`.
+
+There are serde round-trip tests for both codes, inside a `CommandOutcome::Failed`.
+
+### W-5 and W-6: schema constraints, pinned
+
+Statement order inside 0046:
+
+1. `gitlab_connections`.
+2. `runner_pool_gitlab_connections`.
+3. `runner_pools.run_untagged`.
+4. `gitlab_jobs`.
+5. The `fleet_ci_targets` rebuild.
+6. The `runners` rebuild.
+
+The tables:
+
+    CREATE TABLE `gitlab_connections` (
+      `id` text PRIMARY KEY NOT NULL,
+      `name` text NOT NULL,
+      `base_url` text NOT NULL,                   -- normalised by #138: scheme+host[+port][+path], no trailing slash
+      `scope_kind` text NOT NULL CHECK (`scope_kind` IN ('project','group')),
+      `scope_id` integer NOT NULL CHECK (`scope_id` > 0),
+      `scope_path` text NOT NULL,
+      `access_token_key` text NOT NULL,
+      `webhook_secret_key` text NOT NULL,
+      `created_by` text,
+      `created_at` integer NOT NULL,
+      `updated_at` integer NOT NULL,
+      FOREIGN KEY (`created_by`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE set null
+    );
+    CREATE UNIQUE INDEX `gitlab_connections_scope_unique` ON `gitlab_connections` (`base_url`,`scope_kind`,`scope_id`);
+    CREATE UNIQUE INDEX `gitlab_connections_access_token_key_unique` ON `gitlab_connections` (`access_token_key`);
+    CREATE UNIQUE INDEX `gitlab_connections_webhook_secret_key_unique` ON `gitlab_connections` (`webhook_secret_key`);
+
+    -- runner_pool_gitlab_connections: the 0019 Bitbucket table word for word with
+    -- gitlab_connections in place of bitbucket_connections, index
+    -- runner_pool_gitlab_connections_connection_idx (connection_id, pool_id).
+
+    ALTER TABLE runner_pools ADD COLUMN run_untagged INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE `gitlab_jobs` (
+      `id` text PRIMARY KEY NOT NULL,
+      `connection_id` text NOT NULL REFERENCES `gitlab_connections`(`id`) ON DELETE cascade,
+      `project_id` integer NOT NULL,
+      `job_id` integer NOT NULL,
+      `pipeline_id` integer NOT NULL,
+      `status` text NOT NULL,                     -- JobStatus::as_str()
+      `tag_list` text NOT NULL DEFAULT '[]',      -- JSON array of strings
+      `status_changed_at` integer NOT NULL,
+      `retries_count` integer NOT NULL DEFAULT 0,
+      `gitlab_runner_id` integer,
+      `pool_id` text REFERENCES `runner_pools`(`id`) ON DELETE set null,
+      `created_at` integer NOT NULL,
+      `updated_at` integer NOT NULL
+    );
+    CREATE UNIQUE INDEX `gitlab_jobs_connection_job_unique` ON `gitlab_jobs` (`connection_id`,`job_id`);
+    CREATE INDEX `gitlab_jobs_open_created_idx` ON `gitlab_jobs` (`created_at`,`id`)
+      WHERE `status` NOT IN ('success','failed','canceled','skipped');
+
+- The open-jobs index follows 0043's `workflow_jobs_open_created_idx`, not 0045. `gitlab_jobs` has no `conclusion` column. A job is concluded exactly when `JobStatus::is_terminal()`, and #140 and #148 both use that one rule.
+- `runners` gets `gitlab_connection_id text REFERENCES gitlab_connections(id) ON UPDATE no action ON DELETE set null` and `gitlab_runner_id integer`, appended after `runtime`, and **two** new indexes:
+  - `runners_gitlab_connection_idx (pool_id, gitlab_connection_id, status)`, the pool lookup, after 0019's.
+  - `runners_gitlab_runner_id_idx (gitlab_runner_id)`, #140's busy lookup by GitLab runner id, after `runners_github_id_idx`.
+
+### W-8: rebuild mechanics
+
+0046 starts with sqlx's `-- no-transaction` directive and controls the transaction itself:
+
+    PRAGMA foreign_keys=OFF;
+    BEGIN;
+      -- statements 1-6 above; each rebuild = CREATE TABLE x_new (...); INSERT INTO x_new (<old columns>) SELECT <old columns> FROM x;
+      -- DROP TABLE x; ALTER TABLE x_new RENAME TO x; then every index and trigger of x recreated
+      CREATE TEMP TABLE _gitlab_0046_fk_guard (violations INTEGER NOT NULL CHECK (violations = 0));
+      INSERT INTO _gitlab_0046_fk_guard SELECT count(*) FROM pragma_foreign_key_check;
+      DROP TABLE _gitlab_0046_fk_guard;
+    COMMIT;
+    PRAGMA foreign_keys=ON;
+
+- Any dangling reference makes the guard's CHECK fail, so the migration errors before `COMMIT`.
+- `foreign_keys` is back on for the pooled connection once the migration finishes.
+- A test asserts `PRAGMA foreign_keys` is 1 on a connection taken from the pool after migrating.
+
+### Done-when, extended for A-1
+
+On top of the `runners` criteria above:
+
+- `fleet_schema.rs` may also exempt `fleet_ci_targets`, its autoindex and the `fleet_ci_targets_immutable_identity` trigger from the definition-unchanged assertion. For those, it asserts:
+  - the new kinds and columns exist;
+  - the trigger is present and still aborts an UPDATE;
+  - the shape CHECK accepts a `gitlab_project` row and a `gitlab_group` row, and refuses a GitLab row with a GitHub column set and a `gitlab_project` row without `gitlab_project_id`.
+- A new test migrates to 0045, loads `fleet_ready.sql`, snapshots every table, and then applies 0046. It asserts:
+  - every row of every table is equal, with `fleet_ci_targets` rows gaining three NULL GitLab columns;
+  - `PRAGMA foreign_key_check` is empty, `PRAGMA integrity_check` is `ok` and `foreign_keys` is 1;
+  - `pragma_foreign_key_list` of each of the seven referencing tables is unchanged.
+
+  `fleet_ready.sql`'s Bitbucket and GitHub targets survive, and that fixture carries the whole fleet graph that references targets.
+- There is a round-trip test: `ensure_target` of a `CiTarget::GitlabProject` and of a `CiTarget::GitlabGroup`, then `target_from_db` of each row, returns the same `CiTarget`. Calling `ensure_target` a second time returns the same id.
+
+### W-7: the OpenAPI entries
+
+New paths in `docs/openapi/gridops-v1.json`. Every operation description starts with "Not served yet: implemented by #138" (or #140), because the spec is served live.
+
+- The connection operations declare `security: [{ "cookieAuth": [] }]` only, with no `bearerAuth`. They are session routes, like Bitbucket's, so `TOKEN_SCOPED_ROUTES` is unchanged.
+  - `GET /api/v1/platform-connections/gitlab`: 200 `GitlabConnectionList { canManage: boolean, items: GitlabConnection[] }`.
+  - `POST /api/v1/platform-connections/gitlab`: body `CreateGitlabConnectionRequest { name, baseUrl (default "https://gitlab.com"), scopeKind ("project"|"group"), scopePath, accessToken }`. Responses: 201 `GitlabConnectionCreated { connection: GitlabConnection, webhookUrl, webhookSecret }`, the only response that carries the secret; 409 on a duplicate `(baseUrl, scope)`.
+  - `PATCH /api/v1/platform-connections/gitlab/{connectionId}`: body `UpdateGitlabConnectionRequest { name?, accessToken? }`, response 200 `GitlabConnection`. PATCH is kept as #138 says, because it is a partial update. Bitbucket's PUT is a full replace.
+  - `DELETE /api/v1/platform-connections/gitlab/{connectionId}`: 204, or 409 while a pool targets it.
+  - `POST /api/v1/platform-connections/gitlab/{connectionId}/verify`: 204, or an error that names the missing scope or role.
+  - `POST /api/v1/platform-connections/gitlab/{connectionId}/webhook-secret/rotate`: 200 `GitlabWebhookSecret { webhookUrl, webhookSecret }`.
+  - `GitlabConnection` is `{ id, provider: "gitlab", name, baseUrl, scopeKind, scopeId (integer), scopePath, createdAt, updatedAt (RFC 3339 strings, as Bitbucket's iso()), canManage }`. It has no secret, no token and no webhook URL.
+- `POST /api/v1/webhooks/gitlab` declares `security: []`, like `/api/v1/fleet/agent/enroll`.
+  - Required header parameters: `X-Gitlab-Token` and `X-Gitlab-Event`.
+  - The body is a free-form JSON object.
+  - Responses: 202 on an accepted delivery, 401 when no connection's secret matches.
+- Errors on these paths use a new `ApiErrorBody { error: string, code?: string }` component, the shape `gridops-api/src/error.rs` returns. They do not use the Fleet `ErrorResponse`.
+- Component schemas are PascalCase, and the `openapi.rs` structural tests and `npm run validate:openapi` pass.
+
+### Remaining scope notes
+
+- `CiTarget::GitlabProject { connection_id: GitlabConnectionId, project_id: ExternalId }` and `CiTarget::GitlabGroup { connection_id: GitlabConnectionId, group_id: ExternalId }` serialize as `{"platform":"gitlab_project",...}` and `{"platform":"gitlab_group",...}`. `CiPlatform::Gitlab` serializes as `"gitlab"`.
+- `CiTarget::is_gitlab()` is added. `is_bitbucket()` tests the Bitbucket variants explicitly.
+- No Bitbucket-only validation rule in `PrepareEnvironment` applies to GitLab targets. Platform rules for GitLab are #147's and #142's.
+- Out of scope: any handler, reconciler loop, HTTP client, host-agent code or UI.
+
+### Deviations from the issue text (to repeat in the PR and on #136)
+
+| # | Issue text | Contract as shipped | Wave-1 issues affected |
+|---|---|---|---|
+| D1 | "the base URL in `configuration`" | No `ExecutionConfiguration` change. The base URL is `url` in the sealed `GitlabRunnerMaterial` `{"kind":"gitlab_runner","token","url"}`. | #139, #147, #142 |
+| D2 | `GitLabApi` methods without credentials | Every method takes `&GitLabCredentials { base_url, access_token }` first. A single `Arc<dyn GitLabApi>` serves every connection. | #146, #138, #139, #140, #148 |
+| D3 | `resolve_scope(path)` | `resolve_scope(credentials, kind: ScopeKind, path)` | #146, #138 |
+| D4 | (no method) | A new `group_projects(credentials, group_id)`, so group connections can be polled | #146, #148 |
+| D5 | New outcome codes (owning enum unstated) | `DiagnosticCode::{IdleExpired, RegistrationRefused}` inside `Failed { ResourceUnavailable \| Configuration }` | #147, #142, #139 |
+| D6 | Schema list without `fleet_ci_targets` | 0046 also rebuilds `fleet_ci_targets` with the `gitlab_project` and `gitlab_group` kinds, adds `TargetKind::Gitlab*`, and adds `ensure_target`/`target_from_db` arms. Pool-target sync for GitLab is #139's. | #139, #147, #142 |
+| D7 | "an index" on the new `runners` columns | Two indexes: `runners_gitlab_connection_idx` and `runners_gitlab_runner_id_idx` | #139, #140 |
+| D8 | Unconcluded-jobs index "like 0045's" | An open-jobs partial index like 0043's, `WHERE status NOT IN ('success','failed','canceled','skipped')` | #140, #148 |
+
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
 - migrations/0046_gitlab.sql (not found)
@@ -198,3 +470,15 @@ The unconcluded-jobs index `gitlab_jobs` follows, from `migrations/0045_workflow
 - migrations/0022_fleet_foundation.sql (`workload_placements.runner_id`)
 - migrations/0031_runner_name_index.sql
 - migrations/0001 to 0045 applied in order to a scratch SQLite database, to read the live `runners` definition, its indexes and the FKs pointing at it
+- docs/handoffs/137/handoff-A.md (architecture review, round 1)
+- migrations/0022_fleet_foundation.sql (`fleet_ci_targets`, its trigger and the seven referencing tables)
+- migrations/0018_bitbucket_connections.sql
+- migrations/0043_workflow_job_attempts.sql
+- crates/gridops-core/src/fleet/targets.rs (`ensure_target`)
+- crates/gridops-core/src/fleet/placement.rs (`reported_gone`)
+- crates/gridops-host-agent/src/docker.rs (`Material`)
+- crates/gridops-reconciler/src/fleet.rs (material production)
+- crates/gridops-core/src/bitbucket.rs (per-call token)
+- crates/gridops-api/src/main.rs and resources.rs (Bitbucket routes and JSON)
+- crates/gridops-api/src/error.rs (`ApiError` body)
+- issues #146 #138 #139 #147 #140 #148 #142 #141 (names they depend on)
