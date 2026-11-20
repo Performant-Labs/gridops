@@ -363,13 +363,13 @@ fn compact(sql: &str) -> String {
 fn the_active_jobs_index_predicate_is_built_from_the_active_statuses() -> Result<()> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../migrations/0046_gitlab.sql"
+        "/../../migrations/0047_gitlab.sql"
     );
     let migration = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     let index = migration
         .split(';')
         .find(|statement| statement.contains("gitlab_jobs_active_created_idx"))
-        .context("0046 creates gitlab_jobs_active_created_idx")?;
+        .context("0047 creates gitlab_jobs_active_created_idx")?;
     let statuses: Vec<String> = EVERY_STATUS
         .iter()
         .filter(|(status, _)| status.is_active())

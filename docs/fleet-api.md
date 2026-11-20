@@ -636,3 +636,27 @@ offline, and the start grant can't exceed local authority.
   approved, unretired machine set aside this way, titled with the machine's
   name, with `detail` set to the gate's `message`, `until` as above and
   `href` `/fleet/machines/<id>`; the alert goes once the gate lifts.
+
+## Exclusive pools
+
+Every Linux runner carries the catch-all label `self-hosted-linux` (macOS
+runners carry `self-hosted-macos`), and a job that asks for it matches any
+pool on that platform. Pinning alone therefore cannot reserve a pool for a
+class of jobs: GitHub hands a `self-hosted-linux` job to any idle runner of
+the pinned pool, and when the main pool is saturated its queued jobs pass to
+the next compatible pool, which scales up for them.
+
+`PUT /api/v1/fleet/pools/{pool_id}/profile` takes an optional boolean
+`exclusiveLabels` (default off):
+
+- **left out**: the pool keeps its setting. The web form sends none;
+- **`true`**: the pool's runners register without the catch-all label (they
+  still carry `self-hosted`, the OS, the architecture and the pool's own
+  labels), and queue ownership matches the pool only on those labels. A job
+  that asks for `self-hosted-linux` never goes to it;
+- **`false`**: the pool takes the catch-all label again.
+
+`GET` (and the `PUT` response) returns it as `exclusiveLabels`. The setting
+applies to runners started after the save; a runner already registered keeps
+the labels it has until it is replaced. To use the pool, a workflow asks for
+one of its own labels (the pool's name is always one).

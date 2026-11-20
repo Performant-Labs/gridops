@@ -146,7 +146,7 @@ pub enum JobStatus {
 }
 
 /// The `gitlab_jobs.status` values of active jobs, in the order of the
-/// `gitlab_jobs_active_created_idx` predicate in `migrations/0046_gitlab.sql`,
+/// `gitlab_jobs_active_created_idx` predicate in `migrations/0047_gitlab.sql`,
 /// which must match this list.
 pub const GITLAB_ACTIVE_JOB_STATUSES: [&str; 5] = [
     "created",

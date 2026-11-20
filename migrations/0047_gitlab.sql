@@ -171,9 +171,9 @@ CREATE INDEX `runners_gitlab_connection_idx`
 CREATE INDEX runners_name_idx ON runners(name, created_at);
 
 -- Refuse to commit if any reference anywhere now dangles.
-CREATE TEMP TABLE _gitlab_0046_fk_guard (violations INTEGER NOT NULL CHECK (violations = 0));
-INSERT INTO _gitlab_0046_fk_guard SELECT count(*) FROM pragma_foreign_key_check;
-DROP TABLE _gitlab_0046_fk_guard;
+CREATE TEMP TABLE _gitlab_0047_fk_guard (violations INTEGER NOT NULL CHECK (violations = 0));
+INSERT INTO _gitlab_0047_fk_guard SELECT count(*) FROM pragma_foreign_key_check;
+DROP TABLE _gitlab_0047_fk_guard;
 
 COMMIT;
 

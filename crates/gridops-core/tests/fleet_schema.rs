@@ -112,7 +112,7 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     let old_records = records(&db.pool, &tables).await?;
     MIGRATOR.run(&db.pool).await?;
     // Rows compare on every column the table had before the upgrade; the
-    // columns 0046 adds are checked on their own below.
+    // columns 0047 adds are checked on their own below.
     let mut new_records = records_on(&db.pool, &old_columns).await?;
     // The one row an upgrade may add: whether the built-in runner host stays
     // on. This legacy fixture has a Docker pool with a runner on the host, so
@@ -126,7 +126,7 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     assert!(added[0].contains("\"true\""), "{}", added[0]);
     assert_eq!(new_records, old_records);
     assert_added_columns(&db.pool, &old_columns, LEGACY_ADDED_COLUMNS).await?;
-    // 0046 rebuilds `runners` (its ci_platform CHECK) and adds a column to
+    // 0047 rebuilds `runners` (its ci_platform CHECK) and adds a column to
     // `runner_pools`, so only those definitions may change; their shape is
     // asserted instead. Every other legacy definition is byte-for-byte equal.
     let new_schema = schema(&db.pool).await?;
@@ -171,7 +171,7 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     db.close().await
 }
 
-/// The definitions 0046 may change, each asserted by shape instead: the
+/// The definitions 0047 may change, each asserted by shape instead: the
 /// `runners` rebuild and its indexes, `runner_pools` (one added column), and
 /// whatever else the caller names.
 fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
@@ -181,8 +181,8 @@ fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
         || also.contains(&name)
 }
 
-/// Every index on `runners` after 0046: name, unique, columns. The first eight
-/// are the ones the table has after 0045; 0013's `runners_github_id_unique`
+/// Every index on `runners` after 0047: name, unique, columns. The first eight
+/// are the ones the table has after 0046; 0013's `runners_github_id_unique`
 /// must not come back.
 const RUNNERS_INDEXES: [(&str, bool, &str); 10] = [
     ("runners_container_id_unique", true, "container_id"),
@@ -213,7 +213,7 @@ const RUNNERS_INDEXES: [(&str, bool, &str); 10] = [
     ("runners_gitlab_runner_id_idx", false, "gitlab_runner_id"),
 ];
 
-/// Outbound foreign keys of `runners` after 0046: (from, table, to, on delete).
+/// Outbound foreign keys of `runners` after 0047: (from, table, to, on delete).
 const RUNNERS_FOREIGN_KEYS: [(&str, &str, &str, &str); 5] = [
     (
         "bitbucket_connection_id",
@@ -232,7 +232,7 @@ const RUNNERS_FOREIGN_KEYS: [(&str, &str, &str, &str); 5] = [
     ("target_repository_id", "repositories", "id", "SET NULL"),
 ];
 
-/// The columns 0046 adds to tables that already hold rows, with the value
+/// The columns 0047 adds to tables that already hold rows, with the value
 /// every existing row must have afterwards (`None` = NULL).
 type AddedColumns = &'static [(
     &'static str,
@@ -482,7 +482,7 @@ async fn assert_runners_contract(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// 0046 switches `foreign_keys` off for its own run; every pooled connection,
+/// 0047 switches `foreign_keys` off for its own run; every pooled connection,
 /// the migration's included, must have it on again afterwards.
 async fn assert_foreign_keys_on_every_connection(pool: &SqlitePool) -> Result<()> {
     let mut connections = Vec::new();
@@ -824,9 +824,9 @@ const TARGET_REFERRERS: [&str; 7] = [
 ];
 
 #[tokio::test]
-async fn gitlab_upgrade_from_0045_keeps_the_fleet_graph_and_every_reference() -> Result<()> {
+async fn gitlab_upgrade_from_0046_keeps_the_fleet_graph_and_every_reference() -> Result<()> {
     let db = Database::legacy().await?;
-    MIGRATOR.run_to(45, &db.pool).await?;
+    MIGRATOR.run_to(46, &db.pool).await?;
     sqlx::raw_sql(include_str!("fixtures/fleet_ready.sql"))
         .execute(&db.pool)
         .await?;
@@ -850,7 +850,7 @@ async fn gitlab_upgrade_from_0045_keeps_the_fleet_graph_and_every_reference() ->
             old_foreign_keys
                 .get(table)
                 .is_some_and(|keys| keys.iter().any(|key| key.1 == "fleet_ci_targets")),
-            "{table} references fleet_ci_targets before 0046"
+            "{table} references fleet_ci_targets before 0047"
         );
     }
 
@@ -1222,10 +1222,10 @@ async fn a_gitlab_connection_a_fleet_target_references_cannot_be_deleted() -> Re
 }
 
 #[tokio::test]
-async fn the_0046_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()> {
+async fn the_0047_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../migrations/0046_gitlab.sql"
+        "/../../migrations/0047_gitlab.sql"
     );
     let migration = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     // Comments are dropped first, so a `;` inside one cannot split a statement.
@@ -1236,7 +1236,7 @@ async fn the_0046_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
         .join("\n");
     let guard: Vec<String> = code
         .split(';')
-        .filter(|statement| statement.contains("_gitlab_0046_fk_guard"))
+        .filter(|statement| statement.contains("_gitlab_0047_fk_guard"))
         .map(|statement| statement.trim().to_owned())
         .collect();
     let starts: Vec<_> = guard
@@ -1246,7 +1246,7 @@ async fn the_0046_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
     assert_eq!(
         starts,
         ["CREATE", "INSERT", "DROP"],
-        "0046's guard: {guard:?}"
+        "0047's guard: {guard:?}"
     );
     let guard = format!("{};", guard.join(";\n"));
     for dangling in [false, true] {

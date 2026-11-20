@@ -755,7 +755,7 @@
       "put": {
         "tags": ["fleet-operate"],
         "summary": "Save the pool's fleet execution profile",
-        "description": "Saves the pool's fleet execution profile. An optional `hostIds` (a list of machine ids, at most 64) pins the pool to those machines; `[]` clears the pin, and leaving it out keeps the current pin. See docs/fleet-api.md, Pinning a pool to machines.",
+        "description": "Saves the pool's fleet execution profile. An optional `hostIds` (a list of machine ids, at most 64) pins the pool to those machines; `[]` clears the pin, and leaving it out keeps the current pin. An optional `exclusiveLabels` (boolean) makes the pool's runners skip the catch-all `self-hosted-linux` / `self-hosted-macos` label; leaving it out keeps the current setting. See docs/fleet-api.md, Pinning a pool to machines and Exclusive pools.",
         "security": [{ "bearerAuth": ["fleet:operate"] }, { "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/PoolId" }],
         "requestBody": {

@@ -68,6 +68,8 @@ export const profileSchema = profileInputSchema.extend({
   targetIds: z.array(fleetIdSchema).max(10_000),
   // Pinned machines (#131); a server from before pinning sends none.
   hostIds: z.array(fleetIdSchema).max(64).default([]),
+  // Exclusive labels (#134); a server from before it sends none.
+  exclusiveLabels: z.boolean().default(false),
 });
 export const profileResultSchema = z.strictObject({ item: profileSchema.nullable() });
 export const savedProfileResultSchema = z.strictObject({ item: profileSchema });
