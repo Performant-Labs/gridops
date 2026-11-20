@@ -65,8 +65,8 @@ These decisions are binding and replace any earlier text in this brief that diff
 
 - `gitlab_poll::worker(app: Reconciler)` is spawned from `main()` with `tokio::spawn`, next to `github_sync_worker`, and never runs inside `reconcile()`. It loops: one poll of every connection, then sleeps for the reconcile interval (the same `reconcileIntervalSeconds` setting `run_passes` uses; if that is not cheaply readable from the worker, a named constant `GITLAB_POLL_INTERVAL` of 30 s, documented).
 - Every `gitlab_jobs` write goes through the existing `retry_when_busy` helper, as the GitHub sync's writes do.
-- Each connection's poll runs under `tokio::time::timeout(GITLAB_CONNECTION_POLL_BUDGET, ..)` (named constant, 60 s); a timeout is logged for that connection and the worker moves on.
-- The conclusion step is bounded like `confirm_jobs`: it only checks rows of that connection whose status is active and not `pending` in GitLab's answer, and whose `status_changed_at` (or `updated_at`) is older than `GITLAB_JOB_CHECK_AGE_MS` (named, 5 minutes, mirroring `JOB_CHECK_AGE_MS`), oldest first, at most `GITLAB_JOB_CHECK_LIMIT` (named, 10, mirroring `JOB_CHECK_LIMIT`) per connection per poll. `running` rows are included (a running job whose terminal webhook was missed must still conclude), but only once they are that old.
+- Timeouts are per request, not per connection — see A2-W6.
+- The conclusion step is bounded like `confirm_jobs`/`unconfirmed_jobs` — see **A2-B1** (round 2), which replaces this bullet.
 - The rate-limit skip-until map (`HashMap<connection_id, Instant>`) lives in the worker's own state, not in `Reconciler` or the database. Expose a single-poll function (e.g. `poll_once(app, &mut backoff, now)`) so tests drive individual polls deterministically without the loop.
 
 ### A-B2. GitLab jobs stay out of the GitHub id spaces
@@ -94,7 +94,7 @@ These decisions are binding and replace any earlier text in this brief that diff
 
 ### A-W1. Allowed `main.rs` edits (#139 is not on master)
 
-`gitlab: Arc<dyn GitLabApi>` on `Reconciler` is #139's field; if #139 is not on master when this lands, #148 adds it. Allowed edits outside `gitlab_poll.rs`: `mod gitlab_poll;` in `main.rs`; the `gitlab` field on `Reconciler`; its value in `main()`'s constructor (the placeholder); the `tokio::spawn(gitlab_poll::worker(..))` line; and the `gitlab` field in the test constructors (`main.rs` near line 4825 and `start_tests.rs` near line 425, and any other `Reconciler { .. }` literal the compiler requires). The placeholder is a private type `UnavailableGitLab` in `gitlab_poll.rs` returning `GitLabError::Upstream("GitLab client not available yet".into())` from every method (#139 keeps its own in `gitlab_lifecycle.rs`; whichever lands second keeps one).
+`gitlab: Arc<dyn GitLabApi>` on `Reconciler` is #139's field; if #139 is not on master when this lands, #148 adds it. Allowed edits outside `gitlab_poll.rs`: `mod gitlab_poll;` in `main.rs`; the `gitlab` field on `Reconciler`; its value in `main()`'s constructor (the placeholder); the `tokio::spawn(gitlab_poll::worker(..))` line; and the `gitlab` field in the test constructors (`main.rs` near line 4825 and `start_tests.rs` near line 425, and any other `Reconciler { .. }` literal the compiler requires). The placeholder is a `pub(crate)` type `UnavailableGitLab` in `gitlab_poll.rs` (A2-W7) returning `GitLabError::Upstream("GitLab client not available yet".into())` from every method (#139 keeps its own in `gitlab_lifecycle.rs`; whichever lands second keeps one).
 
 ### A-W2. One credentials loader
 
@@ -103,13 +103,54 @@ These decisions are binding and replace any earlier text in this brief that diff
 ### A-W3. One status rule for two writers
 
 - A terminal row never changes.
-- The poll never moves a row backwards along `created/waiting_for_resource/preparing → pending → running → terminal`: it only writes a status that is later in that order than the stored one (or equal, with no write), and only when the row's `status_changed_at` is older than the poll's observation time, which is taken **before** the `pending_jobs` request.
+- The poll never moves a row backwards; the order and the same-rank timestamp rule are fixed in A2-W2/W3 (round 2), which replaces the order stated here.
 - A conclusion through `job` writes the terminal status GitLab reports (or `canceled` on `NotFound`) with `status_changed_at` = that observation time.
 - New rows inserted by the poll use `INSERT .. ON CONFLICT(connection_id, job_id) DO NOTHING` (then the guarded update), so a concurrent webhook insert is never clobbered. Recorded on epic #136.
 
 ### A-W4. One ordered candidate list
 
 GitHub and GitLab candidates form one ordered list (a `UNION ALL` or an in-Rust merge) ordered by job `created_at`, then platform (GitHub before GitLab), then the job key, then the existing pool order (repository-scoped pools first, then `created_at`, `id`). The GitLab arm reuses the same `room` subquery and `PoolStanding::of`. A GitLab pool can therefore also own GitHub jobs with consistent ownership.
+
+## Amendments, round 2 (A review of brief `f8be658`)
+
+Binding; they replace earlier text where it differs.
+
+### A2-B1. The conclusion step cannot starve
+
+The conclusion step is bounded like `confirm_jobs`/`unconfirmed_jobs` (`main.rs:2030-2220`). It considers that connection's active rows that are not in GitLab's `pending` answer and whose `updated_at` is older than `GITLAB_JOB_CHECK_AGE_MS` (5 minutes). Every writer sets `updated_at`, and the poll sets it to the observation time on each row **before** that row's `job` request (through `retry_when_busy`), so a checked row is not asked about again for `GITLAB_JOB_CHECK_AGE_MS` whatever the answer, like `workflow_job_sync.checked_at`. The mechanism is `gitlab_jobs.updated_at`; there is no worker-local last-checked map. Rows are ordered `pending` first, then the other non-`running` active statuses, then `running`, each by `created_at`, `id`. At most `GITLAB_JOB_CHECK_LIMIT` (10) are checked per connection per poll.
+
+### A2-W2/W3. Status order (replaces A-W3's order)
+
+- Rank order: `created` = `waiting_for_resource` = `preparing` = `manual` = `scheduled` < `pending` < `running` < terminal (`success`/`failed`/`canceled`/`skipped`, all equal and final).
+- The poll never writes `unknown` (a job GitLab reports as an unrecognised status is skipped for that poll).
+- **The order decides, not timestamps**: a status later in the order always applies (for both the poll and #140's webhook); a terminal row never changes; timestamps (`status_changed_at`) only order writes at the **same** rank (a same-rank write applies only when its `status_changed_at` is newer). The poll's observation time is taken before its `pending_jobs` request. A `manual`/`scheduled` row that GitLab now reports as `pending` moves to `pending` under the same `(connection_id, job_id)`.
+- This updated rule is posted to #136 for #140.
+
+### A2-W4. Concluding a `running` row clears its runner's busy flag
+
+When the conclusion step writes a terminal status to a row that was `running` and has a non-null `gitlab_runner_id`, it also sets `busy=0` on the live runner with that `gitlab_runner_id` and the row's `gitlab_connection_id` (`deleted_at IS NULL`), in the same `retry_when_busy` write, mirroring `associate_runner_with_job` for GitHub. A test covers it (runner busy before, not busy after, other runners untouched).
+
+### A2-W5. Keep the platform check
+
+The GitLab arm keeps a bare `EXISTS (SELECT 1 FROM (pool_platforms!()) platform)` with no label terms, so a pool with no runnable platform never owns a GitLab job.
+
+### A2-W6. Time limits per request
+
+No per-connection budget. Each `GitLabApi` call (`group_projects`, each `pending_jobs`, each `job`) runs under `tokio::time::timeout(GITLAB_REQUEST_TIMEOUT, ..)` (named, 30 s). A timed-out `pending_jobs` for one project skips that project for this poll; the conclusion step still runs for the connection, but it must not conclude rows of a project whose `pending_jobs` failed or timed out this poll (they are only "not pending" because the answer is missing). A timed-out `job` leaves the row for its next check.
+
+### A2-W7. Where the shared helpers live
+
+- `gitlab_credentials(app: &Reconciler, connection_id: &str) -> Result<Option<GitLabCredentials>>` lives in `main.rs` next to `runtime_secret` (an allowed `main.rs` edit), imported by `gitlab_poll.rs` with `use super::`, so #139's module never depends on the poll module.
+- `UnavailableGitLab` is `pub(crate)` in `gitlab_poll.rs` (constructed by `main()`).
+
+### A2 Done-when additions
+
+- A stale `pending` row (older than the age) is checked ahead of `GITLAB_JOB_CHECK_LIMIT` older `running` rows.
+- A row whose `job` answer did not change is not asked about again within `GITLAB_JOB_CHECK_AGE_MS` (its `updated_at` was set before the request).
+- A `manual` row that GitLab now lists as pending becomes `pending` and becomes demand.
+- A webhook-written `running` row with a `status_changed_at` older than the poll's observation time is not moved back to `pending`.
+- Concluding a `running` row clears its runner's `busy` (A2-W4).
+- Rows of a project whose `pending_jobs` call failed are not concluded in that poll (A2-W6).
 
 ## Verified source excerpts (brief review R1, NV-1 to NV-4)
 
