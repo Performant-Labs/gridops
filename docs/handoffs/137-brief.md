@@ -102,7 +102,7 @@ The criterion "existing GitHub and Bitbucket rows survive the `runners` rebuild 
 What the fixtures hold:
 
 - `fleet_legacy.sql` has three `runners` rows: `legacy-runner` and `legacy-native` (GitHub, `github_runner_id` 100 and 101) and `legacy-bb-runner` (`ci_platform` `'bitbucket'`, `bitbucket_connection_id` `'legacy-bb'`). It also has the inbound rows the rebuild endangers: `runner_events` row `legacy-event` and `log_streams` row `legacy-log`, both with `runner_id` `'legacy-runner'`.
-- `fleet_ready.sql` has **no** `runners` rows. It inserts the fleet graph (hosts, domains, backends, `fleet_ci_targets` including a `bitbucket_workspace` target, placements, allocations, commands) after the full migration run, so it proves the post-0046 schema still accepts that graph and its constraint tests in `fleet_schema.rs` still pass.
+- `fleet_ready.sql` has **no** `runners` rows. It inserts the fleet graph (hosts, domains, backends, `fleet_ci_targets` including a `bitbucket_workspace` target, placements, allocations, commands) after the full migration run, so it proves the post-0046 schema still accepts that graph and its constraint tests in `fleet_schema.rs` still pass. It is always loaded on top of `fleet_legacy.sql` (`Database::ready()` calls `Database::legacy()` first), because its rows reference `legacy-pool` and `legacy-bb`. So any database that holds it also holds the three legacy `runners` rows and their inbound rows (see "Done-when, extended for A-1").
 
 Because 0046 must change the `runners` definition, the existing test cannot pass unchanged; it has to be extended, not loosened, so that it still proves the criterion:
 
@@ -461,7 +461,15 @@ On top of the `runners` criteria above:
   - `PRAGMA foreign_key_check` is empty, `PRAGMA integrity_check` is `ok` and `foreign_keys` is 1;
   - `pragma_foreign_key_list` of each of the seven referencing tables is unchanged.
 
-  `fleet_ready.sql`'s Bitbucket and GitHub targets survive, and that fixture carries the whole fleet graph that references targets.
+  The fixture's existing target rows, the GitHub `github_repository` target `30000000-0000-4000-8000-000000000001` and the Bitbucket `bitbucket_workspace` target `30000000-0000-4000-8000-000000000002`, are still present and unchanged after 0046 (apart from the three new NULL columns). `fleet_ready.sql` also holds every row that references those targets: the profile, the `profile_ci_targets` mapping, the intent, the placement, its two allocations and its host command.
+- How that test's database is built, and why it covers the `runners` rebuild too (brief review R1 of this gate, B-1 and W-1). `fleet_ready.sql` has no `runners` rows of its own, but it can't be loaded alone. It references `legacy-pool` (its profile, intent and placement) and `legacy-bb` (its Bitbucket target), and both come from `fleet_legacy.sql`. So the test builds its database the way `Database::ready()` does, stopping at 0045. It calls `Database::legacy()` (`MIGRATOR.run_to(21, ...)` plus `fleet_legacy.sql`), then `MIGRATOR.run_to(45, ...)`, then loads `fleet_ready.sql`. That database holds:
+  - the three legacy `runners` rows (`legacy-runner`, `legacy-native`, `legacy-bb-runner`);
+  - the inbound `runner_events` row `legacy-event` and `log_streams` row `legacy-log`, both with `runner_id` `'legacy-runner'`;
+  - the whole `fleet_ready.sql` fleet graph.
+
+  In `fleet_ready.sql` the placement `60000000-0000-4000-8000-000000000001` has a NULL `runner_id`, so the third inbound FK, `workload_placements.runner_id`, would be empty. To populate it, the test runs `UPDATE workload_placements SET runner_id='legacy-runner'` before the snapshot. This is allowed: the placement's intent is `ci_runner` with no `agent_run_id`, which is what 0022's `workload_placements_match_intent_update` trigger requires. This was checked on a scratch SQLite database (0001 to 0021, `fleet_legacy.sql`, 0022 to 0045, `fleet_ready.sql`, foreign keys on). The update succeeded, `runners` had 3 rows, and `PRAGMA foreign_key_check` was empty.
+
+  So the test covers the `runners` rebuild hazard on a realistic post-0045 fleet graph, with all three inbound FKs populated (cascade, set null and no action). The row-equality assertion treats `runners` as the "Done-when, made concrete" criteria do: each of the three rows is equal on every pre-0046 column, and its two new GitLab columns are NULL. Every other table, `runner_events`, `log_streams` and `workload_placements` included, stays under the exact comparison. The placement's `runner_id` is still `'legacy-runner'` after 0046. No third fixture is needed, and `fleet_ready.sql` is not changed.
 - There is a round-trip test: `ensure_target` of a `CiTarget::GitlabProject` and of a `CiTarget::GitlabGroup`, then `target_from_db` of each row, returns the same `CiTarget`. Calling `ensure_target` a second time returns the same id.
 
 ### W-7: the OpenAPI entries
@@ -562,6 +570,28 @@ Round 1 of the brief review printed five findings under its BLOCK heading and th
 - **Round-1 B-11** (the `runners` rebuild order and its inbound FKs). With `foreign_keys` OFF, `DROP TABLE runners` doesn't cascade into `runner_events`. After `ALTER TABLE runners_new RENAME TO runners`, the inbound FKs from `runner_events`, `log_streams` and `workload_placements` still name `runners`. The guard runs `pragma_foreign_key_check` before `COMMIT` and fails the migration on any dangling reference. **Resolved.**
 - **Round-1 summary line** ("After retractions, the real blocks are B-1, B-3, B-4, B-6, B-7, B-9"). This is a summary, not a finding. Its six items are resolved in "Amendments (brief review, round 1)", and round 3 listed them as R-1 to R-6. **Resolved.**
 
+## Fixture evidence (brief review R1 of this gate, NV-1 to NV-3)
+
+All of this was read from the fixtures in this worktree. Excerpts are verbatim, with long column lists shortened where shown as `...`.
+
+- **NV-1.** `crates/gridops-core/tests/fixtures/fleet_ready.sql` is 36 lines long. Its `INSERT INTO` statements target, in order: `fleet_hosts`, `host_resource_domains`, `host_backends`, `fleet_ci_targets` (twice), `pool_execution_profiles`, `profile_ci_targets`, `fleet_operations`, `workload_intents`, `workload_placements`, `capacity_allocations` and `host_commands`. None targets `runners`, `runner_events` or `log_streams`. The `workload_placements` insert lists a column set without `runner_id`, so the placement's `runner_id` is NULL.
+- **NV-2.** The fleet graph inserts include the two targets:
+
+      INSERT INTO fleet_ci_targets (id,kind,canonical_key,installation_id,repository_id)
+      VALUES ('30000000-0000-4000-8000-000000000001','github_repository','github:1:10',1,10);
+      INSERT INTO fleet_ci_targets (id,kind,canonical_key,bitbucket_connection_id,workspace_uuid)
+      VALUES ('30000000-0000-4000-8000-000000000002','bitbucket_workspace','bitbucket:legacy-bb:11111111-1111-4111-8111-111111111111','legacy-bb','11111111-1111-4111-8111-111111111111');
+
+  It has three hosts, five resource domains, five backends, one profile (`pool_id` `'legacy-pool'`), one `profile_ci_targets` row, one operation, one intent (`kind` `'ci_runner'`), one placement (`state` `'reserved'`), two capacity allocations and one host command (`kind` `'prepare_environment'`).
+- **NV-3.** `crates/gridops-core/tests/fixtures/fleet_legacy.sql` contains:
+
+      INSERT INTO runner_events (id,runner_id,pool_id,event,message,created_at)
+      VALUES ('legacy-event','legacy-runner','legacy-pool','online','Fixture history',1);
+      INSERT INTO log_streams (id,job_id,runner_id,source,path,installation_id,size_bytes,complete,created_at,updated_at)
+      VALUES ('legacy-log',30,'legacy-runner','github','fixture/log',1,32,1,1,1);
+
+  It also has the three `runners` inserts, with ids `legacy-runner`, `legacy-native` and `legacy-bb-runner`, and the `runner_pools` row `legacy-pool` and `bitbucket_connections` row `legacy-bb` that `fleet_ready.sql` references.
+
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
 - migrations/0046_gitlab.sql (not found)
@@ -611,3 +641,4 @@ Round 1 of the brief review printed five findings under its BLOCK heading and th
 - crates/gridops-api/src/resources.rs (`delete_bitbucket_connection`, and the id generation in Bitbucket connection create)
 - Cargo.lock (`serde` 1.0.229, `serde_json` 1.0.151), used to build a scratch crate that checked the `GitlabRunnerMaterial` serde shape
 - the local `sqlite3` 3.54.0, used to check `pragma_foreign_key_check` with `foreign_keys` OFF and `PRAGMA foreign_keys` inside a transaction
+- migrations/0001 to 0021, `fleet_legacy.sql`, migrations/0022 to 0045 and `fleet_ready.sql` applied in order to a scratch SQLite database with foreign keys on, to check that `UPDATE workload_placements SET runner_id='legacy-runner'` is accepted and leaves `PRAGMA foreign_key_check` empty
