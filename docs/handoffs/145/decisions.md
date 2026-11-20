@@ -188,3 +188,9 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Hedged:**
   - None of the round-4 surfaces were run in a browser here (jsdom only); U's walkthrough covers them.
 - **Evidence:** full suite 461/461, `tsc`, `eslint --max-warnings=0` and `vite build` clean; `docs/handoffs/145/handoff-F.md`, section "Round 4".
+
+## T (Tester, Phase 7 GREEN, round 4) - 2026-11-20T15:15:00-08:00
+- **Decided:** Round 4 is GREEN with no blocking issue. I changed no test; F flagged none as wrong.
+- **Assumed:** F's reading of "can manage at least one platform" as "at least one addable platform" is acceptable, since with the production registry the two readings match.
+- **Hedged:** Client-visual behaviour (layout, new-tab link, SPA navigation) is not covered by jsdom; U's walkthrough owns it.
+- **Evidence:** full suite 461/461, typecheck, lint and build clean; four mutations (empty state, connectLink in chooser, toast, per-platform empty text) each failed the matching tests and were reverted; `docs/handoffs/145/handoff-T-green.md`, section "Round 4".

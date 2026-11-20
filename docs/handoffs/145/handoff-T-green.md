@@ -52,3 +52,70 @@ None.
 ## Advisory notes
 - `postCreate`'s `any` parameter could be tightened to a generic descriptor type later; not blocking.
 - Evidence appendix: F's `evidence.md` already covers the unchanged source facts my tests rely on (`api()` signal/ApiError, zod parse in `createRunnerPoolAction`, `confirmAction` fallback, `useAction` router invalidate, `TooltipProvider`); I added none.
+
+
+---
+
+# Handoff-T-green, Round 4: Add connection offers every platform; one generic empty state (#145)
+
+**Date:** 2026-11-20 (about 3:15 PM PST)
+**Branch:** claude/ui-145-platform-neutral-cf5832 (on top of `8c961a9`, F's round-4 commit)
+**Issue:** #145
+**Handoff-F reviewed:** `docs/handoffs/145/handoff-F.md`, section "Round 4" ("Tests that look wrong (for T)": None)
+**Handoff-T-red:** `docs/handoffs/145/handoff-T-red.md`, section "Round 4"
+
+## GREEN confirmation
+    $ npx vitest run  -> Test Files 46 passed (46), Tests 461 passed (461)
+
+The 16 round-4 tests (15 behavioural, 1 typecheck-gated) all pass, plus the 445 earlier ones. `git diff 2fb904c HEAD --stat -- tests crates migrations docs/openapi` is empty: F touched no test, backend, migration or OpenAPI file. I changed no test this phase.
+
+Mutation spot-checks (production edited, suite run, edit reverted; `git status` is clean afterwards):
+- `nothingConnected` forced false -> 4 empty-state tests FAIL (admin, member, loading, failed-then-retry).
+- `addable` ignores `connectLink` -> 4 W1 tests FAIL (chooser lists GitHub, install link step, disabled install, registry-driven LinkCI).
+- `postCreate` catch swallows the error instead of `toast.error` -> both toast tests (throws, rejects) FAIL.
+- Per-platform empty text rendered regardless of `showEmpty` -> the admin and member generic-empty-state tests FAIL.
+
+## Tier 1 results
+| Check | Result |
+|---|---|
+| `npm run typecheck` | PASS (this gates the `expectTypeOf` contract test) |
+| `npm run lint` (`--max-warnings=0`) | PASS, no output |
+| `npm run build` (vite build, then tsc) | PASS, built in 1.16s |
+| `npx vitest run` (full) | PASS 461/461 |
+| Platform-name grep in `targets-row.tsx`, `platform-options-section.tsx`, `connections-section.tsx` | PASS, prints nothing |
+| `grep -rn externalLinks src docs/handoffs/145/survey.md` | PASS, prints nothing |
+| Redirect grep (`settings/github`, `settings/integrations`, minus the two declaration lines) | PASS, prints nothing |
+| Server start / API smoke | N/A: no API change; exercised under jsdom against stubbed `fetch` |
+
+F's reported commands all reproduced with identical results.
+
+## Tier 2 results
+- **Coverage per criterion:** PASS (below).
+- **Test quality:** PASS. Each case names one behaviour and fails for the behavioural reason (mutations above). Tier is the cheapest sufficient: a rendered-dialog component test for W1/W2 and the toast, unit/type tests for the contract. No redundancy worth merging. Advisory: the survey-doc test reads `docs/handoffs/145/survey.md`, which couples the suite to a handoff file; the brief asks for it, so kept.
+- **Type safety:** PASS. No new `any` in the round-4 diff; `connectLink` and `emptyText` signatures are pinned by `expectTypeOf` and `tsc`.
+- **Error handling:** PASS. A failed list shows InlineError with Retry and blocks the generic empty state; a `postCreate` throw or rejection becomes a toast with no reveal dialog; a `create` error stays inline in the dialog.
+- **Data integrity / migration:** N/A, no schema or backend change. F's note about keeping fetching rows mounted under the generic empty state (so a post-create `invalidateQueries` refetches) is sound; the reload-after-create path is covered by the existing create case.
+- **API contract / Security:** PASS. No new endpoint; Add connection stays hidden from non-admins (existing test) and the chooser lists only `canManage` platforms; the install link is `rel="noreferrer"` `target="_blank"`.
+- **Playwright:** the project has no Playwright setup, so no e2e suite exists and nothing is skipped.
+- **Evidence appendix:** `evidence.md` "Round 4" already holds the unchanged-source facts the round-4 tests rely on (`githubApp: null` in the page type, `InlineError` `role="alert"`, `Callout` role by tone, `EmptyState` defaults). I copied the first two against source: they match verbatim. Added none.
+
+## Acceptance criteria status
+- W1 chooser lists GitHub then Bitbucket with descriptions: PASS (`lists GitHub then Bitbucket ...`).
+- W1 GitHub link step (installUrl, new tab, noreferrer), Back from link and form: PASS (`GitHub's step links ...`).
+- W1 disabled install plus unavailable text with no App: PASS.
+- W1 registry-driven (`connectLink`-only listed, neither-binding not listed): PASS.
+- W1 `externalLinks` removed, `chooserDescription` on every descriptor, contract types: PASS (`platform-registry` cases, `tsc`).
+- W2 generic empty state for admin and member with the exact copy: PASS.
+- W2 no GitHub empty row while the App is unconfigured; row shown when configured: PASS.
+- W2 not shown while loading or after a failed list: PASS.
+- `postCreate` failure toast, no reveal dialog: PASS (2 cases).
+- Runner link `title` equals the descriptor label: PASS.
+- Survey names `chooserDescription` / `connectLink`, not `externalLinks`: PASS.
+- `platform-neutral-source` guard on `connections-section.tsx`: PASS.
+
+## Blocking issues
+None.
+
+## Advisory notes
+- Not covered by jsdom and left to U: the visual layout of the chooser entries and the generic empty state at 360/768/1280, the new-tab behaviour of the install link, and the chooser reached by SPA navigation.
+- F's two deviations (one-paragraph GitHub description instead of the wireframe's description plus callout; neutral admin empty copy without the GitHub/Bitbucket sentence) follow the brief's round-4 text and are not defects.
