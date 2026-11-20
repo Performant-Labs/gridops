@@ -150,3 +150,12 @@ The original "Done when" list stands. Tests must **also** cover each behaviour t
 - `docs/openapi/gridops-v1.json` (`POST /api/v1/webhooks/gitlab` path entry)
 - `src/routes/_app/webhooks.tsx` (`:100-166`)
 - GitLab webhooks documentation, `https://docs.gitlab.com/user/project/integrations/webhooks/` (header table)
+
+## Orchestrator decisions (brief gate round 2 warnings)
+
+These settle the warnings the amend step left for a decision. They win over any earlier text in this brief.
+
+- **Duplicates (W-1).** Use `receive`'s rule: any existing `webhook_deliveries.id` is a duplicate. It is acknowledged (202) and not reprocessed, whatever its status. A delivery that failed is recovered through the GitLab `retry` arm, not by GitLab redelivering it. This replaces "only when its status is `processed`" above.
+- **`pool_id` (W-2).** #140 always writes `pool_id = NULL`. #148 owns pool assignment. Tests assert NULL.
+- **Tag fetch ordering (W-3, round 1 W-1).** The fetch runs only for a delivery that is not a duplicate. Before fetching, read the stored `gitlab_jobs` row for `(connection_id, job_id)`. If the incoming `pending` event would be rejected by the ordering guard (an older `status_changed_at`, or an equal one without a later lifecycle rank), skip the fetch and mark the delivery processed with no effect. Otherwise fetch the tags, then run the conditional upsert, which still decides on its own whether the event applies. A failed fetch marks the delivery failed and writes no row. A test covers "stale `pending` after `running`: no `GitLabApi::job` call, row unchanged" (check the call log on `FakeGitLab`).
+- **Delivery-id header order (NIT-1).** `Idempotency-Key`, then `webhook-id`, then `X-Gitlab-Event-UUID`, then the SHA-256 of the body. `Idempotency-Key` comes first because GitLab's docs say it stays the same across retries, and that's what duplicate detection needs. The rest are fallbacks for older GitLab versions.
