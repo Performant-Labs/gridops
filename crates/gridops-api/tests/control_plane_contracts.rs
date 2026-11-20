@@ -2102,3 +2102,75 @@ async fn a_rerun_clears_the_queue_alert_that_names_its_job() -> Result<()> {
     assert_eq!((run.0, run.1.as_str()), (2, "queued"));
     Ok(())
 }
+
+/// #133: a re-run's job can reach `GridOps` while the run row still reads `completed` from the
+/// earlier attempt. The job's own event reopens the run, so the queue and Overview see the
+/// job; a late queued event of the finished attempt does not reopen it.
+#[tokio::test]
+async fn a_rerun_job_arriving_before_its_run_event_reopens_the_completed_run() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let database = fixture.database().await?;
+    seed(
+        &database,
+        &[
+            DASHBOARD_REPOSITORIES.to_owned(),
+            org_pool("linux", "[\"linux-pool\"]", ""),
+            "INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,run_attempt,event,status,conclusion,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at,completed_at)
+               VALUES (100,7,'CI',1,1,'push','completed','success','abc','https://github.com/fixture/app/actions/runs/100',2,2,2,2,2);".to_owned(),
+        ],
+    )
+    .await?;
+
+    let job_event = |attempt: i64, job_id: i64| {
+        json!({
+            "action": "queued",
+            "installation": { "id": 42 },
+            "repository": { "id": 7 },
+            "workflow_job": {
+                "id": job_id, "run_id": 100, "run_attempt": attempt, "name": "build",
+                "status": "queued", "labels": ["self-hosted-linux"],
+                "html_url": format!("https://github.com/fixture/app/actions/runs/100/job/{job_id}"),
+            },
+        })
+        .to_string()
+    };
+
+    // A stale queued event of attempt 1 leaves the finished run finished.
+    let stale = job_event(1, 1001);
+    let response = fixture
+        .post_webhook_event(
+            "delivery-stale-queued",
+            "workflow_job",
+            &stale,
+            &ApiFixture::webhook_signature(&stale)?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let run = sqlx::query_as::<_, (i64, String)>(
+        "SELECT run_attempt,status FROM workflow_runs WHERE id=100",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!((run.0, run.1.as_str()), (1, "completed"));
+
+    // Attempt 2's job arrives first: the run is reopened and its job is counted as queued.
+    let rerun = job_event(2, 1002);
+    let response = fixture
+        .post_webhook_event(
+            "delivery-rerun-job",
+            "workflow_job",
+            &rerun,
+            &ApiFixture::webhook_signature(&rerun)?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let run = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        "SELECT run_attempt,status,conclusion FROM workflow_runs WHERE id=100",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!((run.0, run.1.as_str(), run.2), (2, "queued", None));
+    let body = overview_of(&fixture).await?;
+    assert_eq!(body["metrics"]["queuedJobs"], 1, "{}", body["metrics"]);
+    Ok(())
+}

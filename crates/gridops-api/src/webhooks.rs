@@ -609,6 +609,7 @@ async fn process_workflow_job(
     .execute(database)
     .await?;
     record_job_report(database, id, i64_value(job, "run_attempt"), now).await?;
+    reopen_run_for_newer_attempt(database, run_id, job, status, now).await?;
     // A job of a newer attempt means the earlier attempts are over (#33); a
     // late event of an earlier attempt is finished again, and says nothing
     // about a runner or the queue now.
@@ -649,6 +650,42 @@ async fn process_workflow_job(
     if status == "queued" {
         scale_for_queued_job(database, payload, job, now).await?;
     }
+    Ok(())
+}
+
+/// A re-run reuses the run id and bumps `run_attempt`. GitHub sends the run's `requested` event
+/// and the new attempt's job events independently, so a job can arrive while the run row still
+/// reads `completed` from the earlier attempt, which hides every job of the re-run from the
+/// scaler and the queue (#133). A live job of a newer attempt therefore reopens the run itself;
+/// a late event of the same or an earlier attempt never does.
+async fn reopen_run_for_newer_attempt(
+    database: &SqlitePool,
+    run_id: i64,
+    job: &Map<String, Value>,
+    job_status: &str,
+    now: i64,
+) -> ApiResult<()> {
+    let Some(attempt) = i64_value(job, "run_attempt") else {
+        return Ok(());
+    };
+    if job_status == "completed" {
+        return Ok(());
+    }
+    let run_status = if job_status == "in_progress" {
+        "in_progress"
+    } else {
+        "queued"
+    };
+    sqlx::query(
+        "UPDATE workflow_runs SET run_attempt=?,status=?,conclusion=NULL,completed_at=NULL,updated_at=? WHERE id=? AND run_attempt<?",
+    )
+    .bind(attempt)
+    .bind(run_status)
+    .bind(now)
+    .bind(run_id)
+    .bind(attempt)
+    .execute(database)
+    .await?;
     Ok(())
 }
 
