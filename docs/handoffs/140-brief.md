@@ -159,3 +159,51 @@ These settle the warnings the amend step left for a decision. They win over any 
 - **`pool_id` (W-2).** #140 always writes `pool_id = NULL`. #148 owns pool assignment. Tests assert NULL.
 - **Tag fetch ordering (W-3, round 1 W-1).** The fetch runs only for a delivery that is not a duplicate. Before fetching, read the stored `gitlab_jobs` row for `(connection_id, job_id)`. If the incoming `pending` event would be rejected by the ordering guard (an older `status_changed_at`, or an equal one without a later lifecycle rank), skip the fetch and mark the delivery processed with no effect. Otherwise fetch the tags, then run the conditional upsert, which still decides on its own whether the event applies. A failed fetch marks the delivery failed and writes no row. A test covers "stale `pending` after `running`: no `GitLabApi::job` call, row unchanged" (check the call log on `FakeGitLab`).
 - **Delivery-id header order (NIT-1).** `Idempotency-Key`, then `webhook-id`, then `X-Gitlab-Event-UUID`, then the SHA-256 of the body. `Idempotency-Key` comes first because GitLab's docs say it stays the same across retries, and that's what duplicate detection needs. The rest are fallbacks for older GitLab versions.
+
+## Amendments (architecture review, round 2)
+
+These resolve the round-2 Phase 3 findings in `docs/handoffs/140/handoff-A.md`. They **supersede** the named earlier text: the first and third bullets of "Ordering guard (finding 6)", the tie-rule and the stale-concluded-event (W-2) items under "Done when: additional required tests", the "Tag fetch ordering" pre-fetch check, and every mention of "Unix epoch seconds".
+
+### Block 1: one status rule (epic #136, comments of 2026-11-20 23:30 and 23:43 UTC)
+
+- The out-of-order guard is one conditional upsert on `(connection_id, job_id)` that follows epic #136's one status rule for `gitlab_jobs` writers. The update applies only when `gitlab_jobs.status` is not terminal (`success`, `failed`, `canceled`, `skipped`) **and** either `tier(excluded.status) > tier(gitlab_jobs.status)`, or the tiers are equal and `excluded.status_changed_at > gitlab_jobs.status_changed_at`.
+- The tiers, as #136 states them:
+  - 0: `created`, `waiting_for_resource`, `preparing`, `manual`, `scheduled`;
+  - 1: `pending`;
+  - 2: `running`;
+  - 3: `success`, `failed`, `canceled`, `skipped`.
+- **`unknown` is never stored** (#136: "Writers never store `unknown`"). A `build` event whose status is not in the table is recorded and marked processed with no effect.
+- The tier table is written **once** in Rust in `webhooks/gitlab.rs`. The SQL `CASE` is built from it, and the pre-fetch check uses the same predicate. Moving the table into a `gridops-core` helper shared with #148 is a follow-up recorded on #136.
+- #148's poll applies the same rule (epic #136). The earlier "#148's poll is insert-only" note is withdrawn.
+- **Pre-fetch check (replaces the W-3 decision's check).** For a non-duplicate `pending` delivery, read the stored row first. If the guard predicate above would reject the event, skip `GitLabApi::job` and mark the delivery processed with no effect. Otherwise fetch the tags, then run the conditional upsert.
+
+### Block 2: units
+
+`gitlab_jobs.status_changed_at` is **epoch milliseconds**, parsed from `build_status_changed_at`, like every other timestamp in the schema (`now_millis`, `date_value`). A missing or unparsable value falls back to `now_millis()` at receipt. The unit is recorded on #136.
+
+### Block 3: route side effects (added to the shared-file list)
+
+- **`docs/fleet-api.md`:** one "Who may call what" row for `POST /api/v1/webhooks/gitlab` (`— | — | — | ignored`), after the GitHub webhook rows, so `access::tests::the_documented_matrix_lists_exactly_the_registered_routes` passes.
+- **`docs/openapi/gridops-v1.json`:** remove only the sentence "Not served yet: implemented by #140." from this path's description. Nothing else in the spec changes.
+- **`crates/gridops-api/src/fleet/openapi.rs`:** the #140 entry of `the_gitlab_operations_are_specified_before_they_are_served` stops asserting that prefix. #138 edits the same function and table, and whichever lands second reconciles.
+
+### Warnings settled
+
+- **Retry's connection (W-4): option (a).** An accepted delivery's id is `gitlab:<connection_id>:<key>`, where `<key>` follows the header order in "Orchestrator decisions". Retry uses that connection, never the candidate set. A rejected delivery (no candidate or no token match) is recorded as `gitlab:unmatched:<key>`, and retry refuses it with the same error `retry` gives an unverified row. The duplicate check uses the full id, so the same delivery to two connections is two rows. Test: with two candidate connections on different instances that share a `project_id`, a retried delivery uses the recorded connection's credentials (check the `FakeGitLab` call log) and writes no second `gitlab_jobs` row.
+- **D17 (W-6):** #140 adds no `list_runners` stub. If #139 lands D17 before #140 merges, #140 adds the `list_runners` arm to `UnconfiguredGitLab` while merging master. Otherwise whichever of #138 and #140 is on master when #139 lands is #139's to update. This is recorded on #136.
+- **`runner_events` (W-7):** when a busy set or clear changes a matched runner, #140 writes one `runner_events` row like the GitHub path (`level` `info`, `event` `GitLab job <status>`, `runner_id` and `pool_id` of the runner, metadata `{ "jobId", "projectId", "pipelineId", "connectionId" }`). No row is written when no runner matched.
+
+### Done when: replaces the tie-rule and W-2 items
+
+- **Terminal is final.** After `success`, a `running` (or any) event with a newer `status_changed_at` changes neither the row nor any runner.
+- **Never backwards.** After `running`, a `pending` event with a newer `status_changed_at` is ignored and makes no `GitLabApi::job` call.
+- **A later tier wins over time.** A row stored as `pending` with `status_changed_at` T, as #148's poll writes it, followed by a `running` event with an older `status_changed_at`: the event applies and marks the runner busy.
+- **Within a tier, time decides.** `created`, then `preparing`: with an older `status_changed_at` it is ignored, and with a newer one it applies.
+- **A stale terminal event changes nothing.** After `success` cleared runner A, a `failed` event delivered later with an older `status_changed_at` touches neither the row nor A.
+- **Timestamp unit.** A stored `status_changed_at` equals `build_status_changed_at` in epoch ms; the fallback equals the receive time (`now_millis()`).
+- **`unknown`.** A `build` event with an unrecognized status writes no row.
+- The retry-connection test above, and a `runner_events` row on busy set and clear.
+
+### Outside #140
+
+A project connection plus its parent group's connection give one GitLab job two `gitlab_jobs` rows, because identity is `(connection_id, job_id)`. #148's demand scan or the contract has to deduplicate (for example on `(base_url, job_id)`). This is recorded on #136.
