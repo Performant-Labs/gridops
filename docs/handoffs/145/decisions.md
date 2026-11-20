@@ -151,3 +151,8 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Assumed:** no Playwright suite exists in this project, so the browser walkthrough is U's.
 - **Hedged:** jsdom-only surfaces (picker load states, Back button, runner "CI platform" link, SPA nav, old-URL redirects) are not verified in a browser.
 - **Evidence:** `docs/handoffs/145/handoff-T-green.md`.
+
+## A (anti-duplication gate, Phase 7) — 2026-11-20
+- **Decided:** PASS. F extended the objects the Reuse map named (`SearchableMultiSelect`, `SecretDialog` extracted, `validateBitbucketConnections`, moved Bitbucket/GitHub page logic) and built no parallel path; old pages are redirect-only.
+- **Hedged:** two warns, neither blocking: the pool list/detail pages still branch on `pool.scope` (out of scope, follow-up for #141), and `bitbucket.tsx` imports a rule from `runner-pools/schemas` (acyclic).
+- **Evidence:** `docs/handoffs/145/handoff-A-dup.md`.
