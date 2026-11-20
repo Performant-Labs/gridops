@@ -1,0 +1,33 @@
+# Decision journal: #138 GitLab platform-connection and pool-target API
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:19:07-08:00
+- **Decided:** BLOCK, with 2 block findings and 7 warn findings (see `handoff-A.md`).
+  - **(1) The test seam can't be reached.** The brief puts the HTTP tests under `crates/gridops-api/tests/` and has them inject `FakeGitLab` through `AppState`. Every test there runs the `gridops-api` binary as a child process, and the crate has no library target, so the fake can't be injected. The binary wires the `Upstream` placeholder, and `gridops-core/test-support` isn't a dev-dependency.
+  - **(2) The authorization item names the wrong file and a rule that can't be built.** Bitbucket's fleet authorization is in `fleet/service.rs` (`ensure_pool_access`, `ensure_target_access`) and `registry/queries.rs`, not in `authorization.rs`, and it depends on `bitbucket_user_grants`. GitLab has no grants table, D11 defers user-scoped GitLab visibility, and migrations are forbidden. `ensure_target_access` also panics on the NULL `bitbucket_connection_id` of a GitLab target once #139 admits GitLab targets.
+  - **The warnings:**
+    - (3) a `resources/gitlab.rs` submodule;
+    - (4) the pool request types are in `gridops-core/src/models.rs`, the wire names aren't pinned, and "no GitHub targets" conflicts with the pool's required installation and scope;
+    - (5) the spec declares no 502 and `ApiError` has none, while Bitbucket uses 400;
+    - (6) Bitbucket has no webhook URL; the analogue is GitHub's `effective_webhook_url`;
+    - (7) PATCH plumbing: the `access.rs` parsers, `docs/fleet-api.md` and the "Not served yet" assertion in `openapi.rs`;
+    - (8) the delete rule against the 0047 FK actions;
+    - (9) how the secrets are stored, which #140 relies on.
+  - **Accepted as consistent:**
+    - one shared `Arc<dyn GitLabApi>` in `AppState`, set through a `with_gitlab` builder;
+    - the D14 predicate change, whose callers are all in `resources.rs`;
+    - handlers copied from the Bitbucket ones, using `json!` builders, `require_system_admin` and `SameOrigin`;
+    - cookie-only routes in `session_routes()`.
+- **Assumed:**
+  - sqlx's `Row::get::<String>` panics on a NULL column. That's its documented behaviour; I didn't run it.
+  - In-process tests can build an `AppState` the way the `oauth.rs` tests build `Config` and a temporary database. Nobody builds a full `AppState` in a test today, so this is a new shape built from existing parts.
+- **Hedged:**
+  - **Finding 2** recommends a system-admin-only rule for GitLab fleet access. That rule is my reading of D11 and of the existing `require_system_admin` gates; O may choose another rule, but must write one down.
+  - **Finding 4's mix-rule question** is partly a spec question. I left it as a warning because T and F can pick a working request body, but #141 needs the names pinned.
+  - **Finding 5** offers two options. 400 is the established Bitbucket pattern; 502 needs a spec change and an `error.rs` change.
+  - **The task text named no earlier BLOCK findings,** so this is a first review.
+  - **No `survey.md` or Reuse map was provided,** so the brief's own analogues were the baseline.
+- **Evidence:**
+  - Read: the brief and the brief-gate result r1; epic #136 and issues #140 and #141 (via `gh issue view`); #137's `handoff-A.md` and `decisions.md`.
+  - API: `crates/gridops-api/{Cargo.toml,src/state.rs,src/error.rs,src/main.rs,src/access.rs,src/oauth.rs (tests),src/auth.rs,src/resources.rs (Bitbucket, pool and webhook-URL sections),src/resources/{route_security.rs,tart_host.rs},src/fleet/openapi.rs,tests/control_plane_contracts.rs,tests/fleet_http.rs}`.
+  - Core: `crates/gridops-core/{Cargo.toml,src/gitlab/mod.rs,src/gitlab/fake.rs,src/fleet/authorization.rs,src/fleet/service.rs,src/fleet/registry/queries.rs,src/models.rs,src/config.rs,src/crypto.rs,src/api_tokens.rs}`.
+  - Schema and docs: `migrations/0001_initial.sql` (`runner_pools`), `migrations/0047_gitlab.sql`, the GitLab paths and schemas of `docs/openapi/gridops-v1.json`, the Bitbucket rows of `docs/fleet-api.md`, and the workspace `Cargo.toml` (resolver 3, edition 2024, `unsafe_code = "forbid"`).
