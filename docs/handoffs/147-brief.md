@@ -24,7 +24,7 @@ In `crates/gridops-host-agent/src/docker.rs` (and `gridops-core/src/provisioning
 
 - Tests show the token isn't visible through `docker inspect` or the container main process's `/proc/<pid>/environ`.
 - Each exit path maps to the right outcome.
-- Manual check: run the container with a real `glrt-` token from a test project. It shows online in GitLab, runs one job, and exits.
+- Manual check: run the container with a real `glrt-` token from a test project. It shows online in GitLab, runs one job, and exits. **Not run in #147: deferred to #143**, as Boundaries records (no test project or token exists yet). The criterion testable within #147 is that the PR description states explicitly that this check was not run and is deferred to #143; it is not faked or simulated. (Brief review R1, B-1.)
 
 ## Contract from #137 (wins over the issue text above where they differ)
 
@@ -48,7 +48,7 @@ The shared contract merged in #137 (`b22c451`). Its full rationale is `docs/hand
 
 ## Boundaries
 
-- Owned files: the GitLab branch of `crates/gridops-host-agent/src/docker.rs` (plus whatever host-agent wiring is needed to advertise GitLab and route its material there), the GitLab runner script in `crates/gridops-core/src/provisioning.rs`, and the GitLab arm in `crates/gridops-manager/src/main.rs`.
+- Owned files: the GitLab branch of `crates/gridops-host-agent/src/docker.rs` (plus whatever host-agent wiring is needed to advertise GitLab and route its material there), the GitLab runner script in `crates/gridops-core/src/provisioning.rs`, and the GitLab arm in `crates/gridops-manager/src/main.rs`. This list is not exhaustive: the amendments below extend it, and the consolidated list is in "Amendments (brief review R1)", NIT-2.
 - Do **not** change shared contract types (`GitlabRunnerMaterial`, `DiagnosticCode`, `TargetKind`, `ProvisionRunner`'s `gitlab`/`gitlabRunnerToken` shapes, `GitlabBootstrap`, the `GITLAB_*` constants, `for_selected_provider`). If the contract truly needs a change, stop and report it.
 - Do not edit `crates/gridops-tart-agent` (#142), the reconciler (#139), the API (#138), the GitLab client (#146), webhooks (#140), scaling (#148) or the UI (#141).
 - Docker access: the GitLab Docker executor needs a Docker daemon. Use the access the agent already gives container jobs that require the Docker socket (`requires_docker_socket`), and document in the docs (for example `docs/fleet-agent.md` and the `compose.no-docker-socket.yaml` header comment) that a deployment without the Docker socket can't run GitLab runners. If the socket is unavailable, refuse the GitLab start with a clear configuration failure rather than starting a runner that can't run jobs.
@@ -132,3 +132,91 @@ A late exit 77 (after a successful Start) is reported on Inspect as `Failed { Re
 
 - The runner runs with the Docker executor's cache volumes disabled (`--docker-disable-cache`), so a runner leaves no cache volumes on the host daemon.
 - Job and helper containers are created and removed by `gitlab-runner` itself during a normal job. Containers orphaned when Stop/Cleanup kills the runner mid-job are a **known gap deferred to #143**, which runs against a real GitLab and can confirm the labels `gitlab-runner` puts on them before a cleanup filter is written. Recorded in the PR and in `docs/fleet-agent.md`.
+
+## Amendments (brief review R1)
+
+Each finding of the outside brief review, round 1, is resolved here or in place (marked "Brief review R1"). These are additions and clarifications: no acceptance criterion, scope item, deviation or earlier decision is removed or loosened. Where this section and the text above differ, this section wins.
+
+### B-1: the manual check in Done when
+
+Resolved in place in "Done when". The manual check stays listed, marked **not run in #147, deferred to #143**, which is what Boundaries already recorded. The criterion #147 can meet is that the PR description says so explicitly. The two sections now agree.
+
+### NV-1 to NV-4 and NV-6: facts the implementor confirms and cites
+
+These rest on sources outside this repository (the pinned `gitlab-runner` version's source or `--help` output, GitLab's runner API documentation, the pinned image's Dockerfile or manifest). They were **not** verified while amending the brief. Before code relies on any of them, the implementor confirms each headlessly and cites the evidence (source file and line at the pinned version, documentation URL and section, or the command and its output) in the handoff and the PR description:
+
+- **NV-1.** `gitlab-runner run-single` at the pinned version accepts every flag the script passes: `--url`, `--executor docker`, `--docker-image`, `--docker-disable-cache`, `--max-builds 1` and `--wait-timeout`.
+- **NV-2.** How `run-single` takes the `glrt-` token (flag, environment variable, config file or stdin), and that the mechanism chosen keeps it out of the container main process's argv and `/proc/1/environ` (B-2 already requires this and the test of what `docker inspect` and `/proc/1/environ` show).
+- **NV-3.** The exact signal that a job was received (log line or exit status) that maps the outcome to exit 0 or 75; B-2 already requires it pinned in a constant with the source location cited.
+- **NV-4.** `POST {url}/api/v4/runners/verify` accepts the form-encoded `token` field and answers 200 for a valid token and 403 for a refused one.
+- **NV-6.** The pinned `GITLAB_RUNNER_IMAGE` tag is Ubuntu-based and ships `bash` and `curl`.
+
+If any of these turns out false, the implementor stops and reports it rather than working around it, as the brief already requires for a contract change.
+
+### NV-5: what Inspect reports for an exited runner today (verified)
+
+A completed GitHub ephemeral runner's exited container inspects today as `Failed { code: ResourceUnavailable, retryable: false, diagnostic: None }`:
+
+- `crates/gridops-host-agent/src/docker.rs:301-317`: Inspect reads `{{.State.Running}}` and the environment label. Anything but running and labelled falls to the `Ok(_)` arm at `:312`, `failed(FailureCode::ResourceUnavailable, false)`, whatever the exit status.
+- `crates/gridops-host-agent/src/helper.rs:67`: `HelperResponse::Failed { code: FailureCode, retryable: bool }` has no diagnostic field today.
+- `crates/gridops-host-agent/src/dispatch.rs:414-422`: `outcome()` maps `HelperResponse::Failed` to `CommandOutcome::Failed { code, retryable, diagnostic: None }`.
+- `crates/gridops-host-agent/tests/docker_runtime.rs:82`: the `"exited"` case pins `HelperResponse::Failed { code: ResourceUnavailable, retryable: false }`.
+
+So B-2's "always `Failed { ResourceUnavailable, retryable: false }` for an exited GitLab container, with `diagnostic: None` for exit 0" matches what the GitHub runner reports today. #147 adds only the diagnostic for exit 75 and a late 77.
+
+### NIT-1: where the script reads the token
+
+The script reads the token from stdin into a **non-exported shell variable**, the way the GitHub branch does today (`docker.rs:128`: `IFS= read -r S`, then `[ -n "$S" ]`). `S` is never `export`ed, so it is in no process's environment. The verify call sends it with the shell builtin `printf 'token=%s' "$S" | curl ... --data @- ...`, so it is in no process's argv either. The script `unset`s `S` once it has handed the token to `run-single` by the mechanism NV-2 confirms.
+
+### W-1: the env-var choice against D1
+
+D1 (and the `GitlabRunnerMaterial` doc comment) says `url` and `wait_timeout_seconds` "may be arguments". R2's W-3 amendment passes them, and the job image, as fixed-name environment variables on both paths. That is within D1's permission and changes no contract item. The PR description and its comment on #136 record it next to D147-1 and D147-2, so #139 and #142 implementors reading #137's contract alone do not diverge.
+
+### W-2: the GitLab URL is checked on the fleet path too
+
+The fleet path checks `url` the way the manager path does (D10: an http(s) URL). The material arrives only on Start, so after the GitLab branch parses `GitlabRunnerMaterial` and before it creates any container, a `url` that does not parse as a URL or whose scheme is not `http` or `https` is refused with `Failed { code: Configuration, retryable: false }`, the same as material that does not parse. It never reaches the verify `curl`, so it can't surface as a retryable runtime failure. A test covers a non-http(s) URL and an unparseable one.
+
+### W-3: the pinned image values go in the PR
+
+The PR description states the exact values chosen for `GITLAB_RUNNER_IMAGE` and `GITLAB_DEFAULT_JOB_IMAGE`, and the headless registry check for each (the command run and the answer that shows the tag exists), so review can confirm them. The test that pins both values and refuses `:latest` is unchanged.
+
+### NIT-2: consolidated ownership
+
+Every path #147 may edit, gathered from the sections above (Boundaries, B-1, B-3, W-7, R2 W-2, R2 W-4):
+
+- `crates/gridops-host-agent/src/docker.rs`: the GitLab branch (Prepare refusal, Start, Inspect diagnostics), the GitLab advertisement in `docker_backend`, and the mechanical `diagnostic: None` fallout.
+- `crates/gridops-host-agent/src/helper.rs`, `dispatch.rs`: the `HelperResponse::Failed.diagnostic` field and its pass-through (B-3).
+- `crates/gridops-host-agent/src/native.rs`, `runtime.rs`: mechanical `diagnostic: None` only.
+- `crates/gridops-host-agent/tests/docker_runtime.rs`, `crates/gridops-host-agent/tests/dispatch.rs`: mechanical fallout, plus new tests.
+- `crates/gridops-api/tests/fleet_http/placement.rs`: mechanical `diagnostic: None` only (test-only; the one exception to the API-crate boundary).
+- `crates/gridops-core/src/provisioning.rs`: the GitLab runner script and the additive constants (`GITLAB_RUNNER_IMAGE`, `GITLAB_DEFAULT_JOB_IMAGE`, the readiness marker, `GITLAB_START_READY_TIMEOUT_SECS`, `GITLAB_VERIFY_MAX_TIME_SECS`, `GITLAB_EXIT_VERIFY_UNAVAILABLE`). Existing contract items are unchanged.
+- `crates/gridops-core/src/fleet/protocol/outcomes.rs`: the text of the `DiagnosticCode::RegistrationRefused` doc comment only (R2 W-4).
+- `crates/gridops-manager/src/main.rs`: the GitLab validation arm, launch, label, listing `exitReason` and `ManagedRunner.exit_reason` (D10, D15, W-6).
+- `docs/fleet-agent.md` and the header comment of `compose.no-docker-socket.yaml` (W-7, R2 W-5).
+- A note for #139 in the shared notes folder (B-1, B-2, W-5).
+
+The "do not edit" list in Boundaries is unchanged.
+
+## Source material read
+
+- docs/handoffs/147-brief.md
+- docs/handoffs/147-brief-result-r1.md (the brief review, round 1)
+- docs/handoffs/147/handoff-A.md (architecture review, round 2)
+- docs/handoffs/147/decisions.md
+- docs/handoffs/137-brief.md
+- crates/gridops-host-agent/src/docker.rs
+- crates/gridops-host-agent/src/helper.rs
+- crates/gridops-host-agent/src/dispatch.rs
+- crates/gridops-host-agent/src/native.rs
+- crates/gridops-host-agent/src/runtime.rs
+- crates/gridops-host-agent/tests/docker_runtime.rs
+- crates/gridops-host-agent/tests/dispatch.rs
+- crates/gridops-api/tests/fleet_http/placement.rs (lines 1-200, the `FakeDocker` helper with every `HelperResponse::Failed` literal; the rest of the file not read)
+- crates/gridops-core/src/provisioning.rs
+- crates/gridops-core/src/fleet/protocol/agent.rs
+- crates/gridops-core/src/fleet/protocol/outcomes.rs
+- crates/gridops-core/src/fleet/targets.rs
+- crates/gridops-reconciler/src/fleet.rs
+- crates/gridops-manager/src/main.rs
+- docs/fleet-agent.md
+- compose.no-docker-socket.yaml

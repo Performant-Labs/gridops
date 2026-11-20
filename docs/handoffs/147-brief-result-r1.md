@@ -1,38 +1,24 @@
 ## Brief Review (Round 1)
 
 ### BLOCK findings
-None.
+**[B-1]** The "Done when" section requires "Manual check: run the container with a real `glrt-` token from a test project. It shows online in GitLab, runs one job, and exits," but the Boundaries section states this check "cannot be run in this issue: no test project or token exists yet… not run, deferred to #143." The brief therefore contains an acceptance criterion that is internally acknowledged as unsatisfiable — a vacuous criterion, and two sections of the brief disagree. Fix: strike the manual check from "Done when" (or rewrite it as "deferred to #143; the PR states this explicitly"), so Done-when contains only criteria testable within #147.
 
 ### Needs-verification findings
-**[NV-1]** The core design assumption that the pinned `gitlab-runner` version's `run-single` can receive the `glrt-` token via a mechanism that keeps it out of the container main process's argv and environ (B-2: "the implementor confirms from the pinned gitlab-runner version's source/docs how `run-single` takes its token"). If `run-single` accepts the token only as `--token <value>` or a documented env var, the entire token-hiding design fails and no test in "Done when" can pass. Settling evidence: the pinned gitlab-runner version's `run-single` flag/env source (e.g. `commands/run_single.go` and the common exec package for the pinned tag) or official documentation showing a stdin/file-based token input.
-
-**[NV-2]** The `POST {url}/api/v4/runners/verify` endpoint exists, accepts form-encoded `token`, and returns exactly 200 for valid / 403 for refused `glrt-` tokens (B-2). Settling evidence: GitLab API documentation for the runners verify endpoint, or a source excerpt of the endpoint's handler.
-
-**[NV-3]** `gitlab-runner run-single` produces a deterministically detectable signal (specific log line or exit-status distinction) separating "one job received and ran" from "wait timeout with no job", which the script can map to exit 0 vs 75 (B-2). Settling evidence: pinned-version source excerpt of the `run-single` command's wait/job-received paths.
-
-**[NV-4]** `--wait-timeout` causes `run-single` to exit (rather than hang) and `--max-builds 1` causes exit after one job. Settling evidence: pinned-version source or docs for these two flags.
-
-**[NV-5]** The GitLab Docker executor works when its daemon is the host's socket-mounted daemon while the runner itself runs in a container (see W-2). Settling evidence: GitLab docker-executor documentation on the socket strategy and builds-volume path handling, or a source excerpt showing how build-directory mounts are resolved.
-
-**[NV-6]** Exit codes 75 and 77 are not already consumed by `gitlab-runner`/the base image's own failure exits, which would collide with the script's mapping table `GITLAB_EXIT_REASONS`. Settling evidence: pinned-version exit-status handling in `run-single` source.
+**[NV-1]** That `gitlab-runner run-single` (at the pinned version) accepts the flags used (`--max-builds 1`, `--wait-timeout`, `--executor docker --docker-image … --docker-disable-cache`) — evidence: the pinned gitlab-runner version's CLI source or `gitlab-runner run-single --help` output.
+**[NV-2]** That `run-single` can receive the `glrt-` token through a mechanism that keeps it out of the container main process's argv and `/proc/1/environ` (the brief itself flags env-on-child as unacceptable if the child is PID 1) — evidence: gitlab-runner source showing how `run-single` reads a registration token (flag/env/config-file/stdin), cited in the handoff.
+**[NV-3]** That `run-single` exposes a distinguishable signal (log line or exit status) that a job was received, so exit 0 vs 75 can be mapped — evidence: gitlab-runner source location pinned in a constant and cited per the brief.
+**[NV-4]** That GitLab's `POST {url}/api/v4/runners/verify` returns 200 for a valid `glrt-` token and 403 for a refused one (and accepts form-encoded `token`) — evidence: GitLab runner API documentation (`/api/v4/runners/verify`).
+**[NV-5]** That a completed GitHub ephemeral runner's exited container today inspects as `Failed { ResourceUnavailable, retryable: false }`, which B-2's "always Failed{ResourceUnavailable} for exited GitLab containers, diagnostic None for exit 0" relies on to be "as the GitHub runner reports today" — evidence: `crates/gridops-host-agent/src/docker.rs` / `dispatch.rs` inspect branch for exited runners.
+**[NV-6]** That the pinned `gitlab/gitlab-runner` image tag is Ubuntu-based and ships `bash` and `curl` (the script depends on both) — evidence: the image's Dockerfile/manifest at the pinned tag.
 
 ### WARN findings
-**[W-1]** Missing test for a stated in-scope deliverable: D6 requires the Linux Docker host agent to advertise `TargetKind::{GitlabProject, GitlabGroup}` in `supported_runners` (ephemeral mode), and the Scope says "whatever host-agent wiring is needed to advertise GitLab," but no "Done when" item or amendment names a test for that advertisement. Add an explicit test that the host agent's `supported_runners` includes both GitLab target kinds in ephemeral mode.
-
-**[W-2]** The Docker-executor socket-aliasing hazard is unaddressed: when `gitlab-runner` runs in a container against the host's Docker socket, its Docker executor resolves build-volume and helper-image mount paths from inside the runner container while the host daemon interprets them — a classic mismatch that makes builds fail at the mount step. The brief covers *whether* the socket exists (W-5, manager refusal) but not *whether the executor functions correctly through it*. The deferred manual check (#143) is currently the only thing that would catch this; state the risk and how it will be detected before #143.
-
-**[W-3]** The Start-time readiness wait timeout is left as "a pinned timeout such as 60 s" — no named constant, no value, no test. Pin it as a `GITLAB_*` constant with a test, like the other pinned values, otherwise the "bounded wait" criterion is untestable and reviewable only by reading the diff.
-
-**[W-4]** Exit-code-0 ambiguity on the fleet path: an Inspect of a GitLab container that exited 0 for *any* reason (script bug, OOM-adjacent clean exit, base-image failure) yields `Failed { ResourceUnavailable, diagnostic: None }` and is treated as "completed." The contract accepts this, but the brief should state explicitly that "completed" is inferred solely from exit status 0 and not from evidence a job ran — otherwise the "one job then exit → completed" wording reads as a stronger guarantee than the mechanism provides.
-
-**[W-5]** D10's validation list says "both fields present" without naming the two fields (presumably `url` and `gitlabRunnerToken`; `waitTimeoutSeconds` defaults per D12, and `image` handling is delegated per D147-1). Also unstated: whether the manager requires `image` on a GitLab Docker request or what happens when it is absent. Name the fields explicitly.
-
-**[W-6]** Internal tension between "Done when" ("Manual check: run the container with a real `glrt-` token…") and Boundaries ("It is not run, deferred to #143"). Boundaries resolves it, but the Done-when section still lists an unrunnable criterion as a gate. Strike or mark it as deferred in Done when itself so the gate is not satisfiable only by reading a later section.
+**[W-1]** D1 (the merged contract, which "wins over the issue text") says `url` and `wait_timeout_seconds` "may be arguments," while R2 amendment W-3 mandates they travel as fixed-name env vars on both paths. Since the amendments win internally, D1's permissive wording is not a contract violation, but a reader of #137's contract alone could implement args. Recommendation: note the env-var choice against D1 in the PR/deviation table so #139/#142 implementors don't diverge.
+**[W-2]** URL validation is specified only on the manager path (D10: "URL is an http(s) URL"). On the fleet path, `GitlabRunnerMaterial` is parsed with serde, which will accept any string; nothing in the brief rejects a non-http(s) or malformed `url` at Prepare/Start, and the verify `curl` would then fail as "retryable runtime failure" instead of a configuration error. Recommendation: specify refusal of non-http(s) URLs on the fleet path as `Failed { Configuration, retryable: false }`.
+**[W-3]** `GITLAB_RUNNER_IMAGE` and `GITLAB_DEFAULT_JOB_IMAGE` are left as placeholders ("<pinned ubuntu-based tag>", "<pinned image>") — the choice is deferred to implementation with a headless registry check and a test that neither ends in `:latest`. That is testable, but the brief does not pin the values or the check's recorded evidence location. Recommendation: require the tag values and registry-check evidence in the PR description so review can confirm them.
 
 ### NIT findings
-**[NIT-1]** W-8's URL-quoting test criterion is "refused or quoted" — an either/or acceptance that any implementation trivially satisfies. Pick one: either a URL containing quotes/spaces is refused, or it is correctly quoted and verified.
-
-**[NIT-2]** Exit codes 75/77 collide with `EX_TEMPFAIL`/`EX_NOPERM` sysexits conventions; harmless here, but a one-line comment in `provisioning.rs` noting the deliberate choice would prevent future "fix" churn.
+**[NIT-1]** B-2's verify snippet uses `"$S"` without saying where `S` is read (presumably `read -s` from stdin); spell it out so the "token never in env" property is auditable.
+**[NIT-2]** "Boundaries" lists owned files that B-3/W-2 then extend (helper.rs, dispatch.rs, native.rs, runtime.rs, three test files, one API-crate test); a consolidated ownership list would prevent the boundary section from being read as exhaustive.
 
 ### Verdict
-PASS — no BLOCK findings; implementation may proceed, with the needs-verification items (especially NV-1, which the whole token-hiding design rests on) resolved during implementation and cited in the handoff as the brief already requires.
+BLOCK — 1 blocking finding; must resolve before implementation starts.
