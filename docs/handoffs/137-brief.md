@@ -278,20 +278,8 @@ The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet
         GitlabRunner { token: "[redacted]", url: "https://gitlab.example.com", wait_timeout_seconds: 600 }
 
   `url` and `wait_timeout_seconds` are printed in full. This output was produced by that `debug_struct` call in a scratch crate against the locked versions.
-- Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected (with the extra field last, and again with it before `kind`); a payload with another `kind` is rejected; `format!("{:?}")` doesn't contain the token; and `format!("{:?}")` equals the exact `Debug` string above (string equality).
-- Why the byte-for-byte comparison is deterministic (brief review R1 of this gate, B-4). serde's derived `Serialize` for an internally tagged enum writes the tag (`kind`) first and then the variant's fields in their declaration order, every time; `serde_json::to_string` keeps that order. So the field order of the literal is fixed by the declaration order `token`, `url`, `wait_timeout_seconds`, and that declaration order is part of this contract: reordering the fields is a contract change, and the byte-for-byte test is there to catch it. The test keeps the exact string comparison and also asserts `serde_json::from_str::<serde_json::Value>` of the output equals that of the literal, so a failure says whether the content or only the order differs. Deserialization accepts the fields in any order (see above).
-  - The source that makes this order part of serde's generated code, not an observed accident (brief review R2 of this gate, B-1). In `serde_derive-1.0.229/src/ser.rs`, `serialize_struct_variant` generates, for `StructVariant::InternallyTagged`, a `serialize_struct` call, then the tag, then the fields, verbatim:
-
-        _serde::ser::SerializeStruct::serialize_field(
-            &mut __serde_state,
-            #tag,
-            #variant_name,
-        )?;
-        #(#serialize_fields)*
-        _serde::ser::SerializeStruct::end(__serde_state)
-
-    and `serialize_fields` comes from `serialize_struct_visitor`, which walks the fields in declaration order (`for field in fields {`, skipping only `skip_serializing` fields, of which this type has none). `serde_json-1.0.151/src/ser.rs`, `impl ser::SerializeStruct for Compound`, writes each field as it is called: `Compound::Map { .. } => ser::SerializeMap::serialize_entry(self, key, value)`. So the output order is tag, `token`, `url`, `wait_timeout_seconds`, by construction of the generated code at the locked versions. The lockfile pins one version of each crate, so a serde patch release only reaches this code through a `Cargo.lock` change, and that change runs this test.
-  - The test is not circular: the expected value is the string literal written in the test, not the output of the code under test. If a future serde version ever changed the order, the fix is a hand-written `Serialize` that emits the same literal; the literal, not the derive, is the contract.
+- Tests: `serde_json::to_value(&material)` equals `serde_json::from_str::<serde_json::Value>(<the literal above>)` (JSON value equality, so key order is not part of the contract: every consumer parses the material, none compares bytes); it round-trips; a payload with an extra field is rejected (with the extra field last, and again with it before `kind`); a payload with another `kind` is rejected; `format!("{:?}")` doesn't contain the token; and `format!("{:?}")` equals the exact `Debug` string above (string equality).
+- Key order (brief review, R3 B-1). The material test compares JSON values, not bytes, so it doesn't depend on the order serde's derive writes keys in. The earlier byte-for-byte requirement and its serde-source argument are withdrawn. The GitHub `PrepareEnvironment` fixture test below is still byte for byte, because its expected literal was captured from `master` and it guards an unchanged type.
 - `token` carries a doc comment saying it is the secret `glrt-` runner authentication token and must never be logged, put in an error message, or passed as an argument or environment variable (brief review R1 of this gate, W-3). The hand-written `Debug` above is what enforces this for `{:?}`.
 - A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
 - The base URL is carried **only** in `GitlabRunnerMaterial.url` (brief review R1 of this gate, B-7; this restates deviation D1 as an acceptance criterion and changes nothing in it):
@@ -910,6 +898,30 @@ Each applied finding is resolved in place above, marked "brief review R2 of this
 | B-8 | R2-1 item 3: `GITLAB_EXIT_REASONS` pins the code-to-string mapping, and a test in `gridops-core` and in `gridops-tart-agent` asserts the same three pairs |
 
 **Open for the operator (B-7).** The contract today says a job is concluded exactly when `JobStatus::is_terminal()` (`Success | Failed | Canceled | Skipped`), so `Manual` and `Scheduled` jobs stay in `gitlab_jobs_open_created_idx` until a writer records a terminal status. The reviewer asks for either making them terminal for the open index or adding a separate "needs a runner" predicate. Either choice changes the conclusion rule that #140 and #148 share, so it is left unchanged here pending a decision.
+
+## Amendments (brief review, third run, round 3)
+
+### R3 B-1: the material test compares JSON values
+
+This is resolved in place in A-2. The `GitlabRunnerMaterial` serialization test asserts `serde_json::Value` equality with the literal, so key order is not part of the contract. Every consumer (#147's host agent) parses the material with serde, and none compares bytes. The byte-for-byte claim, and the serde-source argument offered to support it, are withdrawn. Nothing in the contract depends on field order any more.
+
+### R3 B-7: which jobs the open-jobs index holds (decided)
+
+This resolves the "Open for the operator (B-7)" note above.
+
+- `JobStatus` gains `pub const fn is_active(self) -> bool`. It is true exactly for `Created | WaitingForResource | Preparing | Pending | Running`: a job that needs a runner now, or holds one.
+- `JobStatus::is_terminal()` is unchanged (`Success | Failed | Canceled | Skipped`). It is still the single conclusion rule for #140 and #148.
+- `Manual`, `Scheduled` and `Unknown` are neither active nor terminal. A job in one of those states waits for a person or a timer, so it neither needs a runner nor is concluded.
+- `JobStatus::Unknown` is stored as `"unknown"`. `as_str()` returns `"unknown"`, because the original string isn't kept.
+- The partial index in 0046 becomes:
+
+      CREATE INDEX `gitlab_jobs_active_created_idx` ON `gitlab_jobs` (`created_at`,`id`)
+        WHERE `status` IN ('created','waiting_for_resource','preparing','pending','running');
+
+  It replaces `gitlab_jobs_open_created_idx` everywhere above. Its size is bounded by the jobs that are actually waiting for or holding a runner. A project with many manual jobs doesn't grow it.
+- When GitLab moves a `Manual` or `Scheduled` job to `pending`, the job webhook (#140) or the pending-jobs poll (#148) upserts the new status, and the row joins the index again. A stale `Manual` row costs nothing to the scaling scan.
+- Test: a unit test in `gitlab/mod.rs` builds the SQL `IN (...)` list from every `JobStatus` whose `is_active()` is true, using `as_str()`. It asserts that list equals the string set in the migration's predicate. That migration string is held as a `pub const GITLAB_ACTIVE_JOB_STATUSES: [&str; 5]` beside `JobStatus`, which the migration text must match. A second test asserts `is_active` and `is_terminal` are never both true.
+- **[deviation D13]** The issue says "an index for unconcluded jobs". The index holds active jobs. Unconcluded `Manual` and `Scheduled` jobs are outside it. Wave-1 issues affected: #140 and #148.
 
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
