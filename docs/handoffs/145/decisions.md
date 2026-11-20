@@ -174,3 +174,17 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
   - Typecheck errors appear only on the new contract names.
   - A scratch-copy implementation sketch made all 461 pass, except `build-info`, which needs `Cargo.toml` and is an artifact of the scratch copy.
   - Handoff: `docs/handoffs/145/handoff-T-red.md`, section "Round 4".
+
+## F (Feature Implementor, Phase 5, round 4) - 2026-11-20T15:05:00-08:00
+- **Decided:**
+  - `ConnectionBindings` gains `chooserDescription` and `connectLink`; `emptyText` returns `string | null`; `PlatformDescriptor.externalLinks` and GitHub's implementation are deleted. GitHub's `emptyText` is null while `page.data?.githubApp` is absent (the old "Sign in to see GitHub installations." branch goes with it, since no App also means no page data).
+  - The parent section now observes every fetching list (not only creatable ones) to know, per platform, loading / error / ready. The chooser lists descriptors with `create` or `connectLink` whose ready list says `canManage`; `create` wins when a descriptor has both.
+  - The generic empty state shows only when every list is ready and empty. Fetching platforms stay mounted underneath it (rendering nothing) so their queries stay active and `invalidateQueries` after a create refetches them.
+  - Add connection is one controlled dialog owned by the section, opened by the header button or the empty-state CTA. The header button is hidden while the generic empty state shows, so only one "Add connection" button is on screen.
+  - `postCreate` runs in a try/catch after the dialog has closed; a throw or rejection becomes `toast.error(message)`. The dialog's `submit` now only catches `create` errors, so nothing after close lands in dialog state.
+  - The runner details link carries `title={runnerLink().label}`; the visible platform name stays its accessible name.
+- **Assumed:**
+  - "A user who can manage at least one platform" is read as "at least one platform is addable" (has `create` or `connectLink` and `canManage`), so the admin copy always comes with its Add connection button. With the production registry the two readings are the same.
+- **Hedged:**
+  - None of the round-4 surfaces were run in a browser here (jsdom only); U's walkthrough covers them.
+- **Evidence:** full suite 461/461, `tsc`, `eslint --max-warnings=0` and `vite build` clean; `docs/handoffs/145/handoff-F.md`, section "Round 4".

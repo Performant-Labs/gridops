@@ -187,7 +187,19 @@ export const githubPlatform: PlatformDescriptor = {
         aside: <InstallationAside installation={installation} />,
       };
     },
-    emptyText: (page) => page.data ? `No installations are visible to @${page.data.user.login}.` : "Sign in to see GitHub installations.",
+    // Before the GitHub App exists there is nothing to install, so GitHub shows no empty row.
+    emptyText: (page) => page.data?.githubApp ? `No installations are visible to @${page.data.user.login}.` : null,
+    chooserDescription: "Runners for GitHub Actions. Added by installing the GridOps GitHub App.",
+    // GitHub accounts are connected on GitHub, by installing the App; GridOps has no create form for them.
+    connectLink: (page) => {
+      const installUrl = page.data?.githubApp?.installUrl ?? null;
+      return {
+        label: "Install GitHub App",
+        description: "GitHub accounts are connected by installing the GridOps GitHub App on them. GridOps then picks the installation up automatically after you return and refresh access.",
+        href: installUrl,
+        ...(installUrl ? {} : { unavailableText: "Create the GitHub App first (below on this page)." }),
+      };
+    },
   },
   targetKinds: [repositoryKind, runnerGroupKind],
   runnerLink: (runner) => runner.repository && runner.githubRunnerId !== null
@@ -264,7 +276,4 @@ export const githubPlatform: PlatformDescriptor = {
     }
     return null;
   },
-  externalLinks: (page) => page.data?.githubApp
-    ? [{ label: "Install", href: page.data.githubApp.installUrl }, { label: "Manage App", href: page.data.githubApp.appUrl }]
-    : [],
 };

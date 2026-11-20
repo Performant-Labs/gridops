@@ -1,5 +1,7 @@
 # Handoff-F: Phase 6 - One Connections page and one Targets picker for every CI platform
 
+> **Round 4 (3:05 PM PST):** the implementation of the operator's round-4 decisions (W1, W2, the `postCreate` toast, the runner-link label) is the last section of this file, "Round 4". Everything above is the original cycle's handoff and still stands.
+
 **Date:** 2026-11-20 (2:02 PM PST)
 **Branch:** claude/ui-145-platform-neutral-cf5832 (on top of `b8cbf8d`, T's RED commit)
 **Issue:** #145
@@ -152,3 +154,92 @@ None.
 - src/routes/settings.integrations.tsx
 - src/routes/settings.tsx
 - docs/handoffs/145/survey.md (new, brief deliverable), docs/handoffs/145/evidence.md (new), docs/handoffs/145/handoff-F.md (this file), docs/handoffs/145/decisions.md (appended)
+
+
+---
+
+# Handoff-F, Round 4: Add connection offers every platform; one generic empty state (#145)
+
+**Date:** 2026-11-20 (3:05 PM PST)
+**Branch:** claude/ui-145-platform-neutral-cf5832 (on top of `2fb904c`, T's round-4 RED commit)
+**Issue:** #145
+**Brief section:** `docs/handoffs/145-brief.md`, "Round-4 operator decisions after the spec audit" (binding)
+
+## What was done
+- `src/features/platform-connections/types.ts`:
+  - `ConnectionBindings.emptyText` is now `(page) => string | null`.
+  - New `ConnectionBindings.chooserDescription: string` (required).
+  - New `ConnectionBindings.connectLink?: (page) => { label; description: ReactNode; href: string | null; unavailableText? }`.
+  - `PlatformDescriptor.externalLinks` is deleted.
+- `src/features/platform-connections/github.tsx`:
+  - `chooserDescription` and `connectLink` use the brief's copy. The link's label is "Install GitHub App" and its `href` is `githubApp.installUrl`. While there is no App, `href` is null and the unavailable text is "Create the GitHub App first (below on this page)."
+  - `emptyText` returns null while `page.data?.githubApp` is absent.
+  - `externalLinks` is removed.
+- `src/features/platform-connections/bitbucket.tsx`: `chooserDescription` uses the brief's copy.
+- `src/features/platform-connections/registry.tsx`: the unknown-platform fallback gets a `chooserDescription`. It is never listed in the chooser, because it has no `create` and no `connectLink`.
+- `src/features/platform-connections/connections-section.tsx` (shared code; it still names no platform):
+  - **List states:** the section observes every fetching list (`enabled: false`) and gives each platform a state of loading, error or ready. Page-derived lists are always ready.
+  - **Generic empty state (W2):** it shows only when every list is ready and empty. It reads "No connections yet", then one of two lines:
+    - for someone who can add a connection: "Connect a CI platform to start assigning it to runner pools.", with an "Add connection" call to action;
+    - otherwise: "A GridOps administrator can add platform connections."
+  - **Per-platform empty rows:** these render only outside the generic state, and only when `emptyText` is non-null.
+  - **Add connection (W1):** this is now one controlled `AddConnectionDialog` owned by the section. The header button and the empty-state call to action both open it. Step 1 lists, in registry order, every descriptor that has `create` or `connectLink` and whose ready list says `canManage`. Each entry shows the icon, the name and the `chooserDescription`.
+    - Picking a `create` platform shows today's form.
+    - Picking a `connectLink` platform shows its description, then Back and a primary `<a target="_blank" rel="noreferrer">` with the link's label. When `href` is null, the primary is a disabled button and a warning callout shows the `unavailableText`.
+    - Back returns to step 1 from either step.
+  - **`postCreate` failures:** a throw or rejection after the dialog closed becomes `toast.error(message)`. `submit` now catches only `create` errors.
+- `src/features/runners/runner-row.tsx`: the details sheet's platform link carries `title={link.label}`.
+- `docs/handoffs/145/survey.md`: a new row covers "Offering GitLab in Add connection" (`chooserDescription`, `create` / `connectLink`). The `emptyText` row now gives the nullable signature, and statement 2 names the Add connection bindings. The survey never mentioned `externalLinks`.
+
+## Design decisions
+- **Fetching rows stay mounted under the generic empty state.** I rejected unmounting them when everything is empty. With no active observer, `invalidateQueries` after a create would mark the query stale without refetching it: the parent's observer is `enabled: false`, so it does not count as active. The generic state would then stick after the first connection was added. Instead, mounted rows render nothing while the generic state shows.
+- **One dialog, two triggers.** The dialog was lifted into the section and remounts per opening (`key={addSession}`), so each opening starts at step 1 with empty values, as `openDialog` did before. The header "Add connection" is hidden while the generic state shows, so the page has only one such button.
+- **`create` wins over `connectLink`** when a descriptor has both. The brief defines the two steps separately and no current descriptor has both bindings.
+- **Admin copy rule:** "can manage at least one platform" is read as "at least one platform is addable" (`create` or `connectLink`, plus `canManage`). The admin copy therefore always comes with its button. With the production registry the two readings match.
+- **Runner link label:** I used `title` rather than `aria-label`, so the link's accessible name stays the visible platform name and the label shows as its tooltip. The brief allows either.
+- **Link step description:** `connectLink().description` (a `ReactNode`) renders in the dialog body as a `div`, and `DialogDescription` shows the `chooserDescription`. This avoids putting arbitrary nodes inside the description's `<p>`.
+
+## Reuse / extend-vs-new
+- EXTEND `ConnectionsSection` / its Add connection dialog. There is no new component file and no parallel path. The empty state reuses `EmptyState` (`~/components/page`) and the unavailable text reuses `Callout`.
+- EXTEND the descriptor contract in `types.ts` with only the fields the brief names. `externalLinks` is deleted.
+
+## Architecture notes for A
+- Public contract change in `types.ts`, as the brief specifies: `chooserDescription` (required), `connectLink` (optional), nullable `emptyText`, and no `externalLinks`. There is no new module, dependency or import direction. `connections-section.tsx` still imports only `registry` and `types` from the platform side.
+- No API, DB or OpenAPI change.
+
+## Deviations from spec / wireframe
+- The wireframe's C2 splits the GitHub step into a short description plus an info callout ("GridOps then picks the installation up…"). The contract carries one `description`, so the full sentence pair renders as one paragraph.
+- The wireframe's admin empty-state copy (line 239) adds a second sentence that names GitHub and Bitbucket. The brief's round-4 copy is neutral and lives in shared code, so only "Connect a CI platform to start assigning it to runner pools." is rendered.
+- The wireframe's note "A single-platform registry skips straight to step 2" is not implemented. It is not in the round-4 criteria, and this was already the case in the first cycle.
+
+## Tier 1 self-check (incl. tests now GREEN)
+Run in this worktree on 2026-11-20, around 3:00 PM PST:
+
+    $ npm run typecheck  -> tsc --noEmit (exit 0)
+    $ npm run lint       -> eslint src tests *.config.ts eslint.config.js --max-warnings=0 (exit 0, no output)
+    $ npm run build      -> ✓ built in 1.12s; then tsc --noEmit (exit 0)
+    $ npx vitest run     -> Test Files  46 passed (46)   Tests  461 passed (461)
+    $ grep -niE "github|bitbucket" src/features/runner-pools/targets-row.tsx src/features/runner-pools/platform-options-section.tsx src/features/platform-connections/connections-section.tsx
+                         -> (no output)
+    $ grep -rn externalLinks src docs/handoffs/145/survey.md   -> (no output)
+    $ git diff --stat -- tests   -> (empty: no test file touched)
+
+The full 461 includes T's 16 round-4 tests, which were 15 failing plus 1 typecheck-gated at RED. Test #12 (`expectTypeOf` on the contract) is gated by `tsc`, and `tsc` passes.
+
+## Evidence appendix
+`docs/handoffs/145/evidence.md`, section "Round 4 (F, 2026-11-20)".
+
+## Tests that look wrong (for T)
+None.
+
+## Known issues
+- The round-4 surfaces were run only under Vitest/jsdom, not in a browser: the chooser, the link step (enabled and disabled), Back, the generic empty state for an admin and for a member, and the `postCreate` toast. Under the brief, U's headless walkthrough and its saved screenshots cover them.
+
+## Files changed
+- src/features/platform-connections/types.ts
+- src/features/platform-connections/github.tsx
+- src/features/platform-connections/bitbucket.tsx
+- src/features/platform-connections/registry.tsx
+- src/features/platform-connections/connections-section.tsx
+- src/features/runners/runner-row.tsx
+- docs/handoffs/145/survey.md (brief deliverable), docs/handoffs/145/evidence.md (appended), docs/handoffs/145/decisions.md (appended), docs/handoffs/145/handoff-F.md (this section)

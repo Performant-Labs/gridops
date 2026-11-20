@@ -83,7 +83,7 @@ function RunnerCiPlatform({ runner }: { runner: Runner }) {
   const platform = getPlatform(runner.platform);
   const link = platform.runnerLink?.(runner) ?? null;
   return link
-    ? <a className="underline-offset-2 hover:underline" href={link.href} rel="noreferrer" target="_blank">{platform.name}</a>
+    ? <a className="underline-offset-2 hover:underline" href={link.href} rel="noreferrer" target="_blank" title={link.label}>{platform.name}</a>
     : platform.name;
 }
 

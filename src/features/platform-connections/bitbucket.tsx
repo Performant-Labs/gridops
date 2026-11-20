@@ -71,6 +71,7 @@ export const bitbucketPlatform: PlatformDescriptor = {
       };
     },
     emptyText: () => "No Bitbucket workspaces are connected yet.",
+    chooserDescription: "Bitbucket Cloud workspaces with managed macOS runners for Pipelines.",
     fields: [
       { key: "name", label: "Connection name", type: "text", required: true, placeholder: "Mobile delivery", editableOnUpdate: true },
       { key: "workspace", label: "Workspace slug", type: "text", required: true, placeholder: "acme-mobile", editableOnUpdate: false },

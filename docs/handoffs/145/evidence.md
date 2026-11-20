@@ -49,3 +49,28 @@
   **Source:** `src/routes/__root.tsx:49`
   **Verbatim excerpt:**
   > <TooltipProvider delayDuration={450} skipDelayDuration={400}>
+
+## Round 4 (F, 2026-11-20)
+
+- **Fact:** the `/settings` page data's `githubApp` is null while the GitHub App is not configured; GitHub's nullable `emptyText` and its `connectLink` (`href: null` plus `unavailableText`) branch on it.
+  **Source:** `src/features/operations/operations.functions.ts:144`
+  **Verbatim excerpt:**
+  > githubApp: null | { slug: string; appUrl: string; installUrl: string };
+
+- **Fact:** a failed fetching list renders `InlineError`, which carries `role="alert"`; the round-4 tests count alerts to tell a failed list apart from the generic empty state.
+  **Source:** `src/components/page.tsx:222-224`
+  **Verbatim excerpt:**
+  > export function InlineError({ title, children, onRetry, className }: { title: string; children?: React.ReactNode; onRetry?: () => void; className?: string }) {
+  >   return (
+  >     <div className={cn("mt-1.5 flex items-start gap-1.5 text-xs leading-5", className)} role="alert">
+
+- **Fact:** a `warning` `Callout` (used for the connect link's unavailable text) has no `role="alert"`; only `danger` does, so it does not add an alert.
+  **Source:** `src/components/page.tsx:210`
+  **Verbatim excerpt:**
+  > <div className={cn("flex items-start gap-3 rounded-lg border border-border-strong bg-panel-subtle px-3 py-2.5 text-sm", className)} role={tone === "danger" ? "alert" : undefined}>
+
+- **Fact:** `EmptyState` defaults to a 60vh minimum height; the generic Connections empty state overrides it through `className` (`min-h-0 py-10`), which `cn` merges after the defaults.
+  **Source:** `src/components/page.tsx:162-163`
+  **Verbatim excerpt:**
+  > return (
+  >     <div className={cn("grid min-h-[60vh] place-items-center px-6 py-16 text-center", className)}>

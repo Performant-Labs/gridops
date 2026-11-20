@@ -20,6 +20,7 @@ function unknownPlatform(id: string): PlatformDescriptor {
       list: { kind: "page", read: () => ({ canManage: false, items: [] }) },
       describe: (item) => ({ id: String(item), name: String(item) }),
       emptyText: () => "No connections.",
+      chooserDescription: "Not supported by this version of GridOps.",
     },
     targetKinds: [],
     toCreatePayload: () => ({}),

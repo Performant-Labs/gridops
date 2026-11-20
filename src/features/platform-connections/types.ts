@@ -65,8 +65,19 @@ export type ConnectionBindings = {
   list: ConnectionListBinding;
   /** Describes one item of `list` for display. */
   describe: (item: unknown) => ConnectionRowView;
-  /** The text shown when the list is empty. */
-  emptyText: (page: SettingsPage) => string;
+  /**
+   * The platform's empty row while its list is empty and some other platform has connections, or
+   * null for no row (e.g. GitHub before its App exists). While every list is empty the Connections
+   * page shows one generic empty state instead.
+   */
+  emptyText: (page: SettingsPage) => string | null;
+  /** The one line under the platform's name in Add connection's platform chooser. */
+  chooserDescription: string;
+  /**
+   * For a platform connected outside GridOps (e.g. by installing an app there): what Add connection
+   * shows once the platform is chosen. `href: null` disables the link and shows `unavailableText`.
+   */
+  connectLink?: (page: SettingsPage) => { label: string; description: ReactNode; href: string | null; unavailableText?: string };
   fields?: readonly ConnectionField[];
   /** Create binding; its resolved value is what `postCreate` receives. */
   create?: (values: Record<string, string>) => Promise<unknown>;
@@ -216,6 +227,4 @@ export type PlatformDescriptor = {
   readOnlySummary?: (pool: RunnerPoolDetail) => string | null;
   /** What the new-pool page shows while this platform's standalone kinds are unavailable. */
   prerequisiteEmptyState?: (context: TargetContext) => PrerequisiteEmptyState | null;
-  /** External links for the platform's connections (install, manage). */
-  externalLinks?: (page: SettingsPage) => Array<{ label: string; href: string }>;
 };

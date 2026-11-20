@@ -2,20 +2,21 @@
  * The connections list of Settings → Connections (#145): every platform's connections in one
  * section, driven by the platform descriptors. A descriptor's list binding is either page-derived
  * (rendered from the settings page data, nothing to load) or fetching (its own query, loading row,
- * error and Retry, so one platform's failure never hides another's). Adding a connection asks for
- * the platform first, then shows only that descriptor's fields.
+ * error and Retry, so one platform's failure never hides another's). While every list has loaded
+ * and all are empty, one generic empty state replaces the per-platform rows. Adding a connection
+ * asks for the platform first, then shows that descriptor's fields or its link to connect elsewhere.
  */
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LoaderCircle, Plus } from "lucide-react";
+import { ArrowLeftRight, ExternalLink, LoaderCircle, Plus } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 
-import { Callout, InlineError, LoadingRows } from "~/components/page";
+import { Callout, EmptyState, InlineError, LoadingRows } from "~/components/page";
 import { SecretRevealDialog } from "~/components/secret-reveal-dialog";
 import { SettingsSection } from "~/components/settings-ui";
 import { StatusDot } from "~/components/status-icon";
 import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
 import type { SettingsPage } from "~/features/operations/operations.functions";
@@ -25,6 +26,9 @@ import { platforms } from "./registry";
 import type { ConnectionField, ConnectionList, PlatformDescriptor, PostCreateReveal } from "./types";
 
 type FetchBinding = Extract<PlatformDescriptor["connections"]["list"], { kind: "fetch" }>;
+
+/** Where one platform's list stands: a page-derived list is always ready. */
+type ListState = { status: "loading" | "error" } | { status: "ready"; list: ConnectionList };
 
 export const connectionsQueryKey = (platformId: string) => ["platform-connections", platformId] as const;
 
@@ -41,41 +45,79 @@ const fetchBinding = (descriptor: PlatformDescriptor): FetchBinding | null =>
 export function ConnectionsSection({ descriptors = platforms, page }: { descriptors?: readonly PlatformDescriptor[]; page: SettingsPage }) {
   const queryClient = useQueryClient();
   const [reveal, setReveal] = useState<PostCreateReveal | null>(null);
-  const creatable = descriptors.filter((descriptor) => descriptor.connections.create);
-  const fetched = creatable.flatMap((descriptor) => {
+  const [adding, setAdding] = useState(false);
+  // Each opening starts the Add connection dialog afresh (no platform chosen, no values).
+  const [addSession, setAddSession] = useState(0);
+  const fetched = descriptors.flatMap((descriptor) => {
     const binding = fetchBinding(descriptor);
     return binding ? [{ descriptor, binding }] : [];
   });
-  // Observes (never fetches) the lists the rows below load, to know whether the user may add to them.
-  const lists = useQueries({ queries: fetched.map(({ descriptor, binding }) => ({ ...connectionsQuery(descriptor, binding), enabled: false })) });
-  const manageable = creatable.filter((descriptor) => {
+  // Observes (never fetches) the lists the rows below load: their permission and whether they are empty.
+  const observed = useQueries({ queries: fetched.map(({ descriptor, binding }) => ({ ...connectionsQuery(descriptor, binding), enabled: false })) });
+  const states = descriptors.map((descriptor): ListState => {
     const index = fetched.findIndex((entry) => entry.descriptor === descriptor);
-    return index >= 0 ? lists[index]?.data?.canManage === true : readList(descriptor, page).canManage;
+    if (index < 0) return { status: "ready", list: readList(descriptor, page) };
+    const query = observed[index];
+    if (query?.isError) return { status: "error" };
+    return query?.data ? { status: "ready", list: query.data } : { status: "loading" };
   });
+  const addable = descriptors.filter((descriptor, index) => {
+    const state = states[index];
+    const bindings = descriptor.connections;
+    return Boolean(bindings.create || bindings.connectLink) && state?.status === "ready" && state.list.canManage;
+  });
+  // One generic empty state only once every list has loaded and none has a connection.
+  const nothingConnected = states.every((state) => state.status === "ready" && state.list.items.length === 0);
+
+  function openAdd() {
+    setAddSession((session) => session + 1);
+    setAdding(true);
+  }
 
   return (
     <>
       <SettingsSection
-        actions={manageable.length ? (
-          <AddConnection
-            descriptors={manageable}
-            onCreated={async (descriptor, created) => {
-              await queryClient.invalidateQueries({ queryKey: connectionsQueryKey(descriptor.id) });
-              const next = descriptor.postCreate ? await descriptor.postCreate(created) : null;
-              setReveal(next);
-            }}
-          />
-        ) : null}
+        actions={addable.length && !nothingConnected ? <Button onClick={openAdd} size="sm" variant="outline"><Plus />Add connection</Button> : null}
         description="Every CI platform GridOps runs runners for. Runner pools pick their targets from these connections."
         title="Connections"
       >
+        {nothingConnected ? (
+          <EmptyState
+            className="min-h-0 py-10"
+            description={addable.length ? "Connect a CI platform to start assigning it to runner pools." : "A GridOps administrator can add platform connections."}
+            icon={ArrowLeftRight}
+            title="No connections yet"
+          >
+            {addable.length ? <Button onClick={openAdd}><Plus />Add connection</Button> : null}
+          </EmptyState>
+        ) : null}
+        {/* Fetching platforms stay mounted under the generic empty state, so their queries stay active and reload after a create. */}
         {descriptors.map((descriptor) => {
           const binding = fetchBinding(descriptor);
           return binding
-            ? <FetchedConnections binding={binding} descriptor={descriptor} key={descriptor.id} page={page} />
-            : <ConnectionRows descriptor={descriptor} key={descriptor.id} list={readList(descriptor, page)} page={page} />;
+            ? <FetchedConnections binding={binding} descriptor={descriptor} key={descriptor.id} page={page} showEmpty={!nothingConnected} />
+            : <ConnectionRows descriptor={descriptor} key={descriptor.id} list={readList(descriptor, page)} page={page} showEmpty={!nothingConnected} />;
         })}
       </SettingsSection>
+      {addable.length ? (
+        <AddConnectionDialog
+          descriptors={addable}
+          key={addSession}
+          onCreated={async (descriptor, created) => {
+            await queryClient.invalidateQueries({ queryKey: connectionsQueryKey(descriptor.id) });
+            if (!descriptor.postCreate) return;
+            // The dialog has closed: a failing hook reports through a toast, not dialog state.
+            try {
+              setReveal(await descriptor.postCreate(created));
+            } catch (cause) {
+              toast.error(cause instanceof Error ? cause.message : `${descriptor.name} was connected, but its setup did not finish.`);
+            }
+          }}
+          onOpenChange={setAdding}
+          open={adding}
+          page={page}
+        />
+      ) : null}
       <SecretRevealDialog
         closeButtonText={reveal?.closeButtonText}
         description={reveal?.description ?? ""}
@@ -96,7 +138,7 @@ function readList(descriptor: PlatformDescriptor, page: SettingsPage): Connectio
 }
 
 /** One platform with a fetching list: its own query, loading row, error and Retry. */
-function FetchedConnections({ descriptor, binding, page }: { descriptor: PlatformDescriptor; binding: FetchBinding; page: SettingsPage }) {
+function FetchedConnections({ descriptor, binding, page, showEmpty }: { descriptor: PlatformDescriptor; binding: FetchBinding; page: SettingsPage; showEmpty: boolean }) {
   const query = useQuery(connectionsQuery(descriptor, binding));
   if (query.isPending) return <LoadingRows rows={1} />;
   if (query.isError) {
@@ -108,15 +150,17 @@ function FetchedConnections({ descriptor, binding, page }: { descriptor: Platfor
       </div>
     );
   }
-  return <ConnectionRows descriptor={descriptor} list={query.data} page={page} />;
+  return <ConnectionRows descriptor={descriptor} list={query.data} page={page} showEmpty={showEmpty} />;
 }
 
-function ConnectionRows({ descriptor, list, page }: { descriptor: PlatformDescriptor; list: ConnectionList; page: SettingsPage }) {
+function ConnectionRows({ descriptor, list, page, showEmpty }: { descriptor: PlatformDescriptor; list: ConnectionList; page: SettingsPage; showEmpty: boolean }) {
   if (!list.items.length) {
+    const text = showEmpty ? descriptor.connections.emptyText(page) : null;
+    if (text === null) return null;
     return (
       <div className="flex items-center gap-3 px-4 py-4 text-sm text-muted-foreground">
         <PlatformBadge descriptor={descriptor} />
-        <span>{descriptor.connections.emptyText(page)}</span>
+        <span>{text}</span>
       </div>
     );
   }
@@ -244,22 +288,28 @@ function FieldInput({ field, id, value, onChange, update = false }: { field: Con
   );
 }
 
-/** Add connection: choose the platform first, then fill in only that platform's fields. */
-function AddConnection({ descriptors, onCreated }: {
+/**
+ * Add connection: choose the platform first, then fill in only that platform's fields, or, for a
+ * platform connected outside GridOps, follow its link. Lists only platforms the user can manage.
+ */
+function AddConnectionDialog({ descriptors, page, open, onOpenChange, onCreated }: {
   descriptors: readonly PlatformDescriptor[];
+  page: SettingsPage;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onCreated: (descriptor: PlatformDescriptor, created: unknown) => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
   const [chosen, setChosen] = useState<PlatformDescriptor | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A platform with a create binding gets its form; otherwise its connect link.
+  const link = chosen && !chosen.connections.create ? chosen.connections.connectLink?.(page) ?? null : null;
 
-  function openDialog() {
-    setChosen(null);
+  function choose(descriptor: PlatformDescriptor | null) {
+    setChosen(descriptor);
     setValues({});
     setError(null);
-    setOpen(true);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -268,73 +318,95 @@ function AddConnection({ descriptors, onCreated }: {
     if (!chosen || !create) return;
     setSubmitting(true);
     setError(null);
+    let created: unknown;
     try {
       // A plain call, not a query mutation: a post-create value must never sit in a cache.
-      const created = await create(values);
-      toast.success(chosen.connections.createSuccess ?? `${chosen.name} connection added.`);
-      setOpen(false);
-      setValues({});
-      await onCreated(chosen, created);
+      created = await create(values);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : `${chosen.name} could not be connected.`);
-    } finally {
       setSubmitting(false);
+      return;
     }
+    toast.success(chosen.connections.createSuccess ?? `${chosen.name} connection added.`);
+    setSubmitting(false);
+    onOpenChange(false);
+    setValues({});
+    // After the dialog closed: the reload and the post-create hook report their own errors.
+    await onCreated(chosen, created);
   }
 
+  const back = <Button disabled={submitting} onClick={() => choose(null)} type="button" variant="ghost">Back</Button>;
+
   return (
-    <>
-      <Button onClick={openDialog} size="sm" variant="outline"><Plus />Add connection</Button>
-      <Dialog onOpenChange={(next) => { if (!submitting) setOpen(next); }} open={open}>
-        <DialogContent aria-describedby={undefined} className="max-w-[520px]">
-          <div className="space-y-4 overflow-y-auto p-5">
-            <div>
-              <DialogTitle className="text-base font-medium leading-6 text-foreground">{chosen ? chosen.connections.createTitle ?? `Connect ${chosen.name}` : "Add connection"}</DialogTitle>
-              <DialogDescription className="mt-1.5 text-sm leading-5 text-muted-foreground">
-                {chosen ? chosen.connections.createDescription ?? `Connect ${chosen.name} to GridOps.` : "Choose the platform to connect."}
-              </DialogDescription>
-            </div>
-            {chosen ? (
-              <form className="space-y-3" onSubmit={submit}>
-                {(chosen.connections.fields ?? []).map((field) => (
-                  <FieldInput
-                    field={field}
-                    id={`connection-new-${chosen.id}-${field.key}`}
-                    key={field.key}
-                    onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
-                    value={values[field.key] ?? ""}
-                  />
-                ))}
-                {error ? <Callout title="Could not connect" tone="danger">{error}</Callout> : null}
-                <div className="flex justify-end gap-2">
-                  <Button disabled={submitting} onClick={() => { setChosen(null); setError(null); }} type="button" variant="ghost">Back</Button>
-                  <Button disabled={submitting} type="submit">
-                    {submitting ? <LoaderCircle className="animate-spin" /> : <Plus />}
-                    {submitting ? "Connecting…" : chosen.connections.createSubmitLabel ?? "Connect"}
-                  </Button>
-                </div>
-              </form>
-            ) : (
-              <div className="grid gap-2">
-                {descriptors.map((descriptor) => {
-                  const Icon = descriptor.icon;
-                  return (
-                    <button
-                      className="flex items-center gap-3 rounded-lg border border-border-strong px-3 py-2.5 text-left text-sm font-medium text-foreground hover:bg-hover"
-                      key={descriptor.id}
-                      onClick={() => { setChosen(descriptor); setValues({}); setError(null); }}
-                      type="button"
-                    >
-                      <Icon className="size-4 text-muted-foreground" />
-                      {descriptor.name}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+    <Dialog onOpenChange={(next) => { if (!submitting) onOpenChange(next); }} open={open}>
+      <DialogContent aria-describedby={undefined} className="max-w-[520px]">
+        <div className="space-y-4 overflow-y-auto p-5">
+          <div>
+            <DialogTitle className="text-base font-medium leading-6 text-foreground">
+              {chosen ? chosen.connections.createTitle ?? `Connect ${chosen.name}` : "Add connection"}
+            </DialogTitle>
+            <DialogDescription className="mt-1.5 text-sm leading-5 text-muted-foreground">
+              {chosen
+                ? chosen.connections.create ? chosen.connections.createDescription ?? `Connect ${chosen.name} to GridOps.` : chosen.connections.chooserDescription
+                : "Choose the platform to connect."}
+            </DialogDescription>
           </div>
-        </DialogContent>
-      </Dialog>
-    </>
+          {chosen && chosen.connections.create ? (
+            <form className="space-y-3" onSubmit={submit}>
+              {(chosen.connections.fields ?? []).map((field) => (
+                <FieldInput
+                  field={field}
+                  id={`connection-new-${chosen.id}-${field.key}`}
+                  key={field.key}
+                  onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+                  value={values[field.key] ?? ""}
+                />
+              ))}
+              {error ? <Callout title="Could not connect" tone="danger">{error}</Callout> : null}
+              <div className="flex justify-end gap-2">
+                {back}
+                <Button disabled={submitting} type="submit">
+                  {submitting ? <LoaderCircle className="animate-spin" /> : <Plus />}
+                  {submitting ? "Connecting…" : chosen.connections.createSubmitLabel ?? "Connect"}
+                </Button>
+              </div>
+            </form>
+          ) : chosen ? (
+            <div className="space-y-3">
+              {link ? <div className="text-sm leading-6 text-muted-foreground">{link.description}</div> : null}
+              {link && link.href === null && link.unavailableText ? <Callout tone="warning">{link.unavailableText}</Callout> : null}
+              <div className="flex justify-end gap-2">
+                {back}
+                {link?.href ? (
+                  <a className={buttonVariants()} href={link.href} rel="noreferrer" target="_blank">{link.label}<ExternalLink /></a>
+                ) : link ? (
+                  <Button disabled type="button">{link.label}<ExternalLink /></Button>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              {descriptors.map((descriptor) => {
+                const Icon = descriptor.icon;
+                return (
+                  <button
+                    className="flex items-start gap-3 rounded-lg border border-border-strong px-3 py-2.5 text-left hover:bg-hover"
+                    key={descriptor.id}
+                    onClick={() => choose(descriptor)}
+                    type="button"
+                  >
+                    <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-foreground">{descriptor.name}</span>
+                      <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{descriptor.connections.chooserDescription}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
