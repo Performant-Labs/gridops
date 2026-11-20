@@ -200,7 +200,7 @@ Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so
 
 - These inbound foreign keys must keep every row and reference unchanged: `host_target_grants`, `host_session_target_grants`, `profile_ci_targets`, `workload_intents`, `workload_placements`, `fleet_events` (nullable `target_id`) and `external_runner_observations`. All of them are plain `REFERENCES fleet_ci_targets(id)` from 0022. No migration after 0022 touches the table (`grep fleet_ci_targets migrations/*.sql` matches only 0022). The seven clauses, at lines 101, 142, 175, 219, 246, 395 and 407 of 0022, are `target_id TEXT NOT NULL REFERENCES fleet_ci_targets(id),`, except that the `fleet_events` one at line 395 is `target_id TEXT REFERENCES fleet_ci_targets(id),`.
 - Canonical keys, persisted UNIQUE and immutable, and mirroring Bitbucket's format: `gitlab:project:{connection_id}:{project_id}` and `gitlab:group:{connection_id}:{group_id}`, with the decimal id. `CiTarget::canonical_key` returns these. It is infallible, so the "return an error" rule doesn't apply.
-- `TargetKind` (`fleet/capabilities.rs`) gains `GitlabProject` and `GitlabGroup` (wire `gitlab_project`, `gitlab_group`) and a `const fn is_gitlab(self) -> bool`. `From<&CiTarget> for TargetKind` maps the two new variants to them. This is what the host agents of #147 and #142 advertise in `SupportedRunner`.
+- `TargetKind` (`fleet/capabilities.rs`) gains `GitlabProject` and `GitlabGroup` (wire `gitlab_project`, `gitlab_group`) and a `const fn is_gitlab(self) -> bool`. `From<&CiTarget> for TargetKind` maps the two new variants to them. This is what #147's host agent advertises in `SupportedRunner`. The Tart agent (#142) has no `gridops-core` dependency and advertises no `SupportedRunner`; it takes GitLab through `POST /v1/runners` (D10).
   - Wire format (brief review R1, B-6). `TargetKind` is a plain unit-variant enum, and its serde attributes stay exactly as they are today. It is not tagged. Each variant serializes as a bare snake_case string, so the two new variants are `"gitlab_project"` and `"gitlab_group"`, the same strings as the `CiTarget` `platform` tag values and the `fleet_ci_targets.kind` values. The definition today, verbatim:
 
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -432,7 +432,7 @@ What those tests do, exactly (brief review R1 of this gate, B-6). They go in `cr
 
 The pairs are `(FailureCode::ResourceUnavailable, DiagnosticCode::IdleExpired)` with wire string `"idle_expired"`, and `(FailureCode::Configuration, DiagnosticCode::RegistrationRefused)` with wire string `"registration_refused"`. A test against `DiagnosticCode` alone does not satisfy this criterion.
 
-How consumers detect these cases (brief review R2, W-2): #147, #142 and #139 must branch on `diagnostic.code` (`IdleExpired` or `RegistrationRefused`), not on the `FailureCode`. `ResourceUnavailable` and `Configuration` are also used for other failures, so the failure code alone can't tell these two cases apart. Both carry `retryable: false`, so neither should be retried.
+How consumers detect these cases (brief review R2, W-2): #147 (fleet path) and #139 must branch on `diagnostic.code`; the Tart agent (#142) reports `exitReason` instead (D10) (`IdleExpired` or `RegistrationRefused`), not on the `FailureCode`. `ResourceUnavailable` and `Configuration` are also used for other failures, so the failure code alone can't tell these two cases apart. Both carry `retryable: false`, so neither should be retried.
 
 ### W-5 and W-6: schema constraints, pinned
 
@@ -579,19 +579,19 @@ New paths in `docs/openapi/gridops-v1.json`. Every operation description starts 
 
 - `CiTarget::GitlabProject { connection_id: GitlabConnectionId, project_id: ExternalId }` and `CiTarget::GitlabGroup { connection_id: GitlabConnectionId, group_id: ExternalId }` serialize as `{"platform":"gitlab_project",...}` and `{"platform":"gitlab_group",...}`. `CiPlatform::Gitlab` serializes as `"gitlab"`.
 - `CiTarget::is_gitlab()` is added. `is_bitbucket()` tests the Bitbucket variants explicitly.
-- No Bitbucket-only validation rule in `PrepareEnvironment` applies to GitLab targets. Platform rules for GitLab are #147's and #142's.
+- No Bitbucket-only validation rule in `PrepareEnvironment` applies to GitLab targets. Fleet-path platform rules for GitLab are #147's. The runner-manager rules live in each crate's `validate` (#147 the manager, #142 the Tart agent).
 - Out of scope: any handler, reconciler loop, HTTP client, host-agent code or UI.
 
 ### Deviations from the issue text (to repeat in the PR and on #136)
 
 | # | Issue text | Contract as shipped | Wave-1 issues affected |
 |---|---|---|---|
-| D1 | "the base URL in `configuration`" | No `ExecutionConfiguration` change. The base URL is `url` in the sealed `GitlabRunnerMaterial` `{"kind":"gitlab_runner","token","url"}`. | #139, #147, #142 |
+| D1 | "the base URL in `configuration`" | No `ExecutionConfiguration` change. The base URL is `url` in the sealed `GitlabRunnerMaterial` `{"kind":"gitlab_runner","token","url","wait_timeout_seconds"}`. | #139, #147 |
 | D2 | `GitLabApi` methods without credentials | Every method takes `&GitLabCredentials { base_url, access_token }` first. A single `Arc<dyn GitLabApi>` serves every connection. | #146, #138, #139, #140, #148 |
 | D3 | `resolve_scope(path)` | `resolve_scope(credentials, kind: ScopeKind, path)` | #146, #138 |
 | D4 | (no method) | A new `group_projects(credentials, group_id)`, so group connections can be polled | #146, #148 |
-| D5 | New outcome codes (owning enum unstated) | `DiagnosticCode::{IdleExpired, RegistrationRefused}` inside `Failed { ResourceUnavailable \| Configuration }` | #147, #142, #139 |
-| D6 | Schema list without `fleet_ci_targets` | 0046 also rebuilds `fleet_ci_targets` with the `gitlab_project` and `gitlab_group` kinds, adds `TargetKind::Gitlab*`, and adds `ensure_target`/`target_from_db` arms. Pool-target sync for GitLab is #139's. | #139, #147, #142 |
+| D5 | New outcome codes (owning enum unstated) | `DiagnosticCode::{IdleExpired, RegistrationRefused}` inside `Failed { ResourceUnavailable \| Configuration }`. The Tart path reports `exitReason` instead (D10). | #147, #139 |
+| D6 | Schema list without `fleet_ci_targets` | 0046 also rebuilds `fleet_ci_targets` with the `gitlab_project` and `gitlab_group` kinds, adds `TargetKind::Gitlab*`, and adds `ensure_target`/`target_from_db` arms. Pool-target sync for GitLab is #139's. The Tart path is D10. | #139, #147 |
 | D7 | "an index" on the new `runners` columns | Two indexes: `runners_gitlab_connection_idx` and `runners_gitlab_runner_id_idx` | #139, #140 |
 | D8 | Unconcluded-jobs index "like 0045's" | An active-jobs partial index like 0043's, `WHERE status IN ('created','waiting_for_resource','preparing','pending','running')` (R3 B-7, D13) | #140, #148 |
 
@@ -784,6 +784,9 @@ The path parameter is `{connection_id}`, in snake_case like every other path in 
 | D10 | #142: "on a GitLab `PrepareEnvironment`". The manager has no owner. | Tart and the built-in host get GitLab through `POST /v1/runners`, with `gitlab {url, waitTimeoutSeconds}` and `gitlabRunnerToken`, and report `exitReason`. #147 owns the manager arm, #142 the Tart agent. | #142, #147, #139 |
 | D11 | A-1 said "admitted". | Admission (`ensure_target_identity_for_pool`, `link_pool_target`) belongs to #139. User-scoped GitLab target visibility is deferred. | #139 |
 | D12 | No source for the idle timeout. | `wait_timeout_seconds` / `waitTimeoutSeconds` on both paths, default `GITLAB_DEFAULT_WAIT_TIMEOUT_SECS = 600`. | #139, #147, #142 |
+| D13 | "an index for unconcluded jobs" | The index holds active jobs only (`JobStatus::is_active()`, `GITLAB_ACTIVE_JOB_STATUSES`). Unconcluded `manual` and `scheduled` jobs are outside it until GitLab reports them pending. | #140, #148 |
+| D14 | #139: "choosing `CiPlatform::Gitlab` in both `for_selected_provider` callers" | GitLab starts belong to the reconciler, following the #119 Tart precedent. `starts_belong_to_reconciler` in `gridops-api/src/resources.rs` also returns true for a pool with `runner_pool_gitlab_connections` rows, so the API's in-request start only ever passes `Github` or `Bitbucket`. #138 owns that predicate change (it owns the GitLab sections of `resources.rs`); the GitLab registration lifecycle lives only in #139's module. | #138, #139 |
+| D15 | (the relay hop is unstated) | The manager's private `ManagedRunner` gains `#[serde(default, skip_serializing_if = "Option::is_none")] exit_reason: Option<String>` (wire `exitReason`), so a Tart agent's `exitReason` survives the manager's re-parse in `tart_runners`. #147 owns that field and a test that a Tart entry with `exitReason` survives and one without it serializes with no `exitReason` key. #137 does not add it. | #147, #142, #139 |
 
 ## Carried findings closed (brief review, rounds 1 to 3)
 
