@@ -1,23 +1,34 @@
 ## Brief Review (Round 1)
 
 ### BLOCK findings
-**[B-1]** Missing test for two explicitly required invariants — the scope demands "Never overwrite a newer webhook-written status with an older one (use `status_changed_at`), and never resurrect a terminal row," but the "Done when" poll-test list contains no test for either behavior (no webhook-vs-poll status conflict, no poll attempting to revive a terminal row). A stated behavior with no acceptance test is a defect in the brief's own terms. Add both cases to the poll tests (e.g. a `FakeGitLab` job whose reported status is older than a webhook-written one, and a terminal `gitlab_jobs` row GitLab still reports active).
+None.
 
 ### Needs-verification findings
-**[NV-1]** "the Bitbucket 'never scale down' guard in `maybe_scale_down` (`crates/gridops-reconciler/src/main.rs`) … keys on `runner.ci_platform == "bitbucket"`" — a source excerpt of `maybe_scale_down` in `crates/gridops-reconciler/src/main.rs` showing the guard's actual predicate would settle whether a GitLab pool genuinely falls through it.
-**[NV-2]** "`group_projects` exists on `GitLabApi`" (D4) — the `GitLabApi` trait definition from the #137 merge (file:line) would settle that the poll can call it with `&GitLabCredentials`.
-**[NV-3]** "a group connection, list `group_projects` and poll each" scales a pool — nothing in the brief shows the pool-to-project linkage used to route a group-polled job to the right pool's candidates; the `runner_pool_gitlab_connections` / `scope_id` schema excerpt (from `0047_gitlab.sql`) would settle how a project job found via a group connection is matched to pools.
-**[NV-4]** "`FakeGitLab` supports `with_job`, `with_group_project`, `fail_next`" — the `FakeGitLab` source would settle that these helpers exist and can express a 429 and a group project.
+**[NV-1]** D8/D13 claim that the partial index `gitlab_jobs_active_created_idx` exists on `gitlab_jobs` with exactly `WHERE status IN ('created','waiting_for_resource','preparing','pending','running')`, and that `GITLAB_ACTIVE_JOB_STATUSES` / `JobStatus::is_active()` match that list — the migration excerpt stops at line 65 and no index definition or constant is shown. Evidence: the index-creation statement in `migrations/0047_gitlab.sql` (below line 65) and `GITLAB_ACTIVE_JOB_STATUSES` / `is_active()` in `crates/gridops-core/src/gitlab/mod.rs`.
+
+**[NV-2]** NV-4 claims about `FakeGitLab`: `with_job` (fake.rs:98), `with_group_project` (fake.rs:108), `fail_next` (fake.rs:120), `pending_jobs` filtering to `JobStatus::Pending` of that project (fake.rs:245), `job` returning `NotFound` (fake.rs:226-233), one-shot failure semantics, and state keyed by `base_url` alone (fake.rs:67-76) — none of `fake.rs` appears in the attached excerpts. Evidence: the corresponding lines of `crates/gridops-core/src/gitlab/fake.rs`.
+
+**[NV-3]** A-B1/W1 assumptions that a `retry_when_busy` helper exists in the reconciler, that `github_sync_worker` is spawned from `main()` as claimed, and that the reconcile interval (`reconcileIntervalSeconds`) is (or is not) readable from a spawned worker. Evidence: `crates/gridops-reconciler/src/main.rs` around the sync worker spawn and the write paths it wraps.
+
+**[NV-4]** A-W2 claims the token can be unsealed from `access_token_key` "the same way Bitbucket connections' tokens are" via `runtime_secret`. Evidence: the Bitbucket credentials loader in the reconciler and the `runtime_secret` module signature.
+
+**[NV-5]** A-B1 claims `JOB_CHECK_AGE_MS` / `JOB_CHECK_LIMIT` exist in `confirm_jobs` and are mirrored by the new constants. Evidence: `confirm_jobs` in `crates/gridops-reconciler/src/main.rs`.
+
+**[NV-6]** A-B4 relies on `runner_pools.labels` holding the pool's *configured* labels and on migration 0046 `runner_pool_exclusive_labels` behaving as described. Evidence: the `runner_pools.labels` read path in `autoscaling.rs` (outside the shown lines 210-600 if the label source differs) and `migrations/0046_runner_pool_exclusive_labels.sql`.
 
 ### WARN findings
-**[W-1]** Two load-bearing design decisions are deferred to the implementer mid-brief: whether `running` counts as demand, and whether GitLab tags may match the GitHub catch-all labels (`self-hosted`, OS/arch). Both are labeled "decide and document," yet the acceptance tests (tag matching, exclusive pool) don't pin either outcome, so a test suite could pass with either choice and the brief's "Done when" wouldn't catch a wrong one. Pick both now in the brief and add a test for each.
-**[W-2]** The rate-limit backoff has no specified persistence or default: "skip that connection until the retry-after (or a documented default) has elapsed" leaves both where the skip-until timestamp lives (memory across passes? in-process only?) and the default value unnamed. The test only checks "skips on the next pass." Specify the mechanism and the default constant.
-**[W-3]** The `i64` job-key collision fix is stated as an open choice ("Choose a key … keep the existing public API stable … or update every caller"). Two acceptable implementations with materially different blast radius is weak bounding for a parallel-wave change; the brief should name the key scheme (e.g. a tagged/NamespacedId or composite) so parallel sessions (#138, #139, #140) can code against it.
-**[W-4]** The `NotFound → canceled` conclusion path is distinguished in scope ("a `NotFound` concludes it as `canceled` (or another documented terminal status)") but the acceptance test ("a stale recorded job is concluded via `job`") doesn't distinguish which API outcome it exercises. Add an explicit NotFound test and pick the terminal status in the brief.
-**[W-5]** No acceptance test that the demand scan reads only the D8 active status set (the stated reason the partial index is used). Even a cheap assertion that a `manual`/`scheduled` or terminal job produces no candidates would cover it.
+**[W-1]** A-B1 leaves the poll interval undetermined ("the same `reconcileIntervalSeconds` setting …; if that is not cheaply readable … `GITLAB_POLL_INTERVAL` of 30 s") — the brief permits two different runtime behaviors. Recommend fixing one (the named constant) as the deliverable, so the worker's cadence is testable and doesn't depend on a judgment call during implementation.
+
+**[W-2]** The no-older-over-newer test seeds `status_changed_at` "after the pass's start", while A-W3 defines observation time as taken "before the `pending_jobs` request". These can differ; a seed after the pass's start but before the observation timestamp would pass the test's wording while violating A-W3's rule. Recommend the criterion say "later than the observation timestamp the pass records for that connection".
+
+**[W-3]** The NotFound conclusion is specified as "`canceled` (or another documented terminal status … asserted by the test)" in three places — the acceptance criterion permits an implementation-chosen outcome. Recommend fixing it to `canceled` so the test is pinned regardless of implementation.
+
+**[W-4]** The brief says a GitLab pool "must scale down when idle with no owned GitLab jobs. Prove it with a test; do not edit that guard unless a test shows it is needed" — the second sentence is a diff-gate instruction, not a brief criterion, and the excerpt (main.rs:1396-1411) already shows GitLab pools fall through to the busy/queued checks. Keep the test requirement; drop the contingency instruction from the brief.
 
 ### NIT findings
-**[NIT-N]** None.
+**[NIT-1]** The "Job identity hazard" paragraph in Scope is superseded by A-B2's concrete `QueuedJobKey` enum; the earlier prose could be trimmed to avoid two statements of the same rule.
+
+**[NIT-2]** A-W1 lists test-constructor sites "near line 4825" / "near line 425" — line numbers will drift with six parallel wave-1 sessions; naming the constructors instead would be more robust.
 
 ### Verdict
-BLOCK — 1 blocking finding; must resolve before implementation starts.
+PASS — no BLOCK findings; implementation may proceed.

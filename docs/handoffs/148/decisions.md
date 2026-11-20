@@ -35,3 +35,39 @@
     - `crates/gridops-api/src/resources.rs:720-760,2065-2100` and `crates/gridops-api/src/resources/overview_queue.rs:292-330`.
   - Migrations: `0001_initial.sql` (`runner_pools`), `0046_runner_pool_exclusive_labels.sql` and `0047_gitlab.sql`.
   - Commands: a grep for every caller of the public autoscaling API across `crates/`, and `git fetch` plus `git ls-tree origin/master crates/gridops-reconciler/src/`.
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:40:53-08:00
+- **Decided:** BLOCK, with 1 block finding and 6 warn findings (see `handoff-A.md`, round 2). The brief was reviewed at `f8be658`.
+  - Round-1 blocks 1 to 4 are resolved by A-B1 to A-B4:
+    - the poll is its own worker, with `retry_when_busy`, a worker-local backoff map and `poll_once`;
+    - a private key enum, with every public output GitHub-only;
+    - the status tiers, with `running` not demand;
+    - tag matching on the configured labels.
+  - Round-1 warns 5 to 8 are addressed by A-W1 to A-W4, with residue noted in the round-2 warns.
+  - New block (1). The conclusion-step bound in A-B1 copies two of the three properties of `unconfirmed_jobs`/`confirm_jobs`. It lacks the re-check interval (`workflow_job_sync.checked_at`, written before each request) and waiting-before-running ordering. Unchanged `running` rows older than 5 minutes are asked about again every poll and, oldest first, fill `GITLAB_JOB_CHECK_LIMIT`. Stale `pending` rows, the only scaler demand, then wait behind them, starting runners and holding scale-down off.
+  - Recommended fix: stamp `updated_at` before each `job` request and select on it, or use a worker-local last-checked map; order `pending` first and `running` last; add two tests.
+  - Warns:
+    - (2) A-W3's order omits `manual`, `scheduled` and `unknown`, which D13 and `137-brief.md:500` leave to #148.
+    - (3) The poll's local-clock `status_changed_at` against #140's GitLab-clock ordering; make the status order decide.
+    - (4) The conclusion step doesn't clear runner busy, as `confirm_jobs` does through `associate_runner_with_job`.
+    - (5) Excluding `pool_platforms!()` entirely also drops the "pool has a platform" gate.
+    - (6) The 60 s per-connection budget cuts the same tail of a large group every poll and cancels its conclusion step.
+    - (7) Where `gitlab_credentials` lives (shared helpers live in `main.rs`), and that `UnavailableGitLab` must be `pub(crate)` for `main()` to construct it.
+- **Assumed:**
+  - GitLab moves a played manual job `manual → pending` and a due scheduled job `scheduled → pending` under the same job id. This is from GitLab's documented job lifecycle and wasn't checked against a live instance.
+  - Issue #140's text is what #140 builds: it writes `pending`, `running` and terminal statuses, and ignores events older than the stored status by `build_status_changed_at`.
+  - Every `gitlab_jobs` writer sets `updated_at` on each write. The contract doesn't state this; it is the convention of every other table here.
+- **Hedged:**
+  - Finding 1 comes partly from my own round-1 wording, which named only `status_changed_at` as the age. The handoff says so.
+  - How long starvation lasts depends on the data. It is bounded by the longest-running older job in the common case, and has no bound when older rows have answers A-W3 can't write. It is a block because the phantom demand drives scale-up and blocks scale-down, and the Done-when test can't tell either way.
+  - Warn 2 is a warning, not a block, because, per #140's issue, no writer creates `manual` or `scheduled` rows today.
+  - I didn't verify GitLab's tag case rule. A-B4 defers it to #143, which is acceptable.
+- **Evidence:**
+  - Read: the amended brief (all 192 lines), `git diff f76a8bd f8be658`, the working-tree brief-gate result `148-brief-result-r1.md`, the round-1 `handoff-A.md` and `decisions.md`, `docs/handoffs/137-brief.md` (by search for `pool_id`, `updated_at`, `status_changed_at` and #148, and lines 494-502 and 787), and issue #140 via `gh issue view`.
+  - Source:
+    - `crates/gridops-core/src/autoscaling.rs:1-850`, plus the test list and lines 1120-1220;
+    - `crates/gridops-core/src/gitlab/mod.rs:115-222`;
+    - `migrations/0047_gitlab.sql`, in full;
+    - `crates/gridops-reconciler/src/main.rs:30-140,340-520,1145-1230,1396-1445,1555-1600,1975-2260,3650-3730`;
+    - `crates/gridops-core/src/db.rs:195-240`.
+  - Commands: a grep for every `Reconciler {` literal (three sites, all listed in A-W1).
