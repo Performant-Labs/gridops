@@ -1,0 +1,41 @@
+# Decision journal: #142 GitLab macOS runners on Tart pools (Tart agent side)
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:33:21-08:00
+- **Decided:** PASS, with 0 block findings and 7 warn findings (see `handoff-A.md`).
+  - **Accepted as consistent with the code:**
+    - the new `gitlab.rs` sibling module, which matches the manager's `vm_slots.rs`/`sandbox.rs` and the reconciler's `tart_lane.rs`;
+    - the `("gitlab", _)` arm in `validate` and the `"gitlab"` arm in `provision_runner`, with `.take()` plus `SecretString::from` into the shared `start_runner` stdin channel;
+    - the `#[serde(default)]` additions to `TartRecord`;
+    - the conditional `exitReason` in `list_runners`;
+    - `GRIDOPS_TART_GITLAB_RUNNER_BINARY`, configured like `GRIDOPS_TART_BITBUCKET_RUNNER_ROOT`;
+    - `scripts/prepare-tart-gitlab-runner-image.sh`, modelled on the Bitbucket script, with the checksum step following `prepare-tart-runner-image.sh`'s `shasum -a 256 --check`;
+    - the docs section next to "Bitbucket Cloud workspaces".
+  - **The warnings:**
+    - (1) The exit-code writer in `start_runner`'s waiter must update in place, as `start_native_runner`'s waiter does, and never insert. Otherwise a `delete_runner` that races the exiting `tart exec` brings back a deleted record.
+    - (2) The new `platform` field must not default to `"github"`, because old Bitbucket records exist. Use `Option<String>`, like `root`.
+    - (3) Shape the `validate` arms like GitHub's tuple arms and fall through to the CPU and memory checks. Extend the existing native-runtime message rather than adding a duplicate, unreachable runtime check. Cap the URL at 512.
+    - (4) Fix `shell_single_quote` in place rather than adding a GitLab-only quoting helper. The bug is already reachable through the Bitbucket validation.
+    - (5) Reuse `FAKE_TART`/`FakeTart`, `install_script` and `gitlab_request`.
+    - (6) Module conventions: a `//!` header, explicit `use crate::...`, `pub(crate)`, a local `GITLAB_RUNNER_TOKEN_PREFIX` copy, and no installer or plist entry (matching Bitbucket).
+    - (7) #142 is not reachable end to end until #147 lets Tart GitLab requests through the manager's `validate` and adds the D15 relay.
+- **Assumed:**
+  - **Agent restarts:** a waiter task does not outlive an agent restart (spawned tasks die with the process), so old records are not rewritten by a waiter after a restart.
+  - **Ownership:** this issue owns `crates/gridops-tart-agent` whole, per epic #136's table as restated in the brief. So editing `shell_single_quote`, `FAKE_TART` and `install_script`'s visibility is a planned extension, not a drive-by of another agent's code.
+- **Hedged:**
+  - **Runtime behaviour, left to T and F.** It is not settled whether `tart exec` returns the guest status (NV-1) after an explicit `tart stop` (from `control_runner` or `delete_runner`). If it returns 0, a stopped GitLab runner could list `exitReason: "completed"`. I did not classify this as drift.
+  - **Two choices left to F,** each acceptable if written down in the handoff:
+    - Finding 1: record the exit code for every VM runner, or only for GitLab ones chosen by the caller.
+    - Finding 4: fix the quoting helper, or refuse `'` in the URL.
+  - **No Reuse map.** No `survey.md` was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - **Read:**
+    - the brief, and brief-review results r1 to r3, including the uncommitted r1 diff;
+    - `docs/handoffs/137/handoff-A.md` and `docs/handoffs/137/decisions.md`, for format and precedent;
+    - `docs/handoffs/137-brief.md`, grepped for the R2-1 and D10/D15 ownership rows.
+  - **Source:**
+    - `crates/gridops-tart-agent/src/main.rs`: `AgentState`, `TartRecord`, `ProvisionRunner`, `GitlabBootstrap`, `GITLAB_EXIT_*`, `validate`, `main()` configuration, `list_runners`, `provision_runner`, `provision_native`, `start_native_runner`, `control_runner`, `delete_runner`, `start_runner`, `bitbucket_runner_script`, `shell_single_quote`, `runner_script`, the record helpers, `valid_guest_path`, and in the tests module `provision_request`, `FAKE_TART`, `install_script`, `FakeTart`, `vm_record` and the GitLab tests;
+    - `crates/gridops-tart-agent/Cargo.toml`;
+    - `crates/gridops-manager/src/main.rs` (module declarations, `validate`, `valid_registration_url`) and `crates/gridops-manager/src/vm_slots.rs` (module header and imports);
+    - `crates/gridops-core/src/provisioning.rs`, the GitLab constants.
+  - **Scripts and docs:** `scripts/prepare-tart-bitbucket-runner-image.sh` (in full) and `scripts/prepare-tart-runner-image.sh` (checksum lines); `docs/macos-runners.md` (section list and "Bitbucket Cloud workspaces").
+  - **Searched:** `GRIDOPS_TART_*_RUNNER_ROOT` references across `scripts/`, `docs/`, `deploy/` and `crates/`.
