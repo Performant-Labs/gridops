@@ -102,7 +102,7 @@ function fetchStub(url: string, init?: RequestInit) {
     const items = RUNNER_GROUPS[Number(groups[1])];
     return items ? Response.json({ items }) : Response.json({ error: "Runner groups are listed for organizations only." }, { status: 404 });
   }
-  if (method === "GET" && url === "/api/v1/platform-connections/bitbucket") return Response.json({ canManage: true, items: [] });
+  if (method === "GET" && /^\/api\/v1\/platform-connections\/bitbucket$/.test(url)) return Response.json({ canManage: true, items: [] });
   if (method === "POST" && url === "/api/v1/runner-pools") return Response.json({ id: "pool-new" }, { status: 201 });
   if (method === "PUT" && url === "/api/v1/runner-pools/pool-1") return Response.json({ ok: true, configurationVersion: 4, rollingReplacement: false });
   return Response.json({ error: `not in this test: ${method} ${url}` }, { status: 404 });

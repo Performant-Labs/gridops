@@ -145,3 +145,9 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
   - The brief's redirect grep, the `appError` grep and the generic-files grep print nothing beyond what is allowed.
   - `git diff b8cbf8d --stat -- tests` is empty.
   - Handoff: `docs/handoffs/145/handoff-F.md`. Evidence: `docs/handoffs/145/evidence.md`. Survey: `docs/handoffs/145/survey.md`.
+
+## T-green (Phase 7)
+- **Decided:** repaired one test line in `tests/pool-target-payloads.test.ts` (the Bitbucket list URL as a regex) so the brief's independence grep prints nothing; constants untouched. Returned PASS: suite 445/445, build/lint/typecheck clean, three mutation checks fail as expected.
+- **Assumed:** no Playwright suite exists in this project, so the browser walkthrough is U's.
+- **Hedged:** jsdom-only surfaces (picker load states, Back button, runner "CI platform" link, SPA nav, old-URL redirects) are not verified in a browser.
+- **Evidence:** `docs/handoffs/145/handoff-T-green.md`.
