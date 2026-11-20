@@ -33,3 +33,36 @@
     - `src/routes/_app/webhooks.tsx:119-146`.
   - Migrations: `0001_initial.sql:202-218` (`webhook_deliveries`) and `0047_gitlab.sql` (in full).
   - Spec: `docs/openapi/gridops-v1.json` `POST /api/v1/webhooks/gitlab`, extracted with `python3 -I`.
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:44:07-08:00
+- **Decided:** BLOCK, with 3 block findings and 4 warn findings (see `handoff-A.md`).
+  - Round-1 findings 1 to 5 and 7 are resolved by the amendments. Round-1 finding 6 was applied as I suggested, but epic #136's later rule supersedes it.
+  - (1) [correctness] The `gitlab_jobs` guard orders by time first, with rank deciding only ties. That contradicts #136's "one status rule for `gitlab_jobs` writers (#140 webhook, #148 poll)": a terminal row never changes, and no writer moves a row backwards. The rule was posted 3:30:59 PM PST, 15 s after brief commit fc85722. The brief's note that #148 is insert-only is also wrong: #148 refreshes and concludes rows, writing its own observation time.
+  - (2) [correctness] `status_changed_at` in epoch seconds. Every `*_at` column in the codebase is epoch ms, and #148 reads and writes this column against `GITLAB_JOB_CHECK_AGE_MS` and its observation time.
+  - (3) [completeness] The route line fails `access::tests::the_documented_matrix_lists_exactly_the_registered_routes` without a `docs/fleet-api.md` row. The OpenAPI "Not served yet: implemented by #140" marker and its `openapi.rs` test are also left stale. #138's brief already allows the same three edits for its own routes.
+  - The warnings:
+    - (4) retry can't re-resolve the connection when several candidates exist;
+    - (5) the tier rule should be written once in Rust, with a #136 follow-up to move it to core;
+    - (6) D17's `list_runners` must be added to `UnconfiguredGitLab` by whichever of #139 and #138/#140 lands second;
+    - (7) whether to write `runner_events` on busy changes, which the GitHub analogue does.
+- **Assumed:**
+  - The #136 "#148 rules" comment is the governing cross-issue decision for `gitlab_jobs` writers, and it binds #140 although it postdates the brief.
+  - The in-flight sibling briefs, read from their worktrees, are what those issues will build: #148 at f8be658, #138 with uncommitted edits, #139 at d88acd5.
+  - GitLab does not move a job id's status backwards (a retry creates a new job id), so a rank-first guard loses no real transitions.
+- **Hedged:**
+  - I proposed the tier-0 placement of `manual`, `scheduled` and `unknown`. O should confirm it and record it on #136.
+  - I didn't verify that GitLab's Job event payload carries `build_status_changed_at` or `project.web_url`. Payload fields are the brief gate's job. The rank-first guard doesn't depend on the timestamp being present, which is part of why it is safer.
+  - I kept finding 3 as a block, not a warn, because the drift-test failure is certain the moment the route line is added, and the fix is a list edit.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (fc85722) and `140-brief-result-r1.md` / `-r2.md`;
+    - round-1 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs` (`:1-270`, `:500-760`, `:855-940`), `state.rs`, `Cargo.toml` and `main.rs:185-210`;
+    - `access.rs:184-300`, `fleet/openapi.rs:240-330` and `tests/fleet_http/token_access.rs:1140-1280`;
+    - `resources.rs:448-470`;
+    - `gridops-core/src/db.rs:180-330` and `gitlab/mod.rs` / `fake.rs`;
+    - `gridops-reconciler/src/main.rs:2036`, `:3130-3150`, and its uses of the core job helpers;
+    - `migrations/0047_gitlab.sql` and `0001_initial.sql` (`webhook_deliveries`);
+    - `docs/fleet-api.md:80-130`, and `docs/openapi/gridops-v1.json` (the path description, read with `python3 -I`).
+  - Epic #136 comments (`gh api .../issues/136/comments`, with timestamps), issues #140 and #148 (`gh issue view`), and `git log origin/master` (#138 not landed).
+  - Sibling worktrees: `148-brief.md` (A-W2, A-W3, `:69`) and `148/handoff-A.md`; `138-brief.md` (`:53`, `:113-127`); `139-brief.md` (D17, `:100-118`).
