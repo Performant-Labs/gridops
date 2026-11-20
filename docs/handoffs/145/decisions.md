@@ -214,3 +214,9 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
   - Headless render against S's repro setup: names are unclipped at 360, there is no member overlap, and "Manage App" is on screen.
   - A pixel AE compare against a pre-fix `HEAD` build shows only footer and port-string differences at 768 and 1280, and on every non-Connections surface at 360.
   - `docs/handoffs/145/handoff-F.md`, section "Round 5".
+
+## T (Phase 7, round 5 GREEN)
+- **Decided:** No new test for D1/D2. The defects are layout at 360 px, invisible to jsdom; class assertions would be mock-shaped. Left to U's rendered re-walk.
+- **Assumed:** F's pixel-identical 768/1280 comparison for the shared `SettingsSection` change holds; T did not re-render.
+- **Hedged:** Verified by mutation (`showActions = false`) that the restructured trailing wrapper is still pinned by 3 tests, then reverted.
+- **Evidence:** vitest 461/461, lint clean, `tsc` exit 0, build OK at `d21be14`; `git diff dd934c3 HEAD -- tests` empty.

@@ -119,3 +119,43 @@ None.
 ## Advisory notes
 - Not covered by jsdom and left to U: the visual layout of the chooser entries and the generic empty state at 360/768/1280, the new-tab behaviour of the install link, and the chooser reached by SPA navigation.
 - F's two deviations (one-paragraph GitHub description instead of the wireframe's description plus callout; neutral admin empty copy without the GitHub/Bitbucket sentence) follow the brief's round-4 text and are not defects.
+
+---
+
+# Round 5 (S rework: D1, D2 at 360 px) - GREEN
+
+**Date:** 2026-11-20 (PST)
+**Branch:** claude/ui-145-platform-neutral-cf5832 (head `d21be14`, F's round-5 commit)
+**Issue:** #145
+**Handoff-F reviewed:** `docs/handoffs/145/handoff-F.md` ("Round 5"); input was `handoff-S.md` (REWORK, production only)
+
+## GREEN confirmation
+F's round 5 changed two production files (`src/components/settings-ui.tsx`, `src/features/platform-connections/connections-section.tsx`), layout classes plus one restructure of the trailing status/actions wrapper. No test file changed (`git diff dd934c3 HEAD -- tests` is empty). F flagged no wrong tests.
+
+| Command | Result |
+|---|---|
+| `npx vitest run` | 46 files, 461/461 passed (same as F reported) |
+| `npm run lint` | clean (`--max-warnings=0`) |
+| `npx tsc --noEmit` | exit 0 |
+| `npm run build` | built; typecheck step clean |
+
+Spot-check (behavior, not implementation): I temporarily forced `showActions = false` in `ConnectionRow`. Three tests failed (`shows Add connection, Edit and Remove ...`, `edits only the editable fields ...`, `removes a workspace ...`), so the restructured wrapper is still pinned for Edit/Remove. Reverted; the tree is clean.
+
+## Tier 2 results
+- **Test coverage / quality:** PASS. The brief's criteria are still each backed by a test; round 5 adds no behavior, so no new test is owed. D1, D2 and the dropdown clip are layout and cannot be seen under jsdom; a class-name assertion would be mock-shaped, so I am not adding one (agrees with S and F). They are left to U's rendered re-walk. No redundant test found.
+- **Type safety:** PASS. No prop, type or export change; no new `any`.
+- **Error handling / data integrity / migration / API contract:** N/A or unchanged. No API, DB or OpenAPI change.
+- **Security:** PASS. Edit/Remove stay gated by `canManage && !editing`; the condition is only hoisted into `showActions`, same expression.
+- **Shared-code blast radius:** `SettingsSection` is shared. F listed its `actions` users (fleet-profile Save, Connections Add, GitHub App) and reported 768/1280 pixel-identical to the pre-fix build; those pixel checks are F's, not re-run by me (no headless browser run in T). Flag for U.
+- **Playwright:** none in this project; nothing skipped.
+- **Evidence appendix:** F's round-5 entries cover the unchanged-source facts (other `SettingsSection` users, 20 px page padding, Bitbucket's `hidden sm:inline` aside). My tests rely on none of these. No additions.
+
+## Acceptance criteria status
+All earlier criteria PASS, unchanged (461 tests). S's D1/D1b/D2 are layout criteria checked by render: F reports 360 measurements fixed (names 66/67/98/90 px, none clipped; "Manage App" on screen; no overlap), unverified by T; U must re-walk at 360 and 768/1280.
+
+## Blocking issues
+None.
+
+## Advisory notes
+- Known, accepted by F: member Bitbucket rows are about 8 px taller at 360; the Targets dropdown clip is pre-existing and needs a follow-up issue (not filed by T).
+- The suite still depends on `docs/handoffs/145/survey.md` (survey-text test); unchanged advisory.
