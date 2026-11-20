@@ -758,3 +758,41 @@ The forward-compat table in `docs/handoffs/145/survey.md` must also state plainl
 - **Derived rules.** Replace the `minMaxCount` example formula with a kind flag `raisesMinMaxCount` (true for `github.repository` only, so Bitbucket workspaces do not raise the minimum, as today): `minMaxCount = max(1, count of selected options of kinds with raisesMinMaxCount)`. `planNote(count, { maxCount }) => { ok, text }`; when nothing is selected the default kind is `github.repository` (today's form starts at `scope = "repository"`). Remaining descriptor fields are named: `prerequisiteEmptyState` (today's "Connect GitHub first" / "Install the GitHub App"), `labelsPlaceholder`, `readOnlySummary(pool)` (for `ReadOnlyPool`), `externalLinks` (install / manage URLs), and per kind `offeredIn: Array<"create" | "update">`.
 - **Mutations.** Bitbucket create and edit keep their inline errors (as `settings.integrations.tsx:35-51, 73, 103-119`): a plain async call, then `queryClient.invalidateQueries({ queryKey: ["platform-connections", id] })`, following `CreateTokenSection` (`api-tokens-section.tsx:67-75`). Only Remove uses `useAction({ after })`. `router.invalidate()` is used only to refresh `/settings` data (GitHub). `getBitbucketConnections` gains an optional `signal` parameter (frontend function signature only; same endpoint).
 - **Import rule wording.** Descriptors may import React, `lucide-react`, `~/components/ui/*` and `~/lib/*`, plus the files already listed; they never import route files or other descriptors. The new option fields (`group`, `disabled`, `disabledReason`, `icon`, `locked`) go on a new `SearchableMultiSelectOption` type that extends `SearchableSelectOption`; the shared single-select type is unchanged.
+
+## Round-4 operator decisions after the spec audit (binding; supersede earlier text where they conflict)
+
+Operator decision, 2026-11-20, after run `wf_f810b433-6c8` stopped at S with ADVISORY-HOLD (`docs/handoffs/145/handoff-S.md`). The implementation on this branch stays; this round adds two small changes to it and settles the visual gate. Earlier commits and handoffs remain valid for everything not named here.
+
+### Visual gate: pixel diff waived for #145
+- The only visual reference is the low-fidelity wireframe (`handoff-D.md`: "Mode (a) generated low-fi", glyph placeholders), so a pixel diff against it cannot decide anything. The operator waives S's pixel-diff gate for this story.
+- The visual record is U's headless Playwright walkthrough against the live app plus S's code-level audit. U must save its screenshots under `docs/handoffs/145/screenshots/` at 360, 768 and 1280 widths, covering the Connections page (populated, empty, read-only member), the Add connection dialog (chooser, GitHub link-out step, Bitbucket form), the new-pool form and the pool settings form.
+- S returns PASS when every acceptance criterion (including the two below) holds at code level and U's saved screenshots show no defect against this brief; S does not return ADVISORY-HOLD or CANNOT-AUDIT for the missing pixel diff.
+
+### W3 and W4: accepted as built
+- No "Connections · N" count and no "Active" status on GitHub rows (W3); the runner link is the platform name in the runner details sheet, not an actions-menu item (W4). Both are accepted. No change.
+- `runnerLink(...).label` stays in the contract (it is the accessible name / title of the details-sheet link); F must render it as that link's `title` or `aria-label` so the field is read.
+
+### W1 (new acceptance criterion): every platform is offered in Add connection, through the descriptor
+- Replace the unread `externalLinks` field with a connection binding the Add connection dialog actually reads. In `ConnectionBindings` (types.ts), add:
+  - `chooserDescription: string` — the one-line text under the platform's name in step 1 (GitHub: "Runners for GitHub Actions. Added by installing the GridOps GitHub App."; Bitbucket: "Bitbucket Cloud workspaces with managed macOS runners for Pipelines.").
+  - `connectLink?: (page: SettingsPage) => { label: string; description: ReactNode; href: string | null; unavailableText?: string }` — for a platform connected outside GridOps. GitHub's returns label "Install GitHub App", description "GitHub accounts are connected by installing the GridOps GitHub App on them. GridOps then picks the installation up automatically after you return and refresh access.", `href` = `githubApp.installUrl`, or `href: null` with `unavailableText: "Create the GitHub App first (below on this page)."` when the App is not configured.
+- Delete `PlatformDescriptor.externalLinks` and GitHub's implementation; nothing else reads it. Update `docs/handoffs/145/survey.md` so the descriptor table matches.
+- The dialog (shared code, no platform ids): step 1 lists every descriptor that has `create` or `connectLink` and whose list the user can manage (`canManage`), each with icon, name and `chooserDescription`, in registry order. Picking a `create` platform shows today's form. Picking a `connectLink` platform shows its description and a primary external link (`target="_blank"`, `rel="noreferrer"`) with the link's label, plus a Back button; with `href: null` the primary button is disabled and `unavailableText` is shown. A Back button also returns from the form step to step 1.
+- A platform with neither binding is not listed. Non-admins still never see Add connection.
+
+### W2 (new acceptance criterion): one generic empty state, and no GitHub empty row while the App is unconfigured
+- `ConnectionBindings.emptyText` becomes `(page: SettingsPage) => string | null`; `null` means the platform shows no empty row. GitHub returns `null` while `page.data?.githubApp` is absent; otherwise today's "No installations are visible to @{login}." Bitbucket keeps its text.
+- When every platform's list has loaded successfully and all of them are empty, the section shows one generic empty state instead of any per-platform empty row: title "No connections yet"; for a user who can manage at least one platform, "Connect a CI platform to start assigning it to runner pools." with the Add connection button as its call to action; for a read-only member, "A GridOps administrator can add platform connections." The copy is neutral and lives in the shared section, not a descriptor.
+- While any fetched list is loading, or has failed (its InlineError with Retry), the generic empty state is not shown; the per-platform rows render as today. Per-platform empty rows (where `emptyText` is non-null) still show when some other platform has rows.
+
+### Small advisory fixed in the same pass
+- `postCreate` throwing or rejecting after the dialog has closed must surface as an error toast (`toast.error`) with the thrown message, not as dialog state. A Vitest case with a test-only descriptor whose `postCreate` rejects asserts the toast and that no reveal dialog opens.
+
+### Accepted as is (no change in #145)
+- The new-pool form loads runner groups for every organization installation on mount. That is the per-kind `load` the brief specifies; the number of organization installations per GridOps instance is small. Not changed here.
+
+### Tests (T, RED first)
+- W1: the chooser lists GitHub and Bitbucket for an administrator; GitHub's step renders the install link with `installUrl`; with no `githubApp` the link is disabled and the unavailable text shows; Back returns to step 1; a test-only descriptor with only `connectLink` is listed (registry-driven, no platform branch).
+- W2: all lists empty (admin) → "No connections yet" with Add connection and no per-platform empty row; same for a member with the member copy and no button; App unconfigured and Bitbucket has rows → no GitHub row; App configured, no installations, Bitbucket has rows → the GitHub empty row shows; Bitbucket list failed → InlineError, not the generic empty state.
+- `platform-registry` / survey test: `externalLinks` no longer exists on the type (an `expectTypeOf` or keyof assertion) and every registered descriptor has `chooserDescription`.
+- The `platform-neutral-source.test.ts` guard still passes for `connections-section.tsx`.
