@@ -1,9 +1,20 @@
-# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI
+# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI (revision 2)
 
 **Date:** 2026-11-20
 **Branch:** claude/ui-145-platform-neutral-cf5832
 **Mode:** (a) generated low-fi
 **Wireframe:** docs/handoffs/145/wireframe.html (single static HTML file, frames A-G, numbered annotations per frame)
+**Revision:** 2. Revision 1 (commit 8526086) was BLOCKed in Phase 4 (handoff-A.md) and the brief was amended afterwards. This pass amends the wireframe where the amended brief and the review require it; where the wireframe and the brief disagree, the brief wins. Revised or added items carry a `REV2` tag in the file.
+
+## Revision 2 changes
+- **C4 reveal dialog.** Only the explicit Done button closes it; Escape and outside clicks are ignored (the "or Esc" wording is removed). It is the existing one-time-secret dialog extracted to a shared component, so API tokens and Connections behave identically. New note C7.
+- **Bitbucket is not standalone (D2, new D2b, new D7, D notes 2 and 5).** With no GitHub target selected, every Bitbucket workspace option is shown disabled with the reason `Select a GitHub repository or runner group first`; it enables once a repository or runner group is picked. Removing the last GitHub target keeps the workspace selected, leaves Create pool enabled, and submit fails before any request with the schema's thrown message in the existing "Could not create the pool" callout (D7). Pool settings cannot reach that state (E note 5).
+- **D5 empty state.** Replaced the invented "Add a connection first" with today's two empty states, "Connect GitHub first" (D5a) and "Install the GitHub App" (D5b), copy supplied by the GitHub descriptor. The gate is "no GitHub installation", not "no targets of any kind". The false "if only one platform has targets" sentence is removed.
+- **D notes.** Namespaced internal option keys; per-kind caps counted separately; installation pinned from the first selected repository (mixed installations still allowed, as today); plan-preview sentence contract including the empty-form case.
+- **E3 (new).** Read-only pool shows its targets through the same registry-driven display (platform badge + existing summary text), Priority shown by the descriptor flag.
+- **B5b (new).** Partial load failure: one platform's error row with its own Retry, other platform's rows still rendered, Retry re-runs only that load.
+- **A.** Webhooks empty-state link and the nav item added to the redirect/link table; no link targets a redirecting route.
+- **F note 4.** The Bitbucket label rule is the one already exported from `schemas.ts`; no second copy.
 
 ## Screens & states covered
 
@@ -12,7 +23,7 @@
   - B1 many (GitHub installations + Bitbucket workspaces in one list: badge, name, detail, status, actions; suspended installation; GitHub App section kept for admins).
   - B2 one. B3 empty: guides to Add connection for admins; read-only variant says "A GridOps administrator can add platform connections."
   - B4 read-only: no Add, no Edit/Remove, no App section.
-  - B5 loading and per-platform load error with Retry.
+  - B5 loading and per-platform load error with Retry; B5b partial failure (one platform fails, the other renders; Retry re-runs only the failed load).
   - B6 inline edit (editable-on-update fields only, blank secret keeps the current one, error and saving states).
   - B7 GitHub App not configured (existing create form).
   - GitHub rows are list-only (external Configure link or "Owner approval required"); Bitbucket rows have Edit/Remove. Every action is hidden when the descriptor has no binding or cannot manage.
@@ -20,15 +31,15 @@
   - C1 platform chooser first.
   - C2 GitHub (no create binding, so a link out to install the App; disabled when the App is not configured).
   - C3 Bitbucket fields from the descriptor list: idle, submitting, error.
-  - C4 post-create reveal. Closes only through Done or Esc; the value is dropped after close and never offered again.
+  - C4 post-create reveal. Closes only through the Done button (Escape and outside clicks ignored); the value is dropped after close and never offered again.
 - **D. New-pool Targets row.**
-  - D1 closed with chips. D2 open listbox grouped "Platform · Target kind" with disabled-with-reason incompatible options.
+  - D1 closed with chips. D2 open listbox grouped "Platform · Target kind" with disabled-with-reason incompatible options. D2b nothing selected: Bitbucket options disabled with reason (not standalone).
   - D3 per-group loading / error+Retry / not-connected / no-match rows.
   - D4 organization runner group (single-select, manual "Runner group ID" fallback row).
-  - D5 no targets / not signed in empty state ("Add a connection first").
-  - D6 maximum reached.
+  - D5 no GitHub installation: "Connect GitHub first" (not signed in) and "Install the GitHub App" (zero installations).
+  - D6 maximum reached (per-kind caps). D7 last GitHub target removed while a workspace stays selected: submit enabled, schema error callout, no request.
   - Also the Tart auto-add notice and the plan-preview sentence coming from the target kind.
-- **E. Pool settings Targets row.** E1 repository pool (Bitbucket chips shown locked, display-only). E2 organization runner-group pool (listbox restricted to its own installation).
+- **E. Pool settings Targets row.** E1 repository pool (Bitbucket chips shown locked, display-only). E2 organization runner-group pool (listbox restricted to its own installation). E3 read-only pool targets (no controls).
 - **F. Platform options.** F1 collapsed by default with neutral shared rows. F2 expanded for two platforms, with the optional component slot. F3 one platform. F4 not rendered when nothing is targeted or no content. F5 label-rule error shown in the Additional labels row while the section is collapsed.
 - **G. Runner row.** G1 GitHub, Bitbucket and unknown-platform (dashed fallback) badges. G2 actions menu with "Open on {platform}" shown only when the link builder returns a URL, and the registry-driven delete-confirm text.
 
@@ -36,24 +47,26 @@ Per-state copy is marked in yellow in the file; it keeps today's wording where a
 
 ## Existing components/patterns reused
 
-`SettingsLayout` / `SettingsSection` / `SettingsRow` (page shell, one row shape), `Callout` (read-only, errors, info), `StatusDot`, `Badge`, `Button`, `Input`, `CopyButton` (reveal dialog), `EmptyState`, `InlineError` (retry rows), `useAction` confirm (Remove), `SearchableMultiSelect` extended with an optional option `group` (no parallel widget), BitbucketSettings's ConnectionRow edit/remove logic, the GitHub settings sections moved verbatim into the GitHub App section, `TartBaseVmRow` and the Additional labels row (made neutral). The only net-new surfaces are the Connections list, the Add connection dialog, the reveal dialog and the Platform options disclosure.
+`SettingsLayout` / `SettingsSection` / `SettingsRow` (page shell, one row shape), `Callout` (read-only, errors, info), `StatusDot`, `Badge`, `Button`, `Input`, `CopyButton` (reveal dialog), `EmptyState`, `InlineError` (retry rows), `useAction` confirm (Remove), `SearchableMultiSelect` extended with optional option fields only (group, disabled + reason, icon, locked, per-group status; no parallel widget, no registry import), the extracted `SecretDialog` for C4, BitbucketSettings's ConnectionRow edit/remove logic, the GitHub settings sections moved verbatim into the GitHub App section, `TartBaseVmRow` and the Additional labels row (made neutral). The only net-new surfaces are the Connections list, the Add connection dialog, the reveal dialog and the Platform options disclosure.
 
 ## Open questions for approval
 
-The pipeline has no interactive operator, so each question below has a default that preserves current behaviour; the wireframe is drawn with the default.
+The pipeline has no interactive operator, so each question has a default that preserves current behaviour; the wireframe is drawn with the default.
 
-1. **Bitbucket targets in pool settings.** Default drawn: shown as locked chips, not editable, because the current settings form has no workspace picker and does not send `bitbucketConnectionIds`. The alternative (editable, which changes the save payload) is out of scope per the payload-equality criterion.
-2. **Runner link.** Default drawn: "Open on {platform}" item in the actions menu, only when the descriptor's link builder returns a URL. The brief names the builder but not where it surfaces.
+1. **Bitbucket targets in pool settings.** Default drawn: locked, display-only chips, because the current settings form has no workspace picker and does not send `bitbucketConnectionIds`. The alternative (editable) changes the save payload, which the payload-equality criterion rules out.
+2. **Runner link.** Default drawn: "Open on {platform}" in the actions menu, only when the descriptor's link builder returns a URL. The brief names the builder but not where it surfaces.
 3. **Runner badge on every row.** Today no badge is shown (only the delete-confirm text uses the platform name). Default drawn: a compact badge after the runner name, hidden below `sm`.
-4. **Pool settings Priority section** stays after Destination and is shown when a selected target kind supports prioritisation (descriptor flag `supportsPriority`, true for GitHub repository), replacing the `pool.scope === "repository"` check.
-5. **User-account installations** in the runner-group kind get an "Enter runner group ID" entry, preserving today's manual fallback; organization installations list real groups.
-6. **GitHub on the Add connection chooser** is a link-out (install the GitHub App), not a form, because GitHub has no create endpoint. If the App is not configured the action is disabled with copy pointing at the App setup section.
+4. **Pool settings Priority section** follows the descriptor flag `supportsPriority` (true for GitHub repository), replacing the `pool.scope === "repository"` check.
+5. **User-account installations** in the runner-group kind get an "Enter runner group ID" entry, preserving today's manual fallback.
+6. **GitHub in the Add connection chooser** is a link-out (install the GitHub App), because GitHub has no create endpoint; disabled with pointing copy when the App is not configured.
+7. **D7 error wording.** The message in the "Could not create the pool" callout is whatever `parseCreateRunnerPoolInput` throws for `installationId: 0`; it is not friendly and is not designed here, because improving it needs a `schemas.ts` rule change that the brief rules out for this story. Default: show the thrown message, as today.
+8. **Read-only pool targets (E3).** Default drawn: the existing summary text per kind (`2 repositories`, or the account name for an organization pool) behind a platform badge, plus a Bitbucket line when the pool has workspaces (a small truthful addition: today's read-only view omits them). Alternative: keep the single old "Destination" line unchanged.
 
 Icons are Unicode glyphs only (no hand-drawn SVG geometry). Real icon components (lucide, as used elsewhere) are an implementation choice; the wireframe's glyphs are placeholders.
 
 ## Verification of the render
 
-Rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected frames A-G section by section: glyphs complete and on-canvas, no clipped controls. Fixed three issues found on the first look (nav tag wrapping, block-level copy highlight layout in empty states, wrong frame reference). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
+Revision 2 rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the changed and added frames (legend, A, B5/B5b, C2-C4, D1-D7, E1-E3, F1) in the screenshot: glyphs are complete and on-canvas, no clipped controls, div balance 441/441. Frames G and F2-F4 were not changed and were not re-inspected in this pass (revision 1 inspected them). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
 
 ## Approval
 

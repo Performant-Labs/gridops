@@ -110,6 +110,14 @@
   <b>Platform names, badge styling, icons, field lists, help text and target kinds in every frame below come from the registry descriptor</b> (<code>src/features/platform-connections/registry.tsx</code>) &mdash; the wireframe draws GitHub and Bitbucket only; an unknown id renders the fallback (frame G).
 </div>
 
+<div class="legend" style="border-color:#c2410c">
+  <b>Revision 2 (after the Phase-4 architecture review and the amended brief).</b> Where this file and <code>docs/handoffs/145-brief.md</code> disagree, the brief wins. Changes in this revision:<br>
+  &bull; <b>C4</b>: only the explicit button closes the reveal (Escape and outside clicks are ignored); it is the extracted <code>SecretDialog</code>, shared with API tokens.<br>
+  &bull; <b>D2/D2b/D7</b>: Bitbucket is <i>not standalone</i> &mdash; its options are disabled-with-reason until a GitHub repository or runner group is selected; removing the last GitHub target keeps the workspace selected and the form fails at submit, as today.<br>
+  &bull; <b>D5</b>: with no GitHub installation the page shows today&rsquo;s two empty states (copy now supplied by the GitHub descriptor); the invented &ldquo;Add a connection first&rdquo; is dropped.<br>
+  &bull; <b>D</b> notes: namespaced option keys, separate per-kind caps, installation pinned from the first repository, plan-preview sentence contract. <b>E3</b>: read-only pool targets. <b>A</b>: webhooks empty-state link. <b>B5b</b>: partial load failure. New or changed items carry the <span class="tag new">REV2</span> tag.
+</div>
+
 <nav class="toc">
   <a href="#A">A &middot; Settings nav + redirects</a><a href="#B">B &middot; Connections page</a><a href="#C">C &middot; Add connection + reveal</a><a href="#D">D &middot; Targets row</a><a href="#E">E &middot; Pool settings Targets</a><a href="#F">F &middot; Platform options</a><a href="#G">G &middot; Runner row</a>
 </nav>
@@ -135,12 +143,14 @@
       <tr><td>/platform-connections</td><td>replace-redirect &rarr; /settings/connections (edited in place; was &rarr; integrations)</td></tr>
       <tr><td>/settings?appError=&hellip;</td><td>replace-redirect &rarr; /settings/connections, <code>appError</code> kept so the error Callout still shows</td></tr>
       <tr><td>Pool form link &ldquo;Settings &rarr; Integrations&rdquo;</td><td>&ldquo;Settings &rarr; Connections&rdquo; &rarr; /settings/connections</td></tr>
+      <tr><td>Webhooks empty-state button <span class="tag new">REV2</span></td><td>keeps its label <span class="copy">GitHub settings</span>; link &rarr; /settings/connections (was /settings/github)</td></tr>
+      <tr><td>Settings nav items</td><td>one &ldquo;Connections&rdquo; item &rarr; /settings/connections</td></tr>
     </table>
   </div></div>
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>One nav item replaces two.</b> &ldquo;GitHub&rdquo; and &ldquo;Bitbucket&rdquo; items are removed; &ldquo;Connections&rdquo; sits first in the Integrations section; &ldquo;AI agent&rdquo; is unchanged. Active-state styling as today (<code>aria-current=page</code>).</li>
-  <li><span class="n">2</span>Every redirect points directly at the new route &mdash; no chains.</li>
+  <li><span class="n">2</span>Every redirect, and every in-app link (nav, pool form, webhooks empty state), points directly at the new route &mdash; no link or redirect targets a redirecting route. The three old routes are redirect-only (no component, no loader).</li>
   <li><span class="n">3</span>A future platform adds no nav item; it only appears as a platform choice and as rows in the list.</li>
 </ol>
 </div>
@@ -223,7 +233,22 @@
     <div class="panel"><div class="row"><span class="mut">&#x27F3; Loading connections&hellip;</span></div><div class="row"><span style="display:block;height:14px;width:60%;background:#e6e7eb;border-radius:3px"></span></div></div>
     <div style="height:8px"></div>
     <div class="callout danger"><b class="copy">Couldn&rsquo;t load connections</b><span class="copy">{error message from the platform&rsquo;s list binding}</span> &nbsp; <span class="btn sm">&#x21BA; Retry</span></div>
-    <p class="faint" style="margin:6px 0 0">A failing platform does not hide the others: its rows are replaced by this callout, other platforms&rsquo; rows still render.</p>
+    <p class="faint" style="margin:6px 0 0">A failing platform does not hide the others: its rows are replaced by this callout, other platforms&rsquo; rows still render (see B5b).</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">B5b &middot; Partial failure &mdash; Bitbucket list rejected, GitHub list resolved <span class="tag new">REV2</span></p>
+  <div class="screen tight">
+    <div class="panel">
+      <div class="row"><span class="badge gh">&#x25C9; GitHub</span><span class="av">A</span>
+        <div class="grow"><div class="t">acme <span class="faint">&middot; Organization</span></div><div class="d">GitHub App installation &middot; All repositories &middot; 3 pools &middot; synced 4m ago</div></div>
+        <span class="mut"><span class="dot"></span> Active</span><span class="btn g sm">Configure &#x2197;</span></div>
+      <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span>
+        <div class="grow"><div class="callout danger" style="margin:0"><b class="copy">Couldn&rsquo;t load Bitbucket connections</b><span class="copy">{error message from the Bitbucket list binding}</span></div></div>
+        <span class="btn sm">&#x21BA; Retry</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">The error row names the failed platform (descriptor <code>name</code>). <b>Retry</b> re-runs only that platform&rsquo;s list binding; GitHub is not re-fetched, and while retrying only the Bitbucket row shows <span class="copy">&#x27F3; Loading connections&hellip;</span>. If both fail, both rows show their own error + Retry. Add connection stays available for platforms that can create.</p>
   </div>
   </div>
 
@@ -260,7 +285,7 @@
   <li><span class="n">4</span><b>GitHub rows are list-only:</b> no Edit/Remove (no API). Their action is the external <b>Configure &#x2197;</b> link (new tab), or <span class="copy">Owner approval required</span> when the user lacks admin on the installation. Suspended installations get a danger badge and status.</li>
   <li><span class="n">5</span><b>GitHub App section</b> (administrators only; read-only users see only the &ldquo;Read-only access&rdquo; callout) keeps today&rsquo;s checks, endpoints, create form, refresh/install/manage actions and the &ldquo;Adding another GitHub account&rdquo; callout. It is the GitHub descriptor&rsquo;s optional <code>settingsSection</code> slot &mdash; the page has no GitHub-specific code.</li>
   <li><span class="n">6</span><b>Empty (B3):</b> guidance, not just &ldquo;nothing here&rdquo;; the primary CTA exists only for people who can add. <b>Read-only (B4):</b> callout copy as today; list still visible.</li>
-  <li><span class="n">7</span><b>Pending/error (B5):</b> loading rows while the loader runs; per-platform error callout with Retry.</li>
+  <li><span class="n">7</span><b>Pending/error (B5, B5b):</b> loading rows while the loader runs; a per-platform error row (platform name in the title) with its own Retry that re-runs only that platform&rsquo;s load. Mutations (add/edit/remove) refresh the list afterwards.</li>
   <li><span class="n">8</span>Responsive: rows wrap as today&rsquo;s page (status text hidden below <code>sm</code>).</li>
 </ol>
 </div>
@@ -322,7 +347,7 @@
     </div>
     <div class="df"><span class="btn p">Done</span></div>
   </div></div>
-  <p class="faint" style="margin:4px 0 0">No &#x2715; and no backdrop-dismiss: only <b>Done</b> (or Esc) closes, so the value is not lost by a stray click. After close the value is dropped from state; the list shows the new row and nothing offers the value again.</p>
+  <p class="faint" style="margin:4px 0 0"><span class="tag new">REV2</span> No &#x2715;, <b>Escape is ignored and outside clicks are ignored</b>: only the explicit <b>Done</b> button closes, so the value is not lost by a stray key or click. This is the existing one-time-secret dialog (extracted from the API tokens page to a shared component), so both pages behave identically. After close the value is dropped from state and is never cached; the list shows the new row and nothing offers the value again.</p>
   </div>
 
 </div>
@@ -333,6 +358,7 @@
   <li><span class="n">4</span><b>Error</b> stays in the dialog (does not close), field values kept except the secret is kept too so the user can retry.</li>
   <li><span class="n">5</span><b>Post-create hook</b> (optional per descriptor). If it returns a value the dialog swaps to the reveal (C4) <i>instead of</i> closing; if it returns nothing the dialog closes as in note 3. GitHub and Bitbucket return nothing today.</li>
   <li><span class="n">6</span>Focus: first field on step 2; <b>Copy</b> in C4 uses the existing <code>CopyButton</code> and toast.</li>
+  <li><span class="n">7</span><span class="tag new">REV2</span> C4 is the shared <code>SecretDialog</code> (props: title, description, secret label, optional details slot, close-button text, close handlers). The API tokens page keeps its own copy (<span class="copy">Done</span> there too) and its test stays green. GitHub and Bitbucket never reach C4 in this story; it is exercised by a test-only descriptor.</li>
 </ol>
 </div>
 </section>
@@ -362,7 +388,7 @@
   </div>
 
   <div>
-  <p class="sub-h">D2 &middot; Open listbox &mdash; grouped by platform &middot; target kind; one repository already picked</p>
+  <p class="sub-h">D2 &middot; Open listbox &mdash; grouped by platform &middot; target kind; one repository already picked (Bitbucket now selectable)</p>
   <div class="screen tight" style="padding:14px 14px 20px">
     <div class="trigger"><div><span class="chip">acme/web <i>&#x2715;</i></span></div><span class="mut">&#x25B4;</span></div>
     <div class="listbox">
@@ -379,6 +405,25 @@
       <div class="opt"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div></div>
       <div class="lb-f"><span>&uarr;&darr; navigate &middot; Enter select &middot; Esc close</span><span>Max 5 per kind</span></div>
     </div>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">D2b &middot; Open listbox, nothing selected yet &mdash; Bitbucket is not standalone <span class="tag new">REV2</span></p>
+  <div class="screen tight" style="padding:14px 14px 20px">
+    <div class="trigger"><div><span class="mut copy">Select repositories, a runner group or workspaces&hellip;</span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="lb-s">&#x1F50D; <span class="copy">Search by platform, account or name&hellip;</span></div>
+      <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">0 of 5 selected</span></div>
+      <div class="opt act"><span class="ck"></span><div>acme/web<div class="d">acme &middot; Private</div></div></div>
+      <div class="opt"><span class="ck"></span><div>acme/api<div class="d">acme &middot; Private</div></div></div>
+      <div class="gh-h"><span>GitHub &middot; Organization runner group</span></div>
+      <div class="opt"><span class="ck"></span><div>acme &middot; Default runner group<div class="d">Default runner group</div></div></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span><span class="faint">0 of 5</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">Every Bitbucket option is disabled with its reason (not hidden) until one GitHub target is chosen, because a pool still needs a GitHub installation and scope. The options enable as soon as a repository or runner group is picked (D2). A Bitbucket-only pool stays impossible in this story.</p>
   </div>
   </div>
 
@@ -413,9 +458,13 @@
   </div>
 
   <div>
-  <p class="sub-h">D5 &middot; No targets available at all / not signed in</p>
-  <div class="screen tight"><div class="panel"><div class="empty"><div class="big">&#x21C4;</div><div class="t copy">Add a connection first</div><div class="d copy">GridOps needs a connected CI platform before it can create a runner pool. Connect GitHub or Bitbucket, then come back here.</div><span class="btn p">Go to Connections</span> <span class="btn">&#x25C9; Connect GitHub</span></div></div>
-  <p class="faint" style="margin:6px 0 0">Replaces today&rsquo;s GitHub-only &ldquo;Connect GitHub first&rdquo; / &ldquo;Install the GitHub App&rdquo; page empties; the GitHub sign-in button remains as a secondary action when OAuth is the missing piece. If only one platform has targets, the page renders and the other platform appears as a status row (D3).</p></div>
+  <p class="sub-h">D5 &middot; No GitHub installation &mdash; the form is replaced by today&rsquo;s empty state (copy supplied by the GitHub descriptor) <span class="tag new">REV2</span></p>
+  <div class="screen tight">
+  <div class="panel"><div class="empty"><div class="big">&#x25C9;</div><div class="t copy">Connect GitHub first</div><div class="d copy">GridOps needs an authorized GitHub App installation before it can create a repository or organization runner pool.</div><span class="btn p">&#x25C9; Connect GitHub</span></div></div>
+  <p class="faint" style="margin:4px 0 8px">D5a &middot; not signed in with GitHub (<code>!authenticated</code> or no defaults).</p>
+  <div class="panel"><div class="empty"><div class="big">&#x25C9;</div><div class="t copy">Install the GitHub App</div><div class="d copy">Choose the account and repositories GridOps may operate, then come back here and refresh GitHub access.</div><span class="btn p">&#x25C9; Install GridOps on GitHub</span></div></div>
+  <p class="faint" style="margin:4px 0 0">D5b &middot; signed in but zero installations.</p>
+  <p class="faint" style="margin:6px 0 0">The gate is &ldquo;no GitHub installation&rdquo;, not &ldquo;no targets of any platform&rdquo;: Bitbucket cannot create a pool alone, so having workspaces does not unlock the form. The wording is unchanged from today; the title, description and action come from the GitHub descriptor&rsquo;s prerequisite copy so the page has no GitHub branch. Once an installation exists, a platform with no connection shows a status row inside the listbox (D3), and the &ldquo;Connect a workspace first&rdquo; link goes straight to <code>/settings/connections</code>.</p></div>
   </div>
 
   <div>
@@ -428,16 +477,34 @@
   </div><p class="faint" style="margin:6px 0 0">The limit applies per kind exactly as today (repositories &le; max count, workspaces &le; max count). Form-level validation errors keep today&rsquo;s Callout above the submit area.</p></div>
   </div>
 
+  <div>
+  <p class="sub-h">D7 &middot; Last GitHub target removed while a workspace is selected &mdash; unchanged from today <span class="tag new">REV2</span></p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top stack" style="display:flex">
+      <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut copy" style="display:inline-block">1 workspace selected</div></div>
+      <div class="trigger"><div><span class="chip"><span class="badge bb" style="padding:0 4px">&#x25C6;</span> Mobile delivery <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+    </div>
+  </div>
+  <div class="listbox" style="margin-top:8px">
+    <div class="gh-h"><span>Bitbucket &middot; Workspace</span><span class="faint">1 of 5</span></div>
+    <div class="opt sel"><span class="ck">&#x2713;</span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div></div>
+    <div class="opt dim"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+  </div>
+  <div class="callout danger" style="margin-top:8px"><b class="copy">Could not create the pool</b><span class="copy">{message thrown by the schema parse in createRunnerPoolAction}</span></div>
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px"><span class="btn g">Cancel</span><span class="btn p">&#xFF0B; Create pool</span></div>
+  <p class="faint" style="margin:6px 0 0">The picker does not block the deselection and does not drop the workspace: it stays selected (and removable), the other workspaces become disabled-with-reason again, and <b>Create pool stays enabled</b>. Submitting builds today&rsquo;s payload for that state (no repository, installation id 0); the schema parse rejects it before any request is sent, so no POST happens, and the thrown message appears in the existing &ldquo;Could not create the pool&rdquo; callout. The wording is whatever the schema throws (not designed here); the picker adds no second validator.</p></div>
+  </div>
+
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>One searchable multi-select</b> (the existing <code>SearchableMultiSelect</code> extended with an optional option <code>group</code>; group headings are non-selectable). Group heading = <code>{platform name} &middot; {target kind label}</code>, in registry order. Search matches label, description and platform/kind keywords.</li>
-  <li><span class="n">2</span><b>Mixing rules (descriptor-declared compatibility):</b> GitHub repositories and a GitHub organization runner group are mutually exclusive (as today); Bitbucket workspaces combine with either. Incompatible options are shown <i>disabled with the reason</i> (<span class="copy">Can&rsquo;t combine with repositories</span> / <span class="copy">Can&rsquo;t combine with a runner group</span>), not hidden, so the rule is discoverable. Deselect the blocking kind to re-enable.</li>
+  <li><span class="n">2</span><b>Mixing rules (descriptor-declared):</b> GitHub repositories and a GitHub organization runner group are mutually exclusive (as today). Bitbucket workspaces combine with either but <b>need one of them</b> (not standalone, D2b). Incompatible options are shown <i>disabled with the reason</i> (<span class="copy">Can&rsquo;t combine with repositories</span> / <span class="copy">Can&rsquo;t combine with a runner group</span> / <span class="copy">Select a GitHub repository or runner group first</span>), not hidden, so the rule is discoverable. Deselect the blocking kind to re-enable. Repositories from different installations or accounts may still be selected together (as today); the pool&rsquo;s installation is taken from the first selected repository, with no stricter single-installation rule.</li>
   <li><span class="n">3</span><b>Organization runner group is single-select.</b> Picking another group replaces the current one. Entries are one per organization installation (&ldquo;acme &middot; Default runner group&rdquo;), so the Installation row is gone. For an installation whose groups can&rsquo;t be listed (user account or load failure) a single &ldquo;Enter runner group ID&rdquo; entry is offered, which reveals the numeric <b>Runner group ID</b> row (today&rsquo;s fallback) below Targets.</li>
   <li><span class="n">4</span><b>Per-group status rows</b> (D3) cover loading, error + Retry, not-connected (guides to Settings &rarr; Connections) and no-match. Loading one group never blocks selecting from another.</li>
-  <li><span class="n">5</span><b>Description line</b> counts by kind, truthfully: <span class="copy">2 repositories &middot; 1 workspace selected</span>; the &ldquo;must cover every repository&rdquo; clause appears only when a kind with a per-item runner requirement (repositories) is selected.</li>
+  <li><span class="n">5</span><b>Description line</b> counts by kind, truthfully: <span class="copy">2 repositories &middot; 1 workspace selected</span>; the &ldquo;must cover every repository&rdquo; clause appears only when a kind with a per-item runner requirement (repositories) is selected. <b>Caps are per kind and counted separately</b> (repositories &le; maximum runner count, workspaces &le; maximum runner count), shown as &ldquo;n of max&rdquo; in each group heading.</li>
   <li><span class="n">6</span><b>Side effect kept:</b> picking a Bitbucket workspace auto-adds the <code>macOS &middot; Tart</code> provider (today&rsquo;s behaviour) and now says so in an info callout (D1). Descriptor field: <code>requiresProviders</code>.</li>
-  <li><span class="n">7</span><b>Payload unchanged.</b> Each selected target maps through its kind to the existing fields (<code>installationId</code>, <code>scope</code>, <code>repositoryIds</code>, <code>runnerGroupId</code>, <code>bitbucketConnectionIds</code>); submit validation errors read as today.</li>
-  <li><span class="n">8</span>Pool plan preview&rsquo;s runner-group sentence (<code>pool-plan-preview.tsx</code>) comes from the selected target kind (<code>planNote</code>) rather than <code>scope === &quot;organization&quot;</code>; text unchanged: <span class="copy">GitHub runner-group access defines which repositories can use the pool.</span></li>
+  <li><span class="n">7</span><b>Payload unchanged.</b> Each selected target maps through its kind to the existing fields (<code>installationId</code>, <code>scope</code>, <code>repositoryIds</code>, <code>runnerGroupId</code>, <code>bitbucketConnectionIds</code>); the data passed to the create action equals what the old form built for the same selection. Option values are internally namespaced per kind (a repository id and a runner-group id are both bare numbers and could collide); users never see the keys. Submit validation errors read as today (D7).</li>
+  <li><span class="n">8</span>Pool plan preview&rsquo;s runner-group sentence (<code>pool-plan-preview.tsx</code>) comes from the selected target kind (<code>planNote</code>) rather than <code>scope === &quot;organization&quot;</code>; text unchanged: <span class="copy">GitHub runner-group access defines which repositories can use the pool.</span> With a repository selection, <i>or no GitHub target yet</i>, it shows <span class="copy">{n} selected repositories fit within the {max}-runner maximum.</span> (n = 0 on an empty form, as today); Bitbucket workspaces add no sentence and never change the &ldquo;Ready&rdquo; state.</li>
   <li><span class="n">9</span>Capacity row &ldquo;Maximum&rdquo; minimum stays <code>max(1, repositories selected)</code>.</li>
 </ol>
 </div>
@@ -474,12 +541,24 @@
   <p class="faint" style="margin:6px 0 0">Listbox offers only <b>GitHub &middot; Organization runner group</b> for the pool&rsquo;s own installation (single-select, replaces). Groups can&rsquo;t be listed &rarr; the &ldquo;Runner group ID&rdquo; numeric row appears as in D4. No Priority section.</p></div>
   </div>
 
+  <div>
+  <p class="sub-h">E3 &middot; Read-only pool (user cannot manage) &mdash; targets through the same registry-driven display <span class="tag new">REV2</span></p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Runner definition</b> <span class="badge">Read only</span></div>
+    <div class="row"><div class="grow"><div class="t">Targets</div></div>
+      <div style="text-align:right"><div><span class="badge gh">&#x25C9; GitHub</span> <span class="copy">2 repositories</span></div><div style="margin-top:4px"><span class="badge bb">&#x25C6; Bitbucket</span> <span class="copy">1 workspace</span></div></div></div>
+    <div class="row"><div class="grow"><div class="t">Providers</div></div><div class="mut">Docker + macOS &middot; Tart</div></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">An organization pool shows <span class="badge gh">&#x25C9; GitHub</span> <span class="copy">acme</span> (the account, as today). The Priority section (Prioritised, Fair-share wait) is shown when the pool&rsquo;s target kind supports prioritisation, the same descriptor flag as E1. The Bitbucket line appears only when the pool has workspaces. No controls.</p></div>
+  </div>
+
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>Same widget as the new-pool form</b>, restricted by the pool: the other scope&rsquo;s kinds are not offered (a pool can&rsquo;t change scope). The old read-only &ldquo;GitHub accounts&rdquo; / &ldquo;Installation&rdquo; row is removed; accounts are visible in the chip detail and the listbox descriptions.</li>
   <li><span class="n">2</span><b>Bitbucket targets are display-only here</b> (lock glyph, no &#x2715;), preserving today&rsquo;s behaviour: this form has no workspace picker and its save does not send <code>bitbucketConnectionIds</code>. See open question 1.</li>
   <li><span class="n">3</span>Save payload for a repository pool and for an organization pool is deep-equal to the old form&rsquo;s (<code>repositoryIds: undefined</code> for organization pools).</li>
   <li><span class="n">4</span>Truthful empties: a repository pool whose repositories fail to load shows the retry row (D3) while still showing its current chips; Save stays enabled only if &ge;1 repository remains selected.</li>
+  <li><span class="n">5</span><span class="tag new">REV2</span> This form cannot reach the D7 state: its GitHub kind is fixed by the pool and its Bitbucket chips are locked, so the &ldquo;not standalone&rdquo; rule never fires here. Option values are namespaced internally as in D. E3 is the read-only counterpart (same target display, no controls).</li>
 </ol>
 </div>
 </section>
@@ -551,7 +630,7 @@
   <li><span class="n">1</span><b>Shared rows no longer branch on platform.</b> Tart base VM and Additional labels descriptions and placeholders are neutral (copy above); the platform-specific sentences live only in Platform options, supplied by descriptors. Providers, Mode, images, counts, CPU/memory and autoscaling rows are unchanged.</li>
   <li><span class="n">2</span><b>Collapsed by default</b> on both forms; a disclosure button toggles (<code>aria-expanded</code>). One block per targeted platform, in registry order; each block = badge + that descriptor&rsquo;s help items + its optional component slot.</li>
   <li><span class="n">3</span><b>Visibility:</b> rendered only when at least one targeted platform has options content. Selecting or deselecting targets updates it live; it stays in its open/closed state.</li>
-  <li><span class="n">4</span><b>Label validation</b> runs the targeted descriptors&rsquo; validators (today: Bitbucket <code>/^[a-z0-9.]+$/</code> and the requirement for the tart provider) and reports in the Additional labels row so the error is visible while the section is collapsed. Messages keep today&rsquo;s wording.</li>
+  <li><span class="n">4</span><b>Label validation</b> runs the targeted descriptors&rsquo; validators (today: Bitbucket&rsquo;s label character rule and the requirement for the tart provider; the Bitbucket descriptor calls the rule already exported from <code>schemas.ts</code>, which stays the submit-time authority &mdash; no second copy of the rule) and reports in the Additional labels row so the error is visible while the section is collapsed. Messages keep today&rsquo;s wording.</li>
   <li><span class="n">5</span>On the pool settings form the section is identical and driven by the pool&rsquo;s own targets.</li>
 </ol>
 </div>
