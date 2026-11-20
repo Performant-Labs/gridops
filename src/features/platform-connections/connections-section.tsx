@@ -185,6 +185,7 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
   const update = bindings.update;
   const remove = bindings.remove;
   const reload = () => queryClient.invalidateQueries({ queryKey: connectionsQueryKey(descriptor.id) });
+  const showActions = canManage && !editing && Boolean(update || remove);
 
   function startEditing() {
     setValues(bindings.editValues?.(item) ?? {});
@@ -211,33 +212,39 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
 
   return (
     <div>
-      <div className="flex items-center gap-3 px-4 py-3">
+      {/* Below `sm` the status and actions move to their own line, so the name keeps the row's
+          width; the badges wrap under a long name instead of squeezing it. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 sm:flex-nowrap">
         {view.leading ?? <StatusDot tone="success" />}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{view.name}</span>
+        <div className="min-w-0 flex-[1_1_calc(100%-3rem)] sm:flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="min-w-0 max-w-full truncate text-sm font-medium">{view.name}</span>
             <PlatformBadge descriptor={descriptor} />
             {view.badges}
           </div>
           {view.detail ? <div className="truncate text-xs text-muted-foreground">{view.detail}</div> : null}
         </div>
-        {view.aside}
-        {canManage && !editing && (update || remove) ? (
-          <div className="flex shrink-0 items-center gap-1">
-            {update && editable.length ? <Button onClick={startEditing} size="sm" variant="ghost">Edit</Button> : null}
-            {remove ? (
-              <Button
-                onClick={() => void run({
-                  action: () => remove(item),
-                  after: reload,
-                  confirm: bindings.removeConfirm?.(item) ?? `Remove ${view.name}?`,
-                  success: bindings.removeSuccess?.(item) ?? `${view.name} removed.`,
-                })}
-                size="sm"
-                variant="ghost"
-              >
-                Remove
-              </Button>
+        {view.aside || showActions ? (
+          <div className="flex w-full items-center justify-end gap-3 sm:w-auto sm:shrink-0">
+            {view.aside}
+            {showActions ? (
+              <div className="flex shrink-0 items-center gap-1">
+                {update && editable.length ? <Button onClick={startEditing} size="sm" variant="ghost">Edit</Button> : null}
+                {remove ? (
+                  <Button
+                    onClick={() => void run({
+                      action: () => remove(item),
+                      after: reload,
+                      confirm: bindings.removeConfirm?.(item) ?? `Remove ${view.name}?`,
+                      success: bindings.removeSuccess?.(item) ?? `${view.name} removed.`,
+                    })}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Remove
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

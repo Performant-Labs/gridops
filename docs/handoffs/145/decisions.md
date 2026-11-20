@@ -200,3 +200,17 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
 - **Assumed:** The brief's round-4 decisions justify the `connectLink` contract field and the GitHub App section's separate Install link remaining as a different surface.
 - **Hedged:** Two warn findings (duplicate install entry point; GitHub-shaped `scope === "repository"` branches in pool pages) are follow-ups, not blocks.
 - **Evidence:** `git diff --name-status 932879f HEAD`, platform-name grep on shared components, `externalLinks` grep, empty diff on `crates`/`migrations`/`docs/openapi`; `docs/handoffs/145/handoff-A-dup.md`.
+
+
+## F (Feature Implementor, Phase 6 S rework, round 5) - 2026-11-20T15:45:00-08:00
+- **Decided:**
+  - D2 is fixed in the shared `SettingsSection`: the header wraps (`flex-wrap`) and the title block has a 12rem basis, so actions move below the heading only when they don't fit; the actions block can wrap its own buttons (`max-w-full flex-wrap`).
+  - D1 and D1b are fixed in `ConnectionRow`: below `sm` the aside and actions move to their own right-aligned line, and the badges wrap under the name.
+  - The Targets dropdown clip is not folded in. It is pre-existing and needs a portal or a card-overflow change across shared selects; it needs a follow-up issue.
+- **Assumed:** S's direction to fix in `SettingsSection` (after grepping its users) makes this a spec'd shared edit, not a drive-by.
+- **Hedged:** Member Bitbucket rows at 360 gain about 8 px of empty space under the text (the descriptor hides its aside on phones). Left as is.
+- **Evidence:**
+  - Lint, `tsc`, vitest 461/461 and build are clean.
+  - Headless render against S's repro setup: names are unclipped at 360, there is no member overlap, and "Manage App" is on screen.
+  - A pixel AE compare against a pre-fix `HEAD` build shows only footer and port-string differences at 768 and 1280, and on every non-Connections surface at 360.
+  - `docs/handoffs/145/handoff-F.md`, section "Round 5".

@@ -1,6 +1,8 @@
 # Handoff-F: Phase 6 - One Connections page and one Targets picker for every CI platform
 
 > **Round 4 (3:05 PM PST):** the implementation of the operator's round-4 decisions (W1, W2, the `postCreate` toast, the runner-link label) is the last section of this file, "Round 4". Everything above is the original cycle's handoff and still stands.
+>
+> **Round 5, S rework (3:45 PM PST):** the 360 px layout fixes for S's D1 and D2 are the final section, "Round 5 (S rework: D1, D2 at 360 px)". Production code only; no test changed.
 
 **Date:** 2026-11-20 (2:02 PM PST)
 **Branch:** claude/ui-145-platform-neutral-cf5832 (on top of `b8cbf8d`, T's RED commit)
@@ -243,3 +245,86 @@ None.
 - src/features/platform-connections/connections-section.tsx
 - src/features/runners/runner-row.tsx
 - docs/handoffs/145/survey.md (brief deliverable), docs/handoffs/145/evidence.md (appended), docs/handoffs/145/decisions.md (appended), docs/handoffs/145/handoff-F.md (this section)
+
+
+---
+
+# Round 5 (S rework: D1, D2 at 360 px)
+
+**Date:** 2026-11-20 (3:45 PM PST)
+**Branch:** claude/ui-145-platform-neutral-cf5832 (on top of `dd934c3`, S's REWORK commit)
+**Issue:** #145
+**Input:** `handoff-S.md` (REWORK, production only: D1, D1b and D2 at 360 px; the Targets dropdown clip is advisory)
+
+## What was done
+- `src/components/settings-ui.tsx` (`SettingsSection` header, D2):
+  - The header row is now `flex-wrap`.
+  - The title block is `min-w-0 flex-[1_1_12rem]`: it fills the row as before, and when the actions would squeeze it under 12rem the actions wrap onto their own line below the heading.
+  - The actions block adds `max-w-full flex-wrap`, so a wrapped group wider than the screen wraps its own buttons instead of running off the edge. This keeps "Manage App" on screen.
+- `src/features/platform-connections/connections-section.tsx` (`ConnectionRow`, D1 and D1b):
+  - The row is `flex-wrap` below `sm` (`sm:flex-nowrap`). The text block's basis is the row width minus the leading avatar or dot (`flex-[1_1_calc(100%-3rem)]`, `sm:flex-1`).
+  - `view.aside` and the Edit/Remove actions now sit in one trailing wrapper, `w-full justify-end` below `sm` and `sm:w-auto sm:shrink-0` from `sm` up. On a phone they go to their own line under the text, right-aligned. On wider screens they are the same right-hand cluster as before, with the same `gap-3` between status and actions.
+  - The name line is `flex-wrap`: the name (`min-w-0 max-w-full truncate`) keeps its full width, and the platform badge and `view.badges` wrap under a long name instead of squeezing it.
+  - The wrapper renders only when there is an aside or actions (`showActions`, the same condition as before).
+
+## Design decisions
+- **D2 is fixed in the shared `SettingsSection`, wrapping only when the actions don't fit.** Alternatives:
+  - A local header in `github-app-section.tsx`. It would have duplicated `SettingsSection`'s header markup, which is a parallel path.
+  - `SettingsLayout`'s always-stack-below-`sm` pattern (`flex-col sm:flex-row`). It would also have moved the fleet-profile Save button under its heading on phones, a page this story does not own.
+  
+  With `flex-wrap` and a 12rem title basis, a header wraps only when the actions plus 12rem don't fit. Its three users with `actions` are below. I grepped them first, as S asked, and confirmed them with a multiline search for `<SettingsSection ... actions=`.
+  - The fleet-profile Save (pool settings) still fits beside its heading at 360. It is pixel-identical to the pre-fix build at 360, 768 and 1280.
+  - Connections "Add connection" now wraps below the description at 360. It previously sat beside a 178 px text column. This is a #145 surface; 768 and 1280 are unchanged.
+  - The GitHub App header wraps at 360 for administrators (three actions) and for members (two actions).
+- **D1 stacks the trailing controls rather than hiding anything.** No row content is dropped on phones. The descriptor's own `hidden sm:inline` on Bitbucket's "Verified …" aside is left as the descriptor chose it.
+
+## Reuse / extend-vs-new
+Both changes modify existing objects (`SettingsSection`, `ConnectionRow`). No new component, file or prop. This is a spec'd shared-code edit: S's REWORK names `SettingsSection` as the place to fix and asks for the grep of its users, which is done above.
+
+## Architecture notes for A
+Layout classes only. No prop, type, export or dependency change. `SettingsSection`'s interface is unchanged. Its users with `actions` are `fleet-profile-section.tsx:231`, `connections-section.tsx:79` and `github-app-section.tsx:46`; users without `actions` render the same header DOM with no actions block, and the pixel check below covers `settings.general`.
+
+## Deviations from spec / wireframe
+None. The wireframe did not draw narrow widths; this follows S's acceptance for 360 px.
+
+## Tier 1 self-check (incl. tests now GREEN)
+```
+npm run lint        -> eslint src tests *.config.ts eslint.config.js --max-warnings=0   (clean)
+npx tsc --noEmit    -> exit 0
+npx vitest run      -> Test Files 46 passed (46); Tests 461 passed (461)
+npm run build       -> built; typecheck step clean
+built CSS: .flex-\[1_1_12rem\]{flex:12rem}   .flex-\[1_1_calc\(100\%-3rem\)\]{flex:calc(100% - 3rem)}   .sm\:flex-nowrap present
+```
+I also ran a render check beyond Tier 1, because S's acceptance is a render check and layout does not exist in jsdom. This is not the U/S gate; U should re-walk.
+- **Setup:** S's repro setup (`screenshots/repro/start-api.sh`, `fake-github.mjs`, S's seeded DBs). The fixed build ran on 18097/18098 and a pre-fix build of `HEAD` (`git archive`) ran on copies of the same DBs on 18101/18102. Script: `screenshots/repro/f-measure.mjs`. Viewports were 360, 768 and 1280 wide, 3400 tall, so the whole page is in the viewport (the app scrolls inside its own container).
+- **360, populated administrator:** names measured `acme-labs` 66 px, `ada-admin` 67, `Acme Bitbucket` 98 and `Platform Team` 90, none clipped (`scrollWidth <= clientWidth`). Before the fix these were 0, 20, 45 and 45. "Manage App" is on screen: the off-screen-control list is only the visually hidden "Skip to content", where before it also had "Manage App". The GitHub App title block is 320 px wide and the actions sit on two lines below it.
+- **360, populated member:** "Owner approval required" no longer overlaps "Organization" (`ownerOverlapsOrg: false`; it was `true` before the fix).
+- **768 and 1280:** pixel-compared (`compare -metric AE`) against the pre-fix build for every Connections state (populated or empty, administrator or member), pool settings (repository and organization pools, including the fleet-profile Save header), new pool and General.
+  - The only differing pixels are the footer build string and, on Connections, the Endpoints URLs, whose port differs between the two servers (`:18097` vs `:18101`; cropped and checked).
+  - 360 is identical as well, except Connections.
+- **Console errors and horizontal overflow:** none on any surface at any width.
+- **Saved to `docs/handoffs/145/screenshots/`:**
+  - `f-connections-{populated,empty}-{admin,member}-360.png`: after the fix.
+  - `f-prefix-*-360.png`: the same views before the fix.
+  - `f-geometry-{after,before}.json`: the measurements.
+- **Servers:** all were stopped by port (18097, 18098, 18099, 18101, 18102; all five were confirmed free before I started).
+
+## Evidence appendix
+`docs/handoffs/145/evidence.md`: three entries appended under "F round 5":
+- the other `SettingsSection` user with `actions`;
+- the 20 px page padding at 360 that sets the 320 px header width;
+- Bitbucket's phone-hidden aside.
+
+## Tests that look wrong (for T)
+None. No test changed. No jsdom test can see these layouts, and as S says a class-name assertion would be mock-shaped.
+
+## Known issues
+- **Member Bitbucket rows at 360 are about 8 px taller than before.** Bitbucket's aside is `hidden sm:inline`, so the trailing wrapper renders but shows nothing on a phone, and the row's `gap-y-2` adds a little space under the text. Cosmetic. I left it rather than override the descriptor's own visibility choice.
+- **The Targets dropdown clip (S advisory 1) is not folded in.** It is pre-existing and not cheap. Both `SearchableMultiSelect` and `SearchableSelect` draw their list `absolute` (`searchable-multi-select.tsx:223`, `searchable-select.tsx:186`) inside `SettingsSection`'s `overflow-hidden` card. Fixing it means either portalling and positioning the list in both shared selects, or removing the card's `overflow-hidden` for every settings page. Either is a separate change with its own visual surface. It needs a follow-up issue, which is the orchestrator's or operator's to file.
+- A-dup's two warns stand, as S notes. No F action this round.
+
+## Files changed
+- `src/components/settings-ui.tsx`
+- `src/features/platform-connections/connections-section.tsx`
+
+Non-production evidence written this round: `docs/handoffs/145/screenshots/f-*.png`, `f-geometry-*.json`, `screenshots/repro/f-measure.mjs`, plus appended `evidence.md` and `decisions.md` entries.

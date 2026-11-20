@@ -74,3 +74,22 @@
   **Verbatim excerpt:**
   > return (
   >     <div className={cn("grid min-h-[60vh] place-items-center px-6 py-16 text-center", className)}>
+
+
+## F round 5 (S rework: D1, D2 at 360 px)
+
+- **Fact:** besides the GitHub App and Connections headers, the only other `SettingsSection` with `actions` is the fleet-profile section's single Save button, so it is the only other header the wrap change could move.
+  **Source:** `src/features/fleet/fleet-profile-section.tsx:231-232`
+  **Verbatim excerpt:**
+  > <SettingsSection
+  >       actions={<Button disabled={saving} form={FORM_ID} size="sm" type="submit">{saving ? <LoaderCircle className="animate-spin" /> : null}Save</Button>}
+
+- **Fact:** settings pages are padded 20 px each side below `sm`, so at 360 px a `SettingsSection` header is 320 px wide (12rem title + 12 px gap leaves about 116 px for actions before they wrap).
+  **Source:** `src/components/settings-ui.tsx:11`
+  **Verbatim excerpt:**
+  > <div className={cn("mx-auto w-full max-w-[720px] px-5 pb-20 pt-10 sm:px-8 sm:pt-14", className)}>
+
+- **Fact:** the Bitbucket row's aside is hidden below `sm`, so on a phone the row's trailing wrapper is present but shows nothing for a member (no Edit/Remove).
+  **Source:** `src/features/platform-connections/bitbucket.tsx:70`
+  **Verbatim excerpt:**
+  > aside: <span className="hidden text-xs text-faint sm:inline">Verified {formatRelativeTime(connection.updatedAt)}</span>,
