@@ -39,3 +39,31 @@
   - API: `crates/gridops-api/src/{main.rs,state.rs,resources.rs (Bitbucket JSON)}` and the path parameters of `docs/openapi/gridops-v1.json`.
   - Migrations: 0018, 0022 and 0043.
   - Dependencies: `sqlx-core-0.9.0/src/migrate/source.rs:234` and `sqlx-sqlite-0.9.0/src/migrate.rs` (`no_tx` handling).
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T12:39:52-08:00
+- **Decided:** PASS, with 0 block findings and 4 warn findings (see `handoff-A.md`).
+  - The round-2 block R2-1 is resolved by option (a), which pins:
+    - `for_selected_provider(provider, platform: CiPlatform, ...)`;
+    - the `/v1/runners` `gitlab {url, waitTimeoutSeconds}` and `gitlabRunnerToken` fields in both private `ProvisionRunner` structs;
+    - the `("gitlab", _)` validation arms;
+    - `exitReason` with the exit codes 0, 75 and 77 and `GITLAB_EXIT_REASONS`;
+    - ownership in D9 to D12.
+  - R2-W1 to R2-W4 are all resolved.
+  - The new warnings:
+    - (1) #139's row puts GitLab registration into the API's in-request `provision` (`resources.rs:4169`), a second lifecycle in a file whose GitLab sections #138 owns, with no deviation recorded. The recommended fix routes GitLab pool starts to the reconciler, following #119's `starts_belong_to_reconciler`.
+    - (2) The manager re-parses the Tart listing into its own `ManagedRunner`, which has no `exit_reason`, so a Tart `exitReason` would be dropped before the reconciler sees it.
+    - (3) The pinned `GitlabBootstrap` lacks `Debug`, which the Tart agent's `ProvisionRunner` derive needs, and uses `deny_unknown_fields`, which neither crate's `BitbucketBootstrap` does.
+    - (4) Text still names #142 as a fleet-path consumer: brief lines 203, 435 and 582, and rows D1, D5 and D6.
+- **Assumed:** #137's own implementation doesn't depend on warns 1 or 4. They change only the ownership rows and the deviation table. Warns 2 and 3 touch code #137 writes, so they are cheap to fold in before T. The task text named no earlier BLOCK findings to mark, so R2-1 is reported under "Resolved findings".
+- **Hedged:**
+  - Warn 1 isn't a block, because the code already duplicates Bitbucket registration in the API and the reconciler. The departure is from the epic's disjoint-ownership rule, not from a code pattern.
+  - Warn 2 isn't a block. The name and values are pinned, and the natural way #147 adds the field to the shared `ManagedRunner` would carry Tart entries through anyway. The risk is merge order and a non-obvious implementation.
+  - No Reuse map (`survey.md`) was provided.
+- **Evidence:**
+  - Read: the brief (all 1010 lines), `git diff f51bfcc..HEAD -- docs/handoffs/137-brief.md`, the round-2 `handoff-A.md` and `decisions.md`, and epic #136 plus issues #139, #142 and #147 (via `gh issue view`).
+  - Core: `crates/gridops-core/src/{provisioning.rs,lib.rs}`, and `fleet/domain.rs` (`CiPlatform`).
+  - Manager: `crates/gridops-manager/src/main.rs` (`ProvisionRunner`, `BitbucketBootstrap`, `validate`, `ManagedRunner`, `list_runners`, `tart_runners`, `start_runner` forwarding, `take_bootstrap_secret`, `runner_command`).
+  - Tart agent: `crates/gridops-tart-agent/src/main.rs` (`ProvisionRunner`, `BitbucketBootstrap`, `validate`, `list_runners`, `start_vm`, `start_runner`, `bitbucket_runner_script`).
+  - Reconciler: `crates/gridops-reconciler/src/main.rs` (`MANAGER_RUNNER_LIST`, `ManagerRunners`, `ManagedRunner`, the state mapping in `reconcile_pool`, and the `json!` request builder).
+  - API: `crates/gridops-api/src/resources.rs` (`starts_belong_to_reconciler`, `provision` and its Bitbucket branch).
+  - Branch state: `git diff master --stat -- crates`. The only crate commit on the branch is dd525d5 (#135), which is upstream and not in local `master`. No #137 code exists.
