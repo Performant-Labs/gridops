@@ -2103,7 +2103,7 @@ async fn a_rerun_clears_the_queue_alert_that_names_its_job() -> Result<()> {
     Ok(())
 }
 
-/// #133: a re-run's job can reach GridOps while the run row still reads `completed` from the
+/// #133: a re-run's job can reach `GridOps` while the run row still reads `completed` from the
 /// earlier attempt. The job's own event reopens the run, so the queue and Overview see the
 /// job; a late queued event of the finished attempt does not reopen it.
 #[tokio::test]
