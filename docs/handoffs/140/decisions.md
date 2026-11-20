@@ -1,0 +1,35 @@
+# Decision journal: #140 GitLab job webhook ingestion and busy tracking
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:20:11-08:00
+- **Decided:** BLOCK, with 2 block findings and 5 warn findings (see `handoff-A.md`).
+  - (1) [correctness] GitLab rows go into the shared `webhook_deliveries` table, but `retry` (`webhooks.rs:113-185`) replays every verified row through GitHub's `process`. That would mark a GitLab row `processed` and audit it as retried without doing anything. Admins are offered that retry, because a NULL `installation_id` makes `can_retry` true. The brief allows only `mod gitlab;` in `webhooks.rs`, so the fix is out of bounds. The GitLab row's `id` (the duplicate key) and its column mapping are also unpinned. `repository_id` is LEFT JOINed to `repositories` in the list.
+  - (2) [completeness] "Mark busy" doesn't name columns. The analogous `associate_runner_with_job` writes `current_job_id` and `last_job_id`. `last_job_id` has an FK to `workflow_jobs` (0047:140), and `current_job_id` is joined to `workflow_jobs.id` by six readers: the runners list, the job-log lookup, log-stream linking and the reconciler's agent context.
+  - The warnings:
+    - (3) the `AppState.gitlab` placeholder type, its home and the builder are unpinned between #138 and #140;
+    - (4) the `gridops-api` dev-dependency on `test-support` is missing from the shared-file list;
+    - (5) the delivery bookkeeping would be copied unless the brief authorizes extracting `pub(super)` helpers or accepts the copy;
+    - (6) the out-of-order guard should be a single conditional upsert, and #148's poll must be insert-only on `gitlab_jobs`;
+    - (7) connection lookup must handle several candidates and select by token, and the processing signature should stay narrow for fake injection.
+  - Accepted as consistent: the module placement (the `resources.rs` and `tart_host` precedent), the public route beside the GitHub webhook, runtime-secret reads, the `subtle` constant-time compare, the D2 `Arc<dyn GitLabApi>` seam, and the 0047 `gitlab_jobs` columns and statuses.
+- **Assumed:**
+  - #138 hasn't landed: `state.rs` has no `gitlab` field, and `gh pr list` shows no #138 PR.
+  - #140 is the only wave-1 issue that owns anything under webhooks (epic #136's ownership table), so widening its `webhooks.rs` allowance can't collide.
+  - GitLab job ids and GitHub job ids are independent integer namespaces.
+  - GitLab runner ids are unique per GitLab instance.
+- **Hedged:**
+  - **Finding 1** offers two resolutions: a GitLab dispatch arm in `retry` (recommended), or refusing GitLab retries and relying on #148's poll. The delivery-id header is left to O, because the OpenAPI declares only `X-Gitlab-Token` and `X-Gitlab-Event`, and brief-gate NV-2 already questions whether a GitLab delivery id exists. I didn't verify GitLab's webhook headers or payload fields such as `build_status_changed_at` against GitLab documentation. Those belong to the brief gate (NV-1 to NV-3).
+  - **Finding 2** is a block, not a warn. The FK and the join collisions are silent or late failures in code that other issues read, and the amendment is a single sentence.
+  - **Finding 6's #148 rule** is outside #140's code. It is reported so O can record it on #136.
+  - No Reuse map (`survey.md`) was provided, so the GitHub webhook path was the baseline.
+- **Evidence:**
+  - Read: `docs/handoffs/140-brief.md`, `docs/handoffs/140-brief-result-r1.md`, the #137 run's `handoff-A.md` and `decisions.md`, epic #136 (body and the D1-D16 deviation comments) and issue #138 (`gh issue view`).
+  - Source:
+    - `crates/gridops-api/src/webhooks.rs` (in full), `state.rs` (in full), `main.rs` (routes and state wiring) and `Cargo.toml`;
+    - `resources.rs`: the deliveries list and detail at `:2130-2230`, the runners list at `:1885`, the job logs at `:3220-3300`, and the submodules at `:41` and `:89-91`;
+    - `crates/gridops-api/tests/control_plane_contracts.rs`: the harness, which spawns the binary;
+    - `crates/gridops-core/src/gitlab/mod.rs` (in full) and the `fake.rs` surface;
+    - `crates/gridops-core/src/db.rs:150-330` and `:29`, `crypto.rs`, and `fleet/registry/output.rs:255-265`;
+    - `crates/gridops-reconciler/src/agent.rs:640-652` and `main.rs:1874-2030` and `2820-2895`;
+    - `src/routes/_app/webhooks.tsx:119-146`.
+  - Migrations: `0001_initial.sql:202-218` (`webhook_deliveries`) and `0047_gitlab.sql` (in full).
+  - Spec: `docs/openapi/gridops-v1.json` `POST /api/v1/webhooks/gitlab`, extracted with `python3 -I`.
