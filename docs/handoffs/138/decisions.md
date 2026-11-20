@@ -31,3 +31,35 @@
   - API: `crates/gridops-api/{Cargo.toml,src/state.rs,src/error.rs,src/main.rs,src/access.rs,src/oauth.rs (tests),src/auth.rs,src/resources.rs (Bitbucket, pool and webhook-URL sections),src/resources/{route_security.rs,tart_host.rs},src/fleet/openapi.rs,tests/control_plane_contracts.rs,tests/fleet_http.rs}`.
   - Core: `crates/gridops-core/{Cargo.toml,src/gitlab/mod.rs,src/gitlab/fake.rs,src/fleet/authorization.rs,src/fleet/service.rs,src/fleet/registry/queries.rs,src/models.rs,src/config.rs,src/crypto.rs,src/api_tokens.rs}`.
   - Schema and docs: `migrations/0001_initial.sql` (`runner_pools`), `migrations/0047_gitlab.sql`, the GitLab paths and schemas of `docs/openapi/gridops-v1.json`, the Bitbucket rows of `docs/fleet-api.md`, and the workspace `Cargo.toml` (resolver 3, edition 2024, `unsafe_code = "forbid"`).
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:31:08-08:00
+- **Decided:** BLOCK, with 1 block finding and 4 warn findings (see `handoff-A.md`).
+  - **Round 1 is resolved.** Both block findings and all seven warnings are fixed in the amended brief, and the code bears them out:
+    - `AppState::new` keeps its five-argument signature;
+    - `crate::session_routes()` is reachable from in-crate test modules;
+    - `test-support` exists in gridops-core;
+    - the `runner_pool_installations` trigger (0014) keeps `ensure_pool_access` satisfiable for GitLab pools;
+    - the `effective_webhook_url`, `access.rs` parser, `openapi.rs` assertion and D17 `delete_runner_resources` citations all match the code.
+  - **(1) New block, caused by the amendment.** `scope: "gitlab"` is a third value in a field that every reader treats as two-way (`== "repository"` else GitHub organization).
+    - `gridops-core/src/fleet/targets.rs::pool_targets` (`:854-905`) derives a `github_organization` target from `installation_id` for any non-repository pool.
+    - `save_pool_fleet` (`:541`, `:630`), which the API serves at `PUT /api/v1/fleet/pools/{pool_id}/profile`, writes that target into `profile_ci_targets`, which admission reads.
+    - The reconciler's `fleet.rs:158`/`:176` and `main.rs:1167`, `:1312` and `:2352` treat `"gitlab"` as organization too.
+    - The brief's statement that `installationId` "does not make a GitHub target", and its "already inert" hand-off to #139, are therefore false. No wave-1 issue owns `pool_targets`.
+    - **Fix:** #138 adds an explicit `"gitlab"` arm that returns no target, records a deviation, owns `pool_targets` only, adds a test, and corrects the #139 hand-off.
+  - **The warnings:**
+    - (2) force `runner_group_id = 1` for GitLab pools;
+    - (3) the brief contradicts itself on `main.rs` (CORS) and on the `resources.rs` keep-list;
+    - (4) D17's dispatch should be an explicit `match` with GitLab bookkeeping that never says "GitHub", and `RunnerAccess` needs the GitLab columns; also a reminder that the round-1 `ensure_target_access` no-panic test isn't in the brief.
+- **Assumed:**
+  - The UI (#141) or an API client saves fleet settings for a GitLab pool through the existing `PUT /api/v1/fleet/pools/{pool_id}/profile`, which is the only way a pool gets fleet profiles.
+  - A GitLab pool can sit on an Organization installation. When the installation is a User account, `pool_targets` already returns nothing.
+- **Hedged:**
+  - **Finding 1's fix gives the `pool_targets` arm to #138** because #138 introduces the value. O could instead extend D11 to give it to #139, but the brief must then name the owner and describe the interim state, which can't be "already inert".
+  - **This is the second Phase-3 BLOCK.** One more means escalation to the operator.
+  - **The task text named no earlier BLOCK findings** to re-mark, so round 1's status is recorded in a table in `handoff-A.md`.
+- **Evidence:**
+  - Read: the amended brief and its diff against d8da721; the brief-gate result r1; round 1's `handoff-A.md`; epic #136's body and comments (D11, D14, D16, D17); issue #139.
+  - Core: `crates/gridops-core/src/{models.rs,fleet/targets.rs,fleet/service.rs,gitlab/mod.rs}` and `Cargo.toml` (features).
+  - API: `crates/gridops-api/src/{state.rs,main.rs,access.rs,oauth.rs (tests),resources.rs (pool create/update/delete, delete_runner_resources, effective_webhook_url),fleet/mod.rs,fleet/profiles.rs,fleet/openapi.rs}` and `Cargo.toml`.
+  - Reconciler: `crates/gridops-reconciler/src/{fleet.rs,main.rs}`.
+  - Schema and spec: `migrations/0014_runner_pool_installations.sql`, `migrations/0047_gitlab.sql`, and the runner-pool paths of `docs/openapi/gridops-v1.json`.
