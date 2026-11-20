@@ -66,3 +66,35 @@
     - `docs/fleet-api.md:80-130`, and `docs/openapi/gridops-v1.json` (the path description, read with `python3 -I`).
   - Epic #136 comments (`gh api .../issues/136/comments`, with timestamps), issues #140 and #148 (`gh issue view`), and `git log origin/master` (#138 not landed).
   - Sibling worktrees: `148-brief.md` (A-W2, A-W3, `:69`) and `148/handoff-A.md`; `138-brief.md` (`:53`, `:113-127`); `139-brief.md` (D17, `:100-118`).
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:57:43-08:00
+- **Decided:** BLOCK, with 1 block finding and 3 warn findings (see `handoff-A.md`).
+  - Round-2 blocks 1 to 3 and warnings 4 to 7 are resolved by the round-2 amendments (a4ed945).
+    - Block 1 matches #136's comments of 23:43:53 and 23:45:29 UTC.
+    - Block 3's matrix row passes `token_access.rs:1263`'s "ignored" assertions, because `ApiError::Unauthorized` renders only `{"error": ...}`.
+  - (1) [correctness] The status guard is applied to the whole `gitlab_jobs` row, but each writer lacks one column:
+    - **`gitlab_runner_id`:** #148's poll writes `running` with no runner id (`Job` has none). The webhook's same-tier `running` event, with an older time, is then rejected, and the runner is never marked busy. The retry arm reaches this too.
+    - **`tag_list`:** the webhook inserts tier-0 rows with `[]`, which #148 reads as untagged. #148's status-only refresh moves such a row to `pending`, and the webhook's same-tier `pending` then skips the fetch.
+    - The GitHub analogue avoids this because both of its writers carry `runner_id` and `labels`, and runner identity is filled with `COALESCE`.
+  - The warnings:
+    - (2) #148's round-3 review proposes a shared `gridops-core` helper for the guarded write. Decide once for #140 and #148;
+    - (3) #148's busy clear matches on `connection_id`, while #140 matches on `base_url`. Post one match rule on #136;
+    - (4) pin `runner_events.message` (`NOT NULL`), and pin the retry arm's id split.
+- **Assumed:**
+  - #148's conclusion step writes whatever `job` reports, including `running` ("write its status", `148-brief.md:37`).
+  - Its pending refresh writes status only ("refresh the status", `:36`).
+  - GitLab sends Job events for `created` (the brief's own "`created`, then `preparing`" test requires the webhook to write tier-0 rows).
+  - #138 hasn't landed: origin/master is still b22c451.
+- **Hedged:**
+  - Finding 1(a) is reachable only through a delayed delivery or a retried failed `running` delivery. That is a narrow path, but a retry that does nothing reads as a fix.
+  - Finding 1(b) depends on #148's update not writing `tag_list`. The #140-side change, "`[]` until fetched, never overwritten by a non-fetch write", is small. The #148-side rule has to be posted on #136.
+  - I kept finding 1 as one block, because both parts share one root cause and one amendment.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (a4ed945), `140-brief-result-r1.md` / `-r2.md`, and round-2 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs:20-190` and `:556-660`, `db.rs:195-245`, `gitlab/mod.rs:115-127`, and `error.rs`;
+    - `gridops-reconciler/src/main.rs:1396-1438` and `:2000-2006`;
+    - `migrations/0047_gitlab.sql:23-82` and `0001_initial.sql:83-94`;
+    - `docs/fleet-api.md:118-132`, `token_access.rs:1195-1290`, and `fleet/openapi.rs:292-332`.
+  - Epic #136's comments (`gh api`, with timestamps), and issues #140 and #148, which have no comments.
+  - Sibling worktree `gitlab-148-scaling-71c514`: `148-brief.md` at c48f951 (`:19-37`, `:95-135`), and `148/handoff-A.md` round 3 (99c5a07).
