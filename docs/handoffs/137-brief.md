@@ -358,6 +358,8 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 
 There are serde round-trip tests for both codes, inside a `CommandOutcome::Failed`.
 
+How consumers detect these cases (brief review R2, W-2): #147, #142 and #139 must branch on `diagnostic.code` (`IdleExpired` or `RegistrationRefused`), not on the `FailureCode`. `ResourceUnavailable` and `Configuration` are also used for other failures, so the failure code alone can't tell these two cases apart. Both carry `retryable: false`, so neither should be retried.
+
 ### W-5 and W-6: schema constraints, pinned
 
 Statement order inside 0046:
@@ -444,6 +446,7 @@ The tables:
 - The guard works while `foreign_keys` is OFF (brief review R1, W-7). `PRAGMA foreign_key_check` is an explicit check, not enforcement, and it reports violations whatever the `foreign_keys` setting is. This was checked with SQLite 3.54.0. With `foreign_keys` OFF, one dangling child row gave `count(*) FROM pragma_foreign_key_check` = 1, and the guard's `INSERT` failed with `CHECK constraint failed: v=0`. `PRAGMA foreign_keys` itself is a no-op inside a transaction, which is why it sits outside `BEGIN`/`COMMIT`.
 - `foreign_keys` is back on for the pooled connection once the migration finishes.
 - A test asserts `PRAGMA foreign_keys` is 1 on a connection taken from the pool after migrating.
+- A test proves the guard itself fails (brief review R2, W-3). In `crates/gridops-core/tests/fleet_schema.rs`, on a scratch SQLite database with `foreign_keys` OFF, it inserts one child row whose FK points at a missing parent. It then runs the three guard statements above (`CREATE TEMP TABLE _gitlab_0046_fk_guard ...`, the `INSERT ... SELECT count(*) FROM pragma_foreign_key_check`, `DROP TABLE`) and asserts that the `INSERT` fails with a CHECK constraint error. With no dangling row, the same statements succeed.
 
 ### Done-when, extended for A-1
 
