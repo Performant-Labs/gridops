@@ -173,7 +173,7 @@ The Phase-3 review (`docs/handoffs/137/handoff-A.md`) blocked the plan on three 
 
 ### A-1 (block): GitLab fleet targets get storage in 0046
 
-Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so a GitLab `CiTarget` can be stored, granted, admitted and loaded into `PrepareEnvironment.target`.
+Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so a GitLab `CiTarget` can be stored and loaded back into `PrepareEnvironment.target`. Admitting a GitLab intent needs the GitLab arm of `ensure_target_identity_for_pool`, which is #139's (see the round-2 amendments).
 
 - New columns, all nullable: `gitlab_connection_id TEXT REFERENCES gitlab_connections(id)`, `gitlab_project_id INTEGER`, `gitlab_group_id INTEGER`. They come after `repository_uuid`, in that order.
 - The `gitlab_connection_id` FK has no `ON DELETE` clause, so its action is SQLite's default, NO ACTION. That is the same as the Bitbucket column beside it, which 0022 declares as `bitbucket_connection_id TEXT REFERENCES bitbucket_connections(id)`. The other two actions are impossible here (brief review R1, B-3):
@@ -233,26 +233,28 @@ Option (a) of the review: `0046_gitlab.sql` also rebuilds `fleet_ci_targets`, so
 The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet/protocol/agent.rs`:
 
     /// Bootstrap material for a GitLab runner, sealed by the reconciler (#139)
-    /// with `placement::store_bootstrap` and opened by the host agents
-    /// (#147 Linux Docker, #142 Tart/macOS). `token` goes to the runner's stdin;
-    /// `url` is not secret and may be passed as an argument.
+    /// with `placement::store_bootstrap` and opened by the fleet host agent's
+    /// Docker runtime (#147). Tart/macOS does not use this path (round-2 R2-1).
+    /// `token` goes to the runner's stdin; `url` and `wait_timeout_seconds`
+    /// are not secret and may be passed as arguments.
     #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
     pub enum GitlabRunnerMaterial {
         GitlabRunner {
             token: String, // the `glrt-` runner authentication token
             url: String,   // the connection's base_url, e.g. https://gitlab.com
+            wait_timeout_seconds: u32, // gitlab-runner run-single --wait-timeout
         },
     }
 
-- The JSON is exactly `{"kind":"gitlab_runner","token":"glrt-…","url":"https://gitlab.example.com"}`. There are no other fields.
+- The JSON is exactly `{"kind":"gitlab_runner","token":"glrt-…","url":"https://gitlab.example.com","wait_timeout_seconds":600}`. There are no other fields.
 - Why it is an enum with one variant and not a struct (brief review R1, B-4): `#[serde(tag = "kind", rename = "gitlab_runner", deny_unknown_fields)]` on a struct serializes the literal above, but it **can't deserialize its own output**. With `deny_unknown_fields`, the struct's deserializer rejects `kind` as an unknown field. Without `deny_unknown_fields`, it ignores `kind`, so a payload with another `kind` would be accepted. The internally tagged single-variant enum above was checked against the workspace's locked `serde` 1.0.229 and `serde_json` 1.0.151 in a scratch crate:
   - It serializes as the literal above.
   - It accepts the literal, with the fields in any order.
   - It rejects a payload with no `kind` ("missing field `kind`").
   - It rejects another `kind` ("unknown variant `github_registration`, expected `gitlab_runner`").
   - It rejects an extra field ("unknown field `extra`").
-  - Consumers read the fields with `let GitlabRunnerMaterial::GitlabRunner { token, url } = material;`. That pattern is irrefutable while the enum has one variant.
+  - Consumers read the fields with `let GitlabRunnerMaterial::GitlabRunner { token, url, wait_timeout_seconds } = material;`. That pattern is irrefutable while the enum has one variant.
 - `Debug` is implemented by hand and prints `token: "[redacted]"`.
 - Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected; a payload with another `kind` is rejected; and `format!("{:?}")` doesn't contain the token.
 - A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
@@ -351,7 +353,7 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 
 ### W-4: the outcome codes are `DiagnosticCode` variants
 
-`IdleExpired` and `RegistrationRefused` are added to **`DiagnosticCode`** in `fleet/protocol/outcomes.rs` (wire `idle_expired`, `registration_refused`). `FailureCode` is unchanged, so `placement::reported_gone` still recognises an exited runner. The meaning, pinned for #147, #142 and #139:
+`IdleExpired` and `RegistrationRefused` are added to **`DiagnosticCode`** in `fleet/protocol/outcomes.rs` (wire `idle_expired`, `registration_refused`). `FailureCode` is unchanged, so `placement::reported_gone` still recognises an exited runner. The meaning, pinned for #147 (fleet host agent) and #139. The runner-manager path (built-in Docker host and Tart, #147 and #142) reports the same two reasons as `exitReason` instead; see the round-2 amendments:
 
 - Runner waited its timeout without a job: the Inspect result is `Failed { code: ResourceUnavailable, retryable: false, diagnostic: Some({ code: IdleExpired, .. }) }`.
 - GitLab refused the `glrt-` token: the start command's result is `Failed { code: Configuration, retryable: false, diagnostic: Some({ code: RegistrationRefused, .. }) }`.
@@ -479,11 +481,11 @@ New paths in `docs/openapi/gridops-v1.json`. Every operation description starts 
 - The connection operations declare `security: [{ "cookieAuth": [] }]` only, with no `bearerAuth`. They are session routes, like Bitbucket's, so `TOKEN_SCOPED_ROUTES` is unchanged.
   - `GET /api/v1/platform-connections/gitlab`: 200 `GitlabConnectionList { canManage: boolean, items: GitlabConnection[] }`.
   - `POST /api/v1/platform-connections/gitlab`: body `CreateGitlabConnectionRequest { name, baseUrl (default "https://gitlab.com"), scopeKind ("project"|"group"), scopePath, accessToken }`. Responses: 201 `GitlabConnectionCreated { connection: GitlabConnection, webhookUrl, webhookSecret }`, the only response that carries the secret; 409 on a duplicate `(baseUrl, scope)`.
-  - `PATCH /api/v1/platform-connections/gitlab/{connectionId}`: body `UpdateGitlabConnectionRequest { name?, accessToken? }`, response 200 `GitlabConnection`. PATCH is kept as #138 says, because it is a partial update. Bitbucket's PUT is a full replace.
-  - `DELETE /api/v1/platform-connections/gitlab/{connectionId}`: 204, or 409 while a pool targets it.
+  - `PATCH /api/v1/platform-connections/gitlab/{connection_id}`: body `UpdateGitlabConnectionRequest { name?, accessToken? }`, response 200 `GitlabConnection`. PATCH is kept as #138 says, because it is a partial update. Bitbucket's PUT is a full replace.
+  - `DELETE /api/v1/platform-connections/gitlab/{connection_id}`: 204, or 409 while a pool targets it.
     - The 409 also covers a GitLab `fleet_ci_targets` row that still references the connection, whether or not any pool does. That FK is NO ACTION (see A-1), so the delete couldn't succeed anyway. The 409 description says "while a pool or a fleet target references it".
-  - `POST /api/v1/platform-connections/gitlab/{connectionId}/verify`: 204, or an error that names the missing scope or role.
-  - `POST /api/v1/platform-connections/gitlab/{connectionId}/webhook-secret/rotate`: 200 `GitlabWebhookSecret { webhookUrl, webhookSecret }`.
+  - `POST /api/v1/platform-connections/gitlab/{connection_id}/verify`: 204, or an error that names the missing scope or role.
+  - `POST /api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate`: 200 `GitlabWebhookSecret { webhookUrl, webhookSecret }`.
   - `GitlabConnection` is `{ id, provider: "gitlab", name, baseUrl, scopeKind, scopeId (integer), scopePath, createdAt, updatedAt (RFC 3339 strings, as Bitbucket's iso()), canManage }`. It has no secret, no token and no webhook URL.
 - `POST /api/v1/webhooks/gitlab` declares `security: []`, like `/api/v1/fleet/agent/enroll`.
   - Required header parameters: `X-Gitlab-Token` and `X-Gitlab-Event`.
@@ -558,6 +560,133 @@ All of this was verified in this worktree.
   - `fn redact` treats a char as part of a token when `c.is_ascii_alphanumeric() || c == '_' || c == '-'`. It replaces a run that starts with a listed prefix and has at least `SECRET_MIN_LEN` characters after it with the prefix followed by `[redacted]`.
   - The fake's token `glrt-fake-runner-token-0001` has 22 characters after `glrt-`, so it is masked too.
 - **NV-14.** Settled by B-4 above, which tested it against the locked serde versions.
+
+## Amendments (architecture review, round 2)
+
+Round 2 of the Phase-3 review blocked on one finding (R2-1) and raised four warnings. This section resolves all five. **Where it conflicts with anything above, this section wins.** Some text above was corrected in place because of this section:
+
+- the material's doc comment and consumers (A-2);
+- `wait_timeout_seconds` in the material;
+- the W-4 consumer list;
+- the "admitted" wording in A-1;
+- the path parameter `{connection_id}`.
+
+### R2-1 (block): the runner-manager path (built-in Docker host and Tart/macOS) is pinned too
+
+Option (a): #137 pins the GitLab contract of the runner-manager path. The facts it rests on:
+
+- Tart starts never use fleet placement. The host agent answers `Unsupported` for Tart.
+- The reconciler's `start` sends `POST /v1/runners` to `gridops-manager`. The manager runs Docker runners itself (the built-in host) and forwards Tart runners to `gridops-tart-agent`.
+- Each of those two crates has its own private camelCase `ProvisionRunner`, and each refuses an unknown platform ("Runner platform is invalid.").
+- `gridops-tart-agent` has no `gridops-core` dependency.
+- The platform comes from `ProvisioningPlan::for_selected_provider(provider, bitbucket_connection_selected: bool, ...)` in `gridops-core/src/provisioning.rs`. It is called by `gridops-api/src/resources.rs` and by `gridops-reconciler/src/main.rs`.
+
+**1. `ProvisioningPlan::for_selected_provider` becomes platform-aware.** **[deviation D9]**
+
+    pub fn for_selected_provider(
+        provider: &str,
+        platform: CiPlatform,        // replaces `bitbucket_connection_selected: bool`
+        pool_mode: &str,
+        pool_ephemeral: bool,
+        macos_runtime: &str,
+        docker_image: &str,
+        tart_image: &str,
+    ) -> Self
+
+- `CiPlatform::Github` and `CiPlatform::Bitbucket` give exactly today's results for `false` and `true`.
+- `CiPlatform::Gitlab` gives `platform: "gitlab"`, `mode: "ephemeral"`, `ephemeral: true` and `runtime: "vm"`, whatever `pool_mode`, `pool_ephemeral` and `macos_runtime` say. Its `image` is `tart_image` when `provider == "tart"`, and `docker_image` otherwise.
+- `ProvisioningPlan.platform` stays `&'static str`. `CiPlatform` gains `as_str()`, which returns "github", "bitbucket" or "gitlab".
+- The two callers change mechanically to `if bitbucket_selected { CiPlatform::Bitbucket } else { CiPlatform::Github }`. Choosing GitLab there is #139's job.
+- A table test in `provisioning.rs` pins all three platforms for both providers. The GitHub and Bitbucket rows equal the outputs from before the change.
+
+**2. The `/v1/runners` request, from the reconciler to the manager to the Tart agent.** Two private `ProvisionRunner` structs, one in `gridops-manager/src/main.rs` and one in `gridops-tart-agent/src/main.rs`, both camelCase. Each gains two optional fields, `#[serde(default)]`, which existing requests leave out:
+
+    gitlab: Option<GitlabBootstrap>,          // {"url": "<base_url>", "waitTimeoutSeconds": 600}
+    gitlab_runner_token: Option<String>,      // wire "gitlabRunnerToken": the glrt- token, a secret
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct GitlabBootstrap { url: String, wait_timeout_seconds: u32 }
+
+- A GitLab request has `"platform":"gitlab"`, `"mode":"ephemeral"` and `"runtime":"vm"`. `provider` is `"docker"` (the built-in host) or `"tart"`. It has no `jitConfig`, `registrationToken`, `bitbucket` or `bitbucketOauthClientSecret`.
+- The manager forwards a Tart GitLab request to the Tart agent with both fields intact, as it already does for Bitbucket.
+- `gitlabRunnerToken` is a secret, handled the way the manager and the Tart agent already handle `jitConfig` and `bitbucketOauthClientSecret`:
+  - it is never logged;
+  - it never appears in container env or args;
+  - it is delivered on stdin or through the agent's existing secret channel.
+- What #137 lands here is shapes only:
+  - Both structs gain the fields.
+  - The manager's `validate` gains a `("gitlab", _)` arm that returns `BadRequest("GitLab runners are not supported yet: Docker is #147, Tart is #142.")`. An early GitLab request then fails loudly instead of being silently mis-run.
+  - The Tart agent gets the same arm, naming #142.
+  - Tests: a GitLab request body deserializes into each struct with the fields populated; a GitHub request without them still deserializes unchanged; and the GitLab arm's error is returned.
+- Shared constants in `gridops-core/src/provisioning.rs`:
+  - `pub const GITLAB_DEFAULT_WAIT_TIMEOUT_SECS: u32 = 600;`, the value #139 sends when a pool sets none.
+  - `pub const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";`.
+
+**3. Exit reporting on the runner-manager path.** `GET /v1/runners` entries gain an optional `exitReason` field. The manager reports it for Docker runners and the Tart agent for Tart runners. The field is present only for a GitLab runner whose `state` is `"exited"`, and takes one of three values:
+
+- `"completed"`: the runner ran its one job.
+- `"idle_expired"`: it hit `--wait-timeout` with no job.
+- `"registration_refused"`: GitLab rejected the token.
+
+The runner script's exit status gives the value. The constants are pinned in `gridops-core/src/provisioning.rs`. The Tart agent can't depend on core, so it gets a copy, with a test that pins the values:
+
+    pub const GITLAB_EXIT_COMPLETED: i32 = 0;
+    pub const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
+    pub const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+
+- The GitLab runner script exits with these codes. #147 owns the copy in `provisioning.rs`, and #142 the copy in the VM image.
+- The reconciler (#139) maps `idle_expired` to "removed without error" and `registration_refused` to a failure with a readable diagnostic. These are the meanings W-4 gives the fleet path.
+- #137 pins the field's name, its values and the exit codes, but doesn't add the field to either listing. The agent that launches the runner adds `exitReason` to its own listing, and #139 reads it.
+
+**4. Ownership, a deviation from the epic's table.** **[deviation D10]**
+
+| Piece | Owner |
+|---|---|
+| The manager's `("gitlab", _)` validation arm, the built-in Docker host's GitLab launch, and `exitReason` in the manager's listing | **#147**. It already owns the Linux Docker `gitlab-runner` command and script, so the built-in host and fleet Docker share one runner script. |
+| The Tart agent's GitLab module, its validation arm, and `exitReason` in its listing | **#142** |
+| Choosing `CiPlatform::Gitlab` in both `for_selected_provider` callers, filling `gitlab` and `gitlabRunnerToken`, and mapping `exitReason` | **#139** |
+
+#142 receives a `/v1/runners` request, not a `PrepareEnvironment`. Its wording "on a GitLab `PrepareEnvironment`" becomes "on a GitLab `POST /v1/runners`".
+
+### R2-W1: admitting GitLab intents
+
+`fleet/service.rs::ensure_target_identity_for_pool` ends `_ => false`, so a GitLab intent is refused today. `link_pool_target` and the user-scoped visibility and admission SQL have no GitLab arm either.
+
+- #137 doesn't change any of them.
+- **#139 owns** the GitLab arm of `ensure_target_identity_for_pool` and of `link_pool_target`.
+- GitLab fleet targets are visible to admins only, until a later issue adds a user-scoped arm. **[deviation D11]**
+- A-1 now says "stored and loaded", not "admitted".
+
+### R2-W2: the outbound FKs of `fleet_ci_targets`
+
+The rebuilt `fleet_ci_targets` keeps its three outbound FKs, all plain `REFERENCES` with no action:
+
+- `installation_id` → `installations(id)`
+- `repository_id` → `repositories(id)`
+- `bitbucket_connection_id` → `bitbucket_connections(id)`
+
+It adds a fourth, `gitlab_connection_id` → `gitlab_connections(id)`, also with no action. The A-1 upgrade test asserts that `pragma_foreign_key_list('fleet_ci_targets')` returns exactly those four rows.
+
+### R2-W3: who adds the `gitlab` field to the shared state
+
+- `AppState` in `gridops-api/src/state.rs` gains `pub gitlab: Arc<dyn GitLabApi>`. **#138 owns** the field and its constructor argument.
+- The reconciler's `Reconciler` struct gains `gitlab: Arc<dyn GitLabApi>`. **#139 owns** it.
+- #140 (API) and #148 (reconciler) read `state.gitlab` or `self.gitlab`. If one of them lands before the owner, it adds the same field with the same name and type, and whichever lands second rebases onto it.
+- #137 adds neither field, because nothing calls it yet.
+
+### R2-W4: the OpenAPI path parameter
+
+The path parameter is `{connection_id}`, in snake_case like every other path in the spec and the live Bitbucket route. It is corrected in place in W-7 above.
+
+### Deviation table, continued
+
+| # | Issue or epic text | Contract as shipped | Wave-1 issues affected |
+|---|---|---|---|
+| D9 | `for_selected_provider(provider, bitbucket_connection_selected: bool, …)` | `for_selected_provider(provider, platform: CiPlatform, …)`. GitLab is ephemeral, with the vm runtime. | #139, #147, #142 |
+| D10 | #142: "on a GitLab `PrepareEnvironment`". The manager has no owner. | Tart and the built-in host get GitLab through `POST /v1/runners`, with `gitlab {url, waitTimeoutSeconds}` and `gitlabRunnerToken`, and report `exitReason`. #147 owns the manager arm, #142 the Tart agent. | #142, #147, #139 |
+| D11 | A-1 said "admitted". | Admission (`ensure_target_identity_for_pool`, `link_pool_target`) belongs to #139. User-scoped GitLab target visibility is deferred. | #139 |
+| D12 | No source for the idle timeout. | `wait_timeout_seconds` / `waitTimeoutSeconds` on both paths, default `GITLAB_DEFAULT_WAIT_TIMEOUT_SECS = 600`. | #139, #147, #142 |
 
 ## Carried findings closed (brief review, rounds 1 to 3)
 
@@ -642,3 +771,8 @@ All of this was read from the fixtures in this worktree. Excerpts are verbatim, 
 - Cargo.lock (`serde` 1.0.229, `serde_json` 1.0.151), used to build a scratch crate that checked the `GitlabRunnerMaterial` serde shape
 - the local `sqlite3` 3.54.0, used to check `pragma_foreign_key_check` with `foreign_keys` OFF and `PRAGMA foreign_keys` inside a transaction
 - migrations/0001 to 0021, `fleet_legacy.sql`, migrations/0022 to 0045 and `fleet_ready.sql` applied in order to a scratch SQLite database with foreign keys on, to check that `UPDATE workload_placements SET runner_id='legacy-runner'` is accepted and leaves `PRAGMA foreign_key_check` empty
+- docs/handoffs/137/handoff-A.md (architecture review, round 2)
+- crates/gridops-core/src/provisioning.rs (`ProvisioningPlan::for_selected_provider`)
+- crates/gridops-manager/src/main.rs (`ProvisionRunner`, `validate`)
+- crates/gridops-tart-agent/src/main.rs (`ProvisionRunner`, `list_runners`)
+- crates/gridops-api/src/state.rs (`AppState`)
