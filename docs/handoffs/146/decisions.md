@@ -78,3 +78,14 @@
   - `cargo clippy -p gridops-core --lib -D warnings` is clean.
   - `cargo check --workspace --all-targets` is clean.
   - The facts this relies on in unchanged code are in `docs/handoffs/146/evidence.md`.
+
+## T (Phase 7, GREEN): 2026-11-20
+- **Decided:** The suite is GREEN with no blocking Tier 2 issue. I changed no test and no production code (F flagged no wrong tests).
+- **Assumed:** The two clippy `--all-targets` failures in `autoscaling.rs` are pre-existing and not a #146 blocker; they matched T-red's report from before F's change.
+- **Hedged:**
+  - The live test was not run (no `GITLAB_TEST_TOKEN`).
+  - The `Retry-After` trim branch and the 30s timeout are verified by reading, not by test.
+- **Evidence:**
+  - `cargo test -p gridops-core --lib gitlab::http`: 18 passed. Full crate: lib 279 passed, all integration binaries ok.
+  - Two mutations applied to the real `http.rs` (same-origin check off, 404 not forgiven on delete) each failed one test; the file was restored and `git status` is clean.
+  - fmt and lib clippy are clean.
