@@ -1,25 +1,33 @@
 ## Brief Review (Round 1)
 
 ### BLOCK findings
-None.
+
+**[B-1]** The Done-when test list was not extended to cover the amended behavior. The amendments add several new, testable behaviors — the equal-`status_changed_at` tie rule (lifecycle-rank comparison), the missing/unparsable `build_status_changed_at` fallback to receive time, multi-candidate token matching with project-scoped/oldest tie-break, group-scoped prefix matching at a `/` boundary, retry through the new GitLab arm in `retry`, and non-`build` event kinds recorded with no effect — but "Done when" still lists only the original seven cases (bad token, unknown project, pending tag lookup, out-of-order, retried job, duplicate delivery, busy set/cleared). The tie rule in particular is the only thing preventing the out-of-order guard from being non-deterministic on ties, and nothing in the brief requires a test of it. Add the amended cases to Done when.
 
 ### Needs-verification findings
-**[NV-1]** Claim: a retried job carries a new `build_id`, so it lands as a new row under the unique key `(connection_id, job_id)` — the evidence that would settle it is the GitLab Job events webhook documentation (payload schema for `build_id` / `retries_count` on retries), confirming retries produce a distinct job/build id rather than reusing the original.
-**[NV-2]** Claim: GitLab deliveries can be recorded "in the same table as GitHub deliveries" with duplicate-delivery detection — the evidence that would settle it is the migration/schema of that deliveries table (file:line of its CREATE TABLE and any unique key on a delivery/event id) plus confirmation that GitLab build payloads carry a usable per-delivery idempotency key (GitHub's `X-GitHub-Delivery` has no shown GitLab analogue; `build_id` + status + timestamp is a weaker substitute).
-**[NV-3]** Claim: `object_kind: "build"` events always populate `build_status_changed_at` (the ordering rule depends on it; `skipped` jobs in particular are commonly never scheduled) — the evidence is the GitLab webhook payload documentation or a captured payload excerpt for each of `pending`, `running`, `success`, `failed`, `canceled`, `skipped`.
-**[NV-4]** Claim: matching a group-scoped connection via "the payload's `project` path namespace" correctly identifies membership — evidence would be a sample build payload showing `project.namespace` / full path structure, confirming the stored group is derivable and that nested-subgroup paths resolve unambiguously.
-**[NV-5]** Claim: the request/response shapes of `POST /api/v1/webhooks/gitlab` in `docs/openapi/gridops-v1.json` exist and are implementable as described — evidence is the path definition in that file (line references for the request body and error responses, including whether 401 is the specified response for no matching connection).
+
+**[NV-1]** The claim that the deliveries UI labels an unlabeled row "GitHub App" at `src/routes/_app/webhooks.tsx:146` — the excerpt ends at line 131; only `:119` is shown (and it does show the `"GitHub App"` fallback). A line-range excerpt of `webhooks.tsx` covering line 146 would settle it.
+
+**[NV-2]** The claim that GitLab sends `Idempotency-Key` constant across retries (and `X-Gitlab-Event-UUID` as a per-delivery alternative) — a GitLab webhooks documentation excerpt ("Job events" payload/headers page) would settle it; nothing in this prompt shows GitLab's retry header behavior.
+
+**[NV-3]** The claim that `docs/openapi/gridops-v1.json` documents `POST /api/v1/webhooks/gitlab` with required headers exactly `X-Gitlab-Token` and `X-Gitlab-Event` — the OpenAPI path entry would settle it; it is cited but not excerpted.
+
+**[NV-4]** The claim that `gitlab::GITLAB_ACTIVE_JOB_STATUSES` / `JobStatus::is_active()` and the `JobStatus` serialization match migration 0047's partial-index statuses — an excerpt of `gridops-core`'s gitlab module and `migrations/0047_gitlab.sql` would settle it.
+
+**[NV-5]** The claim that the `runners` busy gating "as `webhooks.rs` already does for GitHub" exists, and that delivery bookkeeping helpers can be extracted from `receive` without behavior change — an excerpt of `crates/gridops-api/src/webhooks.rs` showing the guarded upsert and duplicate/invalid-signature recording would settle it.
 
 ### WARN findings
-**[W-1]** The group-matching rule is stated as an unresolved disjunction: "the payload's `project` path namespace, **or** the stored group." Two different implementations satisfy this sentence, and the "unknown project" acceptance test cannot distinguish them. Pick one rule before implementation.
-**[W-2]** Busy clearing on conclusion depends on `gitlab_runner_id` having been recorded by an earlier `running` event. The brief has no error path or acceptance test for concluding a job whose runner id is unknown (running event lost, or never sent for `skipped`). Specify the behavior (no-op clear is fine, but say so) and consider a test.
-**[W-3]** No error path for the `GitLabApi::job` tag fetch during `pending` (network failure, 404, deleted job). Specify: does the delivery fail (5xx / retry), or is the job upserted with an empty `tag_list`? Currently untestable.
-**[W-4]** Out-of-order interplay with retries is unspecified: a stale event for a retried job has an old `build_id` and lands on the *old* row by the unique key — presumably harmless, but if the old row was already concluded and a stale `running` arrives for it, the handler would "mark busy" on a runner based on a dead job. State that stale events for concluded/replaced rows are ignored (or are not, and why).
-**[W-5]** "Ignore an event older than the stored status" doesn't state tie-breaking for equal `status_changed_at` (GitLab re-sends). The duplicate-delivery test partially covers this only if dedup is by delivery key; if it's by timestamp, equal timestamps need a rule.
+
+**[W-1]** The `pending` tag fetch failing marks the delivery failed with no row written, but a stale `pending` arriving after `running` still triggers the fetch before the guard rejects the update — an unnecessary upstream call on every out-of-order/duplicate pending. Consider noting the fetch is best-effort ordering (or only fetched when the upsert will apply); at minimum confirm the extra call is acceptable.
+
+**[W-2]** "Clear busy only applies to the runner recorded on that job" plus the guard running busy effects only when the upsert changed the row leaves a gap: if a `running` event for runner A is superseded by an out-of-order-ignored state, no busy write occurs for A — fine — but a `failed` event whose upsert is ignored as stale will also skip clearing busy, potentially leaving a runner busy after its job concluded via an older-timestamped delivery that was already processed. Recommend an explicit acceptance test for "concluded-but-stale event does not corrupt busy state."
+
+**[W-3]** `pool_id` "may stay NULL here unless the pool is unambiguous" is untestable as written (ambiguity is undefined — unambiguous by what query?). Specify: NULL always in #140, or fill only when exactly one `runner_pool_gitlab_connections` row matches the connection.
 
 ### NIT findings
-**[NIT-1]** The Done-when list omits a token-mismatch test distinct from no-connection: "a bad token" may mean either; state both are covered (valid token wrong secret vs. no connection at all), since both must return 401 but via different lookups.
-**[NIT-2]** "Route registration in `main.rs` is shared with #138. Keep it to the added lines" is vague about merge-order reconciliation for `state.rs` (the fallback instructions are good; add the same explicit "whichever lands second reconciles" note for the route line, which you did only for the `AppState.gitlab` field).
+
+**[NIT-N]** The group-matching rule changed between the issue text ("the payload's `project` path namespace, or the stored group") and the amendment (`scope_path` prefix at a `/` boundary); the amendment says it wins, but the issue text's `scope_path` column is not listed in the `gitlab_connections` schema summary — add it there for consistency.
 
 ### Verdict
-PASS — no BLOCK findings; implementation may proceed.
+
+BLOCK — 1 blocking finding; must resolve before implementation starts.
