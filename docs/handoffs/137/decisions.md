@@ -95,3 +95,20 @@
   - The master bytes of the GitHub fixture, re-captured and equal to the brief's literal.
   - A throwaway probe of today's `for_selected_provider` (8 GitHub and Bitbucket rows matched).
   - A throwaway draft 0046 (never staged): 14/14 passed, and the mutation without transaction control failed 3, catching the `runner_events` cascade.
+
+## F (Phase 5, implementation): 2026-11-20T13:30:41-08:00
+- **Decided:** Implemented the contract against T's RED suite. Every T-authored test is GREEN. One pre-existing test, `db::tests::fresh_database_applies_every_migration`, hard-codes 70 tables and now sees 73, because 0046 adds `gitlab_connections`, `runner_pool_gitlab_connections` and `gitlab_jobs`. It is flagged for T and not edited.
+  - I did not take a scope-cap split. This touches more than 6 files across several surfaces, but it is the reviewed types-and-stubs contract with a single RED suite, so no sub-phase could go GREEN alone.
+  - Extended the existing objects: `ensure_target`, `target_from_db`, `TargetKind`, `CiTarget`, both `ProvisionRunner` structs and `SECRET_PREFIXES`. The `gitlab` module is new because the brief places it there (no prior GitLab code exists).
+  - `ensure_target`: the GitLab arms insert through a private `ensure_gitlab_target`. The final `SELECT id` moved into a private `target_id_for_key`, shared by both paths. The Bitbucket wildcard and its error string are unchanged.
+  - The manager's new fields use `skip_serializing_if = "Option::is_none"`, so the bytes forwarded to the Tart agent for GitHub and Bitbucket starts are unchanged.
+  - The Tart agent's new fields, `GitlabBootstrap` and its exit-code copy are read only by #142, so they carry `#[allow(dead_code, reason = ...)]`.
+  - `FakeGitLab::job` matches the project id as well as the job id, as GitLab's `GET /projects/:id/jobs/:job_id` does. `verify_access` is `Ok` for a seeded scope of the same kind and id, and `NotFound` otherwise. A failed call never uses up a runner id.
+- **Assumed:** The OpenAPI 403 `token_not_accepted` refusal of bearer tokens is stated in the tag description and not declared as a response. Its body is not `ApiErrorBody`, and T's test forbids any other error schema on these operations.
+- **Hedged:** The 0046 guard checks `pragma_foreign_key_check` over the whole database, as the brief pins. So a production database that already holds a dangling reference anywhere would refuse to migrate rather than commit. This is the safe failure, and it is recorded under Known issues in `handoff-F.md`.
+  - 11 `gridops-manager` tests fail on this macOS workstation. Their Unix socket paths under `temp_dir()` exceed `SUN_LEN`. Those modules are untouched, and CI is Linux.
+- **Evidence:**
+  - Tests: `cargo test` for `gridops-core` (lib, `fleet_schema`, `gitlab_contract`, `fleet_agent_outcomes`, `fleet_agent_commands`), `gridops-agent`, `gridops-api --bin`, `gridops-manager` and `gridops-tart-agent`.
+  - Lint and build: `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (clean), the same for `gridops-core --features test-support`, `cargo fmt --all -- --check`, `cargo build --workspace --locked`, and `npx @redocly/cli@2.72.1 lint` (valid; only the operationId warnings the spec already has).
+  - 0046 applied with `sqlite3` 3.54.0 to a scratch database built from 0001 to 0045: integrity `ok` and an empty FK check.
+  - Source facts are in `evidence.md`.

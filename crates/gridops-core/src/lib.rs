@@ -10,6 +10,7 @@ pub mod disk;
 pub mod fix_agent;
 pub mod fleet;
 pub mod github;
+pub mod gitlab;
 pub mod job_log;
 pub mod models;
 pub mod provisioning;

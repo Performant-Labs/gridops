@@ -267,6 +267,15 @@ struct ProvisionRunner {
     /// on this host. Defaulted so older control planes keep getting VMs.
     #[serde(default = "default_runtime")]
     runtime: String,
+    /// A GitLab runner's non-secret bootstrap (#137 R2-1); #142 reads it.
+    #[serde(default)]
+    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+    gitlab: Option<GitlabBootstrap>,
+    /// The secret `glrt-` GitLab runner token, handled like `jit_config`:
+    /// never logged, never in VM env or args. #142 reads it.
+    #[serde(default)]
+    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+    gitlab_runner_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +286,31 @@ struct BitbucketBootstrap {
     runner_uuid: String,
     oauth_client_id: String,
 }
+
+/// Where a GitLab runner registers and how long it waits for a job.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+struct GitlabBootstrap {
+    url: String,
+    wait_timeout_seconds: u32,
+}
+
+/// This crate's copy of `gridops_core::provisioning`'s GitLab exit codes and
+/// `exitReason` values (the Tart agent does not depend on `gridops-core`).
+/// Keep the names and values equal to core's.
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_COMPLETED: i32 = 0;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+    (GITLAB_EXIT_COMPLETED, "completed"),
+    (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
+    (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+];
 
 fn default_platform() -> String {
     "github".into()
@@ -363,6 +397,11 @@ impl ProvisionRunner {
             ("bitbucket", _) => {
                 return Err(AgentError::BadRequest(
                     "Bitbucket Tart runners must be persistent.".into(),
+                ));
+            }
+            ("gitlab", _) => {
+                return Err(AgentError::BadRequest(
+                    "GitLab runners are not supported yet: Tart is #142.".into(),
                 ));
             }
             _ => return Err(AgentError::BadRequest("Runner platform is invalid.".into())),

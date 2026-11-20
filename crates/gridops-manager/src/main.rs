@@ -350,6 +350,14 @@ struct ProvisionRunner {
     /// "native" runs the runner on the agent host. Docker ignores it.
     #[serde(default = "default_runtime")]
     runtime: String,
+    /// A GitLab runner's non-secret bootstrap (#137 R2-1). Left out of
+    /// GitHub and Bitbucket requests, and of their forwarded copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gitlab: Option<GitlabBootstrap>,
+    /// The secret `glrt-` GitLab runner token. Handled like `jit_config`:
+    /// never logged, never in container env or args.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gitlab_runner_token: Option<String>,
 }
 
 fn default_runtime() -> String {
@@ -363,6 +371,14 @@ struct BitbucketBootstrap {
     repository_uuid: Option<String>,
     runner_uuid: String,
     oauth_client_id: String,
+}
+
+/// Where a GitLab runner registers and how long it waits for a job.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GitlabBootstrap {
+    url: String,
+    wait_timeout_seconds: u32,
 }
 
 impl ProvisionRunner {
@@ -464,6 +480,11 @@ impl ProvisionRunner {
             ("bitbucket", _) => {
                 return Err(ManagerError::BadRequest(
                     "Bitbucket runners are persistent until their VM is drained.".into(),
+                ));
+            }
+            ("gitlab", _) => {
+                return Err(ManagerError::BadRequest(
+                    "GitLab runners are not supported yet: Docker is #147, Tart is #142.".into(),
                 ));
             }
             _ => {

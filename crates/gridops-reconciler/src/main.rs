@@ -2403,7 +2403,11 @@ async fn provision_on_host(
         .flatten();
     let plan = gridops_core::ProvisioningPlan::for_selected_provider(
         &provider,
-        bitbucket_connection.is_some(),
+        if bitbucket_connection.is_some() {
+            gridops_core::fleet::CiPlatform::Bitbucket
+        } else {
+            gridops_core::fleet::CiPlatform::Github
+        },
         &pool.mode,
         pool.ephemeral,
         &pool.macos_runtime,

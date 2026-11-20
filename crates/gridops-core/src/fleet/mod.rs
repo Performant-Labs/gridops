@@ -34,10 +34,10 @@ pub use authorization::{
 pub use domain::{
     AllocationReleaseError, AllocationState, Architecture, BackendReadiness, BitbucketConnectionId,
     CiPlatform, CiTarget, DelayedStartExclusion, EnrollmentState, ExecutionOs, ExternalId,
-    ExternalIdError, Freshness, HostIntent, HostLifecycle, IntegrityState, LifecycleAxis,
-    LifecycleTransitionError, LifecycleValidationError, NonNilTargetUuid, PlacementOwnership,
-    PlacementState, PressureState, ProvenLocalAbsence, ProviderCleanupState, ResourceAmount,
-    ResourceError, ResourceRequest, RuntimeKind,
+    ExternalIdError, Freshness, GitlabConnectionId, HostIntent, HostLifecycle, IntegrityState,
+    LifecycleAxis, LifecycleTransitionError, LifecycleValidationError, NonNilTargetUuid,
+    PlacementOwnership, PlacementState, PressureState, ProvenLocalAbsence, ProviderCleanupState,
+    ResourceAmount, ResourceError, ResourceRequest, RuntimeKind,
 };
 pub use ids::{
     AllocationId, BackendId, CiTargetId, CommandId, CounterError, CounterKind, FleetIdParseError,

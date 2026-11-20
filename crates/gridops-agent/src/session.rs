@@ -110,7 +110,7 @@ impl AgentEvent {
 
 /// Prefixes of well-known credential formats: GitHub, `OpenAI` and Anthropic,
 /// AWS access keys, Slack and GitLab.
-const SECRET_PREFIXES: [&str; 10] = [
+const SECRET_PREFIXES: [&str; 11] = [
     "ghp_",
     "gho_",
     "ghu_",
@@ -121,6 +121,7 @@ const SECRET_PREFIXES: [&str; 10] = [
     "AKIA",
     "xoxb-",
     "glpat-",
+    "glrt-",
 ];
 const SECRET_MIN_LEN: usize = 16;
 

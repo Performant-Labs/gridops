@@ -15,7 +15,9 @@
     { "name": "fleet-admin", "description": "Cookie-only administration (API tokens, recovery, rotation); a bearer token gets `403 token_not_accepted`" },
     { "name": "pools", "description": "Runner pools (token scope `pools:read` or `pools:manage`, or cookie), with the web form's validation and the token owner's installation access" },
     { "name": "operations", "description": "Durable operation status (token scope `fleet:read` or cookie)" },
-    { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" }
+    { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" },
+    { "name": "platform-connections", "description": "CI platform connections (session cookie only; a bearer token gets `403 token_not_accepted`)" },
+    { "name": "webhooks", "description": "Deliveries from CI platforms, authenticated by the connection's webhook secret" }
   ],
   "security": [{ "cookieAuth": [] }],
   "components": {
@@ -98,6 +100,12 @@
         "in": "path",
         "required": true,
         "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ConnectionId": {
+        "name": "connection_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1 }
       }
     },
     "schemas": {
@@ -427,6 +435,78 @@
             "additionalProperties": false
           }
         ]
+      },
+      "ApiErrorBody": {
+        "type": "object",
+        "description": "The error body of the session and webhook routes (`gridops-api`'s `ApiError`), not the fleet `ErrorResponse`.",
+        "properties": {
+          "error": { "type": "string", "description": "A readable message." },
+          "code": { "type": "string", "description": "A stable machine-readable code, when the error has one." }
+        },
+        "required": ["error"]
+      },
+      "GitlabConnection": {
+        "type": "object",
+        "description": "A GitLab connection: one project or group on one GitLab instance. It never carries the access token, the webhook secret or the webhook URL.",
+        "properties": {
+          "id": { "type": "string" },
+          "provider": { "type": "string", "const": "gitlab" },
+          "name": { "type": "string" },
+          "baseUrl": { "type": "string", "format": "uri", "description": "The GitLab instance, normalised: scheme, host, optional port and path, no trailing slash." },
+          "scopeKind": { "type": "string", "enum": ["project", "group"] },
+          "scopeId": { "type": "integer", "minimum": 1, "description": "The GitLab project or group id." },
+          "scopePath": { "type": "string", "description": "The full path, for example `group/sub/project`." },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "canManage": { "type": "boolean" }
+        },
+        "required": ["id", "provider", "name", "baseUrl", "scopeKind", "scopeId", "scopePath", "createdAt", "updatedAt", "canManage"]
+      },
+      "GitlabConnectionList": {
+        "type": "object",
+        "properties": {
+          "canManage": { "type": "boolean", "description": "Whether the caller may create connections." },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/GitlabConnection" } }
+        },
+        "required": ["canManage", "items"]
+      },
+      "CreateGitlabConnectionRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "baseUrl": { "type": "string", "format": "uri", "default": "https://gitlab.com" },
+          "scopeKind": { "type": "string", "enum": ["project", "group"] },
+          "scopePath": { "type": "string", "minLength": 1, "description": "The project or group path, resolved to its id at GitLab." },
+          "accessToken": { "type": "string", "minLength": 1, "writeOnly": true, "description": "A GitLab access token (`glpat-...`); stored encrypted and never returned." }
+        },
+        "required": ["name", "scopeKind", "scopePath", "accessToken"]
+      },
+      "GitlabConnectionCreated": {
+        "type": "object",
+        "description": "The only response that carries the webhook secret, apart from a rotation.",
+        "properties": {
+          "connection": { "$ref": "#/components/schemas/GitlabConnection" },
+          "webhookUrl": { "type": "string", "format": "uri" },
+          "webhookSecret": { "type": "string", "description": "Shown once; configure it as the GitLab webhook's secret token." }
+        },
+        "required": ["connection", "webhookUrl", "webhookSecret"]
+      },
+      "UpdateGitlabConnectionRequest": {
+        "type": "object",
+        "description": "A partial update: fields left out are unchanged.",
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "accessToken": { "type": "string", "minLength": 1, "writeOnly": true }
+        }
+      },
+      "GitlabWebhookSecret": {
+        "type": "object",
+        "description": "A newly issued webhook secret. The previous secret stops working.",
+        "properties": {
+          "webhookUrl": { "type": "string", "format": "uri" },
+          "webhookSecret": { "type": "string" }
+        },
+        "required": ["webhookUrl", "webhookSecret"]
       }
     },
     "examples": {
@@ -1228,6 +1308,112 @@
         "responses": {
           "200": { "description": "The Tart host", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TartHost" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/platform-connections/gitlab": {
+      "get": {
+        "tags": ["platform-connections"],
+        "summary": "The GitLab connections the caller may see",
+        "description": "Not served yet: implemented by #138.",
+        "security": [{ "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "The connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitlabConnectionList" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      },
+      "post": {
+        "tags": ["platform-connections"],
+        "summary": "Connect a GitLab project or group",
+        "description": "Not served yet: implemented by #138. Resolves `scopePath` at GitLab and checks the token's access before storing anything.",
+        "security": [{ "cookieAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateGitlabConnectionRequest" } } } },
+        "responses": {
+          "201": { "description": "Connected; the response carries the webhook secret once", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitlabConnectionCreated" } } } },
+          "400": { "description": "The request is invalid, or the token lacks a required scope or role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "409": { "description": "A connection for this base URL and scope already exists", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      }
+    },
+    "/api/v1/platform-connections/gitlab/{connection_id}": {
+      "patch": {
+        "tags": ["platform-connections"],
+        "summary": "Rename a GitLab connection or replace its access token",
+        "description": "Not served yet: implemented by #138.",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateGitlabConnectionRequest" } } } },
+        "responses": {
+          "200": { "description": "The updated connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitlabConnection" } } } },
+          "400": { "description": "The request is invalid, or the new token lacks a required scope or role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "404": { "description": "No such connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      },
+      "delete": {
+        "tags": ["platform-connections"],
+        "summary": "Remove a GitLab connection",
+        "description": "Not served yet: implemented by #138.",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
+        "responses": {
+          "204": { "description": "Removed" },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "404": { "description": "No such connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "409": { "description": "The connection cannot be removed while a pool or a fleet target references it", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      }
+    },
+    "/api/v1/platform-connections/gitlab/{connection_id}/verify": {
+      "post": {
+        "tags": ["platform-connections"],
+        "summary": "Check that the connection's token can still manage runners for its scope",
+        "description": "Not served yet: implemented by #138.",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
+        "responses": {
+          "204": { "description": "The token has every scope and role GridOps needs" },
+          "400": { "description": "The token is refused, or the error names the missing scope or role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "404": { "description": "No such connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      }
+    },
+    "/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate": {
+      "post": {
+        "tags": ["platform-connections"],
+        "summary": "Issue a new webhook secret",
+        "description": "Not served yet: implemented by #138.",
+        "security": [{ "cookieAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
+        "responses": {
+          "200": { "description": "The new secret, shown once", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitlabWebhookSecret" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "404": { "description": "No such connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      }
+    },
+    "/api/v1/webhooks/gitlab": {
+      "post": {
+        "tags": ["webhooks"],
+        "summary": "Receive a GitLab webhook delivery",
+        "description": "Not served yet: implemented by #140. The delivery is matched to a connection by its `X-Gitlab-Token`.",
+        "security": [],
+        "parameters": [
+          { "name": "X-Gitlab-Token", "in": "header", "required": true, "description": "The connection's webhook secret.", "schema": { "type": "string" } },
+          { "name": "X-Gitlab-Event", "in": "header", "required": true, "description": "The GitLab event name, for example `Job Hook`.", "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "The GitLab event payload." } } } },
+        "responses": {
+          "202": { "description": "Accepted" },
+          "400": { "description": "The payload is not a JSON object", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "401": { "description": "No connection's webhook secret matches", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
         }
       }
     }

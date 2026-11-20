@@ -3,6 +3,30 @@
 //! The API and reconciler own their I/O adapters, credentials, and persistence
 //! details. This module owns the decisions that must not drift between them.
 
+use crate::fleet::CiPlatform;
+
+/// The `--wait-timeout` a GitLab runner gets when its pool sets none (#139).
+pub const GITLAB_DEFAULT_WAIT_TIMEOUT_SECS: u32 = 600;
+
+/// The prefix of a GitLab runner authentication token, a secret.
+pub const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";
+
+/// The GitLab runner script ran its one job.
+pub const GITLAB_EXIT_COMPLETED: i32 = 0;
+/// The GitLab runner script hit `--wait-timeout` without a job.
+pub const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
+/// GitLab rejected the runner's token.
+pub const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+
+/// A GitLab runner script's exit status and the `exitReason` the runner
+/// listing (`GET /v1/runners`) reports for it. `gridops-tart-agent` holds a
+/// copy with the same names and values.
+pub const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+    (GITLAB_EXIT_COMPLETED, "completed"),
+    (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
+    (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisioningPlan {
     pub provider: String,
@@ -14,30 +38,30 @@ pub struct ProvisioningPlan {
 }
 
 impl ProvisioningPlan {
+    /// The runner shape for `platform` on `provider`. Bitbucket runners are
+    /// persistent; GitLab runners are ephemeral (one job each); both run in a
+    /// VM on Tart. Only GitHub follows the pool's mode and macOS runtime.
     pub fn for_selected_provider(
         provider: &str,
-        bitbucket_connection_selected: bool,
+        platform: CiPlatform,
         pool_mode: &str,
         pool_ephemeral: bool,
         macos_runtime: &str,
         docker_image: &str,
         tart_image: &str,
     ) -> Self {
-        let platform = if bitbucket_connection_selected {
-            "bitbucket"
-        } else {
-            "github"
-        };
-        let mode = if bitbucket_connection_selected {
-            "persistent".to_owned()
-        } else {
-            pool_mode.to_owned()
-        };
-        let ephemeral = platform == "github" && pool_ephemeral;
-        let runtime = if provider == "tart" && platform == "github" {
-            macos_runtime.to_owned()
-        } else {
-            "vm".to_owned()
+        let (mode, ephemeral, runtime) = match platform {
+            CiPlatform::Github => (
+                pool_mode.to_owned(),
+                pool_ephemeral,
+                if provider == "tart" {
+                    macos_runtime.to_owned()
+                } else {
+                    "vm".to_owned()
+                },
+            ),
+            CiPlatform::Bitbucket => ("persistent".to_owned(), false, "vm".to_owned()),
+            CiPlatform::Gitlab => ("ephemeral".to_owned(), true, "vm".to_owned()),
         };
         let image = if provider == "tart" {
             if runtime == "native" {
@@ -51,7 +75,7 @@ impl ProvisioningPlan {
 
         Self {
             provider: provider.to_owned(),
-            platform,
+            platform: platform.as_str(),
             mode,
             ephemeral,
             runtime,
