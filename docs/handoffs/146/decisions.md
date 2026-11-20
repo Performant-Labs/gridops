@@ -89,3 +89,21 @@
   - `cargo test -p gridops-core --lib gitlab::http`: 18 passed. Full crate: lib 279 passed, all integration binaries ok.
   - Two mutations applied to the real `http.rs` (same-origin check off, 404 not forgiven on delete) each failed one test; the file was restored and `git status` is clean.
   - fmt and lib clippy are clean.
+
+## S (Phase 10, spec audit): 2026-11-20T15:58:00-08:00
+- **Decided:** PASS. Read `http.rs`, `http_tests.rs`, `gitlab_live.rs` and the `mod.rs` diff against every clause of the brief; all are met (see `handoff-S.md`).
+  - No browser or visual-diff precondition applies (no visual surface), so there is no HTML report.
+  - The clippy `--all-targets` failure T and F left for O is a toolchain artifact, not a repo defect: CI pins 1.98.1 (`.github/workflows/ci.yml:88-101`), and `cargo +1.98.1 clippy -p gridops-core --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` and `cargo +1.98.1 fmt --all -- --check` are both clean. The two failures at `autoscaling.rs:1615/1701` come from the local default toolchain (1.99.1).
+  - Test quality passes the rubric. Two small items (the `" 30 "` row that hyper's whitespace stripping makes unobservable, and 4 statuses sharing one `error_for` arm in the leak test) are advisory, not rework.
+  - The diff-gate warnings are dispositioned: W-1 (`MAX_PAGES` 100) is A-W3's pin; W-2 (`tests/gitlab_live.rs`) is A-W4's named location; W-3 (clippy) is resolved as above; W-4 (membership 403 → `MissingRole`) is acceptable because step 1 already proved the scopes.
+- **Assumed:**
+  - T's and F's independent test runs (18/18, full crate green) still describe the tree at `8b0cad1`; the only commits after T-green are the a-dup result file. I did not re-run the tests, because that is T's job.
+- **Hedged:**
+  - The live test has never run (no `GITLAB_TEST_TOKEN`), so wire behaviour against a real GitLab rests on GitLab's source and docs plus the mock server.
+  - GitLab's own docs disagree on the project-runner role: `runners_scope.md` says Maintainer and `users.md` says Owner. The brief follows the first. If the second is right, `verify_access` passes a Maintainer and `create_runner` then returns `MissingRole`, so it fails safe. Not a hold; the by-hand live run with a Maintainer-not-Owner token settles it.
+  - Granular-scope tokens (GitLab 19.2+) may omit `scopes`, which would give a generic `Upstream` instead of `MissingScope`. It fails closed.
+  - `handoff-A-dup.md` is not in this directory; the a-dup result is `docs/handoffs/146-diff-result-r1.md`.
+- **Evidence:**
+  - Read: the brief, `handoff-A.md`, `handoff-F.md`, `handoff-T-red.md`, `handoff-T-green.md`, `146-diff-result-r1.md`, `decisions.md`, `evidence.md`, `http.rs`, `http_tests.rs`, `gitlab_live.rs`, `mod.rs`, `.github/workflows/ci.yml`, and the release's `testing/test-quality.md`.
+  - Ran: `cargo +1.98.1 clippy ...` and `cargo +1.98.1 fmt ... --check` (both clean); `git diff cdda02e HEAD --stat` (4 code files, no `Cargo.toml`, no contract change); `git fetch` and a diff of `origin/master` (no change under `gitlab/` or `tests/`).
+  - GitLab master docs and source fetched 2026-11-20: `doc/api/{users,jobs,groups,runners,personal_access_tokens}.md`, `doc/ci/runners/runners_scope.md`, `lib/api/user_runners.rb` (`tag_list` is `Array[String]` with `CommaSeparatedToArray`) and `lib/api/validations/types/comma_separated_to_array.rb`.
