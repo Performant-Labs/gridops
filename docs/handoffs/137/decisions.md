@@ -112,3 +112,9 @@
   - Lint and build: `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (clean), the same for `gridops-core --features test-support`, `cargo fmt --all -- --check`, `cargo build --workspace --locked`, and `npx @redocly/cli@2.72.1 lint` (valid; only the operationId warnings the spec already has).
   - 0046 applied with `sqlite3` 3.54.0 to a scratch database built from 0001 to 0045: integrity `ok` and an empty FK check.
   - Source facts are in `evidence.md`.
+
+## T (Phase 7, GREEN + Tier 2): 2026-11-20
+- **Decided:** Repaired `db::tests::fresh_database_applies_every_migration` (70 to 73 tables, plus `table_exists` for the three new tables), the test-only fix F flagged. Verdict PASS, no production change needed.
+- **Assumed:** The 12 remaining workspace failures (11 manager `SUN_LEN`, 1 macOS-host `release_preflight`) are workstation-specific, not #137: none of those files is in the diff, and the `SUN_LEN` error was re-observed directly.
+- **Hedged:** Server-start/HTTP smoke is not run because #137 adds no handlers; the OpenAPI spec tests stand in for it.
+- **Evidence:** `cargo test --workspace --no-fail-fast --locked` (843 passed, 12 failed, all host-specific); `cargo test -p gridops-core --locked` all ok; clippy and fmt clean; redocly valid (67 warnings); mutation spot-checks on exit code 75 and `run_untagged` default both turned tests red and were reverted.
