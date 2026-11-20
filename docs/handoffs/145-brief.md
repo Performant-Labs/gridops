@@ -61,7 +61,7 @@ Make the web UI platform-neutral: one Settings → Connections page, one Targets
 - [ ] No in-app link or redirect targets a redirecting route: the Bitbucket/Targets "connect first" link in `runner-pools.new.tsx` (today line 368, `to="/settings/integrations"`), the webhooks empty-state link in `src/routes/_app/webhooks.tsx` (line 83, `to="/settings/github"`), the `settings.index.tsx` `?appError=` redirect (line 10) and the settings nav (`settings.tsx` lines 41-42) all point directly at `/settings/connections`. Verified by a Vitest assertion on the rendered `href`/redirect target, plus a grep over `src/` showing no remaining `"/settings/github"` or `"/settings/integrations"` string outside the two redirect-only route files.
 - [ ] The new-pool form and pool settings have no platform-specific rows outside Targets and Platform options (no `bitbucket`/`github` branching in shared rows).
 - [ ] `runner-row.tsx` reads its platform badge from the registry.
-- [ ] Vitest covers the registry (lookups, fallback, every descriptor well-formed), the targets picker's mixing rules and payload mapping, and the conditional Platform options section. The mixing-rules cases include at least: (a) with no GitHub target selected, every Bitbucket workspace option is disabled and shows a reason (Bitbucket is not standalone), and becomes selectable once a GitHub repository or runner group is selected; (b) selecting a GitHub repository disables runner-group options and vice versa; (c) the per-kind caps are separate (repositories ≤ `maxCount` and workspaces ≤ `maxCount`, each counted on its own); (d) picking a Bitbucket workspace adds the `tart` provider, as today (`runner-pools.new.tsx` line 378).
+- [ ] Vitest covers the registry (lookups, fallback, every descriptor well-formed), the targets picker's mixing rules and payload mapping, and the conditional Platform options section. The mixing-rules cases include at least: (a) with no GitHub target selected, every Bitbucket workspace option is disabled and shows a reason (Bitbucket is not standalone), and becomes selectable once a GitHub repository or runner group is selected; (b) selecting a GitHub repository disables runner-group options and vice versa; (c) the per-kind caps are separate (repositories ≤ `maxCount` and workspaces ≤ `maxCount`, each counted on its own); (d) picking a Bitbucket workspace adds the `tart` provider, as today (`runner-pools.new.tsx` line 378); (e) selecting a GitHub repository, then a Bitbucket workspace, then removing the repository leaves the workspace selected, and submitting sends no `POST /api/v1/runner-pools` (the stubbed `fetch` records none) and shows the parse error in the "Could not create the pool" callout, as the Target-kind contract's `requires`/`standalone` entry states.
 - [ ] Vitest covers partial load failure on the Connections page: when one platform's list binding rejects and the other resolves, the page still renders the resolved platform's connections, shows a per-platform error with a Retry control for the failed one, and Retry re-runs only that load.
 - [ ] Vitest payload-equality cases (deep-equal `data` objects, as defined in Required design 3) for: GitHub repository pool, GitHub organization runner-group pool, GitHub repositories plus Bitbucket workspaces, and pool-settings saves for a repository pool and an organization pool. The expected objects are the frozen old-form constants described in "Payload-equality reference (frozen old-form output)" below, not values computed by the new code.
 - [ ] Vitest (or the Playwright walkthrough) covers the Connections page's permission gating — Add, Edit and Remove are hidden when the descriptor reports the user cannot manage, shown when it can — and the post-create one-time reveal dialog, driven by a test-only descriptor whose post-create hook returns a value: the value is shown once after create and not again after the dialog closes.
@@ -74,7 +74,7 @@ Write handoffs under `docs/handoffs/145/` (the run directory; the survey is `doc
 
 ### Operating rules
 - Read the survey + Reuse map before writing code; extend existing components (searchable select, settings layout, BitbucketSettings logic) rather than building parallel ones.
-- Implement against the failing tests from Phase 5 — F writes no tests. Handoff path for those tests: T writes them in this same worktree and branch (`claude/ui-145-platform-neutral-cf5832`), as `tests/**/*.test.ts` files (the only pattern Vitest collects, per `vitest.config.ts` `include: ["tests/**/*.test.ts"]`), together with any fixtures under `tests/fixtures/`, and commits them before F starts; T's handoff note goes under `docs/handoffs/145/` (see Handoff locations) and lists the test files. F reads them from the branch; F must not edit them, including the frozen old-form payload constants.
+- Implement against the failing tests from Phase 5 — F writes no tests. Handoff path for those tests: T writes them in this same worktree and branch (`claude/ui-145-platform-neutral-cf5832`), as `tests/**/*.test.ts` files (the only pattern Vitest collects, per `vitest.config.ts` `include: ["tests/**/*.test.ts"]`), together with any fixtures under `tests/fixtures/`, and commits them before F starts; T's handoff note goes under `docs/handoffs/145/` (see Handoff locations) and lists the test files. F reads them from the branch; F must not edit them, including the frozen old-form payload constants. T captures those constants before any `src/` change, per the "Sequencing gate" in "Payload-equality reference (frozen old-form output)"; T's commits change nothing under `src/`.
 - Follow project conventions; read source before referencing types/APIs.
 - Stage files by explicit path, never `git add .`.
 - All `gh` calls pass `--repo Performant-Labs/gridops`; never touch upstream iamngoni/gridops.
@@ -100,7 +100,8 @@ Write handoffs under `docs/handoffs/145/` (the run directory; the survey is `doc
 - `src/lib/api.ts`
 - `tests/searchable-select.test.ts`
 - `docs/handoffs/145/survey.md` — not found (to be created by this story)
-- Added in this amendment pass (read in full unless noted): `src/routes/_app/webhooks.tsx` (lines 1-90), `src/components/settings-ui.tsx`, `src/features/fleet/api-tokens-section.tsx` (lines 1-60 and 170-230, covering `SecretDialog`), `tests/api-tokens-section.test.ts` (test names, and lines 140-182), `tests/runner-pool-tart-image.test.ts`, `vitest.config.ts`, `package.json` (scripts), `docs/handoffs/145/decisions.md`, `docs/handoffs/145/handoff-A.md`, `docs/handoffs/145/handoff-D.md`, `docs/handoffs/145/wireframe.html` (grep for C4 / Esc only). Not yet created, so not found: `src/components/secret-reveal-dialog.tsx`, `src/features/platform-connections/registry.tsx`, `github.tsx`, `bitbucket.tsx`, `github-app-section.tsx`, `src/features/runner-pools/targets.ts`, `targets-row.tsx`, `platform-options-section.tsx`, `src/routes/settings.connections.tsx`.
+- Added in round-2 amendment pass: `src/routes/settings.tsx` (full), `src/routes/settings.github.tsx` (full), `src/components/pool-plan-preview.tsx` (full), `src/features/runner-pools/runner-pools.functions.ts` (full), `src/lib/api.ts` (full), `src/features/operations/operations.functions.ts` (lines 130-235), `src/routes/_app/runner-pools.new.tsx` (lines 120-280 and 360-390, plus grep for the submit button and error callout, lines 489 and 494), `src/features/runner-pools/schemas.ts` (lines 120-194), `tests/runner-pool-tart-image.test.ts` (lines 1-110), `package.json` (`zod` version), `src/routes/settings.integrations.tsx` (line 17), and `git diff 5550cf5 HEAD --stat` (only `docs/handoffs/` changed).
+- Added in the round-1 amendment pass (read in full unless noted): `src/routes/_app/webhooks.tsx` (lines 1-90), `src/components/settings-ui.tsx`, `src/features/fleet/api-tokens-section.tsx` (lines 1-60 and 170-230, covering `SecretDialog`), `tests/api-tokens-section.test.ts` (test names, and lines 140-182), `tests/runner-pool-tart-image.test.ts`, `vitest.config.ts`, `package.json` (scripts), `docs/handoffs/145/decisions.md`, `docs/handoffs/145/handoff-A.md`, `docs/handoffs/145/handoff-D.md`, `docs/handoffs/145/wireframe.html` (grep for C4 / Esc only). Not found (to be created by this story): `src/components/secret-reveal-dialog.tsx`, `src/features/platform-connections/registry.tsx`, `github.tsx`, `bitbucket.tsx`, `github-app-section.tsx`, `src/features/runner-pools/targets.ts`, `targets-row.tsx`, `platform-options-section.tsx`, `src/routes/settings.connections.tsx`.
 
 ## Architecture decisions (resolve the round-1 Phase-4 BLOCK; these are binding for D, T and F)
 
@@ -128,7 +129,7 @@ Each `TargetKind` in a descriptor declares:
 - `cardinality`: `"many"` or `"one"` (the organization runner group is single-select, with today's manual "Runner group ID" fallback for user-account installations);
 - `limit(context)`: per-kind cap — repositories ≤ `maxCount`, workspaces ≤ `maxCount`, separately (as today);
 - `excludes`: kinds that cannot be selected together (GitHub repository ⟂ GitHub runner group; a repository selection also pins one installation as today — precisely: the create payload carries one `installationId`, taken from the first selected repository, `selectedRepositories[0]?.installationId ?? 0` (`runner-pools.new.tsx` lines 233-235), while repositories from different installations/accounts may still be selected together; the new form must reproduce exactly that, not add a stricter single-installation rule);
-- `requires`/`standalone`: Bitbucket workspace is **not standalone** — it requires a GitHub target, because `createRunnerPoolSchema` requires `installationId > 0` and a `scope`. A Bitbucket-only pool stays impossible in this story; the picker shows Bitbucket options as disabled-with-reason until a GitHub target is chosen. (Wireframe D5's "If only one platform has targets, the page renders" must be corrected: with no GitHub installation the form shows the existing "Connect GitHub first" / "Install the GitHub App" empty state, now worded neutrally via the descriptor.)
+- `requires`/`standalone`: Bitbucket workspace is **not standalone** — it requires a GitHub target, because `createRunnerPoolSchema` requires `installationId > 0` and a `scope`. A Bitbucket-only pool stays impossible in this story; the picker shows Bitbucket options as disabled-with-reason until a GitHub target is chosen. **When the last GitHub target is removed while Bitbucket workspaces are selected** (new-pool form), the behaviour is today's, unchanged: the picker does not block the deselection and does not drop the selected workspaces (they stay selected; unselected Bitbucket options become disabled-with-reason again), and the submit button stays enabled as today (`runner-pools.new.tsx` line 494 disables it only on `submitting || options.installations.length === 0`). Submit builds the same payload the old form builds for that state — no repository selected, so `scope: "repository"`, `installationId: selectedRepositories[0]?.installationId ?? 0` = `0`, `repositoryIds: []`, `runnerGroupId: 1`, plus the selected `bitbucketConnectionIds` — and passes it to `createRunnerPoolAction`, whose `parseCreateRunnerPoolInput` (`schemas.ts` lines 160-166) rejects it (`installationId: z.number().int().positive()`, line 127) and throws before `api()` is called, so no POST is sent; the form shows the thrown message in its existing "Could not create the pool" callout (line 489). `schemas.ts` stays the submit-time authority; the picker adds no second validator for this state. Pool settings cannot reach this state: its Bitbucket targets are locked display-only chips and its GitHub kind is fixed by `pool.scope`. (Wireframe D5's "If only one platform has targets, the page renders" must be corrected: with no GitHub installation the form shows the existing "Connect GitHub first" / "Install the GitHub App" empty state, now worded neutrally via the descriptor.)
 - `load(context)`: takes the already-loaded data (`getCreateRunnerPoolOptions()` result, or the pool detail on settings) and any lazily-fetched lists (repositories, runner groups — today's queries); no duplicate fetching of installations or workspaces.
 
 Each `PlatformDescriptor` declares `toCreatePayload(selection, context)` and `toUpdatePayload(selection, pool, context)` returning **partials**; one neutral builder in `targets.ts` merges them with the shared rows. GitHub's partials reproduce today's exact fields, including defaults on an empty or runner-group selection: create sends `installationId`, `scope`, `repositoryIds: []` for organization, and `runnerGroupId` (`runnerGroupId || defaultRunnerGroup?.id || 1` for organization, `1` for repository); update omits `installationId`, `scope` and `bitbucketConnectionIds`, sends `repositoryIds`/`priorityRepositoryIds`/`priorityWaitMinutes` only for repository pools (else `undefined`), and `runnerGroupId: runnerGroupId || pool.runnerGroupId` for organization pools, else `1`. Bitbucket's create partial is `bitbucketConnectionIds`; its update partial is empty (pool settings shows Bitbucket targets as locked, display-only chips — the old settings form never sent them). A descriptor flag `supportsPriority` on the GitHub repository kind drives the Priority section in pool settings.
@@ -274,11 +275,113 @@ So the Target-kind contract's update wording is confirmed field by field. The re
 
 **Platform text in `runner-row.tsx`** (settles NV-6). A grep for `platform` in `src/features/runners/runner-row.tsx` finds only lines 27-28, 121 and 147. Lines 27-28 are `MachineLink`'s unrelated boolean `platform` prop (OS/architecture detail), not a CI platform. Line 121 is the only CI-platform ternary: `const platform = runner.platform === "bitbucket" ? "Bitbucket" : "GitHub";`. Line 147 uses that variable in the delete confirmation: `` confirm: `Delete ${runner.name} from its provider and ${platform}?` ``. After the change, line 121's name comes from `getPlatform(runner.platform).name` (with the registry fallback for an unknown id), so the line-147 text is registry-driven too. Lines 27-28 are out of scope.
 
+**Parent `/settings` loader** (`src/routes/settings.tsx` lines 9-10; settles NV-2). The settings layout route loads `getSettingsPage()` for every child route, including the new `/settings/connections`:
+
+     9  export const Route = createFileRoute("/settings")({
+    10    loader: () => getSettingsPage(),
+
+**`settings.github.tsx` route and data source** (`src/routes/settings.github.tsx` lines 17 and 20-30; settles NV-3). The route declares only `component` (no `loader`, no `beforeLoad`, no action export); the page reads the parent loader through `getRouteApi("/settings")`; the two GitHub actions are imported functions called from components (line 47 and lines 136-140):
+
+    17  import { createGitHubAppManifestAction, syncGitHubAction } from "~/features/operations/operations.functions";
+    ...
+    20  export const Route = createFileRoute("/settings/github")({
+    21    component: GitHubSettings,
+    22  });
+    23
+    24  const settingsRoute = getRouteApi("/settings");
+    25
+    26  function GitHubSettings() {
+    27    const page = settingsRoute.useLoaderData();
+    28    if (!page.data) return <EmptyState description="Sign in to manage the GitHub integration." icon={Github} title="GitHub unavailable" />;
+    29    const { configuration, githubApp, installations, user } = page.data;
+    30    const isAdmin = user.role === "admin";
+
+    47        actions={githubApp ? <AsyncActionButton action={() => syncGitHubAction()} icon={<RefreshCw />} success="GitHub installations and repository access refreshed.">Refresh access</AsyncActionButton> : null}
+
+   136        const setup = await createGitHubAppManifestAction({ data: {
+   137          ownerType,
+   138          organization: ownerType === "organization" ? organization.trim() : undefined,
+   139          name: name.trim() || undefined,
+   140        } });
+
+**`PoolPlanPreview` props and target check** (`src/components/pool-plan-preview.tsx` lines 9-29 and 50; settles NV-4 and confirms the "Plan preview contract" quotes above):
+
+     9  export function PoolPlanPreview({
+    10    name,
+    11    providers,
+    12    labels,
+    13    desiredCount,
+    14    maxCount,
+    15    repositoryCount,
+    16    scope,
+    17  }: {
+    18    name: string;
+    19    providers: Provider[];
+    20    labels: string[];
+    21    desiredCount: number;
+    22    maxCount: number;
+    23    repositoryCount: number;
+    24    scope: "repository" | "organization";
+    25  }) {
+    26    const normalizedName = name.trim();
+    27    const customLabels = labels.filter(Boolean);
+    28    const repositoryCapacityOk = scope === "organization" || repositoryCount <= maxCount;
+    29    const ready = Boolean(normalizedName) && providers.length > 0 && repositoryCapacityOk;
+    ...
+    50          <PlanCheck ok={repositoryCapacityOk} text={scope === "organization" ? "GitHub runner-group access defines which repositories can use the pool." : `${repositoryCount} selected repositories fit within the ${maxCount}-runner maximum.`} />
+
+The file imports nothing from the registry or from `runner-pools` (its imports are `lucide-react`, `~/components/ui/badge` and `~/lib/utils`, lines 1-4).
+
+**Pool actions** (`src/features/runner-pools/runner-pools.functions.ts` lines 127-139; settles NV-5). Both parse `data` with the zod schemas, then send it through `api()`:
+
+   127  export function createRunnerPoolAction({ data }: { data: CreateRunnerPoolInput }) {
+   128    const input = parseCreateRunnerPoolInput(data);
+   129    return api<{ id: string; cannotRun?: CannotRun }>("/api/v1/runner-pools", { method: "POST", body: input });
+   130  }
+   131
+   132  export function updateRunnerPoolAction({ data }: { data: UpdateRunnerPoolInput & { poolId: string } }) {
+   133    const { poolId, ...values } = data;
+   134    const input = parseUpdateRunnerPoolInput(values);
+   135    return api<{ ok: true; configurationVersion: number; rollingReplacement: boolean }>(
+   136      `/api/v1/runner-pools/${poolId}`,
+   137      { method: "PUT", body: input },
+   138    );
+   139  }
+
+**`api()` body encoding** (`src/lib/api.ts` lines 25-34; settles NV-6):
+
+    25  export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
+    26    const headers = new Headers(options.headers);
+    27    headers.set("Accept", "application/json");
+    28    if (options.body !== undefined) headers.set("Content-Type", "application/json");
+    29    const response = await fetch(path, {
+    30      ...options,
+    31      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    32      credentials: "same-origin",
+    33      headers,
+    34    });
+
+**`SettingsPage` head and `getSettingsPage`** (`src/features/operations/operations.functions.ts` lines 136-138 and 202; with the field excerpt under "Settings page data" above, settles NV-1):
+
+   136  export type SettingsPage = {
+   137    authenticated: boolean;
+   138    data: null | {
+   ...
+   202  export const getSettingsPage = () => api<SettingsPage>("/api/v1/settings");
+
+**References to the redirecting routes** (W-2). `grep -rn -e "settings/github" -e "settings/integrations" -e "/platform-connections" src` (unquoted, so it also catches template strings and route constants), excluding `routeTree.gen.ts` and `/api/v1/` paths, finds only: `settings.index.tsx:10`, `settings.tsx:41-42`, `_app/webhooks.tsx:83`, `_app/runner-pools.new.tsx:368`, the two route declarations (`settings.github.tsx:20`, `settings.integrations.tsx:21`), `_app/platform-connections.tsx:4,6`, and the module import path `~/features/platform-connections/platform-connections.functions` (`settings.integrations.tsx:17`, not a link). No link to them is built dynamically today. The acceptance grep is run in this unquoted form.
+
 ### Payload-equality reference (frozen old-form output)
 This section defines what the payload-equality acceptance criterion compares against, so the comparison does not depend on the old rows still existing.
 - **Where they live:** as inline `const` objects in the Phase-5 test file that holds the payload-equality cases (for example `tests/pool-target-payloads.test.ts`), one per case: GitHub repository create, GitHub organization runner-group create, GitHub repositories plus Bitbucket workspaces create, repository-pool settings save, and organization-pool settings save. Each case also holds its fixed inputs (the `getCreateRunnerPoolOptions()` or `RunnerPoolDetail` fixture, the selection, and the shared-row field values), so the new form can be driven with identical inputs. Shared fixtures may go in `tests/fixtures/`.
 - **How they are derived (from pre-change behaviour only):** T captures them in the RED phase, before any route or component is changed. T renders the **old** forms at the pre-implementation state of this branch (today `5550cf5`) with the harness that `tests/runner-pool-tart-image.test.ts` already uses (lines 16-28 and 90-104: a mocked `@tanstack/react-router` serving `loaderData`, and a stubbed `fetch`). T drives the old controls ("Runner pool scope", "Repositories", "GitHub installation", "GitHub runner group", "Bitbucket Cloud workspaces", "Pool repositories"), submits, and records the `data` argument passed to `createRunnerPoolAction` / `updateRunnerPoolAction`. Recording works by `vi.mock` of `~/features/runner-pools/runner-pools.functions` that wraps the real functions and stores `data`. T pastes each recorded object into the test as the constant, with a comment naming the commit and the source lines quoted above. T cross-checks each constant by hand against the "Old new-pool submit" and "Old pool-settings submit" excerpts.
-- **Rules:** the constants must never be generated by, imported from or recomputed with the new implementation (`targets.ts`, descriptors, the new forms). F must not edit them. A mismatch is fixed in the implementation, not in the constant. Comparison is Vitest `toEqual` on the `data` object (keys set to `undefined` count as absent, as Required design 3 states).
+- **Rules:** the constants must never be generated by, imported from or recomputed with the new implementation (`targets.ts`, descriptors, the new forms). F must not edit them. A mismatch is fixed in the implementation, not in the constant. Comparison is Vitest `toEqual` on the `data` object (keys set to `undefined` count as absent, as Required design 3 states). `toEqual` is intentional: `toStrictEqual` must not be substituted, because it treats `{ repositoryIds: undefined }` and `{}` as different, while `JSON.stringify` (what `api()` sends) does not. The test file says so in a comment next to the assertions.
+- **Sequencing gate (no circular dependency).** The capture needs the old forms, so it happens before any `src/` change on this branch, and it does not depend on the old forms surviving afterwards:
+  1. Starting state, verified: at the branch tip `ff6583a`, `git diff 5550cf5 HEAD --stat -- src tests` is empty — the only commits after `5550cf5` touch `docs/handoffs/` — so the worktree's `src/` is still the pre-change code the excerpts below quote.
+  2. T runs the capture first, against that unchanged `src/`, with a one-off capture harness (the driving-and-recording code described above). The harness is not committed as a collected test, because it drives the old controls and would fail once F removes them; only its output, the pasted constants with their commit/line comments, is committed in the payload-equality test file.
+  3. T's Phase-5 commit(s) change nothing under `src/` (T writes tests only); `git diff 5550cf5 <T's last commit> -- src` must be empty. F makes no `src/` change until T's commits are on the branch (the Operating rules already require T to commit before F starts).
+  4. If `src/` has already changed when T captures (for example a re-run of Phase 5 after F's work), T does not capture from the worktree: T checks out the pre-change tree separately, `git worktree add <scratch dir> 5550cf5` (detached, read-only use), runs the same capture harness there, and removes that worktree afterwards. The constants are always taken from the `5550cf5` source, whichever way it is reached.
+  5. The excerpts in "Verified source excerpts" are the cross-check, not a substitute for the capture: they quote only the target fields and the shared-row expressions (`poolImages(...)`, label splitting, `Number(form.get(...))`), and the concrete values those produce depend on code and defaults the excerpts do not show. A constant that disagrees with the excerpts is a capture error and is re-captured, never hand-edited to match.
 
 ### Other sites now in scope
 - `src/routes/_app/webhooks.tsx:83` links to `/settings/github` → repoint to `/settings/connections` (no redirect hop).
