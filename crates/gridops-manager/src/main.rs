@@ -2805,6 +2805,8 @@ mod tests {
             runner_group: None,
             bitbucket: None,
             bitbucket_oauth_client_secret: None,
+            gitlab: None,
+            gitlab_runner_token: None,
             pull_image: false,
             runtime: "vm".into(),
             cpu_limit: 2.0,
@@ -3166,6 +3168,89 @@ mod tests {
             stdout.contains("secret-masked job output"),
             "forwarded stdout was: {stdout}"
         );
+        Ok(())
+    }
+
+    /// A `POST /v1/runners` body for a GitLab runner (#137 R2-1), as #139
+    /// will send it.
+    fn gitlab_request(provider: &str) -> serde_json::Value {
+        serde_json::json!({
+            "runnerId": "runner-1",
+            "poolId": "pool-1",
+            "name": "runner-1",
+            "image": "registry.example/gitlab-runner:latest",
+            "mode": "ephemeral",
+            "provider": provider,
+            "platform": "gitlab",
+            "runtime": "vm",
+            "cpuLimit": 2.0,
+            "memoryLimitMb": 4_096,
+            "network": "gridops-runners",
+            "capacityLease": "capacity-lease-1",
+            "gitlab": {"url": "https://gitlab.example.com", "waitTimeoutSeconds": 600},
+            "gitlabRunnerToken": "glrt-manager-request-token-0001",
+        })
+    }
+
+    #[test]
+    fn a_gitlab_request_carries_its_bootstrap_and_token_through_the_manager()
+    -> Result<(), serde_json::Error> {
+        let input: ProvisionRunner = serde_json::from_value(gitlab_request("tart"))?;
+        assert_eq!(
+            input
+                .gitlab
+                .as_ref()
+                .map(|gitlab| (gitlab.url.as_str(), gitlab.wait_timeout_seconds)),
+            Some(("https://gitlab.example.com", 600))
+        );
+        assert_eq!(
+            input.gitlab_runner_token.as_deref(),
+            Some("glrt-manager-request-token-0001")
+        );
+        // The manager forwards a Tart request as it re-serializes it.
+        let forwarded = serde_json::to_value(&input)?;
+        assert_eq!(
+            forwarded["gitlab"],
+            serde_json::json!({"url": "https://gitlab.example.com", "waitTimeoutSeconds": 600})
+        );
+        assert_eq!(
+            forwarded["gitlabRunnerToken"],
+            "glrt-manager-request-token-0001"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_github_request_without_gitlab_fields_still_parses() -> Result<(), serde_json::Error> {
+        let mut body = gitlab_request("docker");
+        if let Some(object) = body.as_object_mut() {
+            object.remove("gitlab");
+            object.remove("gitlabRunnerToken");
+            object.insert("platform".into(), "github".into());
+            object.insert("jitConfig".into(), "fake-jit-credential-123456".into());
+        }
+        let input: ProvisionRunner = serde_json::from_value(body)?;
+        assert!(input.gitlab.is_none());
+        assert!(input.gitlab_runner_token.is_none());
+        assert_eq!(input.platform, "github");
+        Ok(())
+    }
+
+    #[test]
+    fn gitlab_runners_are_refused_by_name_until_their_owners_land() -> Result<(), serde_json::Error>
+    {
+        for provider in ["docker", "tart"] {
+            let input: ProvisionRunner = serde_json::from_value(gitlab_request(provider))?;
+            let refused = input.validate();
+            assert!(
+                matches!(
+                    &refused,
+                    Err(ManagerError::BadRequest(message))
+                        if message == "GitLab runners are not supported yet: Docker is #147, Tart is #142."
+                ),
+                "{provider}: {refused:?}"
+            );
+        }
         Ok(())
     }
 }

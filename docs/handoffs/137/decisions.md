@@ -67,3 +67,31 @@
   - Reconciler: `crates/gridops-reconciler/src/main.rs` (`MANAGER_RUNNER_LIST`, `ManagerRunners`, `ManagedRunner`, the state mapping in `reconcile_pool`, and the `json!` request builder).
   - API: `crates/gridops-api/src/resources.rs` (`starts_belong_to_reconciler`, `provision` and its Bitbucket branch).
   - Branch state: `git diff master --stat -- crates`. The only crate commit on the branch is dd525d5 (#135), which is upstream and not in local `master`. No #137 code exists.
+
+## T (Phase 4, author tests / RED): 2026-11-20T13:10:01-08:00
+- **Decided:** RED is valid, and F may start. I authored 40 new or extended tests, plus 2 guards that are green by design, across 11 files.
+  - Runtime RED: 6 in `fleet_schema.rs`, 1 in `session.rs` and 2 in `openapi.rs`. All of them fail on the missing feature: no `gitlab_connections`, no `0046_gitlab.sql`, no added columns, `glrt-` not masked, and no GitLab paths in the spec.
+  - Compile RED: `gitlab_contract.rs`, `gitlab/fake_tests.rs`, `admission_tests.rs`, `provisioning.rs`, `fleet_agent_outcomes.rs`, the manager and the Tart agent. Every error names a missing contract item.
+  - Placement:
+    - The fake tests are a sibling file that F mounts from `fake.rs` (the `admission_tests.rs` precedent). As an integration test, a `cfg(feature = "test-support")` fake would be skipped silently by plain `cargo test`.
+    - The `gitlab/mod.rs` unit tests the brief places in that file live in `tests/gitlab_contract.rs`, because they only touch public API.
+    - The GitLab `PrepareEnvironment` test also lives in `gitlab_contract.rs`, so the two guards in `fleet_agent_commands.rs` keep compiling and running.
+  - Deviation: the definition-unchanged check also exempts `runner_pools`, because the brief's own `ALTER TABLE runner_pools ADD COLUMN` rewrites its `sqlite_master` text. The brief's exemption list ("only runners and the runners_* indexes") can't hold as written. In its place, the test asserts that every column of every table is unchanged, and checks each added column (exactly six) on its own. This is stricter than the brief, not looser.
+- **Assumed:**
+  - Where the brief is silent, the fake's setup methods and `fail_next` take `&self`.
+  - The `FakeMethod` variants are named after the trait methods (`CreateRunner` … `VerifyAccess`).
+  - `GitLabError`, `FakeCall` and `FakeMethod` derive `PartialEq` and `Debug`. That is needed for the brief's own `assert_eq!` on the whole `calls()` vector.
+  - A call that fails through `fail_next` has no side effect.
+  - The rebuild keeps each existing `runners` column's declared type and default text.
+  All of these are listed in `handoff-T-red.md` "Ready for F".
+- **Hedged:**
+  - Two tests are deliberately green before the feature: the GitHub `PrepareEnvironment` master-bytes test and the `ExecutionConfiguration` field-set test. They pin the "unchanged" criteria D1 and B-7, and are labelled as guards, not RED.
+  - What these tests deliberately leave unpinned: the `verify_access` and `group_projects` answers for unseeded scopes and groups, `job` lookups across projects, and whether a failed `create_runner` uses up an id.
+  - A's round-3 warning 2 (relaying `exitReason` through the manager's `ManagedRunner`) has no test, because the brief doesn't adopt it.
+- **Evidence:**
+  - Brief: `docs/handoffs/137-brief.md` (all 1010 lines) and `handoff-A.md` round 3.
+  - Source: `fleet/{domain,capabilities,targets,admission,admission_tests}.rs`, `protocol/{agent,outcomes}.rs`, `ids.rs` (`UpstreamText`), `provisioning.rs`, the manager and Tart `ProvisionRunner`/`validate` and test fixtures, `gridops-agent/src/session.rs` and `gridops-api/src/fleet/openapi.rs`.
+  - Migrations: 0001 to 0045 applied to a scratch `sqlite3` database, which gave the exact `pragma_table_info`, `index_list` and `foreign_key_list` of `runners` and `fleet_ci_targets`.
+  - The master bytes of the GitHub fixture, re-captured and equal to the brief's literal.
+  - A throwaway probe of today's `for_selected_provider` (8 GitHub and Bitbucket rows matched).
+  - A throwaway draft 0046 (never staged): 14/14 passed, and the mutation without transaction control failed 3, catching the `runner_events` cascade.

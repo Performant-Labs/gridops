@@ -343,3 +343,40 @@ fn content_and_image_boundaries_do_not_use_identity_limits() -> Result<()> {
     }
     Ok(())
 }
+
+/// `serde_json::to_string(&command(fixture())?)`, captured on `master` before
+/// #137. The GitLab base URL travels in `GitlabRunnerMaterial`, never in
+/// `PrepareEnvironment`, so a GitHub command keeps these exact bytes.
+const GITHUB_PREPARE_ON_MASTER: &str = r#"{"protocol_version":1,"command_id":"00000001-0000-4000-8000-000000000001","operation_id":"00000002-0000-4000-8000-000000000001","idempotency_key":"prepare:fixture","host_id":"00000003-0000-4000-8000-000000000001","host_epoch":1,"control_plane_incarnation":"00000004-0000-4000-8000-000000000001","authority_session_id":"00000005-0000-4000-8000-000000000001","scope":{"kind":"placement","placement_id":"00000006-0000-4000-8000-000000000001","backend_id":"00000007-0000-4000-8000-000000000001","generation":1},"expected_revision":1,"issued_at":"2026-10-09T12:00:00.000Z","deadline_at":"2026-10-09T12:20:00.000Z","request_hash":"k7OHSRahbs20kmTpOly-Er4Ng0a84gO60v4Zef4pKrE","operation":{"kind":"prepare_environment","execution_profile_id":"00000008-0000-4000-8000-000000000001","profile_revision":1,"workload":"ci_runner","target":{"platform":"github_repository","installation_id":1,"repository_id":10},"runtime_kind":"docker","execution_os":"linux","architecture":"x64","mode":"ephemeral","image":"runner:fixture","labels":["self-hosted","Linux"],"configuration":{"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false},"resource_request":{"cpu_millis":1000,"memory_mib":1024,"disk_bytes":1073741824},"allocation_ids":["00000009-0000-4000-8000-000000000001","0000000a-0000-4000-8000-000000000001"]}}"#;
+
+#[test]
+fn a_github_prepare_environment_keeps_its_master_bytes() -> Result<()> {
+    assert_eq!(
+        serde_json::to_string(&command(fixture())?)?,
+        GITHUB_PREPARE_ON_MASTER
+    );
+    Ok(())
+}
+
+#[test]
+fn execution_configuration_has_exactly_its_four_fields() -> Result<()> {
+    assert_eq!(
+        serde_json::to_value(ExecutionConfiguration::default())?,
+        json!({"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false})
+    );
+    for extra in [
+        json!({"base_url":"https://gitlab.example.com"}),
+        json!({"url":"https://gitlab.example.com"}),
+    ] {
+        let refused = serde_json::from_value::<ExecutionConfiguration>(extra.clone())
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|message| message.contains("unknown field")),
+            "{extra} was not refused as an unknown field: {refused:?}"
+        );
+    }
+    Ok(())
+}

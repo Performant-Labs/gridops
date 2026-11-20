@@ -765,6 +765,18 @@ mod tests {
             event.detail.as_deref(),
             Some("key=sk-[redacted] sk-short task-runner")
         );
+        // GitLab runner authentication and personal access tokens (#137),
+        // masked whole: the run continues to the first non-token character.
+        let gitlab = AgentEvent::new(
+            EventKind::Tool,
+            "Register glrt-fake-runner-token-0001 now",
+            Some("token=glpat-not-a-real-token-0000 glrt-short".into()),
+        );
+        assert_eq!(gitlab.title, "Register glrt-[redacted] now");
+        assert_eq!(
+            gitlab.detail.as_deref(),
+            Some("token=glpat-[redacted] glrt-short")
+        );
     }
 
     #[tokio::test]

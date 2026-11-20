@@ -108,9 +108,12 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY name")
         .fetch_all(&db.pool).await?;
     let old_schema = schema(&db.pool).await?;
+    let old_columns = table_columns(&db.pool, &tables).await?;
     let old_records = records(&db.pool, &tables).await?;
     MIGRATOR.run(&db.pool).await?;
-    let mut new_records = records(&db.pool, &tables).await?;
+    // Rows compare on every column the table had before the upgrade; the
+    // columns 0046 adds are checked on their own below.
+    let mut new_records = records_on(&db.pool, &old_columns).await?;
     // The one row an upgrade may add: whether the built-in runner host stays
     // on. This legacy fixture has a Docker pool with a runner on the host, so
     // it stays on. Every legacy row is otherwise untouched.
@@ -122,14 +125,22 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
     assert_eq!(added.len(), 1, "one new settings row");
     assert!(added[0].contains("\"true\""), "{}", added[0]);
     assert_eq!(new_records, old_records);
+    assert_added_columns(&db.pool, &old_columns, LEGACY_ADDED_COLUMNS).await?;
+    // 0046 rebuilds `runners` (its ci_platform CHECK) and adds a column to
+    // `runner_pools`, so only those definitions may change; their shape is
+    // asserted instead. Every other legacy definition is byte-for-byte equal.
     let new_schema = schema(&db.pool).await?;
     for (name, definition) in old_schema {
+        if exempt_from_definition_check(&name, &[]) {
+            continue;
+        }
         assert_eq!(
             new_schema.get(&name),
             Some(&definition),
             "changed legacy schema: {name}"
         );
     }
+    assert_runners_contract(&db.pool).await?;
     assert!(
         sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(&db.pool)
@@ -148,21 +159,345 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
             .await?,
         "wal"
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
-            .fetch_one(&db.pool)
-            .await?,
-        1
-    );
+    assert_foreign_keys_on_every_connection(&db.pool).await?;
     // Reopening/rerunning the migration neither replays DDL nor loses history.
     MIGRATOR.run(&db.pool).await?;
-    let mut rerun = records(&db.pool, &tables).await?;
+    let mut rerun = records_on(&db.pool, &old_columns).await?;
     rerun
         .get_mut("settings")
         .context("settings table")?
         .retain(|record| !record.contains("builtinRunnerHostEnabled"));
     assert_eq!(rerun, old_records);
     db.close().await
+}
+
+/// The definitions 0046 may change, each asserted by shape instead: the
+/// `runners` rebuild and its indexes, `runner_pools` (one added column), and
+/// whatever else the caller names.
+fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
+    name == "runners"
+        || name == "runner_pools"
+        || RUNNERS_INDEXES.iter().any(|(index, _, _)| *index == name)
+        || also.contains(&name)
+}
+
+/// Every index on `runners` after 0046: name, unique, columns. The first eight
+/// are the ones the table has after 0045; 0013's `runners_github_id_unique`
+/// must not come back.
+const RUNNERS_INDEXES: [(&str, bool, &str); 10] = [
+    ("runners_container_id_unique", true, "container_id"),
+    ("runners_pool_status_idx", false, "pool_id,status"),
+    ("runners_last_job_idx", false, "last_job_id"),
+    (
+        "runners_pool_configuration_idx",
+        false,
+        "pool_id,configuration_version",
+    ),
+    (
+        "runners_target_repository_idx",
+        false,
+        "pool_id,target_repository_id,status",
+    ),
+    ("runners_github_id_idx", false, "github_runner_id"),
+    (
+        "runners_bitbucket_connection_idx",
+        false,
+        "pool_id,bitbucket_connection_id,status",
+    ),
+    ("runners_name_idx", false, "name,created_at"),
+    (
+        "runners_gitlab_connection_idx",
+        false,
+        "pool_id,gitlab_connection_id,status",
+    ),
+    ("runners_gitlab_runner_id_idx", false, "gitlab_runner_id"),
+];
+
+/// Outbound foreign keys of `runners` after 0046: (from, table, to, on delete).
+const RUNNERS_FOREIGN_KEYS: [(&str, &str, &str, &str); 5] = [
+    (
+        "bitbucket_connection_id",
+        "bitbucket_connections",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "gitlab_connection_id",
+        "gitlab_connections",
+        "id",
+        "SET NULL",
+    ),
+    ("last_job_id", "workflow_jobs", "id", "SET NULL"),
+    ("pool_id", "runner_pools", "id", "CASCADE"),
+    ("target_repository_id", "repositories", "id", "SET NULL"),
+];
+
+/// The columns 0046 adds to tables that already hold rows, with the value
+/// every existing row must have afterwards (`None` = NULL).
+type AddedColumns = &'static [(
+    &'static str,
+    &'static [(&'static str, &'static str, Option<i64>)],
+)];
+
+const LEGACY_ADDED_COLUMNS: AddedColumns = &[
+    (
+        "runners",
+        &[
+            ("gitlab_connection_id", "TEXT", None),
+            ("gitlab_runner_id", "INTEGER", None),
+        ],
+    ),
+    ("runner_pools", &[("run_untagged", "INTEGER", Some(0))]),
+];
+
+const FLEET_ADDED_COLUMNS: AddedColumns = &[
+    (
+        "runners",
+        &[
+            ("gitlab_connection_id", "TEXT", None),
+            ("gitlab_runner_id", "INTEGER", None),
+        ],
+    ),
+    ("runner_pools", &[("run_untagged", "INTEGER", Some(0))]),
+    (
+        "fleet_ci_targets",
+        &[
+            ("gitlab_connection_id", "TEXT", None),
+            ("gitlab_project_id", "INTEGER", None),
+            ("gitlab_group_id", "INTEGER", None),
+        ],
+    ),
+];
+
+/// (name, upper-cased declared type, notnull, default, pk) per column, in order.
+type Column = (String, String, i64, Option<String>, i64);
+
+async fn columns(pool: &SqlitePool, table: &str) -> Result<Vec<Column>> {
+    let rows = sqlx::query(
+        "SELECT name,upper(type) AS type,\"notnull\",dflt_value,pk FROM pragma_table_info(?) ORDER BY cid",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            (
+                row.get("name"),
+                row.get("type"),
+                row.get("notnull"),
+                row.get("dflt_value"),
+                row.get("pk"),
+            )
+        })
+        .collect())
+}
+
+async fn table_columns(
+    pool: &SqlitePool,
+    tables: &[String],
+) -> Result<BTreeMap<String, Vec<Column>>> {
+    let mut result = BTreeMap::new();
+    for table in tables {
+        result.insert(table.clone(), columns(pool, table).await?);
+    }
+    Ok(result)
+}
+
+/// Like `records`, but over a fixed column list per table, so rows taken
+/// before and after an upgrade that appends columns compare exactly.
+async fn records_on(
+    pool: &SqlitePool,
+    tables: &BTreeMap<String, Vec<Column>>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut result = BTreeMap::new();
+    for (table, columns) in tables {
+        // Names come exclusively from SQLite's schema, never request input.
+        let columns = columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.0.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT json_array({columns}) AS record FROM \"{}\" ORDER BY record",
+            table.replace('"', "\"\"")
+        );
+        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            .fetch_all(pool)
+            .await?;
+        result.insert(table.clone(), rows);
+    }
+    Ok(result)
+}
+
+/// Every pre-existing column keeps its definition and position; the only new
+/// columns on existing tables are the ones listed, appended in order, nullable
+/// unless a default is given, and every existing row holds the listed value.
+async fn assert_added_columns(
+    pool: &SqlitePool,
+    old: &BTreeMap<String, Vec<Column>>,
+    added: AddedColumns,
+) -> Result<()> {
+    for (table, before) in old {
+        let after = columns(pool, table).await?;
+        let expected = added
+            .iter()
+            .find(|(name, _)| name == table)
+            .map_or(&[][..], |(_, columns)| *columns);
+        assert_eq!(
+            after.get(..before.len()),
+            Some(&before[..]),
+            "{table}: existing columns changed"
+        );
+        let appended: Vec<_> = after[before.len()..]
+            .iter()
+            .map(|column| (column.0.as_str(), column.1.as_str()))
+            .collect();
+        let wanted: Vec<_> = expected
+            .iter()
+            .map(|(name, kind, _)| (*name, *kind))
+            .collect();
+        assert_eq!(appended, wanted, "{table}: added columns");
+        for (column, (name, _, value)) in after[before.len()..].iter().zip(expected) {
+            // Names come from the constant tables above, never request input.
+            let query = match value {
+                None => {
+                    assert_eq!(column.2, 0, "{table}.{name} must be nullable");
+                    assert_eq!(column.3, None, "{table}.{name} has no default");
+                    format!("SELECT COUNT(*) FROM \"{table}\" WHERE \"{name}\" IS NOT NULL")
+                }
+                Some(value) => {
+                    assert_eq!(column.2, 1, "{table}.{name} is NOT NULL");
+                    assert_eq!(
+                        column.3.as_deref(),
+                        Some(value.to_string().as_str()),
+                        "{table}.{name} default"
+                    );
+                    format!("SELECT COUNT(*) FROM \"{table}\" WHERE \"{name}\" IS NOT {value}")
+                }
+            };
+            let differing: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+                .fetch_one(pool)
+                .await?;
+            assert_eq!(
+                differing, 0,
+                "existing {table} rows must hold {value:?} in {name}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Indexes created by `CREATE INDEX` on a table: name -> (unique, columns).
+async fn created_indexes(
+    pool: &SqlitePool,
+    table: &str,
+) -> Result<BTreeMap<String, (bool, String)>> {
+    let names: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT name,\"unique\" FROM pragma_index_list(?) WHERE origin='c' ORDER BY name",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let mut result = BTreeMap::new();
+    for (name, unique) in names {
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+                .bind(&name)
+                .fetch_all(pool)
+                .await?;
+        result.insert(name, (unique, columns.join(",")));
+    }
+    Ok(result)
+}
+
+/// (from, table, to, on update, on delete), sorted.
+async fn foreign_keys(
+    pool: &SqlitePool,
+    table: &str,
+) -> Result<Vec<(String, String, String, String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT \"from\",\"table\",\"to\",on_update,on_delete FROM pragma_foreign_key_list(?) ORDER BY \"from\",\"table\"",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The rebuilt `runners` keeps every index and outbound foreign key, gains the
+/// two GitLab ones, and keeps its CHECKs, with `ci_platform` widened.
+async fn assert_runners_contract(pool: &SqlitePool) -> Result<()> {
+    let expected: BTreeMap<String, (bool, String)> = RUNNERS_INDEXES
+        .iter()
+        .map(|(name, unique, columns)| ((*name).to_owned(), (*unique, (*columns).to_owned())))
+        .collect();
+    assert_eq!(
+        created_indexes(pool, "runners").await?,
+        expected,
+        "runners indexes"
+    );
+    let expected: Vec<_> = RUNNERS_FOREIGN_KEYS
+        .iter()
+        .map(|(from, table, to, on_delete)| {
+            (
+                (*from).to_owned(),
+                (*table).to_owned(),
+                (*to).to_owned(),
+                "NO ACTION".to_owned(),
+                (*on_delete).to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        foreign_keys(pool, "runners").await?,
+        expected,
+        "runners foreign keys"
+    );
+    // The CHECKs, probed in a transaction that is rolled back.
+    let mut tx = pool.begin().await?;
+    let insert = |id: &'static str, column: &'static str, value: &'static str| {
+        // Column names come from the literals below, never request input.
+        sqlx::AssertSqlSafe(format!(
+            "INSERT INTO runners (id,pool_id,name,created_at,updated_at,{column}) VALUES ('{id}','legacy-pool','{id}',1,1,'{value}')"
+        ))
+    };
+    sqlx::query(insert("probe-gitlab", "ci_platform", "gitlab"))
+        .execute(&mut *tx)
+        .await
+        .context("ci_platform accepts 'gitlab'")?;
+    for (id, column, value) in [
+        ("probe-platform", "ci_platform", "circleci"),
+        ("probe-provider", "provider", "qemu"),
+        ("probe-runtime", "runtime", "container"),
+    ] {
+        assert!(
+            sqlx::query(insert(id, column, value))
+                .execute(&mut *tx)
+                .await
+                .is_err(),
+            "runners.{column} accepted '{value}'"
+        );
+    }
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// 0046 switches `foreign_keys` off for its own run; every pooled connection,
+/// the migration's included, must have it on again afterwards.
+async fn assert_foreign_keys_on_every_connection(pool: &SqlitePool) -> Result<()> {
+    let mut connections = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        connections.push(pool.acquire().await?);
+    }
+    for connection in &mut connections {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut **connection)
+                .await?,
+            1
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -474,4 +809,491 @@ async fn deleting_a_pool_takes_its_finished_fleet_history_with_it() -> Result<()
             .is_empty()
     );
     db.close().await
+}
+
+/// Every table that references `fleet_ci_targets(id)` (0022). They are not
+/// rebuilt, so their foreign keys must survive the `fleet_ci_targets` rebuild.
+const TARGET_REFERRERS: [&str; 7] = [
+    "host_target_grants",
+    "host_session_target_grants",
+    "profile_ci_targets",
+    "workload_intents",
+    "workload_placements",
+    "fleet_events",
+    "external_runner_observations",
+];
+
+#[tokio::test]
+async fn gitlab_upgrade_from_0045_keeps_the_fleet_graph_and_every_reference() -> Result<()> {
+    let db = Database::legacy().await?;
+    MIGRATOR.run_to(45, &db.pool).await?;
+    sqlx::raw_sql(include_str!("fixtures/fleet_ready.sql"))
+        .execute(&db.pool)
+        .await?;
+    // Populate the third inbound foreign key of `runners`, so the rebuild is
+    // tested with cascade, set-null and no-action references all present.
+    sqlx::query("UPDATE workload_placements SET runner_id='legacy-runner' WHERE id=?")
+        .bind(PLACEMENT)
+        .execute(&db.pool)
+        .await?;
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY name")
+        .fetch_all(&db.pool).await?;
+    let old_schema = schema(&db.pool).await?;
+    let old_columns = table_columns(&db.pool, &tables).await?;
+    let old_records = records(&db.pool, &tables).await?;
+    let mut old_foreign_keys = BTreeMap::new();
+    for table in &tables {
+        old_foreign_keys.insert(table.clone(), foreign_keys(&db.pool, table).await?);
+    }
+    for table in TARGET_REFERRERS {
+        assert!(
+            old_foreign_keys
+                .get(table)
+                .is_some_and(|keys| keys.iter().any(|key| key.1 == "fleet_ci_targets")),
+            "{table} references fleet_ci_targets before 0046"
+        );
+    }
+
+    MIGRATOR.run(&db.pool).await?;
+
+    assert_eq!(records_on(&db.pool, &old_columns).await?, old_records);
+    assert_added_columns(&db.pool, &old_columns, FLEET_ADDED_COLUMNS).await?;
+    let new_schema = schema(&db.pool).await?;
+    for (name, definition) in &old_schema {
+        if exempt_from_definition_check(
+            name,
+            &["fleet_ci_targets", "fleet_ci_targets_immutable_identity"],
+        ) {
+            continue;
+        }
+        assert_eq!(
+            new_schema.get(name),
+            Some(definition),
+            "changed schema: {name}"
+        );
+    }
+    assert!(
+        new_schema.contains_key("fleet_ci_targets_immutable_identity"),
+        "the immutable-identity trigger is recreated"
+    );
+    for table in &tables {
+        if table == "runners" || table == "fleet_ci_targets" {
+            continue;
+        }
+        assert_eq!(
+            Some(&foreign_keys(&db.pool, table).await?),
+            old_foreign_keys.get(table),
+            "{table} foreign keys"
+        );
+    }
+    let no_action = |from: &str, table: &str| {
+        (
+            from.to_owned(),
+            table.to_owned(),
+            "id".to_owned(),
+            "NO ACTION".to_owned(),
+            "NO ACTION".to_owned(),
+        )
+    };
+    assert_eq!(
+        foreign_keys(&db.pool, "fleet_ci_targets").await?,
+        vec![
+            no_action("bitbucket_connection_id", "bitbucket_connections"),
+            no_action("gitlab_connection_id", "gitlab_connections"),
+            no_action("installation_id", "installations"),
+            no_action("repository_id", "repositories"),
+        ]
+    );
+    assert_runners_contract(&db.pool).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT runner_id FROM workload_placements WHERE id=?"
+        )
+        .bind(PLACEMENT)
+        .fetch_one(&db.pool)
+        .await?
+        .as_deref(),
+        Some("legacy-runner")
+    );
+    for (target, kind) in [
+        (TARGET, "github_repository"),
+        (OTHER_TARGET, "bitbucket_workspace"),
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT kind FROM fleet_ci_targets WHERE id=?")
+                .bind(target)
+                .fetch_one(&db.pool)
+                .await?,
+            kind
+        );
+    }
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&db.pool)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_one(&db.pool)
+            .await?,
+        "ok"
+    );
+    assert_foreign_keys_on_every_connection(&db.pool).await?;
+    db.close().await
+}
+
+const GITLAB_CONNECTION: &str = "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at) VALUES (?,'GitLab',?,?,?,'acme/tools',?,?,1,1)";
+
+async fn gitlab_connection(
+    pool: &SqlitePool,
+    id: &str,
+    base_url: &str,
+    scope: (&str, i64),
+) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    sqlx::query(GITLAB_CONNECTION)
+        .bind(id)
+        .bind(base_url)
+        .bind(scope.0)
+        .bind(scope.1)
+        .bind(format!("{id}-token-key"))
+        .bind(format!("{id}-webhook-key"))
+        .execute(pool)
+        .await
+}
+
+#[tokio::test]
+async fn gitlab_fleet_targets_satisfy_the_shape_check_and_stay_immutable() -> Result<()> {
+    let db = Database::ready().await?;
+    gitlab_connection(&db.pool, "gl-a", "https://gitlab.example.com", ("group", 7)).await?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('gl-project','gitlab_project','gitlab:project:gl-a:42','gl-a',42)")
+        .execute(&db.pool).await.context("a gitlab_project target is accepted")?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_group_id) VALUES ('gl-group','gitlab_group','gitlab:group:gl-a:7','gl-a',7)")
+        .execute(&db.pool).await.context("a gitlab_group target is accepted")?;
+    for sql in [
+        // A GitHub column on a GitLab row.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id,installation_id) VALUES ('x1','gitlab_project','x1','gl-a',43,1)",
+        // A Bitbucket column on a GitLab row.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_group_id,bitbucket_connection_id) VALUES ('x2','gitlab_group','x2','gl-a',8,'legacy-bb')",
+        // A project row without its project id, or with a zero one.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id) VALUES ('x3','gitlab_project','x3','gl-a')",
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('x4','gitlab_project','x4','gl-a',0)",
+        // A group row that also names a project, or has no connection.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_group_id,gitlab_project_id) VALUES ('x5','gitlab_group','x5','gl-a',9,44)",
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_group_id) VALUES ('x6','gitlab_group','x6',10)",
+        // A GitHub or Bitbucket row carrying a GitLab column.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,installation_id,repository_id,gitlab_project_id) VALUES ('x7','github_repository','x7',1,10,45)",
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,bitbucket_connection_id,workspace_uuid,gitlab_connection_id) VALUES ('x8','bitbucket_workspace','x8','legacy-bb','22222222-2222-4222-8222-222222222222','gl-a')",
+        // An unknown kind, a reused canonical key, a non-integer id (STRICT).
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('x9','gitlab_pipeline','x9','gl-a',46)",
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('x10','gitlab_project','gitlab:project:gl-a:42','gl-a',47)",
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('x11','gitlab_project','x11','gl-a','forty-eight')",
+        // A connection that does not exist.
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('x12','gitlab_project','x12','gl-missing',49)",
+    ] {
+        rejected(&db.pool, sql).await;
+    }
+    let refused =
+        sqlx::query("UPDATE fleet_ci_targets SET gitlab_project_id=50 WHERE id='gl-project'")
+            .execute(&db.pool)
+            .await;
+    assert!(
+        refused.as_ref().err().is_some_and(|error| error
+            .to_string()
+            .contains("CI target identity is immutable")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT strict FROM pragma_table_list WHERE name='fleet_ci_targets'"
+        )
+        .fetch_one(&db.pool)
+        .await?,
+        1,
+        "fleet_ci_targets stays STRICT"
+    );
+    db.close().await
+}
+
+#[tokio::test]
+async fn gitlab_tables_enforce_the_pinned_constraints() -> Result<()> {
+    let db = Database::ready().await?;
+    let pool = &db.pool;
+    let base = "https://gitlab.example.com";
+    gitlab_connection(pool, "gl-a", base, ("group", 7)).await?;
+    // One connection per (instance, scope); the same id under the other kind
+    // or on another instance is a different scope.
+    assert!(
+        gitlab_connection(pool, "gl-dup", base, ("group", 7))
+            .await
+            .is_err()
+    );
+    gitlab_connection(pool, "gl-b", base, ("project", 7)).await?;
+    gitlab_connection(pool, "gl-c", "https://gitlab.other.example", ("group", 7)).await?;
+    for (id, scope) in [("gl-kind", ("user", 8)), ("gl-zero", ("group", 0))] {
+        assert!(
+            gitlab_connection(pool, id, base, scope).await.is_err(),
+            "{id} was accepted"
+        );
+    }
+    // Each stored secret key belongs to exactly one connection.
+    for sql in [
+        "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at) VALUES ('gl-token','GitLab','https://gitlab.example.com','group',98,'p','gl-a-token-key','fresh-webhook-key',1,1)",
+        "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at) VALUES ('gl-hook','GitLab','https://gitlab.example.com','group',99,'p','fresh-token-key','gl-a-webhook-key',1,1)",
+    ] {
+        rejected(pool, sql).await;
+    }
+    assert_eq!(
+        foreign_keys(pool, "gitlab_connections").await?,
+        vec![(
+            "created_by".to_owned(),
+            "users".to_owned(),
+            "id".to_owned(),
+            "NO ACTION".to_owned(),
+            "SET NULL".to_owned()
+        )]
+    );
+
+    // Pool membership mirrors runner_pool_bitbucket_connections.
+    sqlx::query("INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('legacy-pool','gl-b',1)")
+        .execute(pool).await?;
+    rejected(pool, "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('legacy-pool','gl-b',2)").await;
+    rejected(pool, "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('legacy-pool','gl-missing',1)").await;
+    assert_eq!(
+        created_indexes(pool, "runner_pool_gitlab_connections").await?,
+        BTreeMap::from([(
+            "runner_pool_gitlab_connections_connection_idx".to_owned(),
+            (false, "connection_id,pool_id".to_owned())
+        )])
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT run_untagged FROM runner_pools WHERE id='legacy-pool'"
+        )
+        .fetch_one(pool)
+        .await?,
+        0
+    );
+
+    // Jobs: one row per (connection, GitLab job id), with the pinned defaults.
+    let job = "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,status_changed_at,created_at,updated_at) VALUES (?,?,42,1001,500,'pending',1,1,1)";
+    sqlx::query(job)
+        .bind("job-a")
+        .bind("gl-b")
+        .execute(pool)
+        .await?;
+    assert!(
+        sqlx::query(job)
+            .bind("job-dup")
+            .bind("gl-b")
+            .execute(pool)
+            .await
+            .is_err(),
+        "(connection_id, job_id) is unique"
+    );
+    sqlx::query(job)
+        .bind("job-c")
+        .bind("gl-c")
+        .execute(pool)
+        .await?;
+    let defaults: (String, i64, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT tag_list,retries_count,gitlab_runner_id,pool_id FROM gitlab_jobs WHERE id='job-a'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(defaults, ("[]".to_owned(), 0, None, None));
+    assert_eq!(
+        created_indexes(pool, "gitlab_jobs").await?,
+        BTreeMap::from([
+            (
+                "gitlab_jobs_active_created_idx".to_owned(),
+                (false, "created_at,id".to_owned())
+            ),
+            (
+                "gitlab_jobs_connection_job_unique".to_owned(),
+                (true, "connection_id,job_id".to_owned())
+            ),
+        ])
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT partial FROM pragma_index_list('gitlab_jobs') WHERE name='gitlab_jobs_active_created_idx'")
+            .fetch_one(pool)
+            .await?,
+        "the active-jobs index is partial"
+    );
+    assert_eq!(
+        foreign_keys(pool, "gitlab_jobs").await?,
+        vec![
+            (
+                "connection_id".to_owned(),
+                "gitlab_connections".to_owned(),
+                "id".to_owned(),
+                "NO ACTION".to_owned(),
+                "CASCADE".to_owned()
+            ),
+            (
+                "pool_id".to_owned(),
+                "runner_pools".to_owned(),
+                "id".to_owned(),
+                "NO ACTION".to_owned(),
+                "SET NULL".to_owned()
+            ),
+        ]
+    );
+
+    // A runner keeps its GitLab runner id when its connection goes, and the
+    // connection's memberships and jobs go with it.
+    sqlx::query("INSERT INTO runners (id,pool_id,name,ci_platform,gitlab_connection_id,gitlab_runner_id,created_at,updated_at) VALUES ('gl-runner','legacy-pool','gl-runner','gitlab','gl-b',77,1,1)")
+        .execute(pool).await?;
+    sqlx::query("DELETE FROM gitlab_connections WHERE id='gl-b'")
+        .execute(pool)
+        .await?;
+    let runner: (Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT gitlab_connection_id,gitlab_runner_id FROM runners WHERE id='gl-runner'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(runner, (None, Some(77)));
+    for table in ["runner_pool_gitlab_connections", "gitlab_jobs"] {
+        // Names come from the list above, never request input.
+        let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {table} WHERE connection_id='gl-b'"
+        )))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(rows, 0, "{table} kept rows of a deleted connection");
+    }
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(pool)
+            .await?
+            .is_empty()
+    );
+    db.close().await
+}
+
+#[tokio::test]
+async fn a_gitlab_connection_a_fleet_target_references_cannot_be_deleted() -> Result<()> {
+    let db = Database::ready().await?;
+    let pool = &db.pool;
+    for (connection, scope) in [
+        ("gl-project-conn", ("project", 42)),
+        ("gl-group-conn", ("group", 7)),
+        ("gl-unused", ("group", 8)),
+    ] {
+        gitlab_connection(pool, connection, "https://gitlab.example.com", scope).await?;
+    }
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('gl-project','gitlab_project','gitlab:project:gl-project-conn:42','gl-project-conn',42)")
+        .execute(pool).await?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_group_id) VALUES ('gl-group','gitlab_group','gitlab:group:gl-group-conn:7','gl-group-conn',7)")
+        .execute(pool).await?;
+    let tables = [
+        "gitlab_connections".to_owned(),
+        "fleet_ci_targets".to_owned(),
+    ];
+    let before = records(pool, &tables).await?;
+    for connection in ["gl-project-conn", "gl-group-conn"] {
+        let refused = sqlx::query("DELETE FROM gitlab_connections WHERE id=?")
+            .bind(connection)
+            .execute(pool)
+            .await;
+        assert!(
+            refused
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("FOREIGN KEY constraint failed")),
+            "deleting {connection}: {refused:?}"
+        );
+        assert_eq!(
+            records(pool, &tables).await?,
+            before,
+            "{connection} delete changed rows"
+        );
+    }
+    let deleted = sqlx::query("DELETE FROM gitlab_connections WHERE id='gl-unused'")
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        deleted.rows_affected(),
+        1,
+        "an unreferenced connection deletes"
+    );
+    db.close().await
+}
+
+#[tokio::test]
+async fn the_0046_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0046_gitlab.sql"
+    );
+    let migration = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    // Comments are dropped first, so a `;` inside one cannot split a statement.
+    let code: String = migration
+        .lines()
+        .map(|line| line.split("--").next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let guard: Vec<String> = code
+        .split(';')
+        .filter(|statement| statement.contains("_gitlab_0046_fk_guard"))
+        .map(|statement| statement.trim().to_owned())
+        .collect();
+    let starts: Vec<_> = guard
+        .iter()
+        .map(|statement| statement.split_whitespace().next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        starts,
+        ["CREATE", "INSERT", "DROP"],
+        "0046's guard: {guard:?}"
+    );
+    let guard = format!("{};", guard.join(";\n"));
+    for dangling in [false, true] {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-fk-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(directory.join("guard.sqlite"))
+                    .create_if_missing(true)
+                    .foreign_keys(false),
+            )
+            .await?;
+        sqlx::raw_sql(
+            "CREATE TABLE parent (id TEXT PRIMARY KEY);
+             CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent(id));
+             INSERT INTO parent (id) VALUES ('present');
+             INSERT INTO child (id,parent_id) VALUES ('ok','present');",
+        )
+        .execute(&pool)
+        .await?;
+        if dangling {
+            sqlx::query("INSERT INTO child (id,parent_id) VALUES ('orphan','missing')")
+                .execute(&pool)
+                .await?;
+        }
+        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(guard.clone()))
+            .execute(&pool)
+            .await;
+        if dangling {
+            assert!(
+                outcome
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.to_string().contains("CHECK constraint failed")),
+                "the guard let a dangling reference through: {outcome:?}"
+            );
+        } else {
+            assert!(
+                outcome.is_ok(),
+                "the guard refused a clean database: {outcome:?}"
+            );
+        }
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+    }
+    Ok(())
 }

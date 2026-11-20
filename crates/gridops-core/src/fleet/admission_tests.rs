@@ -3386,3 +3386,106 @@ async fn jobs_any_platform_can_run_go_where_machines_have_room() -> Result<()> {
     assert_eq!(choose().await?, Some((Architecture::Arm64, true)));
     database.close().await
 }
+
+/// #137 A-1: a GitLab target is stored once by `ensure_target` and loads back
+/// into the same `CiTarget`, which is what `PrepareEnvironment.target` carries.
+#[tokio::test]
+async fn gitlab_targets_are_stored_once_and_load_back_unchanged() -> Result<()> {
+    use crate::fleet::{
+        ExternalId,
+        domain::{BitbucketConnectionId, GitlabConnectionId, NonNilTargetUuid},
+        targets::ensure_target,
+    };
+    let database = Database::ready().await?;
+    sqlx::query(
+        "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+         VALUES ('gl-conn','GitLab','https://gitlab.example.com','group',7,'acme','gl-token-key','gl-webhook-key',1,1)",
+    )
+    .execute(&database.pool)
+    .await?;
+    let connection = GitlabConnectionId::new("gl-conn")?;
+    for (target, kind, key, project, group) in [
+        (
+            CiTarget::GitlabProject {
+                connection_id: connection.clone(),
+                project_id: ExternalId::new(42)?,
+            },
+            "gitlab_project",
+            "gitlab:project:gl-conn:42",
+            Some(42),
+            None,
+        ),
+        (
+            CiTarget::GitlabGroup {
+                connection_id: connection.clone(),
+                group_id: ExternalId::new(7)?,
+            },
+            "gitlab_group",
+            "gitlab:group:gl-conn:7",
+            None,
+            Some(7),
+        ),
+    ] {
+        let id = ensure_target(&database.pool, &target).await?;
+        assert_eq!(Uuid::parse_str(&id)?.get_version_num(), 4, "{kind} id");
+        assert_eq!(
+            ensure_target(&database.pool, &target).await?,
+            id,
+            "a second {kind} call returns the first id"
+        );
+        let row = sqlx::query(
+            "SELECT kind,canonical_key,gitlab_connection_id,gitlab_project_id,gitlab_group_id,
+                    installation_id IS NULL AND repository_id IS NULL AND organization_id IS NULL
+                    AND bitbucket_connection_id IS NULL AND workspace_uuid IS NULL
+                    AND repository_uuid IS NULL AS others_null,
+                    (SELECT COUNT(*) FROM fleet_ci_targets WHERE canonical_key=t.canonical_key) AS copies
+               FROM fleet_ci_targets t WHERE id=?",
+        )
+        .bind(&id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("kind"), kind);
+        assert_eq!(row.get::<String, _>("canonical_key"), key);
+        assert_eq!(row.get::<String, _>("gitlab_connection_id"), "gl-conn");
+        assert_eq!(row.get::<Option<i64>, _>("gitlab_project_id"), project);
+        assert_eq!(row.get::<Option<i64>, _>("gitlab_group_id"), group);
+        assert!(
+            row.get::<bool, _>("others_null"),
+            "{kind} sets no GitHub or Bitbucket column"
+        );
+        assert_eq!(row.get::<i64, _>("copies"), 1, "{kind} stored once");
+        let mut tx = database.pool.begin().await?;
+        let loaded = super::target_from_db(&mut tx, &id).await?;
+        tx.rollback().await?;
+        assert_eq!(loaded, target);
+    }
+    // Bitbucket is still refused with today's error, and writes nothing.
+    let count = || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fleet_ci_targets");
+    let before = count().fetch_one(&database.pool).await?;
+    let workspace =
+        NonNilTargetUuid::new(Uuid::parse_str("22222222-2222-4222-8222-222222222222")?)?;
+    for target in [
+        CiTarget::BitbucketWorkspace {
+            connection_id: BitbucketConnectionId::new("legacy-bb")?,
+            workspace_uuid: workspace,
+        },
+        CiTarget::BitbucketRepository {
+            connection_id: BitbucketConnectionId::new("legacy-bb")?,
+            workspace_uuid: workspace,
+            repository_uuid: NonNilTargetUuid::new(Uuid::parse_str(
+                "33333333-3333-4333-8333-333333333333",
+            )?)?,
+        },
+    ] {
+        let refused = ensure_target(&database.pool, &target).await;
+        assert!(
+            matches!(
+                refused,
+                Err(FleetError::InvalidRequest("only GitHub targets are synced"))
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(count().fetch_one(&database.pool).await?, before);
+    database.close().await
+}
