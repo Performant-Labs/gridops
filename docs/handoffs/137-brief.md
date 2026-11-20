@@ -257,7 +257,12 @@ The GitLab material is pinned as a public type in `crates/gridops-core/src/fleet
   - Consumers read the fields with `let GitlabRunnerMaterial::GitlabRunner { token, url, wait_timeout_seconds } = material;`. That pattern is irrefutable while the enum has one variant.
 - `Debug` is implemented by hand and prints `token: "[redacted]"`.
 - Tests: the serialized string equals the literal above; it round-trips; a payload with an extra field is rejected; a payload with another `kind` is rejected; and `format!("{:?}")` doesn't contain the token.
+- Why the byte-for-byte comparison is deterministic (brief review R1 of this gate, B-4). serde's derived `Serialize` for an internally tagged enum writes the tag (`kind`) first and then the variant's fields in their declaration order, every time; `serde_json::to_string` keeps that order. So the field order of the literal is fixed by the declaration order `token`, `url`, `wait_timeout_seconds`, and that declaration order is part of this contract: reordering the fields is a contract change, and the byte-for-byte test is there to catch it. The test keeps the exact string comparison and also asserts `serde_json::from_str::<serde_json::Value>` of the output equals that of the literal, so a failure says whether the content or only the order differs. Deserialization accepts the fields in any order (see above).
+- `token` carries a doc comment saying it is the secret `glrt-` runner authentication token and must never be logged, put in an error message, or passed as an argument or environment variable (brief review R1 of this gate, W-3). The hand-written `Debug` above is what enforces this for `{:?}`.
 - A test also pins that a GitHub `PrepareEnvironment` fixture serializes byte for byte as it does on `master`, which proves `ExecutionConfiguration` is untouched.
+- The base URL is carried **only** in `GitlabRunnerMaterial.url` (brief review R1 of this gate, B-7; this restates deviation D1 as an acceptance criterion and changes nothing in it):
+  - no field is added to `ExecutionConfiguration` or `PrepareEnvironment` by this issue, for the GitLab base URL or for anything else. In the PR diff against `master`, the definitions of both structs in `crates/gridops-core/src/fleet/protocol/agent.rs` (fields, attributes and derives) are unchanged;
+  - a test in `crates/gridops-core/tests/fleet_agent_commands.rs` pins the field set: `serde_json::to_value(ExecutionConfiguration::default())` is exactly `{"network":null,"session_id":null,"requires_interactive":false,"requires_docker_socket":false}` (the four fields it has today, none of which has `skip_serializing_if`), and deserializing an `ExecutionConfiguration` from `{"base_url":"https://gitlab.example.com"}` or from `{"url":"https://gitlab.example.com"}` is rejected as an unknown field. A field added with `skip_serializing_if` would leave the `PrepareEnvironment` byte test passing; this test catches it.
   - The fixture is the existing `fixture()` in `crates/gridops-core/tests/fleet_agent_commands.rs`, an envelope whose operation is `prepare_environment` with target `{"platform":"github_repository","installation_id":1,"repository_id":10}` and `"configuration":{}`. The new test goes in the same file.
   - The expected bytes are a string literal in the test: the output of `serde_json::to_string(&command(fixture())?)`, captured on `master` before any change in this issue. The literal is checked in as captured and is not edited by hand.
 
@@ -267,6 +272,9 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 
     pub struct GitLabCredentials { pub base_url: Url, pub access_token: SecretString }
     // Debug prints base_url and "[redacted]" for the token.
+    // (brief review R1 of this gate, NIT-4) Debug is hand-written, not derived, so the
+    // output is the fixed text `access_token: "[redacted]"` rather than secrecy's own
+    // placeholder; either way the token itself never appears.
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -349,7 +357,10 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
   - `delete_runner` on an unknown id returns `NotFound`.
   - `job` returns `NotFound` for an unknown job, and so does `resolve_scope` for an unknown path.
 - Recording: `calls() -> Vec<FakeCall>`. `FakeCall { base_url: Url, method: FakeMethod }` records every call, failed calls included, in order. The access token is never recorded.
+  - "In order" means invocation order: `calls()[i]` is the i-th trait-method call made on any clone of the fake, across all base URLs and methods (brief review R1 of this gate, B-5).
 - Tests in `fake.rs` cover each method, the per-base-URL isolation, `fail_next` ordering, and the recorded calls.
+  - The recorded-calls test makes a known sequence of at least four calls that interleaves at least two methods and two base URLs, goes through at least two clones of the fake, and includes one call that fails because of `fail_next`. It then asserts `calls()` equals, with `assert_eq!` on the whole vector, the exact `Vec<FakeCall>` of that sequence in invocation order, the failed call included at its position. Asserting membership or length alone does not satisfy this.
+- `FakeGitLab`'s doc comment states its limits (brief review R1 of this gate, W-2): state is keyed by `base_url` alone, the token is never inspected, two connections on the same base URL share state, token-level permission differences can only be simulated with `fail_next`, and tests that need two connections isolated must give them different base URLs. A wave-1 test that needs per-token permission isolation on one base URL extends the fake in its own issue.
 
 ### W-4: the outcome codes are `DiagnosticCode` variants
 
@@ -359,6 +370,15 @@ One `Arc<dyn GitLabApi>` serves every connection, the way `BitbucketClient` take
 - GitLab refused the `glrt-` token: the start command's result is `Failed { code: Configuration, retryable: false, diagnostic: Some({ code: RegistrationRefused, .. }) }`.
 
 There are serde round-trip tests for both codes, inside a `CommandOutcome::Failed`.
+
+What those tests do, exactly (brief review R1 of this gate, B-6). They go in `crates/gridops-core/tests/fleet_agent_outcomes.rs`, next to the existing `DiagnosticReference` fixtures (`claim`, `exclusion`). For each of the two pairs below, the test:
+
+1. constructs `CommandOutcome::Failed { code, retryable: false, diagnostic: Some(DiagnosticReference { id, code: diagnostic_code }) }`;
+2. serializes it with `serde_json::to_string`, and asserts the JSON contains `"kind":"failed"` and the diagnostic code's wire string;
+3. deserializes that JSON back into `CommandOutcome`;
+4. asserts the result equals the value from step 1, and, by matching on `CommandOutcome::Failed { diagnostic: Some(DiagnosticReference { code, .. }), .. }`, that `code` is the expected `DiagnosticCode`.
+
+The pairs are `(FailureCode::ResourceUnavailable, DiagnosticCode::IdleExpired)` with wire string `"idle_expired"`, and `(FailureCode::Configuration, DiagnosticCode::RegistrationRefused)` with wire string `"registration_refused"`. A test against `DiagnosticCode` alone does not satisfy this criterion.
 
 How consumers detect these cases (brief review R2, W-2): #147, #142 and #139 must branch on `diagnostic.code` (`IdleExpired` or `RegistrationRefused`), not on the `FailureCode`. `ResourceUnavailable` and `Configuration` are also used for other failures, so the failure code alone can't tell these two cases apart. Both carry `retryable: false`, so neither should be retried.
 
@@ -426,6 +446,8 @@ The tables:
 - `gitlab_jobs.tag_list` encoding (brief review R1, W-4): `serde_json::to_string(&job.tag_list)` of the `Vec<String>`. That is compact JSON, an empty list is `[]` (the column default), and the tags stay in the order the GitLab API returned them. It is read back with `serde_json::from_str::<Vec<String>>`. #140 and #148 both use this encoding.
 - The open-jobs index follows 0043's `workflow_jobs_open_created_idx`, not 0045. `gitlab_jobs` has no `conclusion` column. A job is concluded exactly when `JobStatus::is_terminal()`, and #140 and #148 both use that one rule.
   - It follows from that rule that `Created`, `WaitingForResource`, `Preparing`, `Pending`, `Running`, `Manual`, `Scheduled` and `Unknown` jobs are open and stay in the open-jobs index (NIT-4). Whether #148 acts on an open `Manual` or `Scheduled` job is #148's behaviour, not part of this contract.
+  - What the open-jobs index serves (brief review R1 of this gate, B-1). It is a global, oldest-first index over every open job of every connection and project, exactly as 0043's `workflow_jobs_open_created_idx` is global ("The open jobs, oldest first, for the queue views and the reconciler's job check"). #148's demand read ("Unconcluded `gitlab_jobs` rows feed `queued_job_candidates`") is that global scan. A scan narrowed to one connection or one project (for example #148's "Conclude recorded jobs that are no longer pending", run per connection) uses the same partial index with `connection_id` and `project_id` as residual filters. That scan is accepted: the partial index holds only open jobs, so its cost is bounded by the number of open jobs, not by every job ever recorded. This contract adds no index keyed by `connection_id` or `project_id` for open jobs, and the index definition above is not changed. An `AND project_id IS NOT NULL` term would add nothing, because `project_id` is already `NOT NULL`.
+  - `gitlab_jobs` stores the numeric `project_id` only, with no project path or name column (brief review R1 of this gate, W-1). Of the wave-1 issues, only #140 and #148 mention `gitlab_jobs` (checked with `gh issue view` on #138, #139, #140, #141, #142, #145, #146, #147 and #148), and neither text needs a project path in that table. #140 finds the connection from the payload's project or group, which `gitlab_connections.scope_id` and `scope_path` hold. A consumer that needs to display a path reads it from GitLab or from `gitlab_connections`.
 - `runners` gets `gitlab_connection_id text REFERENCES gitlab_connections(id) ON UPDATE no action ON DELETE set null` and `gitlab_runner_id integer`, appended after `runtime`, and **two** new indexes:
   - `runners_gitlab_connection_idx (pool_id, gitlab_connection_id, status)`, the pool lookup, after 0019's.
   - `runners_gitlab_runner_id_idx (gitlab_runner_id)`, #140's busy lookup by GitLab runner id, after `runners_github_id_idx`.
@@ -473,6 +495,13 @@ On top of the `runners` criteria above:
 
   So the test covers the `runners` rebuild hazard on a realistic post-0045 fleet graph, with all three inbound FKs populated (cascade, set null and no action). The row-equality assertion treats `runners` as the "Done-when, made concrete" criteria do: each of the three rows is equal on every pre-0046 column, and its two new GitLab columns are NULL. Every other table, `runner_events`, `log_streams` and `workload_placements` included, stays under the exact comparison. The placement's `runner_id` is still `'legacy-runner'` after 0046. No third fixture is needed, and `fleet_ready.sql` is not changed.
 - There is a round-trip test: `ensure_target` of a `CiTarget::GitlabProject` and of a `CiTarget::GitlabGroup`, then `target_from_db` of each row, returns the same `CiTarget`. Calling `ensure_target` a second time returns the same id.
+- There is a test that the NO ACTION FK refuses the delete (brief review R1 of this gate, B-2). In `crates/gridops-core/tests/fleet_schema.rs`, on a fully migrated database with `foreign_keys` on, it inserts one `gitlab_connections` row and one `gitlab_project` `fleet_ci_targets` row whose `gitlab_connection_id` is that connection. It asserts:
+  - `DELETE FROM gitlab_connections WHERE id=?` for that connection fails with SQLite's FK error (the error message contains `FOREIGN KEY constraint failed`);
+  - after the failed delete, the connection row and the target row are both still present and unchanged;
+  - the same holds for a `gitlab_group` target row;
+  - as a control, a second `gitlab_connections` row that no `fleet_ci_targets` row references deletes successfully.
+
+  This is the behaviour #138's DELETE 409 (A-1 and W-7) depends on.
 
 ### W-7: the OpenAPI entries
 
@@ -618,7 +647,11 @@ Option (a): #137 pins the GitLab contract of the runner-manager path. The facts 
   - Both structs gain the fields.
   - The manager's `validate` gains a `("gitlab", _)` arm that returns `BadRequest("GitLab runners are not supported yet: Docker is #147, Tart is #142.")`. An early GitLab request then fails loudly instead of being silently mis-run.
   - The Tart agent gets the same arm, naming #142.
-  - Tests: a GitLab request body deserializes into each struct with the fields populated; a GitHub request without them still deserializes unchanged; and the GitLab arm's error is returned.
+  - The exact error each crate returns (brief review R1 of this gate, B-3):
+    - `gridops-manager` (`ProvisionRunner::validate` in `src/main.rs`, error type `ManagerError`): `ManagerError::BadRequest("GitLab runners are not supported yet: Docker is #147, Tart is #142.".into())`.
+    - `gridops-tart-agent` (`ProvisionRunner::validate` in `src/main.rs`, error type `AgentError`): `AgentError::BadRequest("GitLab runners are not supported yet: Tart is #142.".into())`.
+    - In each crate the arm sits before the existing `_ => ... "Runner platform is invalid."` arm, so a GitLab request no longer gets that message.
+  - Tests: a GitLab request body deserializes into each struct with the fields populated; a GitHub request without them still deserializes unchanged; and the GitLab arm's error is returned. The GitLab-arm test exists in **both** crates: the manager's test asserts the manager's string above exactly, and the Tart agent's test asserts the Tart agent's string above exactly (string equality, not a prefix or substring match).
 - Shared constants in `gridops-core/src/provisioning.rs`:
   - `pub const GITLAB_DEFAULT_WAIT_TIMEOUT_SECS: u32 = 600;`, the value #139 sends when a pool sets none.
   - `pub const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";`.
@@ -721,6 +754,70 @@ All of this was read from the fixtures in this worktree. Excerpts are verbatim, 
 
   It also has the three `runners` inserts, with ids `legacy-runner`, `legacy-native` and `legacy-bb-runner`, and the `runner_pools` row `legacy-pool` and `bitbucket_connections` row `legacy-bb` that `fleet_ready.sql` references.
 
+## Amendments (brief review R1 of this gate, B-1 to B-8)
+
+The brief review blocked on B-1 to B-7. B-8 was printed under BLOCK, but its own text ends "That is specified. No block." Each one is resolved in place above, marked "brief review R1 of this gate". These changes add detail and tests; no acceptance criterion, scope item, deviation or earlier decision is removed, loosened or changed.
+
+| Finding | Where it is resolved |
+|---|---|
+| B-1 | W-5/W-6, under the open-jobs index: it is a global oldest-first index; per-connection or per-project scans use it with residual filters, which is accepted; `project_id` is already `NOT NULL` |
+| B-2 | "Done-when, extended for A-1": a test that `DELETE FROM gitlab_connections` fails with an FK error while a `fleet_ci_targets` row references the connection |
+| B-3 | R2-1 item 2: the exact error string of each crate, and a test in each crate asserting its own string exactly |
+| B-4 | A-2: why the byte-for-byte comparison is deterministic (tag first, then declaration order), and that the declaration order is part of the contract |
+| B-5 | A-3, under Recording and Tests: `calls()` is in invocation order, and the test asserts the whole vector |
+| B-6 | W-4: the round-trip tests construct, serialize and deserialize a `CommandOutcome::Failed` for each code |
+| B-7 | A-2: the base URL is only in `GitlabRunnerMaterial.url`; `ExecutionConfiguration` and `PrepareEnvironment` are unchanged in the diff, and a test pins `ExecutionConfiguration`'s field set |
+| B-8 | No change. The reviewer's own text concludes the `Scope::target` signature is specified ("No block"). **Closed.** |
+
+Also applied from the same review: W-1 (W-5/W-6, no project path in `gitlab_jobs`), W-2 (A-3, the fake's doc comment states its limits), W-3 (A-2, the `token` doc comment) and NIT-4 (A-3, why `GitLabCredentials`'s `Debug` is hand-written).
+
+### Evidence for this review's needs-verification items
+
+All of this was read in this worktree.
+
+- **NV-1.** `crates/gridops-api/src/fleet/openapi.rs` has five tests. None enumerates paths:
+  - `the_spec_matches_the_token_scope_table_in_both_directions` collects only operations whose `security` lists `bearerAuth` with a scope. The GitLab operations declare `cookieAuth` or `security: []` (W-7), so they add nothing to it.
+  - `the_spec_is_structurally_sound_openapi_31` walks **every** path and operation (skipping keys starting with `x-` and `parameters`). For each it asserts `responses` is an object and that each security requirement names a defined scheme. It then asserts every `"$ref"` in the document resolves, and that `paths.len() > 20`. So each new GitLab operation must have a `responses` object, and every `$ref` it uses (`ApiErrorBody`, `GitlabConnection`, ...) must be defined under `components`. An empty `security: []` passes, because the loop over requirements is empty.
+  - `error_examples_parse_as_the_contract_type`, `enrollment_example_matches_the_issue_response_shape` and `the_serving_route_ships_the_checked_in_bytes_with_the_right_headers` read named examples or the served bytes, so the new paths don't affect them.
+- **NV-2.** The `workload_placements` insert in `crates/gridops-core/tests/fixtures/fleet_ready.sql`, verbatim:
+
+      INSERT INTO workload_placements (id,intent_id,workload_id,generation,host_id,backend_id,host_epoch,profile_revision,target_id,config_snapshot_json,cpu_millis,memory_mib,disk_bytes,state,created_at,updated_at)
+
+  `runner_id` is not in the column list, so it is NULL.
+- **NV-3.** The trigger in `migrations/0022_fleet_foundation.sql`, verbatim:
+
+      CREATE TRIGGER workload_placements_match_intent_update
+      BEFORE UPDATE OF agent_run_id,runner_id ON workload_placements WHEN NOT EXISTS (
+        SELECT 1 FROM workload_intents i WHERE i.id = NEW.intent_id
+        AND i.agent_run_id IS NEW.agent_run_id
+        AND ((i.kind = 'ci_runner' AND NEW.agent_run_id IS NULL) OR (i.kind = 'fix_sandbox' AND NEW.runner_id IS NULL))
+      )
+      BEGIN SELECT RAISE(ABORT,'placement workload must match intent'); END;
+
+  The intent insert in `fleet_ready.sql` is `INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,expected_profile_revision,created_at,updated_at)` with `kind` `'ci_runner'`. `agent_run_id` is not in the column list, so it is NULL. For `UPDATE workload_placements SET runner_id='legacy-runner'`, `NEW.agent_run_id` is NULL, so `i.agent_run_id IS NEW.agent_run_id` holds and the `ci_runner` arm holds, and the trigger does not fire.
+- **NV-4.** `ensure_target` in `crates/gridops-core/src/fleet/targets.rs` today matches `CiTarget::GithubRepository { .. }` and `CiTarget::GithubOrganization { .. }`, and its last arm is, verbatim:
+
+      _ => return Err(FleetError::InvalidRequest("only GitHub targets are synced")),
+
+  There is no explicit Bitbucket arm; Bitbucket reaches that wildcard. Once the two GitLab arms are added, the Bitbucket variants still reach it (whether it stays a wildcard or names them), and the literal `"only GitHub targets are synced"` is kept word for word, as A-1 says.
+- **NV-6.** `ProvisioningPlan::for_selected_provider` in `crates/gridops-core/src/provisioning.rs` has today exactly the parameter list `(provider: &str, bitbucket_connection_selected: bool, pool_mode: &str, pool_ephemeral: bool, macos_runtime: &str, docker_image: &str, tart_image: &str) -> Self`. Its body computes:
+  - `platform`: `"bitbucket"` when `bitbucket_connection_selected`, else `"github"`;
+  - `mode`: `"persistent"` when `bitbucket_connection_selected`, else `pool_mode`;
+  - `ephemeral`: `platform == "github" && pool_ephemeral`;
+  - `runtime`: `macos_runtime` when `provider == "tart" && platform == "github"`, else `"vm"`;
+  - `image`: for `provider == "tart"`, empty when `runtime == "native"`, else `tart_image`; otherwise `docker_image`.
+
+  So `CiPlatform::Github` maps to today's `false` result and `CiPlatform::Bitbucket` to today's `true` result. For GitLab, R2-1 pins `runtime: "vm"`, which with this body gives `tart_image` for Tart and `docker_image` otherwise, as R2-1 says.
+- **NV-7.** `crates/gridops-tart-agent/Cargo.toml` `[dependencies]` are, in full: `anyhow`, `axum`, `chrono`, `futures-util`, `hex`, `reqwest`, `secrecy`, `sha2`, `serde`, `serde_json`, `subtle`, `tokio`, `tower-http`, `tracing`, `tracing-subscriber`, `uuid`. `[dev-dependencies]` is `tokio` with `test-util`. There is no `gridops-core`.
+- **NV-8.** Both `ProvisionRunner` structs are `#[serde(rename_all = "camelCase")]`:
+  - `crates/gridops-manager/src/main.rs`: `#[derive(Deserialize, Serialize)]`, fields `runner_id`, `pool_id`, `name`, `image`, `mode`, `provider` (default), `platform` (default), `jit_config`, `registration_token`, `registration_url`, `labels` (default), `runner_group`, `bitbucket: Option<BitbucketBootstrap>`, `bitbucket_oauth_client_secret: Option<String>`, `pull_image` (default), `cpu_limit`, `memory_limit_mb`, `network`, `capacity_lease`, `runtime` (default).
+  - `crates/gridops-tart-agent/src/main.rs`: `#[derive(Debug, Deserialize)]`, fields `runner_id`, `pool_id`, `name`, `image`, `mode`, `provider`, `platform` (default), `jit_config`, `bitbucket: Option<BitbucketBootstrap>`, `bitbucket_oauth_client_secret: Option<String>`, `cpu_limit`, `memory_limit_mb`, `runtime` (default).
+
+  Under `camelCase`, `gitlab` stays `"gitlab"` and `gitlab_runner_token` becomes `"gitlabRunnerToken"`. Neither struct has `deny_unknown_fields`. Each `validate` ends in an arm returning `BadRequest("Runner platform is invalid.")` (`ManagerError` in the manager, `AgentError` in the Tart agent), which B-3's GitLab arm precedes.
+- **NV-9.** `CiTarget::canonical_key` in `crates/gridops-core/src/fleet/domain.rs` is `pub fn canonical_key(&self) -> String`, so it is infallible. Its arms today are `format!("github:repository:{}:{}", ...)`, `format!("github:organization:{}:{}", ...)`, `format!("bitbucket:workspace:{}:{}", connection_id.as_str(), workspace_uuid.as_uuid())` and `format!("bitbucket:repository:{}:{}:{}", ...)`. The GitLab arms follow the Bitbucket form: `format!("gitlab:project:{}:{}", connection_id.as_str(), project_id.get())` and `format!("gitlab:group:{}:{}", connection_id.as_str(), group_id.get())`, which prints the id in decimal.
+- **NV-14.** Re-run in this worktree with the local `sqlite3` 3.54.0 on scratch files. With `PRAGMA foreign_keys=OFF` and one child row pointing at a missing parent, the guard statements inside `BEGIN`/`COMMIT` failed with `CHECK constraint failed: violations = 0` (exit status 1). The same statements on the same schema with no dangling row succeeded (exit status 0). The W-8 test pins this in `fleet_schema.rs`.
+- NV-5, NV-10, NV-11, NV-12 and NV-13 were confirmed true by the reviewer and need no change.
+
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
 - migrations/0046_gitlab.sql (not found)
@@ -776,3 +873,20 @@ All of this was read from the fixtures in this worktree. Excerpts are verbatim, 
 - crates/gridops-manager/src/main.rs (`ProvisionRunner`, `validate`)
 - crates/gridops-tart-agent/src/main.rs (`ProvisionRunner`, `list_runners`)
 - crates/gridops-api/src/state.rs (`AppState`)
+- docs/handoffs/137/decisions.md (architecture review rounds 1 and 2)
+- crates/gridops-api/src/fleet/openapi.rs (all five tests, for NV-1)
+- crates/gridops-core/tests/fixtures/fleet_ready.sql (the `workload_placements` and `workload_intents` inserts, for NV-2 and NV-3)
+- migrations/0022_fleet_foundation.sql (`workload_placements_match_intent_update`, for NV-3)
+- migrations/0043_workflow_job_attempts.sql (`workflow_jobs_open_created_idx`, for B-1)
+- crates/gridops-core/src/fleet/targets.rs (`ensure_target`, for NV-4)
+- crates/gridops-core/src/provisioning.rs (`for_selected_provider`, for NV-6)
+- crates/gridops-tart-agent/Cargo.toml (for NV-7)
+- crates/gridops-manager/src/main.rs (`ProvisionRunner`, `validate`, for NV-8 and B-3)
+- crates/gridops-tart-agent/src/main.rs (`ProvisionRunner`, `validate`, for NV-8 and B-3)
+- crates/gridops-core/src/fleet/domain.rs (`canonical_key`, for NV-9)
+- crates/gridops-core/src/fleet/protocol/outcomes.rs (`DiagnosticCode`, `FailureCode`, `DiagnosticReference`, `CommandOutcome`, for B-6)
+- crates/gridops-core/tests/fleet_agent_outcomes.rs (existing `DiagnosticReference` fixtures, for B-6)
+- crates/gridops-core/src/fleet/protocol/agent.rs (`ExecutionConfiguration`, `PrepareEnvironment`, for B-7)
+- crates/gridops-core/tests/fleet_agent_commands.rs (`fixture()`, `command()`, for B-7)
+- issues #140 and #148 (`gh issue view`, for B-1 and W-1); #138, #139, #141, #142, #145, #146 and #147 searched for `gitlab_jobs` and project-path use (W-1)
+- the local `sqlite3` 3.54.0, re-run on scratch files to check the FK guard with `foreign_keys` OFF (NV-14)
