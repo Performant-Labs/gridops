@@ -110,6 +110,13 @@
   <b>Platform names, badge styling, icons, field lists, help text and target kinds in every frame below come from the registry descriptor</b> (<code>src/features/platform-connections/registry.tsx</code>) &mdash; the wireframe draws GitHub and Bitbucket only; an unknown id renders the fallback (frame G).
 </div>
 
+<div class="legend" style="border-color:#7c3aed">
+  <b>Revision 3 (after the Phase-4 round-2 review and the brief amendments).</b> Brief wins on any difference. Changes, tagged <span class="tag new">REV3</span>:<br>
+  &bull; <b>A</b>: the <code>?appError=</code> redirect carries no search and the message is a toast, not a Callout on the Connections page.<br>
+  &bull; <b>B (GitHub App section, notes 5 and 7)</b>: the route composes the GitHub App section next to the connections list; the descriptor has no <code>settingsSection</code> slot. Loading is per platform inside the connections list component (no route loader); Retry and refresh touch only that platform.<br>
+  &bull; <b>C4</b>: close button text is the dialog&rsquo;s default <span class="copy">I&rsquo;ve stored it, close</span> (not &ldquo;Done&rdquo;); title, description, secret label, details and optional button text come from the post-create hook&rsquo;s return value; the API tokens page uses the same extracted dialog.<br>
+</div>
+
 <div class="legend" style="border-color:#c2410c">
   <b>Revision 2 (after the Phase-4 architecture review and the amended brief).</b> Where this file and <code>docs/handoffs/145-brief.md</code> disagree, the brief wins. Changes in this revision:<br>
   &bull; <b>C4</b>: only the explicit button closes the reveal (Escape and outside clicks are ignored); it is the extracted <code>SecretDialog</code>, shared with API tokens.<br>
@@ -141,7 +148,7 @@
       <tr><td>/settings/integrations</td><td>replace-redirect &rarr; /settings/connections</td></tr>
       <tr><td>/settings/github</td><td>replace-redirect &rarr; /settings/connections</td></tr>
       <tr><td>/platform-connections</td><td>replace-redirect &rarr; /settings/connections (edited in place; was &rarr; integrations)</td></tr>
-      <tr><td>/settings?appError=&hellip;</td><td>replace-redirect &rarr; /settings/connections, <code>appError</code> kept so the error Callout still shows</td></tr>
+      <tr><td>/settings?appError=&hellip;</td><td>replace-redirect &rarr; /settings/connections with no search; the error is shown as a toast (<code>toast.error</code>, skipped on preload), as today; the Connections page does not read <code>appError</code> <span class="tag new">REV3</span></td></tr>
       <tr><td>Pool form link &ldquo;Settings &rarr; Integrations&rdquo;</td><td>&ldquo;Settings &rarr; Connections&rdquo; &rarr; /settings/connections</td></tr>
       <tr><td>Webhooks empty-state button <span class="tag new">REV2</span></td><td>keeps its label <span class="copy">GitHub settings</span>; link &rarr; /settings/connections (was /settings/github)</td></tr>
       <tr><td>Settings nav items</td><td>one &ldquo;Connections&rdquo; item &rarr; /settings/connections</td></tr>
@@ -187,7 +194,7 @@
     </div>
 
     <div class="sec">
-      <div class="st"><div><h4>GitHub App</h4><p>Moved from the old GitHub page. Rendered by the GitHub descriptor&rsquo;s settings slot.</p></div><div><span class="btn sm">&#x21BA; Refresh access</span> <span class="btn sm">&#xFF0B; Install on another account &#x2197;</span> <span class="btn g sm">Manage App &#x2197;</span></div></div>
+      <div class="st"><div><h4>GitHub App</h4><p>Moved from the old GitHub page. Composed by the route, not by a descriptor. <span class="tag new">REV3</span></p></div><div><span class="btn sm">&#x21BA; Refresh access</span> <span class="btn sm">&#xFF0B; Install on another account &#x2197;</span> <span class="btn g sm">Manage App &#x2197;</span></div></div>
       <div class="panel">
         <div class="row"><div class="grow"><div class="t">GitHub OAuth</div><div class="d">Client ID and secret</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
         <div class="row"><div class="grow"><div class="t">Runner control</div><div class="d">GitHub App installation credentials</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
@@ -283,9 +290,9 @@
   <li><span class="n">2</span><b>Add connection</b> (header, primary) is shown only when at least one descriptor has a create binding and <code>canManage</code> is true. Opens the dialog in frame C.</li>
   <li><span class="n">3</span><b>Edit</b> (inline form, B6) appears only when the descriptor has an update binding and <code>canManage</code>. It shows only editable-on-update fields; the immutable workspace slug is not editable. A blank secret keeps the current one. <b>Remove</b> appears only with a remove binding and <code>canManage</code>; it uses the existing confirm: <span class="copy">Remove {name}? GridOps deletes its stored token. Pools that use it must be changed first.</span> followed by toast <span class="copy">{name} removed.</span>. Descriptor supplies the confirm text.</li>
   <li><span class="n">4</span><b>GitHub rows are list-only:</b> no Edit/Remove (no API). Their action is the external <b>Configure &#x2197;</b> link (new tab), or <span class="copy">Owner approval required</span> when the user lacks admin on the installation. Suspended installations get a danger badge and status.</li>
-  <li><span class="n">5</span><b>GitHub App section</b> (administrators only; read-only users see only the &ldquo;Read-only access&rdquo; callout) keeps today&rsquo;s checks, endpoints, create form, refresh/install/manage actions and the &ldquo;Adding another GitHub account&rdquo; callout. It is the GitHub descriptor&rsquo;s optional <code>settingsSection</code> slot &mdash; the page has no GitHub-specific code.</li>
+  <li><span class="n">5</span><b>GitHub App section</b> (administrators only; read-only users see only the &ldquo;Read-only access&rdquo; callout) keeps today&rsquo;s checks, endpoints, create form, refresh/install/manage actions and the &ldquo;Adding another GitHub account&rdquo; callout. It is composed by the route beside the connections list (a <code>GitHubAppSection</code> fed from the settings page data); the descriptor has no settings slot, and the connections list component has no GitHub-specific code. <span class="tag new">REV3</span> Supersedes the earlier &ldquo;settingsSection slot&rdquo; wording.</li>
   <li><span class="n">6</span><b>Empty (B3):</b> guidance, not just &ldquo;nothing here&rdquo;; the primary CTA exists only for people who can add. <b>Read-only (B4):</b> callout copy as today; list still visible.</li>
-  <li><span class="n">7</span><b>Pending/error (B5, B5b):</b> loading rows while the loader runs; a per-platform error row (platform name in the title) with its own Retry that re-runs only that platform&rsquo;s load. Mutations (add/edit/remove) refresh the list afterwards.</li>
+  <li><span class="n">7</span><b>Pending/error (B5, B5b):</b> each platform with a fetching list binding loads on its own (no route loader), showing loading rows while <i>that platform&rsquo;s</i> list loads; a per-platform error row (platform name in the title) with its own Retry that re-runs only that platform&rsquo;s load. GitHub rows come from the settings page data: no loading row, no Retry. After add/edit/remove only that platform&rsquo;s list reloads. <span class="tag new">REV3</span></li>
   <li><span class="n">8</span>Responsive: rows wrap as today&rsquo;s page (status text hidden below <code>sm</code>).</li>
 </ol>
 </div>
@@ -339,26 +346,26 @@
   <div>
   <p class="sub-h">C4 &middot; One-time reveal (post-create hook returned a value) &mdash; test-only descriptor today; real use by GitLab (#141)</p>
   <div class="dlg-bg"><div class="dlg">
-    <div class="dh copy">Connection created</div><div class="dp copy">Copy this value now. It is shown only once and cannot be retrieved later.</div>
+    <div class="dh copy">{reveal.title} &mdash; e.g. Connection created</div><div class="dp copy">{reveal.description} &mdash; e.g. Copy this value now. It is shown only once and cannot be retrieved later.</div>
     <div class="db">
-      <span class="lbl">{hook.label} &mdash; e.g. Webhook secret</span>
+      <span class="lbl">{reveal.secretLabel} &mdash; e.g. Webhook secret</span>
       <div class="secret"><span>whsec_9f2c&hellip;e41a</span><span>&#x2398; Copy</span></div>
-      <div class="d mut" style="font-size:11.5px;margin-top:6px">{hook.help} &mdash; e.g. Add this as the secret token on the platform&rsquo;s webhook.</div>
+      <div class="d mut" style="font-size:11.5px;margin-top:6px">{reveal.details} (optional) &mdash; e.g. Add this as the secret token on the platform&rsquo;s webhook.</div>
     </div>
-    <div class="df"><span class="btn p">Done</span></div>
+    <div class="df"><span class="btn p copy">I&rsquo;ve stored it, close</span></div>
   </div></div>
-  <p class="faint" style="margin:4px 0 0"><span class="tag new">REV2</span> No &#x2715;, <b>Escape is ignored and outside clicks are ignored</b>: only the explicit <b>Done</b> button closes, so the value is not lost by a stray key or click. This is the existing one-time-secret dialog (extracted from the API tokens page to a shared component), so both pages behave identically. After close the value is dropped from state and is never cached; the list shows the new row and nothing offers the value again.</p>
+  <p class="faint" style="margin:4px 0 0"><span class="tag new">REV2</span> No &#x2715;, <b>Escape is ignored and outside clicks are ignored</b>: only the explicit close button closes (default text <span class="copy">I&rsquo;ve stored it, close</span>; a hook may override it with <code>closeButtonText</code>), so the value is not lost by a stray key or click. This is the existing one-time-secret dialog (extracted from the API tokens page to a shared component), so both pages behave identically. After close the value is dropped from state and is never cached; the list shows the new row and nothing offers the value again.</p>
   </div>
 
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>Platform first.</b> The chooser lists every descriptor in <code>platforms</code> that is creatable-or-linkable (has a create binding <i>or</i> an external &ldquo;connect&rdquo; link). A single-platform registry skips straight to step 2.</li>
   <li><span class="n">2</span><b>Dialog renders only the chosen descriptor&rsquo;s fields</b> from its declarative list (label, input type &mdash; text/secret, required, help). Secret fields are masked and <code>autocomplete=off</code>. The dialog has no per-platform branches.</li>
-  <li><span class="n">3</span><b>Submit</b> &ldquo;Connect workspace&rdquo; label comes from the descriptor (<code>createLabel</code>); disabled while submitting and while required fields are empty (native <code>required</code> validation). On success: dialog closes, toast <span class="copy">{platform name} connected.</span>, list refreshes (router invalidate).</li>
+  <li><span class="n">3</span><b>Submit</b> &ldquo;Connect workspace&rdquo; label comes from the descriptor (<code>createLabel</code>); disabled while submitting and while required fields are empty (native <code>required</code> validation). On success: dialog closes, toast <span class="copy">{platform name} connected.</span>, that platform&rsquo;s list reloads. <span class="tag new">REV3</span></li>
   <li><span class="n">4</span><b>Error</b> stays in the dialog (does not close), field values kept except the secret is kept too so the user can retry.</li>
   <li><span class="n">5</span><b>Post-create hook</b> (optional per descriptor). If it returns a value the dialog swaps to the reveal (C4) <i>instead of</i> closing; if it returns nothing the dialog closes as in note 3. GitHub and Bitbucket return nothing today.</li>
   <li><span class="n">6</span>Focus: first field on step 2; <b>Copy</b> in C4 uses the existing <code>CopyButton</code> and toast.</li>
-  <li><span class="n">7</span><span class="tag new">REV2</span> C4 is the shared <code>SecretDialog</code> (props: title, description, secret label, optional details slot, close-button text, close handlers). The API tokens page keeps its own copy (<span class="copy">Done</span> there too) and its test stays green. GitHub and Bitbucket never reach C4 in this story; it is exercised by a test-only descriptor.</li>
+  <li><span class="n">7</span><span class="tag new">REV2</span> C4 is the shared <code>SecretDialog</code> (props: title, description, secret label, optional details slot, close-button text, close handlers). The API tokens page now renders this same extracted dialog with its existing strings, so its rendered dialog and test are unchanged. <span class="tag new">REV3</span> GitHub and Bitbucket never reach C4 in this story; it is exercised by a test-only descriptor.</li>
 </ol>
 </div>
 </section>

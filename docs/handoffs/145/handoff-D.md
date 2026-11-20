@@ -1,13 +1,21 @@
-# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI (revision 2)
+# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI (revision 3)
 
 **Date:** 2026-11-20
 **Branch:** claude/ui-145-platform-neutral-cf5832
 **Mode:** (a) generated low-fi
 **Wireframe:** docs/handoffs/145/wireframe.html (single static HTML file, frames A-G, numbered annotations per frame)
-**Revision:** 2. Revision 1 (commit 8526086) was BLOCKed in Phase 4 (handoff-A.md) and the brief was amended afterwards. This pass amends the wireframe where the amended brief and the review require it; where the wireframe and the brief disagree, the brief wins. Revised or added items carry a `REV2` tag in the file.
+**Revision:** 3 (this pass; the REV3 list is below). Revision 2 follows.
+**Revision 2:** Revision 1 (commit 8526086) was BLOCKed in Phase 4 (handoff-A.md) and the brief was amended afterwards. This pass amends the wireframe where the amended brief and the review require it; where the wireframe and the brief disagree, the brief wins. Revised or added items carry a `REV2` tag in the file.
+
+## Revision 3 changes (after the Phase-4 round-2 review and the brief amendments)
+Edited in place; each change carries a `REV3` tag in the file. The brief wins on any difference.
+- **GitHub App section (B, B note 5).** The route composes the GitHub App section beside the connections list. The descriptor has no `settingsSection` slot, and the wireframe no longer says so (brief "Connections page loading", last bullet).
+- **Loading (B note 7, C note 3).** No route loader. Each platform with a fetching list binding loads on its own, shows loading rows only while its own list loads, and has its own Retry. GitHub rows come from the settings page data and have no loading row or Retry. After add, edit or remove only that platform's list reloads.
+- **C4 reveal dialog.** The close button reads `I’ve stored it, close` (the extracted dialog's default; a hook may override it with `closeButtonText`), not "Done". Title, description, secret label, details and button text are drawn as the `PostCreateReveal` fields. The API tokens page renders the same extracted dialog with its own strings, so its dialog is unchanged.
+- **A (redirects).** The `?appError=` redirect carries no search; the message is a toast (skipped on preload), as today. The old wireframe said the error stayed visible as a Callout on the target page, which the brief rules out.
 
 ## Revision 2 changes
-- **C4 reveal dialog.** Only the explicit Done button closes it; Escape and outside clicks are ignored (the "or Esc" wording is removed). It is the existing one-time-secret dialog extracted to a shared component, so API tokens and Connections behave identically. New note C7.
+- **C4 reveal dialog.** Only the explicit close button closes it (its text is now `I’ve stored it, close`, see revision 3); Escape and outside clicks are ignored (the "or Esc" wording is removed). It is the existing one-time-secret dialog extracted to a shared component, so API tokens and Connections behave identically. New note C7.
 - **Bitbucket is not standalone (D2, new D2b, new D7, D notes 2 and 5).** With no GitHub target selected, every Bitbucket workspace option is shown disabled with the reason `Select a GitHub repository or runner group first`; it enables once a repository or runner group is picked. Removing the last GitHub target keeps the workspace selected, leaves Create pool enabled, and submit fails before any request with the schema's thrown message in the existing "Could not create the pool" callout (D7). Pool settings cannot reach that state (E note 5).
 - **D5 empty state.** Replaced the invented "Add a connection first" with today's two empty states, "Connect GitHub first" (D5a) and "Install the GitHub App" (D5b), copy supplied by the GitHub descriptor. The gate is "no GitHub installation", not "no targets of any kind". The false "if only one platform has targets" sentence is removed.
 - **D notes.** Namespaced internal option keys; per-kind caps counted separately; installation pinned from the first selected repository (mixed installations still allowed, as today); plan-preview sentence contract including the empty-form case.
@@ -31,7 +39,7 @@
   - C1 platform chooser first.
   - C2 GitHub (no create binding, so a link out to install the App; disabled when the App is not configured).
   - C3 Bitbucket fields from the descriptor list: idle, submitting, error.
-  - C4 post-create reveal. Closes only through the Done button (Escape and outside clicks ignored); the value is dropped after close and never offered again.
+  - C4 post-create reveal. Closes only through its close button, `I’ve stored it, close` (Escape and outside clicks ignored); the value is dropped after close and never offered again.
 - **D. New-pool Targets row.**
   - D1 closed with chips. D2 open listbox grouped "Platform · Target kind" with disabled-with-reason incompatible options. D2b nothing selected: Bitbucket options disabled with reason (not standalone).
   - D3 per-group loading / error+Retry / not-connected / no-match rows.
@@ -66,7 +74,7 @@ Icons are Unicode glyphs only (no hand-drawn SVG geometry). Real icon components
 
 ## Verification of the render
 
-Revision 2 rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the changed and added frames (legend, A, B5/B5b, C2-C4, D1-D7, E1-E3, F1) in the screenshot: glyphs are complete and on-canvas, no clipped controls, div balance 441/441. Frames G and F2-F4 were not changed and were not re-inspected in this pass (revision 1 inspected them). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
+Revision 3 re-rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the legend, A, B2-B4, B7, C1 and C4 frames, which hold every REV3 change: the new text fits, the C4 button and placeholders are complete and on-canvas, div balance 442/442. Frames B1/B5 and D-G were not touched in revision 3 and were not re-inspected. Revision 2 was rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the changed and added frames (legend, A, B5/B5b, C2-C4, D1-D7, E1-E3, F1) in the screenshot: glyphs are complete and on-canvas, no clipped controls, div balance 441/441. Frames G and F2-F4 were not changed and were not re-inspected in this pass (revision 1 inspected them). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
 
 ## Approval
 
