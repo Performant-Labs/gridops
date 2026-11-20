@@ -1,0 +1,38 @@
+# Decision journal: #146 GitLab HTTP client implementing GitLabApi
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:14:37-08:00
+- **Decided:** PASS, with 0 block findings and 5 warn findings (see `handoff-A.md`).
+  - **Accepted as consistent with the code:**
+    - placement in `gitlab/http.rs`, next to `fake.rs`, implementing the #137 trait;
+    - no new dependency, and only the one allowed line in `mod.rs`;
+    - `user_agent("GridOps/0.1")` with `redirect(Policy::none())`, as in `BitbucketClient` and `GitHubClient`;
+    - a hand-written mock server on tokio `TcpListener` (the precedent is `stand_in_docker.rs`; axum isn't a `gridops-core` dependency).
+  - **Accepted as deliberate departures the brief justifies in writing:**
+    - typed `GitLabError`, from the contract;
+    - no response body in any error (the `glrt-` token);
+    - the base URL passed on each call (D2).
+  - **The five warnings:**
+    - (1) Pin `#[derive(Clone)] GitLabClient { http }` with `new() -> anyhow::Result<Self>`, re-exported from `gitlab/mod.rs` and not from `lib.rs`. No wave-1 issue owns wiring `Arc::new(GitLabClient::new()?)` into the API's and the reconciler's `main.rs`.
+    - (2) Use one `send` and `error_for` seam, with 404 checked before mapping in `delete_runner`. Don't copy Bitbucket's `send`, which makes its own `delete_runner` 404 branch unreachable.
+    - (3) Pin `CONNECT_TIMEOUT`, `REQUEST_TIMEOUT` and `MAX_PAGES` as constants.
+    - (4) Put the tests in `gitlab/http_tests.rs`, mounted as `fake.rs` mounts its tests. Bound the mock server. Give the live test the reasoned `#[ignore = …]` form and document its run command, as `sandbox_live.rs` does.
+    - (5) No `base_url` scheme policy is stated anywhere. #138's normalisation is the seam for it, and the host agent's `InsecureUrl` (https, or loopback http) is the precedent.
+- **Assumed:**
+  - The mock server can serve `MAX_PAGES` responses quickly enough that no test-only page-cap hook is needed. This was not measured.
+  - #138, if it lands before #146, has some production stand-in for `AppState.gitlab`. Its issue text says only "inject `Arc<dyn GitLabApi>` … so tests swap in the fake".
+- **Hedged:**
+  - Finding 1's wiring gap and finding 5's scheme policy are epic-level: #146 owns neither `main.rs` nor connection input. I reported them for O to record on #136 and did not block #146 on them.
+  - The auth header (`PRIVATE-TOKEN` versus the neighbours' `bearer_auth`) I left as acceptable either way, folded into finding 2.
+  - No Reuse map (`survey.md`) was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - Read: the brief, the brief-gate result r1, `docs/handoffs/137-brief.md` (D2 to D4, B-6, R2-W3, the `base_url` normalisation at :453) and `docs/handoffs/137/handoff-A.md`.
+  - Issues: epic #136 (body, and the deviations comment D1 to D16), #138 and #139 (`gh issue view`).
+  - Contract and fake: `crates/gridops-core/src/gitlab/{mod.rs,fake.rs,fake_tests.rs}`.
+  - Neighbouring clients: `crates/gridops-core/src/{bitbucket.rs,github.rs,lib.rs}`, `crates/gridops-core/Cargo.toml` and the workspace `Cargo.toml` (deps and lints).
+  - Client construction: `crates/gridops-api/src/{main.rs:82-83,state.rs}` and `crates/gridops-reconciler/src/main.rs:367-368`.
+  - Precedents:
+    - `crates/gridops-core/src/fleet/domain.rs` (`ExternalId` serde);
+    - `crates/gridops-host-agent/src/client.rs:65-78` and `crates/gridops-agent/src/provider_auth.rs:334-335` (timeouts and `InsecureUrl`);
+    - `crates/gridops-manager/src/{stand_in_docker.rs,route_timeout_tests.rs}`, `crates/gridops-reconciler/src/start_tests.rs` and `crates/gridops-api/src/oauth.rs` (mock servers);
+    - `crates/gridops-agent/tests/sandbox_live.rs` (the ignored live test);
+    - a `#[path = …]` grep across `crates/*/src` (the sibling test-module pattern).
