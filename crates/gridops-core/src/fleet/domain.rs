@@ -87,6 +87,37 @@ impl From<BitbucketConnectionId> for String {
     }
 }
 
+/// The `gitlab_connections.id` of a GitLab connection. Same shape as
+/// [`BitbucketConnectionId`]: a validated string, serialized as a plain string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GitlabConnectionId(UpstreamText);
+
+impl GitlabConnectionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, super::ids::FleetTextError> {
+        Ok(Self(UpstreamText::new(value)?))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for GitlabConnectionId {
+    type Error = super::ids::FleetTextError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<GitlabConnectionId> for String {
+    fn from(value: GitlabConnectionId) -> Self {
+        value.0.into()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Uuid", into = "Uuid")]
 pub struct NonNilTargetUuid(Uuid);
@@ -143,6 +174,14 @@ pub enum CiTarget {
         workspace_uuid: NonNilTargetUuid,
         repository_uuid: NonNilTargetUuid,
     },
+    GitlabProject {
+        connection_id: GitlabConnectionId,
+        project_id: ExternalId,
+    },
+    GitlabGroup {
+        connection_id: GitlabConnectionId,
+        group_id: ExternalId,
+    },
 }
 
 impl CiTarget {
@@ -156,7 +195,15 @@ impl CiTarget {
 
     #[must_use]
     pub const fn is_bitbucket(&self) -> bool {
-        !self.is_github()
+        matches!(
+            self,
+            Self::BitbucketWorkspace { .. } | Self::BitbucketRepository { .. }
+        )
+    }
+
+    #[must_use]
+    pub const fn is_gitlab(&self) -> bool {
+        matches!(self, Self::GitlabProject { .. } | Self::GitlabGroup { .. })
     }
 
     /// Stable, non-secret scope key used for authorization comparisons and
@@ -198,6 +245,18 @@ impl CiTarget {
                 workspace_uuid.as_uuid(),
                 repository_uuid.as_uuid()
             ),
+            Self::GitlabProject {
+                connection_id,
+                project_id,
+            } => format!(
+                "gitlab:project:{}:{}",
+                connection_id.as_str(),
+                project_id.get()
+            ),
+            Self::GitlabGroup {
+                connection_id,
+                group_id,
+            } => format!("gitlab:group:{}:{}", connection_id.as_str(), group_id.get()),
         }
     }
 }
@@ -230,6 +289,19 @@ pub enum Architecture {
 pub enum CiPlatform {
     Github,
     Bitbucket,
+    Gitlab,
+}
+
+impl CiPlatform {
+    /// The wire and `runners.ci_platform` spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Bitbucket => "bitbucket",
+            Self::Gitlab => "gitlab",
+        }
+    }
 }
 
 pub const MAX_CPU_MILLIS: u32 = 4_000_000;

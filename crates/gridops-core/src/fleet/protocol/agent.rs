@@ -110,6 +110,46 @@ pub struct StartRunner {
     pub allocation_ids: Vec<AllocationId>,
 }
 
+/// Bootstrap material for a GitLab runner, sealed by the reconciler (#139)
+/// with `placement::store_bootstrap` and opened by the fleet host agent's
+/// Docker runtime (#147). Tart/macOS does not use this path (#137 R2-1).
+/// `token` goes to the runner's stdin; `url` and `wait_timeout_seconds`
+/// are not secret and may be passed as arguments.
+///
+/// The wire form is exactly
+/// `{"kind":"gitlab_runner","token":"…","url":"…","wait_timeout_seconds":600}`.
+/// It is a single-variant internally tagged enum, not a struct, so that it
+/// both writes the `kind` tag and refuses another `kind` or an extra field.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GitlabRunnerMaterial {
+    GitlabRunner {
+        /// The secret `glrt-` runner authentication token. Never log it, put
+        /// it in an error message, or pass it as an argument or environment
+        /// variable: it goes to the runner's stdin only. `Debug` redacts it.
+        token: String,
+        /// The connection's `base_url`, e.g. `https://gitlab.com`.
+        url: String,
+        /// `gitlab-runner run-single --wait-timeout`, in seconds.
+        wait_timeout_seconds: u32,
+    },
+}
+
+impl std::fmt::Debug for GitlabRunnerMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self::GitlabRunner {
+            token: _,
+            url,
+            wait_timeout_seconds,
+        } = self;
+        f.debug_struct("GitlabRunner")
+            .field("token", &"[redacted]")
+            .field("url", url)
+            .field("wait_timeout_seconds", wait_timeout_seconds)
+            .finish()
+    }
+}
+
 /// Only this explicit mode can request cancellation of busy work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

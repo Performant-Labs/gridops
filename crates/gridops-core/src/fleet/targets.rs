@@ -54,10 +54,43 @@ pub async fn sync_github_targets(pool: &SqlitePool) -> Result<(), FleetError> {
     Ok(())
 }
 
-/// The fleet target ID for `target`, created on first use.
+/// The fleet target ID for `target`, created on first use. GitHub and GitLab
+/// targets are stored; Bitbucket targets are refused.
 pub async fn ensure_target(pool: &SqlitePool, target: &CiTarget) -> Result<String, FleetError> {
     let key = target.canonical_key();
     let (kind, installation, repository, organization) = match target {
+        CiTarget::GitlabProject {
+            connection_id,
+            project_id,
+        } => {
+            let project = i64::try_from(project_id.get())
+                .map_err(|_| FleetError::InvalidRequest("project"))?;
+            return ensure_gitlab_target(
+                pool,
+                &key,
+                "gitlab_project",
+                connection_id.as_str(),
+                Some(project),
+                None,
+            )
+            .await;
+        }
+        CiTarget::GitlabGroup {
+            connection_id,
+            group_id,
+        } => {
+            let group =
+                i64::try_from(group_id.get()).map_err(|_| FleetError::InvalidRequest("group"))?;
+            return ensure_gitlab_target(
+                pool,
+                &key,
+                "gitlab_group",
+                connection_id.as_str(),
+                None,
+                Some(group),
+            )
+            .await;
+        }
         CiTarget::GithubRepository {
             installation_id,
             repository_id,
@@ -90,9 +123,38 @@ pub async fn ensure_target(pool: &SqlitePool, target: &CiTarget) -> Result<Strin
     .bind(organization.map(i64::try_from).transpose().map_err(|_| FleetError::InvalidRequest("organization"))?)
     .execute(pool)
     .await?;
+    target_id_for_key(pool, &key).await
+}
+
+/// Inserts a `gitlab_project` or `gitlab_group` row once; every GitHub and
+/// Bitbucket column stays NULL, as the 0047 shape CHECK requires.
+async fn ensure_gitlab_target(
+    pool: &SqlitePool,
+    key: &str,
+    kind: &'static str,
+    connection_id: &str,
+    project_id: Option<i64>,
+    group_id: Option<i64>,
+) -> Result<String, FleetError> {
+    sqlx::query(
+        "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id,gitlab_group_id)
+         VALUES (?,?,?,?,?,?) ON CONFLICT(canonical_key) DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(kind)
+    .bind(key)
+    .bind(connection_id)
+    .bind(project_id)
+    .bind(group_id)
+    .execute(pool)
+    .await?;
+    target_id_for_key(pool, key).await
+}
+
+async fn target_id_for_key(pool: &SqlitePool, key: &str) -> Result<String, FleetError> {
     Ok(
         sqlx::query_scalar("SELECT id FROM fleet_ci_targets WHERE canonical_key=?")
-            .bind(&key)
+            .bind(key)
             .fetch_one(pool)
             .await?,
     )

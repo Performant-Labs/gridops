@@ -3,6 +3,30 @@
 //! The API and reconciler own their I/O adapters, credentials, and persistence
 //! details. This module owns the decisions that must not drift between them.
 
+use crate::fleet::CiPlatform;
+
+/// The `--wait-timeout` a GitLab runner gets when its pool sets none (#139).
+pub const GITLAB_DEFAULT_WAIT_TIMEOUT_SECS: u32 = 600;
+
+/// The prefix of a GitLab runner authentication token, a secret.
+pub const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";
+
+/// The GitLab runner script ran its one job.
+pub const GITLAB_EXIT_COMPLETED: i32 = 0;
+/// The GitLab runner script hit `--wait-timeout` without a job.
+pub const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
+/// GitLab rejected the runner's token.
+pub const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+
+/// A GitLab runner script's exit status and the `exitReason` the runner
+/// listing (`GET /v1/runners`) reports for it. `gridops-tart-agent` holds a
+/// copy with the same names and values.
+pub const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+    (GITLAB_EXIT_COMPLETED, "completed"),
+    (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
+    (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisioningPlan {
     pub provider: String,
@@ -14,30 +38,30 @@ pub struct ProvisioningPlan {
 }
 
 impl ProvisioningPlan {
+    /// The runner shape for `platform` on `provider`. Bitbucket runners are
+    /// persistent; GitLab runners are ephemeral (one job each); both run in a
+    /// VM on Tart. Only GitHub follows the pool's mode and macOS runtime.
     pub fn for_selected_provider(
         provider: &str,
-        bitbucket_connection_selected: bool,
+        platform: CiPlatform,
         pool_mode: &str,
         pool_ephemeral: bool,
         macos_runtime: &str,
         docker_image: &str,
         tart_image: &str,
     ) -> Self {
-        let platform = if bitbucket_connection_selected {
-            "bitbucket"
-        } else {
-            "github"
-        };
-        let mode = if bitbucket_connection_selected {
-            "persistent".to_owned()
-        } else {
-            pool_mode.to_owned()
-        };
-        let ephemeral = platform == "github" && pool_ephemeral;
-        let runtime = if provider == "tart" && platform == "github" {
-            macos_runtime.to_owned()
-        } else {
-            "vm".to_owned()
+        let (mode, ephemeral, runtime) = match platform {
+            CiPlatform::Github => (
+                pool_mode.to_owned(),
+                pool_ephemeral,
+                if provider == "tart" {
+                    macos_runtime.to_owned()
+                } else {
+                    "vm".to_owned()
+                },
+            ),
+            CiPlatform::Bitbucket => ("persistent".to_owned(), false, "vm".to_owned()),
+            CiPlatform::Gitlab => ("ephemeral".to_owned(), true, "vm".to_owned()),
         };
         let image = if provider == "tart" {
             if runtime == "native" {
@@ -51,7 +75,7 @@ impl ProvisioningPlan {
 
         Self {
             provider: provider.to_owned(),
-            platform,
+            platform: platform.as_str(),
             mode,
             ephemeral,
             runtime,
@@ -152,11 +176,12 @@ exit "$runner_status""#
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet::CiPlatform;
 
-    fn plan(provider: &str, bitbucket: bool) -> ProvisioningPlan {
+    fn plan(provider: &str, platform: CiPlatform) -> ProvisioningPlan {
         ProvisioningPlan::for_selected_provider(
             provider,
-            bitbucket,
+            platform,
             "ephemeral",
             true,
             "native",
@@ -168,10 +193,10 @@ mod tests {
     #[test]
     fn api_and_reconciler_inputs_produce_the_same_github_plan() {
         assert_eq!(
-            plan("tart", false),
+            plan("tart", CiPlatform::Github),
             ProvisioningPlan::for_selected_provider(
                 "tart",
-                false,
+                CiPlatform::Github,
                 "ephemeral",
                 true,
                 "native",
@@ -179,19 +204,200 @@ mod tests {
                 "tart:latest",
             )
         );
-        assert_eq!(plan("tart", false).platform, "github");
-        assert_eq!(plan("tart", false).runtime, "native");
-        assert_eq!(plan("tart", false).image, "");
+        assert_eq!(plan("tart", CiPlatform::Github).platform, "github");
+        assert_eq!(plan("tart", CiPlatform::Github).runtime, "native");
+        assert_eq!(plan("tart", CiPlatform::Github).image, "");
     }
 
     #[test]
     fn bitbucket_is_always_persistent_and_vm_hosted() {
-        let selected = plan("tart", true);
+        let selected = plan("tart", CiPlatform::Bitbucket);
         assert_eq!(selected.platform, "bitbucket");
         assert_eq!(selected.mode, "persistent");
         assert!(!selected.ephemeral);
         assert_eq!(selected.runtime, "vm");
         assert_eq!(selected.image, "tart:latest");
+    }
+
+    fn expected(
+        provider: &str,
+        platform: &'static str,
+        mode: &str,
+        ephemeral: bool,
+        runtime: &str,
+        image: &str,
+    ) -> ProvisioningPlan {
+        ProvisioningPlan {
+            provider: provider.to_owned(),
+            platform,
+            mode: mode.to_owned(),
+            ephemeral,
+            runtime: runtime.to_owned(),
+            image: image.to_owned(),
+        }
+    }
+
+    /// Every platform on both providers, for two sets of pool inputs. The
+    /// GitHub and Bitbucket rows are what the `bitbucket_connection_selected`
+    /// flag gave before #137 (false and true); GitLab is always an ephemeral
+    /// VM runner, whatever the pool says.
+    #[test]
+    fn each_platform_gets_its_plan_on_both_providers() {
+        let pools = [("ephemeral", true, "native"), ("persistent", false, "vm")];
+        let rows = [
+            // (provider, platform, pool inputs, expected plan)
+            (
+                "docker",
+                CiPlatform::Github,
+                0,
+                expected("docker", "github", "ephemeral", true, "vm", "docker:latest"),
+            ),
+            (
+                "tart",
+                CiPlatform::Github,
+                0,
+                expected("tart", "github", "ephemeral", true, "native", ""),
+            ),
+            (
+                "docker",
+                CiPlatform::Github,
+                1,
+                expected(
+                    "docker",
+                    "github",
+                    "persistent",
+                    false,
+                    "vm",
+                    "docker:latest",
+                ),
+            ),
+            (
+                "tart",
+                CiPlatform::Github,
+                1,
+                expected("tart", "github", "persistent", false, "vm", "tart:latest"),
+            ),
+            (
+                "docker",
+                CiPlatform::Bitbucket,
+                0,
+                expected(
+                    "docker",
+                    "bitbucket",
+                    "persistent",
+                    false,
+                    "vm",
+                    "docker:latest",
+                ),
+            ),
+            (
+                "tart",
+                CiPlatform::Bitbucket,
+                0,
+                expected(
+                    "tart",
+                    "bitbucket",
+                    "persistent",
+                    false,
+                    "vm",
+                    "tart:latest",
+                ),
+            ),
+            (
+                "docker",
+                CiPlatform::Bitbucket,
+                1,
+                expected(
+                    "docker",
+                    "bitbucket",
+                    "persistent",
+                    false,
+                    "vm",
+                    "docker:latest",
+                ),
+            ),
+            (
+                "tart",
+                CiPlatform::Bitbucket,
+                1,
+                expected(
+                    "tart",
+                    "bitbucket",
+                    "persistent",
+                    false,
+                    "vm",
+                    "tart:latest",
+                ),
+            ),
+            (
+                "docker",
+                CiPlatform::Gitlab,
+                0,
+                expected("docker", "gitlab", "ephemeral", true, "vm", "docker:latest"),
+            ),
+            (
+                "tart",
+                CiPlatform::Gitlab,
+                0,
+                expected("tart", "gitlab", "ephemeral", true, "vm", "tart:latest"),
+            ),
+            (
+                "docker",
+                CiPlatform::Gitlab,
+                1,
+                expected("docker", "gitlab", "ephemeral", true, "vm", "docker:latest"),
+            ),
+            (
+                "tart",
+                CiPlatform::Gitlab,
+                1,
+                expected("tart", "gitlab", "ephemeral", true, "vm", "tart:latest"),
+            ),
+        ];
+        for (provider, platform, pool, want) in rows {
+            let (mode, ephemeral, macos_runtime) = pools[pool];
+            assert_eq!(
+                ProvisioningPlan::for_selected_provider(
+                    provider,
+                    platform,
+                    mode,
+                    ephemeral,
+                    macos_runtime,
+                    "docker:latest",
+                    "tart:latest",
+                ),
+                want,
+                "{provider} {platform:?} pool {pool}"
+            );
+        }
+    }
+
+    #[test]
+    fn gitlab_runner_constants_are_pinned() {
+        assert_eq!(GITLAB_DEFAULT_WAIT_TIMEOUT_SECS, 600);
+        assert_eq!(GITLAB_RUNNER_TOKEN_PREFIX, "glrt-");
+        assert_eq!(
+            (
+                GITLAB_EXIT_COMPLETED,
+                GITLAB_EXIT_IDLE_EXPIRED,
+                GITLAB_EXIT_REGISTRATION_REFUSED
+            ),
+            (0, 75, 77)
+        );
+    }
+
+    /// The exit status to `exitReason` table both runner-manager listings use
+    /// (the Tart agent keeps a copy, pinned by the same literals).
+    #[test]
+    fn gitlab_exit_reasons_map_each_exit_status_once() {
+        assert_eq!(
+            GITLAB_EXIT_REASONS,
+            [
+                (0, "completed"),
+                (75, "idle_expired"),
+                (77, "registration_refused")
+            ]
+        );
     }
 
     #[test]

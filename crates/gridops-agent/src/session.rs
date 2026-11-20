@@ -110,7 +110,7 @@ impl AgentEvent {
 
 /// Prefixes of well-known credential formats: GitHub, `OpenAI` and Anthropic,
 /// AWS access keys, Slack and GitLab.
-const SECRET_PREFIXES: [&str; 10] = [
+const SECRET_PREFIXES: [&str; 11] = [
     "ghp_",
     "gho_",
     "ghu_",
@@ -121,6 +121,7 @@ const SECRET_PREFIXES: [&str; 10] = [
     "AKIA",
     "xoxb-",
     "glpat-",
+    "glrt-",
 ];
 const SECRET_MIN_LEN: usize = 16;
 
@@ -764,6 +765,18 @@ mod tests {
         assert_eq!(
             event.detail.as_deref(),
             Some("key=sk-[redacted] sk-short task-runner")
+        );
+        // GitLab runner authentication and personal access tokens (#137),
+        // masked whole: the run continues to the first non-token character.
+        let gitlab = AgentEvent::new(
+            EventKind::Tool,
+            "Register glrt-fake-runner-token-0001 now",
+            Some("token=glpat-not-a-real-token-0000 glrt-short".into()),
+        );
+        assert_eq!(gitlab.title, "Register glrt-[redacted] now");
+        assert_eq!(
+            gitlab.detail.as_deref(),
+            Some("token=glpat-[redacted] glrt-short")
         );
     }
 

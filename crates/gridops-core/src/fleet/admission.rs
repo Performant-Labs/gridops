@@ -19,8 +19,8 @@ use super::{
         SupportedRunner, TargetKind,
     },
     domain::{
-        Architecture, BitbucketConnectionId, CiTarget, ExecutionOs, ExternalId, NonNilTargetUuid,
-        ResourceAmount, ResourceRequest, RuntimeKind,
+        Architecture, BitbucketConnectionId, CiTarget, ExecutionOs, ExternalId, GitlabConnectionId,
+        NonNilTargetUuid, ResourceAmount, ResourceRequest, RuntimeKind,
     },
     ids::{
         AllocationId, AuthoritySessionId, BackendId, CommandId, ControlPlaneIncarnation,
@@ -1372,7 +1372,7 @@ async fn target_from_db(
 ) -> Result<CiTarget, FleetError> {
     let Some(row) = sqlx::query(
         "SELECT kind,installation_id,repository_id,organization_id,bitbucket_connection_id,
-                workspace_uuid,repository_uuid
+                workspace_uuid,repository_uuid,gitlab_connection_id,gitlab_project_id,gitlab_group_id
            FROM fleet_ci_targets WHERE id=?",
     )
     .bind(target_id)
@@ -1434,6 +1434,30 @@ async fn target_from_db(
                     workspace_uuid,
                     repository_uuid: NonNilTargetUuid::new(repository_uuid)
                         .map_err(|_| FleetError::Invariant("nil Bitbucket repository UUID"))?,
+                })
+            }
+        }
+        "gitlab_project" | "gitlab_group" => {
+            let connection_id =
+                GitlabConnectionId::new(row.get::<String, _>("gitlab_connection_id"))
+                    .map_err(|_| FleetError::Invariant("invalid GitLab connection ID"))?;
+            if kind == "gitlab_project" {
+                Ok(CiTarget::GitlabProject {
+                    connection_id,
+                    project_id: ExternalId::try_from(
+                        u64::try_from(row.get::<i64, _>("gitlab_project_id"))
+                            .map_err(|_| FleetError::Invariant("invalid GitLab project ID"))?,
+                    )
+                    .map_err(|_| FleetError::Invariant("invalid GitLab project ID"))?,
+                })
+            } else {
+                Ok(CiTarget::GitlabGroup {
+                    connection_id,
+                    group_id: ExternalId::try_from(
+                        u64::try_from(row.get::<i64, _>("gitlab_group_id"))
+                            .map_err(|_| FleetError::Invariant("invalid GitLab group ID"))?,
+                    )
+                    .map_err(|_| FleetError::Invariant("invalid GitLab group ID"))?,
                 })
             }
         }

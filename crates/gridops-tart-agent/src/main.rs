@@ -267,6 +267,15 @@ struct ProvisionRunner {
     /// on this host. Defaulted so older control planes keep getting VMs.
     #[serde(default = "default_runtime")]
     runtime: String,
+    /// A GitLab runner's non-secret bootstrap (#137 R2-1); #142 reads it.
+    #[serde(default)]
+    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+    gitlab: Option<GitlabBootstrap>,
+    /// The secret `glrt-` GitLab runner token, handled like `jit_config`:
+    /// never logged, never in VM env or args. #142 reads it.
+    #[serde(default)]
+    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+    gitlab_runner_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +286,31 @@ struct BitbucketBootstrap {
     runner_uuid: String,
     oauth_client_id: String,
 }
+
+/// Where a GitLab runner registers and how long it waits for a job.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code, reason = "the GitLab module of #142 reads it")]
+struct GitlabBootstrap {
+    url: String,
+    wait_timeout_seconds: u32,
+}
+
+/// This crate's copy of `gridops_core::provisioning`'s GitLab exit codes and
+/// `exitReason` values (the Tart agent does not depend on `gridops-core`).
+/// Keep the names and values equal to core's.
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_COMPLETED: i32 = 0;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+    (GITLAB_EXIT_COMPLETED, "completed"),
+    (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
+    (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+];
 
 fn default_platform() -> String {
     "github".into()
@@ -363,6 +397,11 @@ impl ProvisionRunner {
             ("bitbucket", _) => {
                 return Err(AgentError::BadRequest(
                     "Bitbucket Tart runners must be persistent.".into(),
+                ));
+            }
+            ("gitlab", _) => {
+                return Err(AgentError::BadRequest(
+                    "GitLab runners are not supported yet: Tart is #142.".into(),
                 ));
             }
             _ => return Err(AgentError::BadRequest("Runner platform is invalid.".into())),
@@ -2445,6 +2484,8 @@ mod tests {
             jit_config: Some("j".repeat(64)),
             bitbucket: None,
             bitbucket_oauth_client_secret: None,
+            gitlab: None,
+            gitlab_runner_token: None,
             cpu_limit: 3.0,
             memory_limit_mb: 6_144,
             runtime: runtime.into(),
@@ -3291,5 +3332,78 @@ admin     tart run
         );
         assert_eq!(slots["detection"], "tart-list");
         Ok(())
+    }
+
+    /// A `POST /v1/runners` body for a GitLab runner, as the manager forwards
+    /// it (#137 R2-1).
+    fn gitlab_request() -> serde_json::Value {
+        serde_json::json!({
+            "runnerId": "runner-1",
+            "poolId": "pool-1",
+            "name": "homelab-abcd1234",
+            "image": "gridops-macos-tahoe-base",
+            "mode": "ephemeral",
+            "provider": "tart",
+            "platform": "gitlab",
+            "runtime": "vm",
+            "cpuLimit": 3.0,
+            "memoryLimitMb": 6_144,
+            "gitlab": {"url": "https://gitlab.example.com", "waitTimeoutSeconds": 600},
+            "gitlabRunnerToken": "glrt-tart-request-token-0001",
+        })
+    }
+
+    #[test]
+    fn a_gitlab_request_carries_its_bootstrap_and_token() -> Result<()> {
+        let input: ProvisionRunner = serde_json::from_value(gitlab_request())?;
+        assert_eq!(
+            input
+                .gitlab
+                .as_ref()
+                .map(|gitlab| (gitlab.url.as_str(), gitlab.wait_timeout_seconds)),
+            Some(("https://gitlab.example.com", 600))
+        );
+        assert_eq!(
+            input.gitlab_runner_token.as_deref(),
+            Some("glrt-tart-request-token-0001")
+        );
+        let mut github = gitlab_request();
+        if let Some(object) = github.as_object_mut() {
+            object.remove("gitlab");
+            object.remove("gitlabRunnerToken");
+            object.insert("platform".into(), "github".into());
+        }
+        let github: ProvisionRunner = serde_json::from_value(github)?;
+        assert!(github.gitlab.is_none() && github.gitlab_runner_token.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn gitlab_runners_are_refused_by_name_until_142_lands() -> Result<()> {
+        let input: ProvisionRunner = serde_json::from_value(gitlab_request())?;
+        let refused = input.validate();
+        assert!(
+            matches!(
+                &refused,
+                Err(AgentError::BadRequest(message))
+                    if message == "GitLab runners are not supported yet: Tart is #142."
+            ),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
+    /// This crate's copy of `gridops_core::provisioning::GITLAB_EXIT_REASONS`,
+    /// pinned by the same literals as the core test.
+    #[test]
+    fn gitlab_exit_reasons_match_the_core_table() {
+        assert_eq!(
+            GITLAB_EXIT_REASONS,
+            [
+                (0, "completed"),
+                (75, "idle_expired"),
+                (77, "registration_refused")
+            ]
+        );
     }
 }

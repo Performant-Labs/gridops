@@ -24,6 +24,8 @@ pub enum TargetKind {
     GithubOrganization,
     BitbucketWorkspace,
     BitbucketRepository,
+    GitlabProject,
+    GitlabGroup,
 }
 impl From<&CiTarget> for TargetKind {
     fn from(target: &CiTarget) -> Self {
@@ -32,12 +34,17 @@ impl From<&CiTarget> for TargetKind {
             CiTarget::GithubOrganization { .. } => Self::GithubOrganization,
             CiTarget::BitbucketWorkspace { .. } => Self::BitbucketWorkspace,
             CiTarget::BitbucketRepository { .. } => Self::BitbucketRepository,
+            CiTarget::GitlabProject { .. } => Self::GitlabProject,
+            CiTarget::GitlabGroup { .. } => Self::GitlabGroup,
         }
     }
 }
 impl TargetKind {
     pub const fn is_bitbucket(self) -> bool {
         matches!(self, Self::BitbucketWorkspace | Self::BitbucketRepository)
+    }
+    pub const fn is_gitlab(self) -> bool {
+        matches!(self, Self::GitlabProject | Self::GitlabGroup)
     }
 }
 

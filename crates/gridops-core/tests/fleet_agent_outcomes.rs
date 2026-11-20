@@ -762,3 +762,52 @@ fn diagnostics_and_absence_claims_do_not_echo_secret_text() {
     assert!(!debug.contains("authorization=super-secret"));
     assert!(!debug.contains("token"));
 }
+
+/// The two GitLab runner endings (#137, W-4) travel as diagnostics inside a
+/// non-retryable failure, so consumers branch on `diagnostic.code`.
+#[test]
+fn gitlab_runner_endings_round_trip_as_failure_diagnostics() -> anyhow::Result<()> {
+    for (code, diagnostic_code, wire) in [
+        (
+            FailureCode::ResourceUnavailable,
+            DiagnosticCode::IdleExpired,
+            "idle_expired",
+        ),
+        (
+            FailureCode::Configuration,
+            DiagnosticCode::RegistrationRefused,
+            "registration_refused",
+        ),
+    ] {
+        let outcome = CommandOutcome::Failed {
+            code,
+            retryable: false,
+            diagnostic: Some(DiagnosticReference {
+                id: id::<DiagnosticId>("75000000-0000-4000-8000-000000000001"),
+                code: diagnostic_code,
+            }),
+        };
+        let encoded = serde_json::to_string(&outcome)?;
+        assert!(encoded.contains(r#""kind":"failed""#), "{encoded}");
+        assert!(
+            encoded.contains(&format!(r#""code":"{wire}""#)),
+            "{encoded}"
+        );
+        let decoded: CommandOutcome = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded, outcome);
+        let CommandOutcome::Failed {
+            retryable,
+            diagnostic:
+                Some(DiagnosticReference {
+                    code: decoded_code, ..
+                }),
+            ..
+        } = decoded
+        else {
+            anyhow::bail!("{wire} did not decode as a failure with a diagnostic");
+        };
+        assert_eq!(decoded_code, diagnostic_code);
+        assert!(!retryable);
+    }
+    Ok(())
+}

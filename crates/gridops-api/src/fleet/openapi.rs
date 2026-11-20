@@ -214,4 +214,282 @@ mod tests {
         assert_eq!(body.as_ref(), SPEC.as_bytes());
         Ok(())
     }
+
+    /// Resolves a `#/components/...` reference inside the document.
+    fn resolve<'a>(spec: &'a Value, value: &'a Value) -> &'a Value {
+        let Some(reference) = value["$ref"].as_str() else {
+            return value;
+        };
+        reference
+            .trim_start_matches("#/")
+            .split('/')
+            .fold(spec, |cursor, segment| &cursor[segment])
+    }
+
+    fn property_names(schema: &Value) -> Vec<&str> {
+        let mut names: Vec<&str> = schema["properties"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    fn json_schema<'a>(spec: &'a Value, holder: &'a Value) -> &'a Value {
+        resolve(
+            spec,
+            &resolve(spec, holder)["content"]["application/json"]["schema"],
+        )
+    }
+
+    const GITLAB_CONNECTIONS: &str = "/api/v1/platform-connections/gitlab";
+    const GITLAB_CONNECTION: &str = "/api/v1/platform-connections/gitlab/{connection_id}";
+    const GITLAB_VERIFY: &str = "/api/v1/platform-connections/gitlab/{connection_id}/verify";
+    const GITLAB_ROTATE: &str =
+        "/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate";
+    const GITLAB_WEBHOOK: &str = "/api/v1/webhooks/gitlab";
+
+    /// (path, method, the success status, its body schema, issue that serves it)
+    const GITLAB_OPERATIONS: [(&str, &str, &str, Option<&str>, &str); 7] = [
+        (
+            GITLAB_CONNECTIONS,
+            "get",
+            "200",
+            Some("GitlabConnectionList"),
+            "#138",
+        ),
+        (
+            GITLAB_CONNECTIONS,
+            "post",
+            "201",
+            Some("GitlabConnectionCreated"),
+            "#138",
+        ),
+        (
+            GITLAB_CONNECTION,
+            "patch",
+            "200",
+            Some("GitlabConnection"),
+            "#138",
+        ),
+        (GITLAB_CONNECTION, "delete", "204", None, "#138"),
+        (GITLAB_VERIFY, "post", "204", None, "#138"),
+        (
+            GITLAB_ROTATE,
+            "post",
+            "200",
+            Some("GitlabWebhookSecret"),
+            "#138",
+        ),
+        (GITLAB_WEBHOOK, "post", "202", None, "#140"),
+    ];
+
+    /// #137 W-7: the GitLab routes #138 and #140 implement against, declared
+    /// before any handler exists.
+    #[test]
+    fn the_gitlab_operations_are_specified_before_they_are_served() -> anyhow::Result<()> {
+        let spec = spec()?;
+        for (path, method, status, body, owner) in GITLAB_OPERATIONS {
+            let operation = &spec["paths"][path][method];
+            assert!(operation.is_object(), "missing {method} {path}");
+            let description = operation["description"].as_str().unwrap_or_default();
+            assert!(
+                description.starts_with(&format!("Not served yet: implemented by {owner}")),
+                "{method} {path} description: {description:?}"
+            );
+            let expected_security = if path == GITLAB_WEBHOOK {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{ "cookieAuth": [] }])
+            };
+            assert_eq!(
+                operation["security"], expected_security,
+                "{method} {path} security"
+            );
+            let responses = operation["responses"].as_object().context("responses")?;
+            assert!(
+                responses.contains_key(status),
+                "{method} {path} has no {status}"
+            );
+            if let Some(body) = body {
+                assert_eq!(
+                    json_schema(&spec, &responses[status]),
+                    &spec["components"]["schemas"][body],
+                    "{method} {path} {status} body"
+                );
+            }
+            // Errors use the API's own body, never the fleet ErrorResponse.
+            assert!(
+                !operation.to_string().contains("ErrorResponse"),
+                "{method} {path} uses the fleet ErrorResponse"
+            );
+            for (code, response) in responses {
+                let response = resolve(&spec, response);
+                if code.starts_with('2') || response.get("content").is_none() {
+                    continue;
+                }
+                assert_eq!(
+                    json_schema(&spec, response),
+                    &spec["components"]["schemas"]["ApiErrorBody"],
+                    "{method} {path} {code} error body"
+                );
+            }
+        }
+        let conflicts = |path: &str, method: &str| {
+            spec["paths"][path][method]["responses"]["409"]["description"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        assert!(
+            conflicts(GITLAB_CONNECTIONS, "post").is_some(),
+            "POST 409 on a duplicate scope"
+        );
+        assert!(
+            conflicts(GITLAB_CONNECTION, "delete")
+                .is_some_and(|text| text.contains("while a pool or a fleet target references it")),
+            "DELETE 409 covers pools and fleet targets"
+        );
+        for (path, method) in [
+            (GITLAB_CONNECTION, "patch"),
+            (GITLAB_CONNECTION, "delete"),
+            (GITLAB_VERIFY, "post"),
+            (GITLAB_ROTATE, "post"),
+        ] {
+            let parameters = spec["paths"][path][method]["parameters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(
+                    spec["paths"][path]["parameters"]
+                        .as_array()
+                        .into_iter()
+                        .flatten(),
+                )
+                .map(|parameter| resolve(&spec, parameter));
+            assert!(
+                parameters
+                    .into_iter()
+                    .any(|parameter| parameter["name"] == "connection_id"
+                        && parameter["in"] == "path"
+                        && parameter["required"] == true),
+                "{method} {path} declares the connection_id path parameter"
+            );
+        }
+        let webhook = &spec["paths"][GITLAB_WEBHOOK]["post"];
+        for header in ["X-Gitlab-Token", "X-Gitlab-Event"] {
+            assert!(
+                webhook["parameters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|parameter| resolve(&spec, parameter))
+                    .any(|parameter| parameter["name"] == header
+                        && parameter["in"] == "header"
+                        && parameter["required"] == true),
+                "the webhook requires the {header} header"
+            );
+        }
+        assert!(webhook["responses"]["401"].is_object(), "webhook 401");
+        assert_eq!(
+            json_schema(&spec, &webhook["requestBody"])["type"],
+            "object",
+            "the webhook body is a free-form JSON object"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_gitlab_schemas_have_the_pinned_fields_and_no_secrets() -> anyhow::Result<()> {
+        let spec = spec()?;
+        let schemas = &spec["components"]["schemas"];
+        let connection = &schemas["GitlabConnection"];
+        assert_eq!(
+            property_names(connection),
+            [
+                "baseUrl",
+                "canManage",
+                "createdAt",
+                "id",
+                "name",
+                "provider",
+                "scopeId",
+                "scopeKind",
+                "scopePath",
+                "updatedAt"
+            ]
+        );
+        let provider = &connection["properties"]["provider"];
+        assert!(
+            provider["const"] == "gitlab" || provider["enum"] == serde_json::json!(["gitlab"]),
+            "provider is always \"gitlab\": {provider}"
+        );
+        assert_eq!(connection["properties"]["scopeId"]["type"], "integer");
+        assert_eq!(
+            property_names(&schemas["GitlabConnectionList"]),
+            ["canManage", "items"]
+        );
+        assert_eq!(
+            schemas["GitlabConnectionList"]["properties"]["canManage"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            resolve(
+                &spec,
+                &schemas["GitlabConnectionList"]["properties"]["items"]["items"]
+            ),
+            connection
+        );
+        let create = &schemas["CreateGitlabConnectionRequest"];
+        assert_eq!(
+            property_names(create),
+            ["accessToken", "baseUrl", "name", "scopeKind", "scopePath"]
+        );
+        assert_eq!(
+            create["properties"]["baseUrl"]["default"],
+            "https://gitlab.com"
+        );
+        assert_eq!(
+            create["properties"]["scopeKind"]["enum"],
+            serde_json::json!(["project", "group"])
+        );
+        assert_eq!(
+            property_names(&schemas["GitlabConnectionCreated"]),
+            ["connection", "webhookSecret", "webhookUrl"]
+        );
+        assert_eq!(
+            property_names(&schemas["UpdateGitlabConnectionRequest"]),
+            ["accessToken", "name"]
+        );
+        assert!(
+            schemas["UpdateGitlabConnectionRequest"]["required"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "a PATCH body requires nothing"
+        );
+        assert_eq!(
+            property_names(&schemas["GitlabWebhookSecret"]),
+            ["webhookSecret", "webhookUrl"]
+        );
+        assert_eq!(property_names(&schemas["ApiErrorBody"]), ["code", "error"]);
+        assert_eq!(
+            schemas["ApiErrorBody"]["required"],
+            serde_json::json!(["error"])
+        );
+        // Only the create response and the rotation carry the webhook secret.
+        for (name, schema) in schemas.as_object().context("schemas")? {
+            if name == "GitlabConnectionCreated" || name == "GitlabWebhookSecret" {
+                continue;
+            }
+            if name.starts_with("Gitlab") {
+                let text = schema.to_string();
+                assert!(
+                    !text.contains("webhookSecret"),
+                    "{name} carries the webhook secret"
+                );
+            }
+        }
+        Ok(())
+    }
 }

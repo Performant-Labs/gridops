@@ -333,7 +333,7 @@ mod tests {
         .fetch_one(&pool)
         .await?
         .get::<i64, _>("count");
-        assert_eq!(tables, 71);
+        assert_eq!(tables, 74);
         assert!(table_exists(&pool, "workflow_job_sync").await?);
         assert!(table_exists(&pool, "runner_pool_waits").await?);
         assert!(table_exists(&pool, "runner_pool_exclusive_labels").await?);
@@ -348,6 +348,9 @@ mod tests {
         assert!(table_exists(&pool, "agent_run_events").await?);
         assert!(table_exists(&pool, "bitbucket_connections").await?);
         assert!(table_exists(&pool, "runner_pool_bitbucket_connections").await?);
+        assert!(table_exists(&pool, "gitlab_connections").await?);
+        assert!(table_exists(&pool, "runner_pool_gitlab_connections").await?);
+        assert!(table_exists(&pool, "gitlab_jobs").await?);
         assert!(table_exists(&pool, "runner_pool_priority_repositories").await?);
         assert!(table_exists(&pool, "reconciler_passes").await?);
         let columns = sqlx::query("PRAGMA table_info(runner_pools)")

@@ -35,6 +35,12 @@ pub enum DiagnosticCode {
     Runtime,
     Stale,
     Unknown,
+    /// A GitLab runner waited its `--wait-timeout` without receiving a job.
+    /// Carried in `Failed { code: ResourceUnavailable, retryable: false }`.
+    IdleExpired,
+    /// GitLab refused the runner's `glrt-` token. Carried in
+    /// `Failed { code: Configuration, retryable: false }`.
+    RegistrationRefused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
