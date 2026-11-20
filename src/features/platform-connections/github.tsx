@@ -1,0 +1,270 @@
+/** The GitHub platform descriptor (#145): App installations, repositories and organization runner groups. */
+import { ExternalLink, Github } from "lucide-react";
+
+import { Avatar } from "~/components/ui/avatar";
+import { Badge } from "~/components/ui/badge";
+import { buttonVariants } from "~/components/ui/button";
+import type { SettingsPage } from "~/features/operations/operations.functions";
+import {
+  type RunnerPoolDetail,
+  getInstallationRunnerGroups,
+  getRunnerPoolRepositories,
+} from "~/features/runner-pools/runner-pools.functions";
+import { formatRelativeTime } from "~/lib/utils";
+
+import type { PlatformDescriptor, ResolvedSelection, TargetContext, TargetKind, TargetOption } from "./types";
+
+type Installation = NonNullable<SettingsPage["data"]>["installations"][number];
+
+const REPOSITORY = "github.repository";
+const RUNNER_GROUP = "github.runner-group";
+const REPOSITORY_GROUP = "GitHub · Repository";
+const RUNNER_GROUP_GROUP = "GitHub · Organization runner group";
+const RUNNER_GROUP_SENTENCE = "GitHub runner-group access defines which repositories can use the pool.";
+
+const repositoryKey = (id: number) => `${REPOSITORY}:${id}`;
+const runnerGroupKey = (nativeId: string) => `${RUNNER_GROUP}:${nativeId}`;
+
+function isAbort(cause: unknown) {
+  return cause instanceof DOMException && cause.name === "AbortError";
+}
+
+/** A runner group's native id is `<installationId>/<groupId>`: every organization has a group 1. */
+function runnerGroupParts(option: TargetOption | undefined) {
+  const [installationId, groupId] = (option?.nativeId ?? "").split("/");
+  return { installationId: Number(installationId) || 0, groupId: Number(groupId) || 0 };
+}
+
+function manualRunnerGroup(installation: { id: number; accountLogin: string }, description: string): TargetOption {
+  return {
+    key: runnerGroupKey(`${installation.id}/manual`),
+    kindId: RUNNER_GROUP,
+    connectionId: String(installation.id),
+    nativeId: `${installation.id}/0`,
+    label: `${installation.accountLogin} · Enter runner group ID`,
+    description,
+    group: RUNNER_GROUP_GROUP,
+    manual: true,
+  };
+}
+
+/** One installation's runner groups, or the manual entry when they cannot be listed (as today). */
+async function installationRunnerGroups(installation: { id: number; accountLogin: string; accountType?: string }, signal: AbortSignal): Promise<TargetOption[]> {
+  if (installation.accountType !== undefined && installation.accountType !== "Organization") {
+    return [manualRunnerGroup(installation, "Runner groups are listed for organizations only")];
+  }
+  try {
+    const { items } = await getInstallationRunnerGroups(installation.id, signal);
+    if (!items.length) return [manualRunnerGroup(installation, "No runner groups are listed for this installation")];
+    return items.map((group) => ({
+      key: runnerGroupKey(`${installation.id}/${group.id}`),
+      kindId: RUNNER_GROUP,
+      connectionId: String(installation.id),
+      nativeId: `${installation.id}/${group.id}`,
+      label: `${installation.accountLogin} · ${group.name}`,
+      description: group.isDefault ? "Default runner group" : `${group.visibility} visibility`,
+      group: RUNNER_GROUP_GROUP,
+    }));
+  } catch (cause) {
+    if (isAbort(cause)) throw cause;
+    return [manualRunnerGroup(installation, "Runner groups could not be loaded")];
+  }
+}
+
+const installationsAvailable = (context: TargetContext) =>
+  context.form === "create" ? context.options.installations.length > 0 : true;
+
+const repositoryKind: TargetKind = {
+  id: REPOSITORY,
+  label: "Repository",
+  group: REPOSITORY_GROUP,
+  cardinality: "many",
+  standalone: true,
+  excludes: [RUNNER_GROUP],
+  exclusionReason: "Can’t combine with repositories",
+  available: installationsAvailable,
+  notConnected: "Install the GitHub App first",
+  offered: (context) => context.form === "create" || context.pool.scope === "repository",
+  limit: ({ maxCount }) => maxCount,
+  raisesMinMaxCount: true,
+  supportsPriority: true,
+  planNote: (count, { maxCount }) => ({ ok: count <= maxCount, text: `${count} selected repositories fit within the ${maxCount}-runner maximum.` }),
+  defaultForPlan: true,
+  async load(_context, signal) {
+    const { items } = await getRunnerPoolRepositories(signal);
+    return items.map((repository, index) => ({
+      key: repositoryKey(repository.id),
+      kindId: REPOSITORY,
+      connectionId: String(repository.installationId),
+      nativeId: String(repository.id),
+      label: repository.fullName,
+      description: `${repository.accountLogin} · ${repository.private ? "Private" : "Public"}`,
+      group: REPOSITORY_GROUP,
+      loadIndex: index,
+    }));
+  },
+};
+
+const runnerGroupKind: TargetKind = {
+  id: RUNNER_GROUP,
+  label: "Organization runner group",
+  group: RUNNER_GROUP_GROUP,
+  cardinality: "one",
+  standalone: true,
+  excludes: [REPOSITORY],
+  exclusionReason: "Can’t combine with a runner group",
+  available: installationsAvailable,
+  notConnected: "Install the GitHub App first",
+  offered: (context) => context.form === "create" || context.pool.scope === "organization",
+  planNote: () => ({ ok: true, text: RUNNER_GROUP_SENTENCE }),
+  manualEntry: {
+    label: "Runner group ID",
+    parse: (input, connectionId) => {
+      const id = Number(input);
+      return Number.isInteger(id) && id > 0 ? `${connectionId}/${id}` : null;
+    },
+    initialValue: (context) => String(context.form === "create" ? context.options.defaults?.runnerGroupId ?? 1 : context.pool.runnerGroupId),
+  },
+  async load(context, signal) {
+    // Pool settings keep the pool's installation; a new pool may use any organization installation.
+    const installations = context.form === "create"
+      ? context.options.installations
+      : [{ id: context.pool.installationId, accountLogin: context.pool.accountLogin }];
+    const groups = await Promise.all(installations.map((installation) => installationRunnerGroups(installation, signal)));
+    return groups.flat().map((option, index) => ({ ...option, loadIndex: index }));
+  },
+};
+
+function repositorySelection(pool: RunnerPoolDetail): TargetOption[] {
+  return pool.repositoryIds.map((id) => {
+    const repository = pool.repositories.find((candidate) => candidate.id === id);
+    return {
+      key: repositoryKey(id),
+      kindId: REPOSITORY,
+      connectionId: String(repository?.installationId ?? pool.installationId),
+      nativeId: String(id),
+      label: repository?.fullName ?? `Repository ${id}`,
+      description: repository ? `${repository.accountLogin} · ${repository.private ? "Private" : "Public"}` : undefined,
+      group: REPOSITORY_GROUP,
+    };
+  });
+}
+
+function selectedIds(selection: ResolvedSelection) {
+  return (selection[REPOSITORY] ?? []).map((option) => Number(option.nativeId));
+}
+
+function InstallationAside({ installation }: { installation: Installation }) {
+  return installation.permission === "admin" ? (
+    <a className={buttonVariants({ size: "sm", variant: "ghost" })} href={installation.manageUrl} rel="noreferrer" target="_blank">Configure<ExternalLink /></a>
+  ) : <span className="text-xs text-faint">Owner approval required</span>;
+}
+
+export const githubPlatform: PlatformDescriptor = {
+  id: "github",
+  name: "GitHub",
+  icon: Github,
+  badgeDotClassName: "bg-foreground",
+  connections: {
+    // Installations come from the `/settings` page data: no second fetch, nothing to retry.
+    list: {
+      kind: "page",
+      read: (page) => ({ canManage: page.data?.user.role === "admin", items: page.data?.installations ?? [] }),
+    },
+    describe: (item) => {
+      const installation = item as Installation;
+      return {
+        id: String(installation.id),
+        name: installation.accountLogin,
+        leading: <Avatar name={installation.accountLogin} size={28} square src={installation.accountAvatarUrl} />,
+        badges: (
+          <>
+            <span className="text-xs text-faint">{installation.accountType}</span>
+            {installation.suspended ? <Badge variant="destructive">Suspended</Badge> : null}
+          </>
+        ),
+        detail: <>{installation.repositorySelection === "all" ? "All repositories" : "Selected repositories"} · {installation.poolCount} {installation.poolCount === 1 ? "pool" : "pools"}{installation.lastSyncedAt ? ` · synced ${formatRelativeTime(installation.lastSyncedAt)}` : ""}</>,
+        aside: <InstallationAside installation={installation} />,
+      };
+    },
+    emptyText: (page) => page.data ? `No installations are visible to @${page.data.user.login}.` : "Sign in to see GitHub installations.",
+  },
+  targetKinds: [repositoryKind, runnerGroupKind],
+  runnerLink: (runner) => runner.repository && runner.githubRunnerId !== null
+    ? { href: `https://github.com/${runner.repository}/settings/actions/runners/${runner.githubRunnerId}`, label: "Open on GitHub" }
+    : null,
+  toCreatePayload(selection) {
+    const group = selection[RUNNER_GROUP]?.[0];
+    if (group) {
+      const { installationId, groupId } = runnerGroupParts(group);
+      return { installationId, scope: "organization", repositoryIds: [], runnerGroupId: groupId || 1 };
+    }
+    const repositories = selection[REPOSITORY] ?? [];
+    // The installation is the first selected repository's in the loaded list's order, as today;
+    // repositories from other installations may still be selected together.
+    const first = [...repositories].sort((a, b) => (a.loadIndex ?? 0) - (b.loadIndex ?? 0))[0];
+    return {
+      installationId: first ? Number(first.connectionId) : 0,
+      scope: "repository",
+      repositoryIds: repositories.map((option) => Number(option.nativeId)),
+      runnerGroupId: 1,
+    };
+  },
+  toUpdatePayload(selection, pool, values) {
+    if (pool.scope === "repository") {
+      const repositoryIds = selectedIds(selection);
+      const selected = selection[REPOSITORY] ?? [];
+      const priorityRepositoryIds = values.priorityKeys
+        .map((key) => selected.find((option) => option.key === key))
+        .filter((option): option is TargetOption => option !== undefined)
+        .map((option) => Number(option.nativeId))
+        .filter((id) => repositoryIds.includes(id));
+      return { repositoryIds, priorityRepositoryIds, priorityWaitMinutes: values.priorityWaitMinutes, runnerGroupId: 1 };
+    }
+    const { groupId } = runnerGroupParts(selection[RUNNER_GROUP]?.[0]);
+    return {
+      repositoryIds: undefined,
+      priorityRepositoryIds: undefined,
+      priorityWaitMinutes: undefined,
+      runnerGroupId: groupId || pool.runnerGroupId,
+    };
+  },
+  initialSelection: (pool) => pool.scope === "repository"
+    ? { [REPOSITORY]: repositorySelection(pool) }
+    : {
+      [RUNNER_GROUP]: [{
+        key: runnerGroupKey(`${pool.installationId}/${pool.runnerGroupId}`),
+        kindId: RUNNER_GROUP,
+        connectionId: String(pool.installationId),
+        nativeId: `${pool.installationId}/${pool.runnerGroupId}`,
+        label: `${pool.accountLogin} · Runner group ${pool.runnerGroupId}`,
+        group: RUNNER_GROUP_GROUP,
+      }],
+    },
+  initialPriorityKeys: (pool) => pool.scope === "repository" ? pool.priorityRepositoryIds.map(repositoryKey) : [],
+  readOnlySummary: (pool) => pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.accountLogin,
+  prerequisiteEmptyState(context) {
+    if (context.form !== "create") return null;
+    const { options } = context;
+    if (!options.authenticated || !options.defaults) {
+      return {
+        icon: Github,
+        title: "Connect GitHub first",
+        description: "GridOps needs an authorized GitHub App installation before it can create a repository or organization runner pool.",
+        action: { label: "Connect GitHub", href: "/auth/github?returnTo=/runner-pools/new" },
+      };
+    }
+    if (options.installations.length === 0) {
+      return {
+        icon: Github,
+        title: "Install the GitHub App",
+        description: "Choose the account and repositories GridOps may operate, then come back here and refresh GitHub access.",
+        action: { label: "Install GridOps on GitHub", href: options.installUrl },
+      };
+    }
+    return null;
+  },
+  externalLinks: (page) => page.data?.githubApp
+    ? [{ label: "Install", href: page.data.githubApp.installUrl }, { label: "Manage App", href: page.data.githubApp.appUrl }]
+    : [],
+};

@@ -12,20 +12,19 @@ export function PoolPlanPreview({
   labels,
   desiredCount,
   maxCount,
-  repositoryCount,
-  scope,
+  targetCheck,
 }: {
   name: string;
   providers: Provider[];
   labels: string[];
   desiredCount: number;
   maxCount: number;
-  repositoryCount: number;
-  scope: "repository" | "organization";
+  /** Whether the pool's targets fit, in one sentence; computed from the target kinds by the form. */
+  targetCheck: { ok: boolean; text: string };
 }) {
   const normalizedName = name.trim();
   const customLabels = labels.filter(Boolean);
-  const repositoryCapacityOk = scope === "organization" || repositoryCount <= maxCount;
+  const repositoryCapacityOk = targetCheck.ok;
   const ready = Boolean(normalizedName) && providers.length > 0 && repositoryCapacityOk;
   return (
     <div className="space-y-3">
@@ -47,7 +46,7 @@ export function PoolPlanPreview({
         ))}
       </div>
       <div className="space-y-1 text-xs">
-        <PlanCheck ok={repositoryCapacityOk} text={scope === "organization" ? "GitHub runner-group access defines which repositories can use the pool." : `${repositoryCount} selected repositories fit within the ${maxCount}-runner maximum.`} />
+        <PlanCheck ok={targetCheck.ok} text={targetCheck.text} />
         <PlanCheck ok={desiredCount <= maxCount} text={`${desiredCount} runners targeted now; autoscaling may grow to ${maxCount}.`} />
       </div>
       <p className="text-2xs leading-4 text-faint">This preview reserves nothing; host capacity is checked right before each runner starts.</p>

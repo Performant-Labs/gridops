@@ -116,3 +116,32 @@ Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory
   - After the change, `npx vitest run --reporter=json` gave 405 tests, 360 passed and 45 failed, summarised per test in the handoff.
   - `npm run lint` exited 0.
   - `npx vite build`, then `tsc --noEmit`, failed only with TS2307 for the new modules and the implicit-`any` errors that follow from them.
+
+## F (Feature Implementor, Phase 6) - 2026-11-20T14:02:00-08:00
+- **Decided:**
+  - Implemented the whole story in one pass, without proposing a scope-cap split. The work spans about 26 production files and three surfaces (the Connections page, the pool forms and the runner row), but:
+    - T's RED suite is one contract over all of them;
+    - A passed the plan as one unit;
+    - the brief is fully specified.
+    A split would have left part of the suite RED at the Phase-7 GREEN gate. This is judgment under the role doc's "use judgment" clause, recorded here for O.
+  - Followed the brief's Reuse map: EXTEND `SearchableMultiSelect` (optional fields plus a `groups` prop), extract `SecretDialog` into `SecretRevealDialog`, export `bitbucketLabelError` from `schemas.ts`, and move the Bitbucket and GitHub page logic. NEW only where the map says NEW.
+  - Applied the round-4 A warns as the reading of the binding round-3 block:
+    - `TargetOption.loadIndex` (two orders);
+    - `TargetKind.offered(context)` in place of a static `offeredIn`;
+    - `manualEntry.parse(input, connectionId)`;
+    - the route owns the single member-only Read-only callout;
+    - the Installations description is kept in the GitHub App section;
+    - neutral `TargetUpdateValues` (`priorityKeys`, `priorityWaitMinutes`).
+  - `TargetKind.limit` takes `TargetLimits` (`{ maxCount }`, the live Maximum field) rather than `context`, because `TargetContext` holds loaded data only.
+- **Assumed:**
+  - On settings, Bitbucket targets are locked chips that are not listed in the picker (the test pins that they are not options).
+  - The settings labels row stays as today: the old settings form never varied it by platform.
+  - The `tart` auto-add applies on the create form only, as before.
+- **Hedged:**
+  - These are verified under Vitest/jsdom only, with no browser run: the per-kind picker statuses, the Add connection dialog's Back button and the runner details "CI platform" link. The Playwright walkthrough criterion is still open for T/U.
+- **Evidence:**
+  - `npm run build`, `npm run lint` and `npm run typecheck` all exit 0.
+  - `npx vitest run` gives 46 files, 445/445 passing.
+  - The brief's redirect grep, the `appError` grep and the generic-files grep print nothing beyond what is allowed.
+  - `git diff b8cbf8d --stat -- tests` is empty.
+  - Handoff: `docs/handoffs/145/handoff-F.md`. Evidence: `docs/handoffs/145/evidence.md`. Survey: `docs/handoffs/145/survey.md`.

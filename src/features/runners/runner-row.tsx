@@ -9,6 +9,7 @@ import { Dialog, DialogTrigger, SheetContent } from "~/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
 import { Tooltip } from "~/components/ui/tooltip";
 import type { Runner, RunnerMachine } from "~/features/operations/operations.functions";
+import { getPlatform } from "~/features/platform-connections/registry";
 import { runnerAction } from "~/features/runner-pools/runner-pools.functions";
 import { useAction } from "~/lib/use-action";
 import { cn, formatAge } from "~/lib/utils";
@@ -39,6 +40,7 @@ function RunnerDetails({ runner }: { runner: Runner }) {
   const rows: Array<[string, React.ReactNode]> = [
     ["Status", statusLabel(state)],
     ["Platform", runnerPlatformLabel(runner)],
+    ["CI platform", <RunnerCiPlatform runner={runner} />],
     ["Runs on", runner.machine ? <MachineLink className="-ml-1.5" machine={runner.machine} /> : "The GridOps host"],
     ["Pool", <Link className="underline-offset-2 hover:underline" params={{ poolId: runner.poolId }} to="/runner-pools/$poolId">{runner.poolName}</Link>],
     ["Repository", runner.repository ?? runner.accountLogin],
@@ -76,6 +78,21 @@ function RunnerDetails({ runner }: { runner: Runner }) {
   );
 }
 
+/** The CI platform the runner registers with, from the platform registry, with its page there when the platform links one. */
+function RunnerCiPlatform({ runner }: { runner: Runner }) {
+  const platform = getPlatform(runner.platform);
+  const link = platform.runnerLink?.(runner) ?? null;
+  return link
+    ? <a className="underline-offset-2 hover:underline" href={link.href} rel="noreferrer" target="_blank">{platform.name}</a>
+    : platform.name;
+}
+
+/** The runner's CI platform as a badge, named and styled by the platform registry. */
+function CiPlatformBadge({ runner }: { runner: Runner }) {
+  const platform = getPlatform(runner.platform);
+  return <Badge className="relative hidden sm:inline-flex" dot={platform.badgeDotClassName ?? "bg-faint"} variant="outline">{platform.name}</Badge>;
+}
+
 export function runnerState(runner: Runner) {
   return runner.busy ? "busy" : runner.status;
 }
@@ -92,6 +109,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
         <span className="block truncate text-2xs text-muted-foreground md:hidden">{runner.currentJobName ?? runner.repository ?? runner.accountLogin}</span>
       </span>
       <Badge className="hidden sm:inline-flex" dot={runner.provider === "tart" || runner.machine?.os === "macos" ? "bg-[#bb87fc]" : runner.machine?.os === "windows" ? "bg-warning" : "bg-info"}>{runnerPlatformLabel(runner)}</Badge>
+      <CiPlatformBadge runner={runner} />
       {runner.ephemeral ? null : <Badge className="hidden md:inline-flex" variant="outline">persistent</Badge>}
       {runner.currentJobName ? (
         runner.currentRunId ? (
@@ -118,7 +136,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
 export function RunnerActionsMenu({ runner }: { runner: Runner }) {
   const run = useAction();
   const control = runnerAction;
-  const platform = runner.platform === "bitbucket" ? "Bitbucket" : "GitHub";
+  const platform = getPlatform(runner.platform).name;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
