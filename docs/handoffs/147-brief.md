@@ -105,3 +105,30 @@ The docs (`docs/fleet-agent.md` and the header comment of `compose.no-docker-soc
 ### W-8: a separate GitLab script
 
 The GitLab runner script is its own function in `provisioning.rs` (for example `gitlab_runner_script(url, wait_timeout_seconds, job_image) -> String`), not a wrapper around the GitHub-specific `instrumented_runner_script`; `gitlab-runner` output goes to the container's stdout/stderr so `docker logs` shows it. `url` is shell-quoted safely (test with a URL containing quotes/spaces is refused or quoted). The GitLab branch **skips** the GitHub shared work folder: the Docker executor keeps builds inside its own job containers and volumes, so no host path mapping is needed.
+
+## Amendments (architecture review R2)
+
+Where this section and the text above differ, this section wins.
+
+### B-2 (R2 block): Start fits inside the reconciler's start deadline
+
+- `provisioning.rs` pins `pub const GITLAB_START_READY_TIMEOUT_SECS: u64 = 15;` (the bounded wait of the fleet Start for the readiness marker or an exit) and `pub const GITLAB_VERIFY_MAX_TIME_SECS: u32 = 10;` (the verify `curl --max-time`). Their doc comment cites `START_COMMAND_DEADLINE_MILLIS` (30 s, `gridops-reconciler/src/fleet.rs`) and `DELIVERY_MARGIN_MILLIS` (5 s), and explains that create + stdin feed + wait must finish under 30 s − 5 s. A test pins both values. `START_COMMAND_DEADLINE_MILLIS` is not changed.
+- A verify that times out, fails to connect or gets a non-200/non-403 answer exits with a pinned distinct code `GITLAB_EXIT_VERIFY_UNAVAILABLE` (a constant in `provisioning.rs`, not in `GITLAB_EXIT_REASONS`, not 0/75/77), which Start reports as today's retryable runtime failure. The ready wait timing out is also today's retryable runtime failure.
+- The "60 s" example above is withdrawn.
+
+### W-2: compile-forced fallout is owned
+
+Adding `diagnostic` to `HelperResponse::Failed` is mechanical fallout at every struct literal of that variant; all are in Owns, each gaining only `diagnostic: None` (or `..` in patterns): `helper.rs`, `docker.rs`, `native.rs`, `runtime.rs`, `crates/gridops-host-agent/tests/docker_runtime.rs`, `crates/gridops-host-agent/tests/dispatch.rs`, and `crates/gridops-api/tests/fleet_http/placement.rs` (test-only, mechanical; this is the one exception to the "don't edit the API crate" boundary, and no wave-1 issue owns that file). Constructor helpers may be used instead of literals where that is simpler.
+
+### W-3: non-secret values as env vars
+
+Like `GRIDOPS_REGISTRATION_URL` today, the GitLab URL, wait timeout and job image reach the script as fixed-name environment variables (for example `GRIDOPS_GITLAB_URL`, `GRIDOPS_GITLAB_WAIT_TIMEOUT`, `GRIDOPS_GITLAB_JOB_IMAGE`) on both the fleet and manager paths; the script text is constant and contains no interpolated values. The token is never an env var. The W-8 shell-quoting requirement is replaced by this.
+
+### W-4: deviation D147-2
+
+A late exit 77 (after a successful Start) is reported on Inspect as `Failed { ResourceUnavailable, retryable: false, diagnostic: Some(RegistrationRefused) }`, so `reported_gone` still cleans it up. This contradicts the `DiagnosticCode::RegistrationRefused` doc comment (`outcomes.rs`, "Carried in Failed { Configuration }"). Recorded as deviation **D147-2** in the PR and on #136. #147 updates **only that doc comment's text** to say it is carried in `Failed { Configuration }` on Start and `Failed { ResourceUnavailable }` on Inspect; no type, variant or wire value changes. #139 has been told and treats the Inspect case as a failure.
+
+### W-5: Docker executor leftovers
+
+- The runner runs with the Docker executor's cache volumes disabled (`--docker-disable-cache`), so a runner leaves no cache volumes on the host daemon.
+- Job and helper containers are created and removed by `gitlab-runner` itself during a normal job. Containers orphaned when Stop/Cleanup kills the runner mid-job are a **known gap deferred to #143**, which runs against a real GitLab and can confirm the labels `gitlab-runner` puts on them before a cleanup filter is written. Recorded in the PR and in `docs/fleet-agent.md`.
