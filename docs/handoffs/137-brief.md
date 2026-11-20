@@ -551,6 +551,17 @@ All of this was verified in this worktree.
   - The fake's token `glrt-fake-runner-token-0001` has 22 characters after `glrt-`, so it is masked too.
 - **NV-14.** Settled by B-4 above, which tested it against the locked serde versions.
 
+## Carried findings closed (brief review, rounds 1 to 3)
+
+Round 1 of the brief review printed five findings under its BLOCK heading and then withdrew each one in its own text ("No block. Retract."). Its summary line read "After retractions, the real blocks are B-1, B-3, B-4, B-6, B-7, B-9." Those six were marked resolved in round 3, which ended "PASS — no BLOCK findings". The five withdrawn items were never marked resolved, though, so they were carried forward as still blocking. This section closes each one, so a reviewer can list it under Resolved findings.
+
+- **Round-1 B-2** (the `fleet_ci_targets` rebuild and the "unchanged `pragma_foreign_key_list`" assertion for its seven referencing tables). The seven referencing tables are not rebuilt. Their FK clauses name `fleet_ci_targets(id)`, a text primary key, and the rebuild keeps every `id` value. So their `pragma_foreign_key_list` output is unchanged and every reference still resolves. The `fleet_ready.sql` upgrade test in "Done-when, extended for A-1" asserts both. **Resolved.**
+- **Round-1 B-5** (`GitlabRunnerMaterial.token` is a `String`, not a `SecretString`). This is deliberate. The material has to serialize to the pinned JSON, and the existing host-agent `Material` types also carry the token as a `String`. The hand-written `Debug` redacts it, and the `glrt-` prefix is added to `SECRET_PREFIXES`. **Resolved.**
+- **Round-1 B-8** (`IdleExpired` and `RegistrationRefused` pinned as `DiagnosticCode` variants, while the issue text names no owning enum). W-4 is a clarification, not a contradiction. Its wire names are `idle_expired` and `registration_refused`, it is recorded as deviation D5, and it keeps `placement::reported_gone` unchanged. **Resolved.**
+- **Round-1 B-10** (`canonical_key` is infallible). Each GitLab arm returns a real key, `gitlab:project:{connection_id}:{project_id}` or `gitlab:group:{connection_id}:{group_id}`. The key is `NOT NULL UNIQUE`, the shape CHECK requires the id to be > 0, and no error path is needed. **Resolved.**
+- **Round-1 B-11** (the `runners` rebuild order and its inbound FKs). With `foreign_keys` OFF, `DROP TABLE runners` doesn't cascade into `runner_events`. After `ALTER TABLE runners_new RENAME TO runners`, the inbound FKs from `runner_events`, `log_streams` and `workload_placements` still name `runners`. The guard runs `pragma_foreign_key_check` before `COMMIT` and fails the migration on any dangling reference. **Resolved.**
+- **Round-1 summary line** ("After retractions, the real blocks are B-1, B-3, B-4, B-6, B-7, B-9"). This is a summary, not a finding. Its six items are resolved in "Amendments (brief review, round 1)", and round 3 listed them as R-1 to R-6. **Resolved.**
+
 ## Source material read
 - crates/gridops-core/src/fleet/domain.rs
 - migrations/0046_gitlab.sql (not found)
