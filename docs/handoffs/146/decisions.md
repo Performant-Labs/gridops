@@ -58,3 +58,23 @@
   - I ran 17 single mutations of that draft (listed in `handoff-T-red.md`). Each one turns at least one test red, and none hangs.
   - I fixed two invalid tests along the way. The later-page test passed against the stub; it now asserts page 2 was reached. The page-cap test hung when the cap was removed; its mock now stops at page 1001.
   - A 1000-page cap runs in 0.36s.
+
+## F (Phase 6, implementation): 2026-11-20T15:42:47-08:00
+- **Decided:** I implemented `GitLabClient` in `crates/gridops-core/src/gitlab/http.rs` and added `pub mod http;` and `pub use http::GitLabClient;` to `gitlab/mod.rs`. All 18 of T's unit tests are GREEN, and the live test compiles and is listed as ignored.
+  - I took A's pins: `#[derive(Debug, Clone)] GitLabClient { http }` with `new() -> anyhow::Result<Self>`, the `send`/`error_for`/`get_json`/`get_all_pages` seam with 404 checked before mapping in `delete_runner`, and the constants 10s, 30s and `MAX_PAGES` = 100.
+  - **`MissingScope` is sanitised.** A 403 body's `scope` is repeated only if it matches `[a-z_ ]{1,64}`; otherwise it is reported as `api`.
+  - **`resolve_scope(Group)` sends `with_projects=false`.**
+  - **No logging** in `http.rs`.
+- **Assumed:**
+  - GitLab's `insufficient_scope` `scope` field is a short space-separated list of scope names. A real value outside `[a-z_ ]` would be reported as `api`, which is still a correct "missing scope" signal.
+  - `with_projects=false` is still honoured by GitLab v4. It is deprecated, not removed.
+- **Hedged:**
+  - The live test was not run, because there is no `GITLAB_TEST_TOKEN`.
+  - `cargo clippy --all-targets -D warnings` still fails on `autoscaling.rs:1615/1701`. Those failures were already there and are outside #146; I left them for O.
+  - Production wiring of `GitLabClient` is still unowned (A-W1, epic-level).
+- **Evidence:**
+  - `cargo test -p gridops-core`: the lib has 279 passed, and every integration binary is ok.
+  - `cargo fmt --all --check` is clean.
+  - `cargo clippy -p gridops-core --lib -D warnings` is clean.
+  - `cargo check --workspace --all-targets` is clean.
+  - The facts this relies on in unchanged code are in `docs/handoffs/146/evidence.md`.
