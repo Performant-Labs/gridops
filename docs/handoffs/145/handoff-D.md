@@ -1,11 +1,19 @@
-# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI (revision 3)
+# Handoff-D: Phase 3 - Design (wireframe) for #145 platform-neutral UI (revision 4)
 
 **Date:** 2026-11-20
 **Branch:** claude/ui-145-platform-neutral-cf5832
 **Mode:** (a) generated low-fi
 **Wireframe:** docs/handoffs/145/wireframe.html (single static HTML file, frames A-G, numbered annotations per frame)
-**Revision:** 3 (this pass; the REV3 list is below). Revision 2 follows.
+**Revision:** 4 (this pass; the REV4 list is below). Revisions 3 and 2 follow.
 **Revision 2:** Revision 1 (commit 8526086) was BLOCKed in Phase 4 (handoff-A.md) and the brief was amended afterwards. This pass amends the wireframe where the amended brief and the review require it; where the wireframe and the brief disagree, the brief wins. Revised or added items carry a `REV2` tag in the file.
+
+## Revision 4 changes (after the Phase-4 round-3 BLOCK and the round-3 brief amendments)
+Edited in place; each change carries a `REV4` tag in the file. The brief wins on any difference.
+- **Installations rendered once (B1, new B1b, B4, B note 5, B note 1).** Installations are GitHub rows in the connections list only. The GitHub App section (`GitHubAppSection`, props `configuration`, `githubApp`, `user`) holds the Connection checks, the Endpoints, the Create form (admin, App not configured) and the "Adding another GitHub account" callout. Refresh access, Install and Manage App (admin only) are its header actions. The Install label is now today's `Install` (was "Install on another account"). The empty text `No installations are visible to @{login}.` is drawn in new frame B1b as the GitHub descriptor's empty row.
+- **Member visibility (B4 redrawn).** A member sees one Read-only access callout, the list, and the GitHub App section with the checks, endpoints, Refresh access and Install, with no Create section and no Manage App. This supersedes the old B4 / note 5 ("no GitHub App section"), as the brief says. GitHub rows now come before Bitbucket (registry order) in B4.
+- **Mutations (B note 3, C3, C note 3-4).** Add and Edit keep their inline errors; only Remove reports a failure by toast; after any of them only that platform's list reloads. The create success toast keeps today's wording (`Bitbucket workspace connected.`), supplied by the descriptor, instead of the invented `{platform name} connected.`.
+- **Targets (D notes 2, 3, 7, 8, 9; D4).** Option keys are unique within a kind across connections (runner group = installation id plus group id); the manual "Runner group ID" entry is per installation ("{account} - Enter runner group ID"); "first selected repository" means first in the loaded list's order, not click order; the resolved selection, not picker-private state, feeds the payload and the Priority section; the plan sentence's text and ok state depend on count and maximum, and an empty form uses the repository sentence; the Maximum floor counts repositories only (flag `raisesMinMaxCount`).
+- **Named descriptor fields.** `externalLinks` (C2, B1 Configure), `prerequisiteEmptyState` (D5), `offeredIn` (E), `readOnlySummary(pool)` (E3), `labelsPlaceholder` (F note 1; keeps today's provider-based placeholders, Bitbucket overrides with `build, release.ios`).
 
 ## Revision 3 changes (after the Phase-4 round-2 review and the brief amendments)
 Edited in place; each change carries a `REV3` tag in the file. The brief wins on any difference.
@@ -28,9 +36,9 @@ Edited in place; each change carries a `REV3` tag in the file. The brief wins on
 
 - **A. Settings nav + redirects.** "Connections" replaces the GitHub and Bitbucket items; AI agent kept. Table of the four redirects (`/settings/integrations`, `/settings/github`, `/platform-connections`, `?appError=`) and the pool-form link, each pointing straight at `/settings/connections`.
 - **B. Connections page (`/settings/connections`).**
-  - B1 many (GitHub installations + Bitbucket workspaces in one list: badge, name, detail, status, actions; suspended installation; GitHub App section kept for admins).
+  - B1 many (GitHub installations + Bitbucket workspaces in one list: badge, name, detail, status, actions; suspended installation; GitHub App section below with Refresh access / Install / Manage App actions, no installations list). B1b (REV4): App configured, zero installations, another platform has rows: GitHub empty row `No installations are visible to @{login}.`.
   - B2 one. B3 empty: guides to Add connection for admins; read-only variant says "A GridOps administrator can add platform connections."
-  - B4 read-only: no Add, no Edit/Remove, no App section.
+  - B4 read-only member (REV4): one Read-only callout, no Add, no Edit/Remove; GitHub App section with checks, endpoints, Refresh access and Install; no Create, no Manage App.
   - B5 loading and per-platform load error with Retry; B5b partial failure (one platform fails, the other renders; Retry re-runs only the failed load).
   - B6 inline edit (editable-on-update fields only, blank secret keeps the current one, error and saving states).
   - B7 GitHub App not configured (existing create form).
@@ -69,12 +77,15 @@ The pipeline has no interactive operator, so each question has a default that pr
 6. **GitHub in the Add connection chooser** is a link-out (install the GitHub App), because GitHub has no create endpoint; disabled with pointing copy when the App is not configured.
 7. **D7 error wording.** The message in the "Could not create the pool" callout is whatever `parseCreateRunnerPoolInput` throws for `installationId: 0`; it is not friendly and is not designed here, because improving it needs a `schemas.ts` rule change that the brief rules out for this story. Default: show the thrown message, as today.
 8. **Read-only pool targets (E3).** Default drawn: the existing summary text per kind (`2 repositories`, or the account name for an organization pool) behind a platform badge, plus a Bitbucket line when the pool has workspaces (a small truthful addition: today's read-only view omits them). Alternative: keep the single old "Destination" line unchanged.
+9. **Wholly empty list vs the GitHub empty text (REV4).** The brief makes `No installations are visible to @{login}.` a GitHub descriptor row but does not say what shows when nothing at all is listed. Default drawn: the generic empty state B3 when no platform has any row; the GitHub empty row (B1b) only while another platform has rows, and only when the App is configured.
+10. **Members and the "Adding another GitHub account" callout / Refresh / Install (REV4).** The brief lists what members see as checks, endpoints and one Read-only callout, and says it "preserves today's page". Default drawn: members also keep Refresh access, Install and the "Adding another GitHub account" callout, because today's page gates none of them; only Create and Manage App are admin-only.
+11. **Where the three App actions sit (REV4).** Drawn in the header of the section's first `SettingsSection` (Connection), since `GitHubAppSection` is several sections and the brief gives them as `SettingsSection` actions without naming which.
 
 Icons are Unicode glyphs only (no hand-drawn SVG geometry). Real icon components (lucide, as used elsewhere) are an implementation choice; the wireframe's glyphs are placeholders.
 
 ## Verification of the render
 
-Revision 3 re-rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the legend, A, B2-B4, B7, C1 and C4 frames, which hold every REV3 change: the new text fits, the C4 button and placeholders are complete and on-canvas, div balance 442/442. Frames B1/B5 and D-G were not touched in revision 3 and were not re-inspected. Revision 2 was rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the changed and added frames (legend, A, B5/B5b, C2-C4, D1-D7, E1-E3, F1) in the screenshot: glyphs are complete and on-canvas, no clipped controls, div balance 441/441. Frames G and F2-F4 were not changed and were not re-inspected in this pass (revision 1 inspected them). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
+Revision 4 re-rendered headlessly (Chrome `--headless=new` screenshot, no visible window; frame B and the legend) and inspected: the Revision 4 legend, B1 (the App block's header actions first wrapped to three lines, fixed with a shorter caption and no-wrap actions, re-rendered and re-inspected), B1b, B3, B4, B5-B7 and the B notes are complete and on-canvas; div balance 470/470. The D, C, E and F text edits are annotation text only (notes and captions, no new glyphs or controls except the D4 caption) and were not re-rendered; their HTML tag balance was checked. Revision 3 re-rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the legend, A, B2-B4, B7, C1 and C4 frames, which hold every REV3 change: the new text fits, the C4 button and placeholders are complete and on-canvas, div balance 442/442. Frames B1/B5 and D-G were not touched in revision 3 and were not re-inspected. Revision 2 was rendered headlessly (Chrome `--headless=new` screenshot, no visible window) and inspected the changed and added frames (legend, A, B5/B5b, C2-C4, D1-D7, E1-E3, F1) in the screenshot: glyphs are complete and on-canvas, no clipped controls, div balance 441/441. Frames G and F2-F4 were not changed and were not re-inspected in this pass (revision 1 inspected them). Not checked: dark theme and narrow/mobile widths (low-fi gate; layouts reuse `SettingsRow`, which already stacks on narrow screens).
 
 ## Approval
 
