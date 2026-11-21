@@ -26,3 +26,19 @@
 - **Assumed:** the wireframe's copy defaults are approved, as A recorded, even though handoff-D's approval line is unfilled. That copy is "—"/"Unknown destination", "GitLab", "N connections", "No connections listed", Scope "Unknown", and the partial-data rules. Bitbucket list items are GitHub-scoped `organization` pools (`RunnerPool` carries no Bitbucket fields).
 - **Hedged:** "single batched query" is pinned structurally (two GitLab pools are each grouped correctly from one page load) and not by counting queries, per A's warn 3. Satisfiability was checked with throwaway sketches: the frontend in a scratch copy outside the worktree, and the backend in the worktree, reverted with `git checkout --`. All new tests passed against the sketches except the "GitLab has one home" guard, which tripped only because the sketch put the GitLab code outside `gitlab.tsx`.
 - **Evidence:** the baseline (`npx vitest run`) was 548/548. After this phase: 26 failed and 556 passed, and every failure is a new test. Rust: `left: None` for `gitlabConnections` at gitlab_tests.rs:2153. eslint on tests is clean, `tsc` shows no error under tests/, `cargo fmt --check` passes, and clippy shows no finding in gitlab_tests.rs (the other clippy findings predate this change). Advisory for O: `runner_pools` reports `totalRunners: 1` for a pool with no runners (LEFT JOIN count). This predates #159 and is not in scope.
+
+## Phase 6 Implementation (F) - 2026-11-21T01:18:20-08:00
+- **Decided:** One optional `pool?: { scopes, destination, Destination }` key on `PlatformDescriptor` (A warn 1).
+  - GitHub owns `repository`/`organization`, GitLab owns `gitlab`, and Bitbucket declares none.
+  - `platformForPool` returns a descriptor whose `pool` is always present. For an unknown scope that is a registry-owned fallback ("—"/"Unknown destination"/placeholder; Scope "Unknown"), which never reads `name` and so never echoes the raw scope (A warn 2).
+  - Both routes call the hooks unconditionally, and `RepositoryList` moved to `github.tsx`.
+  - API: `pools_gitlab_connections` is one `json_each(?)` query sharing the detail's SELECT/JOIN and ORDER constants, and `runner_pools` adds `gitlabConnections` (`[]` when a pool has none).
+- **Assumed:** The scope cap does not apply. The change spans 9 files on two surfaces, but the brief, A and T planned it as one unit, T's RED spans both layers, and it is one defect, not a polish batch. The GitLab detail chip's `title` (name, then address) is decorative and the tests do not read it.
+- **Hedged:** One `fleet_http` test (`release_preflight…without_a_macos_arm64_machine`) fails locally because the fixture agent reports the host's compile OS (macOS here). It predates this change and is unrelated: the preflight script never reads `/runner-pools`. The clippy findings are the pre-existing set T recorded.
+- **Evidence:**
+  - vitest: 52 files, 582/582 (targeted: 45/45).
+  - eslint: clean.
+  - `npm run build` + tsc: exit 0.
+  - `cargo test -p gridops-api the_pool_list_carries`: 1 passed. Full `gridops-api` suite: 123 + 36 + 143 passed, plus the 1 environment-dependent failure above.
+  - `cargo fmt --check`: exit 0.
+  - clippy: no finding in the changed Rust files.

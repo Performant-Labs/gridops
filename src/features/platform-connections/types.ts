@@ -9,7 +9,7 @@ import type { LucideIcon } from "lucide-react";
 
 import type { ConfirmOptions } from "~/components/confirm-dialog";
 
-import type { Runner, SettingsPage } from "~/features/operations/operations.functions";
+import type { Runner, RunnerPool, SettingsPage } from "~/features/operations/operations.functions";
 import type { RunnerPoolDetail, RunnerPoolOptions } from "~/features/runner-pools/runner-pools.functions";
 
 // ---- Connections -------------------------------------------------------------------------------
@@ -205,6 +205,30 @@ export type TargetKind = {
   defaultForPlan?: boolean;
 };
 
+// ---- Pools -------------------------------------------------------------------------------------
+
+/** What the pool list's destination cell shows for a pool, in the style of `ConnectionRowView`. */
+export type PoolDestinationView = {
+  text: string;
+  /** The cell's tooltip: the full destination when `text` shortens it. */
+  title: string;
+  /** Shown before the text (e.g. an avatar or the platform icon). */
+  leading?: ReactNode;
+};
+
+/**
+ * Where a platform's pools register their runners. A platform that owns a pool scope supplies
+ * both renderers, so the pool list and the pool detail never branch on a platform.
+ */
+export type PoolBindings = {
+  /** The pool scopes (`RunnerPool.scope`) this platform owns. No two platforms own the same scope. */
+  scopes: readonly string[];
+  /** The pool list's destination cell. */
+  destination: (pool: RunnerPool) => PoolDestinationView;
+  /** The rows of the pool detail's Destination group. */
+  Destination: ComponentType<{ pool: RunnerPoolDetail }>;
+};
+
 // ---- Descriptor --------------------------------------------------------------------------------
 
 /**
@@ -282,4 +306,6 @@ export type PlatformDescriptor = {
   readOnlySummary?: (pool: RunnerPoolDetail) => string | null;
   /** What the new-pool page shows while this platform's standalone kinds are unavailable. */
   prerequisiteEmptyState?: (context: TargetContext) => PrerequisiteEmptyState | null;
+  /** The pool scopes this platform owns and how their destination shows; none for a platform whose pools ride on another's scope. */
+  pool?: PoolBindings;
 };

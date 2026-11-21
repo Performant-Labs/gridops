@@ -1352,8 +1352,14 @@ pub async fn runner_pools(
     let blocked_pools = gridops_core::builtin_host::blocked_pool_ids(&state.database)
         .await
         .map_err(ApiError::Internal)?;
+    let pool_ids = rows
+        .iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect::<Vec<_>>();
+    let mut gitlab_connections = gitlab::pools_gitlab_connections(&state, &pool_ids).await?;
     let items = rows.iter().map(|row| json!({
         "cannotRun": cannot_run(blocked_pools.contains(&row.get::<String,_>("id"))),
+        "gitlabConnections": gitlab_connections.remove(&row.get::<String,_>("id")).unwrap_or_default(),
         "id": row.get::<String,_>("id"), "name": row.get::<String,_>("name"), "scope": row.get::<String,_>("scope"),
         "mode": row.get::<String,_>("mode"), "provider": row.get::<String,_>("provider"),
         "providers": json_array(row.get::<&str,_>("providers")),

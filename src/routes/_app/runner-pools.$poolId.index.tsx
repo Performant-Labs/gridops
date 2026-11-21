@@ -1,17 +1,16 @@
 import { BUILTIN_HOST_OFF_LABEL, isBuiltinHostOff } from "~/features/runner-pools/builtin-host";
 import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute, getRouteApi } from "@tanstack/react-router";
-import { Activity, ArrowRight, ChevronDown, Server } from "lucide-react";
-import { useState } from "react";
+import { Activity, ArrowRight, Server } from "lucide-react";
 
 import { CapacityMeter } from "~/components/capacity-meter";
 import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { Callout, InlineLoading, ListGroup, PropertiesPanel, PropertyGroup, PropertyRow, SectionHeading } from "~/components/page";
 import { StatusBadge, StatusDot, statusLabel } from "~/components/status-icon";
-import { Avatar, githubAvatar } from "~/components/ui/avatar";
 import { Badge } from "~/components/ui/badge";
 import { buttonVariants } from "~/components/ui/button";
 import { getRunnersPage } from "~/features/operations/operations.functions";
+import { platformForPool } from "~/features/platform-connections/registry";
 import type { RunnerPoolDetail } from "~/features/runner-pools/runner-pools.functions";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { PoolEventTable, usePoolEvents } from "~/features/runner-pools/pool-events";
@@ -19,7 +18,7 @@ import { provisioningNotice } from "~/features/runner-pools/waiting-notice";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
 import { useRefreshInterval } from "~/lib/use-refresh-interval";
-import { cn, formatRunnerShape } from "~/lib/utils";
+import { formatRunnerShape } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/runner-pools/$poolId/")({
   component: PoolOverviewTab,
@@ -63,6 +62,7 @@ function PoolOverviewTab() {
   const items = runners.data?.items ?? [];
   const online = items.filter((runner) => !["failed", "stopped", "deleted", "paused"].includes(runner.status)).length;
   const busy = items.filter((runner) => runner.busy).length;
+  const PoolDestination = platformForPool(pool).pool.Destination;
 
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
@@ -125,11 +125,7 @@ function PoolOverviewTab() {
         </PropertyGroup>
 
         <PropertyGroup title="Destination">
-          <PropertyRow label="Scope"><span className="capitalize">{pool.scope}</span></PropertyRow>
-          <PropertyRow label="Account"><Avatar name={pool.accountLogin} size={16} square src={githubAvatar(pool.accountLogin)} />{pool.accountLogin}</PropertyRow>
-          {pool.scope === "repository" ? (
-            <RepositoryList repositories={pool.repositories} />
-          ) : <PropertyRow label="Runner group"><span className="tabular">#{pool.runnerGroupId}</span></PropertyRow>}
+          <PoolDestination pool={pool} />
         </PropertyGroup>
 
         <PropertyGroup title="Configuration">
@@ -139,32 +135,6 @@ function PoolOverviewTab() {
           ) : <PropertyRow label="Access">Read only</PropertyRow>}
         </PropertyGroup>
       </PropertiesPanel>
-    </div>
-  );
-}
-
-const COLLAPSED_REPOSITORIES = 6;
-
-function RepositoryList({ repositories }: { repositories: RunnerPoolDetail["repositories"] }) {
-  const [expanded, setExpanded] = useState(false);
-  const hidden = repositories.length - COLLAPSED_REPOSITORIES;
-  const visible = expanded ? repositories : repositories.slice(0, COLLAPSED_REPOSITORIES);
-  return (
-    <div className="space-y-1 pt-1">
-      {visible.map((repository) => (
-        <div className="truncate rounded-md bg-panel-subtle px-2 py-1 text-xs text-secondary-foreground" key={repository.id} title={repository.fullName}>{repository.fullName}</div>
-      ))}
-      {hidden > 0 ? (
-        <button
-          aria-expanded={expanded}
-          className="flex h-6 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-hover hover:text-foreground"
-          onClick={() => setExpanded((current) => !current)}
-          type="button"
-        >
-          <ChevronDown className={cn("size-3 transition-transform duration-200 ease-out-strong", expanded && "rotate-180")} />
-          {expanded ? "Show fewer" : `Show ${hidden} more`}
-        </button>
-      ) : null}
     </div>
   );
 }
