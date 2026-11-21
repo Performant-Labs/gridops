@@ -112,3 +112,36 @@
   - Checked `gh issue view 159`: it covers the pool list and the pool detail only.
   - Coexistence: ran `git diff origin/master...<branch>` for every GitLab branch and `git status` in the #138-followup, #139, #140, #142, #147 and #148 worktrees. #140's brief agrees on the `gitlab:<connection_id>:<key>` id.
   - Confirmed `git diff 0086aa9 HEAD -- src tests crates` is empty.
+
+## T (Tester, Phase 4 RED) - 2026-11-20T17:52:48-08:00
+- **Decided:** RED is valid; F may implement. Handoff: docs/handoffs/141/handoff-T-red.md.
+  - **New tests:**
+    - Vitest: 5 new files and 1 fixture, 85 tests.
+      - `gitlab-descriptor` (52, unit);
+      - `gitlab-pool-schema` (13, unit);
+      - `gitlab-connections` (8, jsdom);
+      - `gitlab-pool-forms` (4, jsdom);
+      - `webhook-delivery-platform` (4, jsdom);
+      - neutral-source: 3 new checks.
+    - Rust: 1 API test in `resources/gitlab_tests.rs` (A warn 1), for the runners list's `gitlabRunnerId` / `gitlabBaseUrl` / `gitlabScopePath`. For a GitHub runner the three keys must be present and null.
+  - **Updated existing tests** (they would break the moment GitLab is registered):
+    - the registry order is now `github, bitbucket, gitlab`;
+    - the unknown-platform fallback moved from `gitlab` to `azure-devops`;
+    - the type test is renamed to `SecretReveal`;
+    - the runner-row badge expects "GitLab";
+    - the stubs in the connections-page test and in `poolFormFetch` serve an empty GitLab list.
+  - **Full suite:** 87 failed (all of them new or updated tests) and 459 passed (every pre-existing test). The Rust test fails on the missing `gitlabRunnerId` key.
+- **Assumed:**
+  - The wireframe's exact copy (revision 3) is the approved UI contract for labels: the field labels, `Verify`, `Rotate webhook secret`, `Run untagged jobs` and "Job events". Its approval line is still empty.
+  - Option `connectionId` or `nativeId` is the connection UUID, following the Bitbucket analogue.
+  - The new-pool form's create values reach `buildCreatePayload` as a fourth `{ platformOptions }` argument (brief gap 2).
+- **Hedged:**
+  - For settings, only a *changed* `runUntagged` is pinned. The wireframe says "sent only when different" and the brief is silent.
+  - The GitLab platform-option value shape, the row-action type and `platformForDeliveryId`'s name are not pinned.
+  - The tag rule's comma and empty checks are tested at unit level only, because they cannot be reached from the field (D open question 1).
+  - No satisfiability sketch was built. The DOM contracts were checked against the existing components instead.
+  - The `targets-row-forward-compat` harness may need a test-only update if F makes the `PlatformOptionsSection` value props required.
+- **Evidence:**
+  - Baseline: 46 files and 461 tests green after `npm ci`.
+  - Read the brief, handoff-A (round 3), handoff-D, the wireframe text, and these files in full or in the parts the tests touch: `types.ts`, `registry.tsx`, `github.tsx`, `bitbucket.tsx`, `platform-connections.functions.ts`, `connections-section.tsx`, `targets.ts`, `schemas.ts`, `runner-pools.functions.ts`, `platform-options-section.tsx`, `targets-row.tsx` (load on mount), `webhooks.tsx`, `runner-row.tsx`, `use-action.ts`, `confirm-dialog.tsx` (the `window.confirm` fallback), `secret-reveal-dialog.tsx`, `copy-button.tsx`, the `searchable-select` trigger ARIA, `settings-ui` `Switch` (Radix), the OpenAPI GitLab schemas, `resources.rs` `runners` (:1916-1998) and migration 0047.
+  - Ran: `npx vitest run`, `cargo test -p gridops-api the_runners_list_carries`, `rustfmt --check`, `eslint tests`, `tsc --noEmit` (test files) and `cargo clippy -p gridops-api --all-targets`. Clippy found nothing in the new test; its pre-existing lints in other files are outside #141.

@@ -43,8 +43,9 @@ describe("runner row platform badge", () => {
   it.each([
     ["github", "GitHub"],
     ["bitbucket", "Bitbucket"],
-    ["gitlab", "gitlab"],
-  ])("shows the registry name for %s", (platform, name) => {
+    ["gitlab", "GitLab"],
+    ["azure-devops", "azure-devops"],
+  ])("shows the registry name for %s (the raw id for an unknown platform)", (platform, name) => {
     act(() => root.render(createElement(TooltipProvider, null, createElement(RunnerRow, { runner: runner(platform) }))));
     expect(container.textContent).toContain(name);
   });

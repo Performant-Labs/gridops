@@ -2022,3 +2022,63 @@ async fn a_gitlab_runner_delete_records_whether_the_gitlab_cleanup_completed_or_
     }
     Ok(())
 }
+
+/// #141: the runners list carries what the GitLab runner link
+/// (`<baseUrl>/<scopePath>/-/runners/<id>`) is built from: the runner's
+/// GitLab id and its connection's address and scope path, and the three
+/// fields as explicit nulls for a GitHub runner.
+#[tokio::test]
+async fn the_runners_list_carries_a_gitlab_runners_link_fields_and_nulls_for_a_github_runner()
+-> Result<()> {
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, group(7, "acme/platform")?)
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[CONNECTION_1])
+        .await?;
+    h.seed_runner("runner-gitlab", GITLAB_POOL, Some(CONNECTION_1), Some(77))
+        .await?;
+    h.seed_pool(ORG_POOL, "org-pool", "organization", &[])
+        .await?;
+    sqlx::query("INSERT INTO runners (id,pool_id,name,provider,status,busy,ci_platform,github_runner_id,created_at,updated_at) VALUES ('runner-github',?,'runner-github','docker','idle',0,'github',5,2,2)")
+        .bind(ORG_POOL)
+        .execute(&h.database)
+        .await?;
+
+    let (status, body) = h.as_admin(Method::GET, "/api/v1/runners", None).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"]
+        .as_array()
+        .context("the runners list has items")?;
+    let runner = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .cloned()
+            .with_context(|| format!("{id} is listed: {body}"))
+    };
+
+    let gitlab = runner("runner-gitlab")?;
+    assert_eq!(gitlab["platform"], "gitlab", "{gitlab}");
+    assert_eq!(gitlab.get("gitlabRunnerId"), Some(&json!(77)), "{gitlab}");
+    assert_eq!(
+        gitlab.get("gitlabBaseUrl"),
+        Some(&json!(GITLAB)),
+        "{gitlab}"
+    );
+    assert_eq!(
+        gitlab.get("gitlabScopePath"),
+        Some(&json!("acme/platform")),
+        "{gitlab}"
+    );
+
+    let github = runner("runner-github")?;
+    assert_eq!(github["platform"], "github", "{github}");
+    for field in ["gitlabRunnerId", "gitlabBaseUrl", "gitlabScopePath"] {
+        assert_eq!(
+            github.get(field),
+            Some(&Value::Null),
+            "{field} is present and null on a GitHub runner: {github}"
+        );
+    }
+    Ok(())
+}
