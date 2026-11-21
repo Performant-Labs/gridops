@@ -189,3 +189,9 @@ Verdict PASS: gitlab.rs and the image script are brief-mandated; all other chang
 - **Assumed:** F's "no production change" is right, because the lines it cites already hold each pinned behaviour (I read `valid_token`, the waiter's `code()` guard and `record_exit_code`).
 - **Hedged:** the workspace run has one failure, `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine`. It fails because this dev host is macOS arm64, and the branch touches nothing in `gridops-api`. NV-1 and the real-VM check (#143) stay open as known issues.
 - **Evidence:** `cargo test -p gridops-tart-agent` x3, `TMPDIR=/tmp/t142 cargo test --workspace --no-fail-fast`, the scratch mutation run, `handoff-T-green.md`.
+
+## A (Phase 7, anti-duplication gate, second run): 2026-11-20
+- **Decided:** PASS. The diff since 3c215ee (to 939eb85) is test, fake and docs only, and extends the existing `FAKE_TART`, `FAKE_GITLAB_RUNNER`, hostile-URL list and docs section in place.
+- **Assumed:** the earlier PASS on the production code (`gitlab.rs`, the `main.rs` wiring, the image script) still holds, because none of it changed (`git diff 3c215ee HEAD` shows no production file).
+- **Hedged:** none.
+- **Evidence:** `git diff --stat 3c215ee HEAD -- . ':!docs/handoffs'`; the `main.rs` hunks fall inside `mod tests` (line 2387 onward).
