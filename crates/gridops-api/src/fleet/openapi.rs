@@ -286,19 +286,27 @@ mod tests {
         (GITLAB_WEBHOOK, "post", "202", None, "#140"),
     ];
 
-    /// #137 W-7: the GitLab routes #138 and #140 implement against, declared
-    /// before any handler exists.
+    /// #137 W-7: the GitLab routes #138 and #140 implement against. #138's
+    /// are served now, so their descriptions no longer say "Not served yet";
+    /// the webhook (#140's) still does.
     #[test]
-    fn the_gitlab_operations_are_specified_before_they_are_served() -> anyhow::Result<()> {
+    fn the_gitlab_operations_are_specified_and_only_140s_await_a_handler() -> anyhow::Result<()> {
         let spec = spec()?;
         for (path, method, status, body, owner) in GITLAB_OPERATIONS {
             let operation = &spec["paths"][path][method];
             assert!(operation.is_object(), "missing {method} {path}");
             let description = operation["description"].as_str().unwrap_or_default();
-            assert!(
-                description.starts_with(&format!("Not served yet: implemented by {owner}")),
-                "{method} {path} description: {description:?}"
-            );
+            if owner == "#138" {
+                assert!(
+                    !description.contains("Not served yet"),
+                    "{method} {path} is served by #138: {description:?}"
+                );
+            } else {
+                assert!(
+                    description.starts_with(&format!("Not served yet: implemented by {owner}")),
+                    "{method} {path} description: {description:?}"
+                );
+            }
             let expected_security = if path == GITLAB_WEBHOOK {
                 serde_json::json!([])
             } else {

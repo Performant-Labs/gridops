@@ -86,6 +86,8 @@ macro_rules! visible_queued_jobs {
     };
 }
 
+#[cfg(test)]
+mod gitlab_tests;
 mod overview_queue;
 mod tart_host;
 pub use self::tart_host::tart_host;

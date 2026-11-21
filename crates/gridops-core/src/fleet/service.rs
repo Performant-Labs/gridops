@@ -994,3 +994,7 @@ where
 {
     value.parse().map_err(FleetError::from)
 }
+
+#[cfg(test)]
+#[path = "service_gitlab_tests.rs"]
+mod gitlab_access_tests;

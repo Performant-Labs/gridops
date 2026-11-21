@@ -89,3 +89,37 @@
   - API: `crates/gridops-api/src/{resources.rs (RunnerAccess, selected_bitbucket_connections, pool detail, update, options, create and delete, D14 predicate and callers, the rotate and scale-down filters, delete_runner_resources, :5281),state.rs,webhooks.rs:423/780,oauth.rs:633,resources/ (layout)}`.
   - Reconciler: `crates/gridops-reconciler/src/{fleet.rs:158,346,main.rs:1167,1312,2352,2669}`.
   - Schema and spec: `migrations/{0001_initial.sql (runner_pools.scope has no CHECK),0014_runner_pool_installations.sql,0047_gitlab.sql}`; the runner-pool and GitLab paths of `docs/openapi/gridops-v1.json` (the pool bodies are loose objects).
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:17:19-08:00
+- **Decided:** RED is valid. 40 tests were authored or changed (see `handoff-T-red.md`):
+  - 26 in-crate HTTP tests with `FakeGitLab` in `crates/gridops-api/src/resources/gitlab_tests.rs`;
+  - 2 changed unit tests in `fleet/openapi.rs` and `access.rs`, with the PATCH parsing added to the `access.rs` and `token_access.rs` matrix parsers;
+  - 4 binary-level tests in `control_plane_contracts.rs`;
+  - 5 model and `pool_targets` tests in `crates/gridops-core/tests/gitlab_pools.rs`;
+  - 2 fleet-access tests in `crates/gridops-core/src/fleet/service_gitlab_tests.rs`.
+  - **Spec validation:** a shared strict validator, `crates/gridops-api/tests/support/openapi_schema.rs`, checks every GitLab connection response against the spec's declared status and schema.
+  - **Fleet access tests (deviation from A's round-3 W1):** they call `ensure_target_access` and `ensure_pool_access` from a test-only child module of `service`. A suggested going through `submit_intent` in `admission_tests.rs`, but that path can't show the decision: `ensure_target_identity_for_pool` refuses every GitLab target first (`service.rs:250`, `:420`) until #139 adds its arm. No visibility is widened.
+  - **Wiring added:** `crates/gridops-api/Cargo.toml` gets the `gridops-core` `test-support` dev-dependency, `resources.rs` gets the `#[cfg(test)] mod gitlab_tests;` mount, and `service.rs` gets the test mount.
+  - **One wrong-reason RED fixed:** the harness's `settings` insert collided with a migration-seeded key and is now an upsert.
+- **Assumed:** these are pins the brief leaves open. F implements against them; O may overrule any of them.
+  - A well-formed body with an invalid value (including an unknown `scopeKind`) is a 400, as the spec declares, not axum's 422. A whitespace-only name is invalid.
+  - `GET /api/v1/platform-connections/gitlab` is open to any signed-in user, with `canManage: false`. This is Bitbucket parity, and the spec declares no 403 on it.
+  - A non-system-admin creating a GitLab pool gets 403, mirroring `selected_bitbucket_connections`.
+  - From A's W3:
+    - a change to the GitLab target set or to `runUntagged` sets `rollingReplacement`;
+    - a `runnerGroupId` change does not, because it is forced to 1;
+    - the pool `created` and `updated` audit metadata carry `gitlabConnectionIds` and `runUntagged`.
+  - Each `GitLabError` message contains a stable substring: "rejected the access token", the scope name, "maintainer", the path, "later", "gitlab request failed". Matching is case-insensitive. The binary-level test pins the exact string "GitLab request failed" for the placeholder.
+  - The webhook secret is at least 32 characters. Create, update, rotate and delete each add at least one audit event for the connection; action names are not pinned.
+  - A runner with `deleted_at` set does not block a connection delete.
+- **Hedged:**
+  - "The right credentials" for `delete_runner` is checked as "the connection's base URL". `FakeGitLab` never sees the token, which is its documented limit.
+  - "No log line contains a secret" has no test because the suite doesn't capture tracing. S should review it in the diff.
+  - A's round-2 and round-3 statement that `ensure_target_access` panics at `:931` on a GitLab target is not what happens. On the branch, the Reconciler call returns `Ok` without panicking: sqlx decoded the NULL. The observable defects are that a system admin is refused and an installation-admin member passes `ensure_pool_access`, and the tests are RED on those.
+  - `fleet_http::release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` fails in this environment. Its preflight sees a ready macOS ARM64 machine. T didn't touch that file and it is unrelated to #138; T will re-check it in Phase 6.
+- **Evidence:**
+  - `cargo test -p gridops-core --no-fail-fast --tests`: only the 7 new tests fail (lib 261 passed and 2 failed; `gitlab_pools` 0 passed and 5 failed); every other target passes.
+  - `cargo test -p gridops-api --test control_plane_contracts --test fleet_http --no-fail-fast`: control_plane_contracts 32 passed and 4 failed (the new ones: 404 instead of 401/200/400, and CORS methods "GET,POST,PUT,DELETE"); fleet_http 143 passed and 1 failed (the unrelated `release_preflight`); the PATCH-aware matrix test passes.
+  - `cargo test -p gridops-api --no-run`: the one error is `E0599 no method named with_gitlab`.
+  - Seam-only scratch copy (only `with_gitlab`, the `gitlab` field and `UnconfiguredGitLab` added), `cargo test -p gridops-api --bins`: 59 passed and 28 failed. All existing bin tests pass, and the 28 failures are exactly the new and changed tests, each on its feature assertion (route 404, "Runner pool scope is invalid.", GitHub cleanup queued for a GitLab runner, `delete_runner` never called, a 500 from an in-request start).
+  - `cargo fmt --all -- --check` is clean. `cargo clippy --all-targets` reports no warnings in T's files.
