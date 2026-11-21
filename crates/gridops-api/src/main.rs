@@ -5,6 +5,8 @@ mod error;
 mod fleet;
 mod github_app;
 mod install;
+#[cfg(test)]
+mod log_filter_tests;
 mod oauth;
 mod resources;
 mod state;

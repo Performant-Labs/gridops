@@ -78,3 +78,30 @@
   - Third-party: `sqlx-core-0.9.0/src/logger.rs`; `sqlx-sqlite-0.9.0` `worker.rs`, `execute.rs` and `arguments.rs`.
   - Re-ran the brief's grep: 25 hits, and the per-file breakdown matches. No `ANALYZE` or `PRAGMA optimize` anywhere in the repo.
   - Scratch-DB `EXPLAIN QUERY PLAN` (sqlite3 3.54, all 47 migrations applied): the as-written poll select uses the autoindex `(host_id=?)`; the as-written cancel uses `host_kind_issued_idx (host_id=?)`; both rewrites and `settle_unreceived` use `host_commands_poll_idx (host_id=? AND state=?)`.
+
+## Phase 4 Tests RED (T) - 2026-11-21T15:22:07-08:00
+- **Decided:** RED is valid (docs/handoffs/179/handoff-T-red.md). F may implement.
+  - **Contract names, which the brief left open:**
+    - `pub(super) const NEXT_DELIVERY`, `UNDELIVERABLE` and `UNRECEIVED` in `registry/commands.rs`;
+    - `fn default_log_filter() -> EnvFilter` at the crate root of both the api and the reconciler. It returns the default only and reads no environment, so a test that sets nothing gets a stable answer.
+  - **Plan test:** an exact positive step (`INDEX host_commands_poll_idx (host_id=? AND state=?)`). It forbids any step ending in `(host_id=?)` and any `SCAN`, rather than one index name (A warn 2).
+  - **Agent tests:** they go in a new `fleet_http/busy_database.rs`. The recovery `Faults` is extended in place (path-suffix failure injection, lease shortening, request log), not moved to a shared module, which keeps the diff small. No test body in `recovery.rs` changed.
+  - **Slow-statement test:** behaviour level, through a `Once`-installed global subscriber built from the api's own filter. It asserts `slow_threshold = 100ms` on the event, so neither the 1 s default nor a 0 threshold passes (A warn 4).
+  - **Guards, green by design:** the large-history behaviour test, the 401 stop, and the result 503 that still ends the session.
+- **Assumed:**
+  - No hot-path statement other than the poll and cancel selects needs a rewrite. A preliminary `EXPLAIN QUERY PLAN` on a migrated scratch DB found the session and snapshot statements PK- or partial-index-bounded. If F's sweep changes more, I add their plan assertions in Phase 6.
+  - `an_api_restart_leaves_a_running_runner_alone` still passes after F, as A traced. If it does not, I amend it in Phase 6 as the brief authorises.
+- **Hedged:**
+  - I proved the api slow-statement test can pass with throwaway code (`sqlx::query=warn` plus `log_slow_statements(Warn, 100 ms)`, then reverted), but not the agent tests. Their satisfiability rests on reading `supervisor.rs`:
+    - the retry sits inside the heartbeat loop;
+    - `MIN_BACKOFF` is 1 s;
+    - the refresh is every 30 s.
+  - The held-lock test's 7.5 s hold depends on the 5 s `busy_timeout`. It checks first that a heartbeat answered 503 during the hold, so a shorter timeout fails it loudly instead of passing vacuously.
+- **Evidence:**
+  - Compile RED: E0432 (three consts, core lib) and E0425 (`default_log_filter`, api and reconciler bins).
+  - Runtime RED behind it, with stubs equal to today's code: the poll plan is `sqlite_autoindex_host_commands_2 (host_id=?)` with a temp B-tree; the cancel plan is `host_commands_host_kind_issued_idx (host_id=?)`; the api logged nothing for a 200 ms statement; the reconciler filter dropped `sqlx::query` WARN.
+  - Agent RED on the real tree: the agent handshook again 4, 4, 2 and 2 times where 1 was expected.
+  - The 14 existing `recovery::` tests and `idle_command_poll_answers_while_another_writer_holds_the_database` pass on the extended proxy.
+  - Behaviour-guard mutations (cursor order DESC; the dropped epoch branch) each fail the guard.
+  - `cargo +1.98.1 clippy … --all-targets -D warnings` is clean with the stubs, and `cargo fmt --check` is clean.
+  - Every stub was reverted with `git checkout` and none was staged.

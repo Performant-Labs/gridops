@@ -12,6 +12,8 @@ mod gitlab_poll_tests;
 #[cfg(test)]
 mod jit_conflict_tests;
 #[cfg(test)]
+mod log_filter_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tart_outage_tests;
