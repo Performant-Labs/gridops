@@ -9,7 +9,7 @@ import { CopyButton } from "~/components/copy-button";
 import { PropertyRow } from "~/components/page";
 import { Switch } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
-import type { RunnerPool } from "~/features/operations/operations.functions";
+import type { Runner, RunnerPool } from "~/features/operations/operations.functions";
 import {
   type GitlabPoolConnection,
   type RunnerPoolDetail,
@@ -33,6 +33,7 @@ import type {
   PlatformOptionsProps,
   PoolDestinationView,
   ResolvedSelection,
+  RunnerDestinationView,
   SecretReveal,
   TargetCreateValues,
   TargetKind,
@@ -229,13 +230,22 @@ function RunUntaggedOption({ values, onChange }: PlatformOptionsProps) {
 
 // ---- Pool destination --------------------------------------------------------------------------
 
+/** The parts of a connection a label is made from: a pool's connection, or the one a runner carries (any part may be missing). */
+type ConnectionParts = { name?: string | null; baseUrl?: string | null; scopePath?: string | null };
+
 /** A connection's `baseUrl/scopePath`, with only the parts that are present. */
-function connectionAddress(connection: GitlabPoolConnection) {
-  return [connection.baseUrl.replace(/\/+$/, ""), connection.scopePath].filter(Boolean).join("/");
+function connectionAddress(connection: ConnectionParts) {
+  return [connection.baseUrl?.replace(/\/+$/, ""), connection.scopePath].filter(Boolean).join("/");
 }
 
 /** A connection's name, or its address when it has none. */
-const connectionLabel = (connection: GitlabPoolConnection) => connection.name || connectionAddress(connection);
+const connectionLabel = (connection: ConnectionParts) => connection.name || connectionAddress(connection);
+
+/** A runner's connection name, else its address, else the platform; never the pool's installation. */
+function runnerDestination(runner: Runner): RunnerDestinationView {
+  const text = connectionLabel({ name: runner.gitlabConnectionName, baseUrl: runner.gitlabBaseUrl, scopePath: runner.gitlabScopePath }) || "GitLab";
+  return { text, title: text };
+}
 
 /** The list cell: the one connection's name, or how many there are with every name in the title. */
 function poolDestination(pool: RunnerPool): PoolDestinationView {
@@ -415,5 +425,5 @@ export const gitlabPlatform: PlatformDescriptor = {
   },
   initialSelection: poolSelection,
   readOnlySummary: (pool) => pool.gitlabConnections?.length ? pool.gitlabConnections.map((connection) => connection.name).join(", ") : null,
-  pool: { scopes: [GITLAB], destination: poolDestination, Destination: PoolDestination },
+  pool: { scopes: [GITLAB], destination: poolDestination, Destination: PoolDestination, runnerDestination, scopeLabel: () => "GitLab" },
 };

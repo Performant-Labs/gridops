@@ -6,7 +6,7 @@ import { PropertyRow } from "~/components/page";
 import { Avatar, githubAvatar } from "~/components/ui/avatar";
 import { Badge } from "~/components/ui/badge";
 import { buttonVariants } from "~/components/ui/button";
-import type { RunnerPool, SettingsPage } from "~/features/operations/operations.functions";
+import type { Runner, RunnerPool, SettingsPage } from "~/features/operations/operations.functions";
 import {
   type RunnerPoolDetail,
   getInstallationRunnerGroups,
@@ -14,7 +14,7 @@ import {
 } from "~/features/runner-pools/runner-pools.functions";
 import { cn, formatRelativeTime } from "~/lib/utils";
 
-import type { PlatformDescriptor, PoolDestinationView, ResolvedSelection, TargetContext, TargetKind, TargetOption } from "./types";
+import type { PlatformDescriptor, PoolDestinationView, ResolvedSelection, RunnerDestinationView, TargetContext, TargetKind, TargetOption } from "./types";
 
 type Installation = NonNullable<SettingsPage["data"]>["installations"][number];
 
@@ -209,6 +209,12 @@ function PoolDestination({ pool }: { pool: RunnerPoolDetail }) {
   );
 }
 
+/** A runner's destination, as before #169: its repository, or the account it registers under. */
+function runnerDestination(runner: Runner): RunnerDestinationView {
+  const text = runner.repository ?? runner.accountLogin;
+  return { text, title: text };
+}
+
 // ---- Descriptor --------------------------------------------------------------------------------
 
 export const githubPlatform: PlatformDescriptor = {
@@ -312,7 +318,8 @@ export const githubPlatform: PlatformDescriptor = {
   initialPriorityKeys: (pool) => pool.scope === "repository" ? pool.priorityRepositoryIds.map(repositoryKey) : [],
   readOnlySummary: (pool) => pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.scope === "organization" ? pool.accountLogin : null,
   // A Bitbucket workspace rides on a GitHub repository or runner-group pool, so that pool's destination is GitHub's.
-  pool: { scopes: ["repository", "organization"], destination: poolDestination, Destination: PoolDestination },
+  // The Overview shows the raw scope in a `capitalize` span, so it reads "Repository" / "Organization" as before #169.
+  pool: { scopes: ["repository", "organization"], destination: poolDestination, Destination: PoolDestination, runnerDestination, scopeLabel: (pool) => pool.scope },
   prerequisiteEmptyState(context) {
     if (context.form !== "create") return null;
     const { options } = context;

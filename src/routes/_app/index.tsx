@@ -22,6 +22,7 @@ import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
 import { metricTiles } from "~/features/dashboard/metric-tiles";
 import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
+import { platformForPool } from "~/features/platform-connections/registry";
 import { humanizeEvent } from "~/features/runner-pools/pool-events";
 import { TartHostSection } from "~/features/runner-pools/tart-host-card";
 import { RunRow } from "~/features/workflow-runs/run-row";
@@ -276,7 +277,7 @@ function PoolsSection({ pools, unmatched }: { pools: DashboardOverview["pools"];
           <Link className={cn(listRowClassName, "last:border-b-0 focus:bg-hover focus:shadow-[inset_2px_0_0_var(--primary)] focus:outline-none")} data-list-row="" key={pool.id} params={{ poolId: pool.id }} to="/runner-pools/$poolId">
             <span className="inline-flex size-3.5 items-center justify-center"><StatusDot status={pool.status} /></span>
             <span className="min-w-0 flex-1 truncate font-medium">{pool.name}</span>
-            <span className="hidden text-xs capitalize text-muted-foreground sm:inline">{pool.scope} · {pool.mode}</span>
+            <span className="hidden text-xs capitalize text-muted-foreground sm:inline">{platformForPool(pool).pool.scopeLabel(pool)} · {pool.mode}</span>
             <CapacityMeter busy={pool.busy} desired={pool.desired} online={pool.online} />
             <span className={cn("tabular w-20 text-right text-xs", pool.queue > 0 ? "text-warning" : "text-faint")}>{pool.queue} queued</span>
           </Link>

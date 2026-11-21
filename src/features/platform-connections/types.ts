@@ -216,9 +216,13 @@ export type PoolDestinationView = {
   leading?: ReactNode;
 };
 
+/** What a runner row shows as the runner's destination (the right-hand column, the narrow line and the details sheet). */
+export type RunnerDestinationView = Pick<PoolDestinationView, "text" | "title">;
+
 /**
  * Where a platform's pools register their runners. A platform that owns a pool scope supplies
- * both renderers, so the pool list and the pool detail never branch on a platform.
+ * every member, so the pool list, the pool detail, the runner row and the Overview's pool rows
+ * never branch on a platform.
  */
 export type PoolBindings = {
   /** The pool scopes (`RunnerPool.scope`) this platform owns. No two platforms own the same scope. */
@@ -227,6 +231,13 @@ export type PoolBindings = {
   destination: (pool: RunnerPool) => PoolDestinationView;
   /** The rows of the pool detail's Destination group. */
   Destination: ComponentType<{ pool: RunnerPoolDetail }>;
+  /** Where a runner of one of this platform's pools registers, as its row shows it. */
+  runnerDestination: (runner: Runner) => RunnerDestinationView;
+  /**
+   * The Overview's pool row scope text. The row shows it inside a CSS `capitalize` span, which is
+   * why a platform may return its raw scope (GitHub's "repository" reads "Repository").
+   */
+  scopeLabel: (pool: { scope: string }) => string;
 };
 
 // ---- Descriptor --------------------------------------------------------------------------------

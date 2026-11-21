@@ -29,3 +29,20 @@
   - `cargo test -p gridops-api --bins` filtered to the two tests: 2 failed (`poolScope` None ≠ "gitlab"; `totalRunners` 1 ≠ 0);
   - eslint, tsc (with the generated route tree) and `cargo fmt --check` are clean on the tests;
   - clippy is clean for `gitlab_tests.rs`. Two lints new in toolchain 1.99.1 (`unused-async-trait-impl`, `assert-is-empty`) already fail in untouched files.
+
+## Phase 5 Implementation (F) - 2026-11-21T03:03:08-08:00
+- **Decided:** all 13 RED Vitest tests and both RED Rust tests are GREEN (docs/handoffs/169/handoff-F.md). The plan follows all five of A's warns:
+  - `runnerDestination` and `scopeLabel` are required `PoolBindings` members. The destination returns the named `RunnerDestinationView`.
+  - The absent-`poolScope` default is in `platformForPool`: an absent scope is GitHub's, and an unknown scope gets the neutral fallback.
+  - GitLab reuses `connectionLabel`/`connectionAddress`, widened to nullable parts.
+  - `total_runners` counts `r.id IS NOT NULL AND r.deleted_at IS NULL`.
+  - The runners list emits `poolScope` and `gitlabConnectionName`.
+- **Assumed:** an empty-string scope is unknown, not absent. A's count sweep (only `resources.rs:1329` was wrong) holds, so I made no other count change.
+- **Hedged:** `fleet_http::release_preflight::…without_a_macos_arm64_machine` fails on this Mac. The cause is the host agent's `cfg!(target_os = "macos")` probe, and the preflight script hits only `/api/v1/fleet`. I recorded it as host-environmental rather than fixing it.
+- **Evidence:**
+  - typecheck and lint are clean;
+  - vitest: 602/602;
+  - `cargo fmt --check` is clean;
+  - cargo test `--bins`: 125/125, which includes the two #169 tests;
+  - clippy is clean apart from the pre-existing `unused-async-trait-impl` sites in untouched files;
+  - source facts are in docs/handoffs/169/evidence.md.
