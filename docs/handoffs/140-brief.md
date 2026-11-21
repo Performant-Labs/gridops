@@ -360,3 +360,61 @@ The webhook tests in `gridops-api` still cover the Done-when list end to end.
 #148 calls `record_gitlab_job` and `set_gitlab_runner_busy` and keeps no SQL of its own for these writes. Until #140 merges, #148 may stub against these exact signatures. Whichever merges second removes its local copy.
 
 - The poll concludes a job only from a `GitLabApi::job` lookup (a `NotFound` answer concludes it `canceled`), and clears busy through `set_gitlab_runner_busy`.
+
+## Amendments (architecture review, round 4)
+
+These resolve the round-4 Phase 3 findings in `docs/handoffs/140/handoff-A.md`. They win over earlier text where they differ.
+
+### State of master (merged into this branch before the run)
+
+- #138 merged as `0086aa9`. `AppState.gitlab`, `UnconfiguredGitLab` and `with_gitlab` are on master in exactly the shape pinned above. **#140 adds nothing to `state.rs`**, and the "`state.rs` (finding 3)" bullet is withdrawn.
+- **Client wiring (W3):** #138's follow-up PR (branch `claude/gitlab-138-followup`) owns `.with_gitlab(Arc::new(GitLabClient::new()?))` in the API's `main.rs`. **#140 does not add it.** Tests inject `FakeGitLab`. The "#146 adds `.with_gitlab(...)`" sentence is withdrawn. If that follow-up has not merged when #140 merges, the webhook answers a matched `pending` delivery with a failed delivery until it does, which is the existing placeholder behaviour. The reconciler's `Reconciler.gitlab` belongs to #139.
+- #140's `main.rs` change stays one route line.
+
+### D18 amendments (agreed with #148, recorded on #136)
+
+These replace the corresponding D18 lines above:
+
+    pub struct JobObservation<'a> {
+        pub connection_id: &'a str,
+        pub project_id: ExternalId,
+        pub job_id: ExternalId,
+        pub pipeline_id: ExternalId,
+        pub status: JobStatus,
+        pub status_changed_at: i64,          // epoch ms
+        pub retries_count: Option<u32>,      // None = keep stored (0 on insert)
+        pub tag_list: Option<&'a [String]>,  // None = keep stored ([] on insert)
+        pub gitlab_runner_id: Option<ExternalId>, // None = keep stored
+    }
+    pub struct JobWriteOutcome {
+        pub write: JobWrite,
+        pub previous_status: Option<String>,
+        pub status: String,
+        pub previous_gitlab_runner_id: Option<ExternalId>, // stored runner before the call; None when inserted
+        pub gitlab_runner_id: Option<ExternalId>,
+    }
+    pub async fn set_gitlab_runner_busy(conn: &mut SqliteConnection, connection_id: &str, gitlab_runner_id: ExternalId, busy: bool, now_ms: i64) -> sqlx::Result<Option<(String, String)>>; // (runner id, pool id)
+
+- Ids use the contract's `ExternalId` (`crate::fleet::ExternalId`, as in `gitlab/mod.rs`), which already fits SQLite. No raw `u64` is bound.
+- `record_gitlab_job` is **one write statement after a read of the stored row**, both on the caller's connection (or transaction). This replaces "one SQL statement per call".
+- The core unit tests use `connect_database_path` on a temp directory, as `db.rs` and `autoscaling.rs` tests do, not an in-memory database.
+
+### Busy set (replaces the `running` bullet's condition in "How #140 uses it")
+
+Whatever the `write` variant (`Inserted`, `StatusApplied` or `FilledOnly`): when `outcome.status == "running"`, `outcome.gitlab_runner_id` is `Some(R)` and `outcome.previous_gitlab_runner_id` is `None`, mark R busy with `set_gitlab_runner_busy` and write the `runner_events` row. Otherwise there is no busy effect. The terminal clear rule is unchanged: on `StatusApplied` into a terminal status with a `gitlab_runner_id`, clear that runner and write the `runner_events` row.
+
+### One transaction per delivery
+
+After any `GitLabApi::job` call (the fetch is never inside a transaction), open `state.database.begin_with("BEGIN IMMEDIATE")`. Run `record_gitlab_job`, then `set_gitlab_runner_busy` and the `runner_events` insert where the rules call for them, and commit. Any error rolls back all three, so the delivery is marked `failed` with nothing written, and the GitLab `retry` arm reapplies it in full. The `webhook_deliveries` status updates stay outside the transaction, as in `receive`. (Precedent: `gridops-core/src/fleet/targets.rs:542`, `fleet/admission.rs:169`.) The pre-fetch check's read may happen before the fetch, and `record_gitlab_job` re-reads inside the transaction.
+
+### Done when (added)
+
+- **First-seen `running`.** A `running` event with `runner.id` R for a job with no row: the event inserts the row, marks R busy and writes one `runner_events` row. A `pending` event for the same job delivered afterwards is ignored and makes no `GitLabApi::job` call.
+- **`running` after a failed `pending` fetch.** `FakeGitLab::fail_next(.., FakeMethod::Job, ..)` fails the `pending` delivery, so no row is written. The `running` event that follows marks R busy.
+- **The fill is recognised under clock skew.** A row stored as `running` with a NULL runner at time T, as #148's poll writes it, followed by a webhook `running` event with R and a time **later** than T: the outcome is `StatusApplied`, R is marked busy, and one `runner_events` row is written.
+- **No double set.** A second `running` event for the same job with the same R and a later time writes no second busy change and no second `runner_events` row.
+- **Partial failure is recoverable.** A test adds a temporary SQLite trigger that aborts inserts into `runner_events`, then delivers a `running` event. The delivery ends `failed`, there is no `gitlab_jobs` row, and R is not busy. After the trigger is dropped, a retry through the GitLab arm writes the row, marks R busy, writes one `runner_events` row and ends `processed`. The same test with a terminal event leaves R busy until the retry, which clears it.
+
+### Build load
+
+Sibling sessions build in parallel on this machine. Every `cargo` command runs with `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`.
