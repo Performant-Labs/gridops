@@ -80,7 +80,7 @@ function WebhooksPage() {
         ) : null}
         {data.items.length === 0 ? (
           <EmptyState description="Verified GitHub App deliveries appear here with their processing history. Private deployments poll GitHub instead." icon={Webhook} title="No webhook deliveries">
-            <Link className={buttonVariants({ variant: "outline" })} to="/settings/github"><Settings />GitHub settings</Link>
+            <Link className={buttonVariants({ variant: "outline" })} to="/settings/connections"><Settings />GitHub settings</Link>
           </EmptyState>
         ) : (
           <>

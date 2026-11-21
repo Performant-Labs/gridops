@@ -46,6 +46,12 @@ pub struct CreateRunnerPool {
     pub repository_ids: Vec<i64>,
     #[serde(default)]
     pub bitbucket_connection_ids: Vec<String>,
+    /// The GitLab connections a `scope: "gitlab"` pool serves (#138).
+    #[serde(default)]
+    pub gitlab_connection_ids: Vec<String>,
+    /// Whether the pool's GitLab runners also pick up untagged jobs.
+    #[serde(default)]
+    pub run_untagged: bool,
     pub name: String,
     pub scope: String,
     pub mode: String,
@@ -155,6 +161,12 @@ impl CreateRunnerPool {
                     .into(),
             );
         }
+        validate_gitlab_targets(
+            &self.scope,
+            &self.gitlab_connection_ids,
+            &repositories,
+            &self.bitbucket_connection_ids,
+        )?;
         validate_bitbucket_connections(
             &self.bitbucket_connection_ids,
             &self.providers,
@@ -162,6 +174,7 @@ impl CreateRunnerPool {
             &self.labels,
             self.max_count,
         )?;
+        validate_gitlab_connections(&self.gitlab_connection_ids, self.max_count)?;
         validate_macos_runtime(&self.macos_runtime, &self.selected_providers())?;
         validate_primary_image(
             &self.provider,
@@ -179,7 +192,10 @@ impl CreateRunnerPool {
         {
             return Err("Repository count cannot exceed maximum runner capacity.".into());
         }
-        if !matches!(self.scope.as_str(), "repository" | "organization") {
+        if !matches!(
+            self.scope.as_str(),
+            "repository" | "organization" | "gitlab"
+        ) {
             return Err("Runner pool scope is invalid.".into());
         }
         validate_pool_configuration(
@@ -211,6 +227,13 @@ pub struct UpdateRunnerPool {
     pub repository_ids: Option<Vec<i64>>,
     #[serde(default)]
     pub bitbucket_connection_ids: Option<Vec<String>>,
+    /// Replaces a GitLab pool's connections as a set. Left out, the pool
+    /// keeps the ones it has.
+    #[serde(default)]
+    pub gitlab_connection_ids: Option<Vec<String>>,
+    /// Left out, the pool keeps its setting.
+    #[serde(default)]
+    pub run_untagged: Option<bool>,
     pub name: String,
     pub mode: String,
     pub provider: String,
@@ -304,6 +327,9 @@ impl UpdateRunnerPool {
                 &self.labels,
                 self.max_count,
             )?;
+        }
+        if let Some(gitlab_connection_ids) = &self.gitlab_connection_ids {
+            validate_gitlab_connections(gitlab_connection_ids, self.max_count)?;
         }
         validate_macos_runtime(&self.macos_runtime, &self.selected_providers())?;
         validate_primary_image(
@@ -494,6 +520,55 @@ fn validate_bitbucket_connections(
     Ok(())
 }
 
+/// A pool serves GitHub, Bitbucket or GitLab, never GitLab beside another
+/// platform: `scope: "gitlab"` needs GitLab connections and takes no
+/// repositories and no Bitbucket connections, and only that scope takes
+/// GitLab connections. An update carries no scope, so the handler applies
+/// the same rule against the stored pool.
+fn validate_gitlab_targets(
+    scope: &str,
+    gitlab_connections: &[String],
+    repositories: &[i64],
+    bitbucket_connections: &[String],
+) -> Result<(), String> {
+    if scope == "gitlab" {
+        if gitlab_connections.is_empty() {
+            return Err("A GitLab pool needs at least one GitLab connection.".into());
+        }
+        if !repositories.is_empty() || !bitbucket_connections.is_empty() {
+            return Err(
+                "A GitLab pool can't also serve GitHub repositories or Bitbucket workspaces."
+                    .into(),
+            );
+        }
+    } else if !gitlab_connections.is_empty() {
+        return Err("Only a GitLab pool (scope gitlab) can serve GitLab connections.".into());
+    }
+    Ok(())
+}
+
+/// The GitLab connection ids follow Bitbucket's rules, without its Tart-only
+/// rule: GitLab runners run on Linux Docker as well.
+fn validate_gitlab_connections(connections: &[String], max_count: i64) -> Result<(), String> {
+    if connections.len() > 100
+        || connections
+            .iter()
+            .any(|connection| uuid::Uuid::parse_str(connection).is_err() || connection.len() > 64)
+    {
+        return Err("Choose up to 100 valid GitLab connections.".into());
+    }
+    let mut unique = connections.to_vec();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != connections.len() {
+        return Err("GitLab connections must be unique.".into());
+    }
+    if i64::try_from(connections.len()).unwrap_or(i64::MAX) > max_count {
+        return Err("GitLab connection count cannot exceed maximum runner capacity.".into());
+    }
+    Ok(())
+}
+
 fn selected_providers(provider: &str, providers: &[String]) -> Vec<String> {
     if providers.is_empty() {
         vec![provider.to_owned()]
@@ -573,6 +648,8 @@ mod tests {
             repository_id: Some(2),
             repository_ids: Vec::new(),
             bitbucket_connection_ids: Vec::new(),
+            gitlab_connection_ids: Vec::new(),
+            run_untagged: false,
             name: "linux-general".into(),
             scope: "repository".into(),
             mode: "ephemeral".into(),
@@ -677,6 +754,8 @@ mod tests {
         let update = UpdateRunnerPool {
             repository_ids: None,
             bitbucket_connection_ids: None,
+            gitlab_connection_ids: None,
+            run_untagged: None,
             name: original.name,
             mode: original.mode,
             provider: original.provider,
@@ -718,6 +797,8 @@ mod tests {
         UpdateRunnerPool {
             repository_ids: None,
             bitbucket_connection_ids: None,
+            gitlab_connection_ids: None,
+            run_untagged: None,
             name: original.name,
             mode: original.mode,
             provider: original.provider,

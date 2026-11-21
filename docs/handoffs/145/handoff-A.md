@@ -1,0 +1,79 @@
+# Handoff-A: Phase 4 - Platform-neutral UI, one Connections page and one Targets picker (#145)  (up-front plan review, round 4)
+
+**Date:** 2026-11-20
+**Branch:** claude/ui-145-platform-neutral-cf5832 (head 4fdd6c8; `git diff 5550cf5 HEAD --stat -- src tests` is empty, so no code exists yet)
+**Brief reviewed:** docs/handoffs/145-brief.md   **Reuse map:** the brief's "Architecture decisions → Reuse map (EXTEND / NEW per surface)" section, plus the "Round-3 architecture decisions" block (lines 754-760). `docs/handoffs/145/survey.md` does not exist yet; the brief makes it a deliverable.   **Wireframe:** docs/handoffs/145/wireframe.html (revision 4) + docs/handoffs/145/handoff-D.md
+**Verdict:** PASS
+
+## Summary
+PASS. The round-3 block is resolved: installations now render once. They appear as GitHub rows in `ConnectionsSection`. `GitHubAppSection` takes only `configuration`, `githubApp` and `user`, and its Refresh access, Install and Manage App controls become `SettingsSection` actions. Member visibility is stated, and wireframe revision 4 draws the same split.
+
+The round-3 warns are folded into a binding block. Five warns remain, all about contract precision:
+- the selection must carry two orders;
+- `offeredIn` is static, but what a pool offers depends on its scope;
+- manual entry needs a connection;
+- small leftovers from the Connections page split;
+- stale text that the round-3 block overrides.
+
+None of them is a parallel path or a layering violation, and the frozen payload constants or the S and U audits catch each one.
+
+## Findings
+
+| # | Severity | Plan element | Drift dimension | Finding | Suggested fix |
+|---|---|---|---|---|---|
+| 1 | warn | Round-3 "Selection shape": `TargetOption = { key, kindId, connectionId, nativeId, label, description?, group }`, `ResolvedSelection` = "per kind: the selected `TargetOption`s", and `installationId` taken from the loaded list's order (brief line 755). `toCreatePayload(selection, context)` (line 151). | contract / data flow | **Two orders are needed:** the old payload uses both orders.<br>- `repositoryIds` is the picker's `values` state in **click order**. `SearchableMultiSelect.toggle` appends (`searchable-multi-select.tsx:84`), and the form sends that state as is (`runner-pools.new.tsx:236`; settings `:125`, starting from `pool.repositoryIds`).<br>- `installationId` comes from `selectedRepositories[0]`, which is in **loaded-list order** (`runner-pools.new.tsx:172, 233-235`).<br>**Why the contract can't build both:** `TargetOption` carries no position in the loaded list, and `context` holds no load state (line 757). So a partial that gets only `(selection, context)` can produce one of the two orders but not both.<br>**Consequence:** arrays compared with `toEqual` are order-sensitive, so the round-3 "two installations clicked in reverse list order" case fails whichever order F picks. The frozen constants catch this, but only if that case is one of them. | **Order:** define `ResolvedSelection` per kind in click order (the picker's `values`).<br>**Load position:** add an optional `loadIndex?: number` to `TargetOption`, or have the selection carry each kind's loaded keys in order. The GitHub create partial then takes `installationId` from the selected repository with the lowest `loadIndex`, and `repositoryIds` in selection order.<br>**T:** make the reverse-order case a **frozen-constant payload-equality case** captured from the old form at `5550cf5`, so both `repositoryIds` order and `installationId` are pinned. |
+| 2 | warn | Round-3 "Derived rules": per kind `offeredIn: Array<"create" \| "update">` (line 758). `supportsPriority` drives the Priority section (line 168). Baseline list (line 50). | contract / pattern consistency | **A static list can't express settings:** on settings, which kind is offered depends on the pool, not just on the form. Brief line 143 says "its GitHub kind is fixed by `pool.scope`". Wireframe E1/E2 offers only the pool's own kind, with runner groups limited to its installation. A static `offeredIn` would show both GitHub kinds on every settings form. The `excludes` rule would then let a repository pool swap to a runner group, a scope change the update schema can't carry (it has no `scope` field, `schemas.ts:97-104`).<br>**Who can branch:** the route can't test `pool.scope`, and `targets-row.tsx` can't contain platform code, so only the descriptor can decide.<br>**Same question, three places:** "which of this pool's kinds is active" also gates:<br>- the editor's Priority section (settings `:302`);<br>- `ReadOnlyPool`'s Priority section (settings `:388`, a `pool.scope` test missing from the baseline list);<br>- the load gating at settings `:66, :70`.<br>**Neutral values:** `toUpdatePayload(selection, pool, values)` with `values: { priorityRepositoryIds, ... }` puts a GitHub field name in the route and the neutral builder. | **Kind function:** replace or add to `offeredIn` with a kind function `offered(context): boolean`. On update, the GitHub descriptor reads `context.pool.scope` inside `github.tsx`.<br>**Priority:** the editor and `ReadOnlyPool` show Priority when an offered kind has `supportsPriority`.<br>**Baseline:** add settings `:388` (and `:66`/`:70`, which move into the kinds' `load`) to the list at line 50.<br>**Values:** name the update values neutrally, e.g. `{ priorityKeys: string[]; priorityWaitMinutes?: number }`. The GitHub update partial maps keys to repository ids and applies today's `.filter((id) => repositoryIds.includes(id))` (settings `:126`). |
+| 3 | warn | `manualEntry: { label, parse(input): nativeId \| null }`, kind-level (line 147), against round-3 "Key uniqueness": `nativeId` = `<installationId>/<groupId>`, manual entry per connection (line 756) | contract / forward-compat | **Signature:** a kind-level `parse(input)` doesn't know which installation it is parsing for, so it can't return `<installationId>/<groupId>`.<br>**Scope of the fallback:** today's manual input appears whenever the group list is empty, failed or not listable: user installations, and organizations whose load failed or returned nothing. See `runner-pools.new.tsx:344-364`, `runnerGroups.length ? <SearchableSelect> : <Input>`, and settings `:187-211`. Wireframe D note 3 matches this ("user account or load failure").<br>**Forward-compat:** #141's per-instance GitLab entries need the same connection argument. | **Signature:** `parse(input, connectionId): nativeId \| null`, or a manual `TargetOption` that carries `connectionId`.<br>**Rendering:** the manual "Runner group ID" input is rendered by `TargetsRow` from `manualEntry.label`, never by the route, so the shared-row grep stays clean.<br>**Survey:** record the signature in the forward-compat table. |
+| 4 | warn | Connections page split: Reuse-map row "GitHub App section" (line 127), "Connections page loading" (line 181) against "GitHub App section wiring" (line 198) | pattern consistency / naming | **(a) Read-only callout:** today there are two, with different copy: GitHub `settings.github.tsx:51` ("…manages credentials and the GitHub App.") and Bitbucket `settings.integrations.tsx:79` ("…can add or change platform connections.").<br>- The Reuse map gives "one Read-only access callout" to `GitHubAppSection`'s member view.<br>- Bitbucket's callout moves into `ConnectionsSection` with the `BitbucketSettings` logic.<br>- Wireframe B4 draws one, with Bitbucket's copy, at the top of the page.<br>Nothing names which component owns it, so a member could see two, and trace (c) can't assert "exactly one".<br>**(b) Lost description:** the Installations section's description ("Installed as `{slug}`. Repository pools can combine repositories from every installation you administer.", `settings.github.tsx:79`) is on neither the moved list nor the rows list.<br>**(c) Prop name:** line 198 passes `page.data.installations` (plus `user`) to `ConnectionsSection`, a GitHub-named prop on the neutral component. Line 181 says it takes "the `/settings` page data".<br>**(d) Actions placement:** `GitHubAppSection` is several `SettingsSection`s, and "this section's `SettingsSection` `actions`" doesn't say which one. Handoff-D open question 11 defaulted it to the Connection section. | (a) **One owner:** the route renders the single callout on `user.role !== "admin"`, and `user.role` is GridOps's own role, not a platform field. Pick its copy. `GitHubAppSection` and `ConnectionsSection` render none.<br>(b) **Description:** keep it as the GitHub App section's description, or drop it on purpose and say so.<br>(c) **Prop:** `ConnectionsSection` takes the `/settings` page data object, and the GitHub descriptor's page-derived binding reads `installations` and `user` from it.<br>(d) **Placement:** confirm D's default, the Connection section header. |
+| 5 | warn | Stale sentences that the round-3 block (lines 754-760) overrides: line 145 (update `context` "plus the update-only form values"), 147 (kind-level `parse(input)`), 149 (`planNote` "the sentence"), 151 (`toUpdatePayload(selection, pool, context)`; "the update `context` carries … `priorityRepositoryIds` … (and `runnerGroupId`)"), 171 (descriptors "import only …"), 185 (create/update/remove "via `useAction({ after })`"), 696 (the `minMaxCount` formula) | contract consistency | **Old signatures still in the text:** precedence is explicit ("supersede earlier text where they conflict"), but T writes `targets.ts` unit tests to these signatures in Phase 5. Line 151 and line 757 give two different third arguments for `toUpdatePayload`, and line 185 contradicts line 759 on create and edit.<br>**Two smaller inaccuracies in the round-3 block:**<br>- `priorityRepositoryIds` is controlled state (settings `:57`), not FormData. Only `priorityWaitMinutes` comes from FormData (`:127`).<br>- `useAction` always calls `router.invalidate()` after success (`use-action.ts:24`), so Remove also refreshes `/settings`. That is harmless, but it makes "`router.invalidate()` is used only to refresh `/settings` data" approximate. | **Brief:** strike or annotate each stale sentence in place (e.g. "superseded by Round-3 decisions"), so the brief states one signature per function.<br>**Otherwise:** T and F should treat lines 754-760 as authoritative and quote the round-3 signatures in T's handoff. |
+
+In the table, "settings `:N`" means `src/routes/_app/runner-pools.$poolId.settings.tsx` line N.
+
+**Checked and consistent (no finding):**
+- **Round-3 block (installations rendered twice):** resolved.
+  - Reuse-map row (line 127): installations render "in exactly one place", as `ConnectionsSection` GitHub rows. `GitHubAppSection` takes `configuration`, `githubApp` and `user`. Refresh access, Install and Manage App are `SettingsSection` actions with unchanged calls and success text.
+  - Line 198 and trace (d) (line 202) match. Wireframe REV4 (B1, B1b, B4, B note 5) draws the same.
+  - The admin gating moved with the section matches today's: Create and Manage App only (`settings.github.tsx:69, 76`). Refresh access, Install and the "Adding another GitHub account" callout stay ungated (handoff-D open question 10).
+- **Round-3 warns folded in:**
+  - selection and `TargetOption` types (gap: finding 1);
+  - key uniqueness, runner group `<installationId>/<groupId>` (gap: finding 3);
+  - `TargetContext` holding loaded data only;
+  - `raisesMinMaxCount`, `planNote(count, { maxCount })` and the empty-selection default;
+  - named descriptor fields (gap in `offeredIn`: finding 2);
+  - mutations: inline errors for create and edit, `invalidateQueries` following `CreateTokenSection` (`api-tokens-section.tsx:67-75`), `useAction` for Remove only, an optional `signal` on `getBitbucketConnections` (`api()` already accepts `signal` through `RequestInit`, `src/lib/api.ts:12, 29`);
+  - import-rule wording and the `SearchableMultiSelectOption` type.
+- **Coexistence:**
+  - `claude/gitlab-137-contract-fa3bbe` still has no `src/` or `tests/` changes against `master`.
+  - `fix/134-exclusive-pools` touches only `src/features/fleet/admin-contracts.ts` and `tests/fleet-admin-api.test.ts`, neither of which this story edits. `api-tokens-section.tsx` imports `admin-contracts` but the extraction doesn't change it.
+- **Baseline:** `5550cf5` is a docs-only commit on top of `master`'s `7d4a87f`, and `git diff 5550cf5 master -- src tests` is empty, so the capture baseline equals `master`'s `src/`.
+
+**Round-3 findings status.**
+
+| Round-3 finding | Status | Where it is resolved |
+|---|---|---|
+| Block 1 (installations rendered twice) | Resolved | Reuse map line 127, wiring line 198, trace (d) line 202, wireframe REV4 |
+| Warn 2 (selection / `load` return shape) | Folded in | Line 755. Remaining gap: two orders (finding 1) |
+| Warn 3 (key collisions, per-connection manual entry) | Folded in | Line 756. Remaining gap: `parse` signature (finding 3) |
+| Warn 4 (`TargetContext` mixing load data and form values) | Folded in | Line 757. Stale text: finding 5 |
+| Warn 5 (Maximum floor, `planNote`, unnamed fields) | Folded in | Line 758. Remaining gap: static `offeredIn` (finding 2) |
+| Warn 6 (`useAction` would drop inline errors; signal) | Folded in | Line 759 |
+| Warn 7 (import rule wording, option type) | Folded in | Line 760 |
+
+## Notes for O
+Not required (PASS). If the brief is amended before Phase 5, these are one-line edits:
+1. **Selection order (finding 1):** add "`ResolvedSelection` lists each kind's options in click order; `TargetOption` has an optional `loadIndex`; the GitHub create partial takes `installationId` from the selected repository with the lowest `loadIndex`." Also state that the reverse-order case is a frozen-constant payload-equality case.
+2. **Offered kinds (finding 2):** replace `offeredIn` with `offered(context): boolean`. Gate the editor's and `ReadOnlyPool`'s Priority sections on it. Add settings `:388` to the baseline list. Name the update values neutrally.
+3. **Manual entry (finding 3):** `parse(input, connectionId)`.
+4. **Connections page (finding 4):** the route owns the single Read-only callout on `user.role !== "admin"`. Keep or drop the Installations description on purpose. `ConnectionsSection` takes the page data object.
+5. **Stale text (finding 5):** annotate the stale sentences at lines 145, 147, 149, 151, 171, 185 and 696.
+
+If the brief is not amended, T and F should apply these as the reading of the binding round-3 block. A should check findings 1 and 2 at the Phase-8 gate, because they decide where the GitHub-specific logic lives.
+
+**Out of scope but noticed:** the `appCreated` / `installationUpdated` toast effect in `NewRunnerPoolPage` (`runner-pools.new.tsx:38-49`) carries GitHub copy at page level. It is not a shared row and is not in the baseline, so it can stay. #141 may want a descriptor hook for it.
+
+## Patterns referenced
+- `src/routes/settings.github.tsx` (layout action at 47, Read-only callout at 51, sections at 53-110, Installations description at 79) and `src/routes/settings.integrations.tsx` (route loader at 22, create at 35-51, Read-only callout at 79, `ConnectionRow` edit at 103-119, Remove through `useAction` at 134).
+- `src/components/ui/searchable-multi-select.tsx` (click-order `toggle` at 78-85), `src/routes/_app/runner-pools.new.tsx` (172, 233-263, 344-364), `src/routes/_app/runner-pools.$poolId.settings.tsx` (57, 66-70, 122-144, 187-211, 302-325, 374-397).
+- `src/lib/use-action.ts` (unconditional `router.invalidate()` at 24) and `src/features/fleet/api-tokens-section.tsx` (`apiTokensQueryKey` at 24, `CreateTokenSection` invalidation at 67-75).
+- `src/features/runner-pools/runner-pools.functions.ts` (signal-taking fetchers at 115-125, `RunnerPoolDetail` at 52-65), `src/features/platform-connections/platform-connections.functions.ts`, `src/lib/api.ts`.
+- `docs/handoffs/145/wireframe.html` REV4 (B1, B1b, B4, B note 5, D notes 2-3, E1-E3) and `docs/handoffs/145/handoff-D.md` (open questions 9-11).

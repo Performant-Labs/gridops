@@ -1168,7 +1168,12 @@ fn matrix_rows() -> Result<Vec<MatrixRow>> {
             .split('|')
             .map(|cell| cell.trim().replace('`', ""))
             .collect();
-        if cells.len() != 6 || !matches!(cells[0].as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+        if cells.len() != 6
+            || !matches!(
+                cells[0].as_str(),
+                "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+            )
+        {
             continue;
         }
         rows.push(MatrixRow {
@@ -1201,13 +1206,14 @@ fn request(client: &Client, f: &Fixture, method: &str, path: &str) -> reqwest::R
         "GET" => client.get(url),
         "POST" => client.post(url),
         "PUT" => client.put(url),
+        "PATCH" => client.patch(url),
         "DELETE" => client.delete(url),
         other => unreachable!("method {other}"),
     };
     if path == "/api/v1/users/{user_id}/role" {
         // The handler checks the Origin after its body parses.
         builder.json(&json!({"role": "member"}))
-    } else if matches!(method, "POST" | "PUT") {
+    } else if matches!(method, "POST" | "PUT" | "PATCH") {
         builder.json(&json!({}))
     } else {
         builder

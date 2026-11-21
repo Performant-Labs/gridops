@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Search, X } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import {
   type SearchableSelectOption,
@@ -11,8 +11,26 @@ import { cn } from "~/lib/utils";
 /** Selected chips shown before the rest collapse into "+N more". */
 const CHIP_LIMIT = 12;
 
+/**
+ * An option of the multi-select. The extra fields are optional, so plain
+ * `SearchableSelectOption`s keep today's flat list:
+ * - `group` puts the option under that group's heading;
+ * - `disabled` blocks picking it (a selected option can still be removed), with `disabledReason` shown in the option;
+ * - `locked` makes it a chip with no remove button that is not listed in the picker.
+ */
+export type SearchableMultiSelectOption<TValue extends SearchableSelectValue> = SearchableSelectOption<TValue> & {
+  group?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  icon?: ReactNode;
+  locked?: boolean;
+};
+
+/** A heading in the picker, in display order, with an optional status (loading, error, not connected). */
+export type SearchableMultiSelectGroup = { name: string; status?: ReactNode };
+
 type SearchableMultiSelectProps<TValue extends SearchableSelectValue> = {
-  options: Array<SearchableSelectOption<TValue>>;
+  options: Array<SearchableMultiSelectOption<TValue>>;
   values: TValue[];
   onValueChange: (values: TValue[]) => void;
   ariaLabel: string;
@@ -25,6 +43,8 @@ type SearchableMultiSelectProps<TValue extends SearchableSelectValue> = {
   selectedNoun?: string;
   /** Offer selecting or clearing every option that matches the search. */
   selectAll?: boolean;
+  /** Group headings in order, each with an optional status. Options name their group. */
+  groups?: SearchableMultiSelectGroup[];
 };
 
 export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
@@ -40,6 +60,7 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
   maxSelected,
   selectedNoun = "options",
   selectAll = false,
+  groups,
 }: SearchableMultiSelectProps<TValue>) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -49,13 +70,25 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listboxId = useId();
-  const filteredOptions = useMemo(
-    () => filterSearchableOptions(options, query),
-    [options, query],
-  );
+  const grouped = groups !== undefined || options.some((option) => option.group !== undefined);
+  const groupNames = useMemo(() => {
+    const names = (groups ?? []).map((group) => group.name);
+    for (const option of options) if (option.group !== undefined && !names.includes(option.group)) names.push(option.group);
+    return names;
+  }, [groups, options]);
+  // Grouped options are listed group by group; the active index counts across the whole list.
+  const filteredOptions = useMemo(() => {
+    // The filter returns a subset of the options it is given, so their extra fields are kept.
+    const listed = filterSearchableOptions(options.filter((option) => !option.locked), query) as Array<SearchableMultiSelectOption<TValue>>;
+    if (!grouped) return listed;
+    return [
+      ...listed.filter((option) => option.group === undefined),
+      ...groupNames.flatMap((name) => listed.filter((option) => option.group === name)),
+    ];
+  }, [groupNames, grouped, options, query]);
   const selectedOptions = values
     .map((value) => options.find((option) => option.value === value))
-    .filter((option): option is SearchableSelectOption<TValue> => option !== undefined);
+    .filter((option): option is SearchableMultiSelectOption<TValue> => option !== undefined);
 
   useEffect(() => {
     function closeOnOutsidePointer(event: PointerEvent) {
@@ -77,9 +110,11 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
 
   function toggle(value: TValue) {
     if (values.includes(value)) {
+      if (options.find((option) => option.value === value)?.locked) return;
       onValueChange(values.filter((selected) => selected !== value));
       return;
     }
+    if (options.find((option) => option.value === value)?.disabled) return;
     if (maxSelected !== undefined && values.length >= maxSelected) return;
     onValueChange([...values, value]);
   }
@@ -94,6 +129,7 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
       return;
     }
     const added = filteredOptions
+      .filter((option) => !option.disabled)
       .map((option) => option.value)
       .filter((value) => !values.includes(value));
     const room = maxSelected === undefined ? added.length : Math.max(0, maxSelected - values.length);
@@ -108,6 +144,44 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
   function toggleActive() {
     const option = filteredOptions[activeIndex];
     if (option) toggle(option.value);
+  }
+
+  function renderOption(option: SearchableMultiSelectOption<TValue>) {
+    const index = filteredOptions.indexOf(option);
+    const selected = values.includes(option.value);
+    const atLimit = !selected && maxSelected !== undefined && values.length >= maxSelected;
+    const blocked = atLimit || (!selected && option.disabled === true);
+    return (
+      <button
+        aria-selected={selected}
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-popover-hover",
+          index === activeIndex && "bg-popover-hover",
+          blocked && "cursor-not-allowed opacity-40",
+        )}
+        disabled={blocked}
+        id={`${listboxId}-option-${index}`}
+        key={String(option.value)}
+        onClick={() => toggle(option.value)}
+        onMouseEnter={() => setActiveIndex(index)}
+        role="option"
+        tabIndex={-1}
+        type="button"
+      >
+        <span className={cn(
+          "grid size-4 shrink-0 place-items-center rounded border",
+          selected ? "border-primary bg-primary text-primary-foreground" : "border-border-strong",
+        )}>
+          {selected ? <Check className="size-3" /> : null}
+        </span>
+        {option.icon ? <span className="shrink-0 text-muted-foreground">{option.icon}</span> : null}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-foreground">{option.label}</span>
+          {option.description ? <span className="mt-0.5 block truncate text-2xs text-muted-foreground">{option.description}</span> : null}
+          {!selected && option.disabled && option.disabledReason ? <span className="mt-0.5 block truncate text-2xs text-muted-foreground">{option.disabledReason}</span> : null}
+        </span>
+      </button>
+    );
   }
 
   const summary = selectedOptions.length === 0
@@ -207,48 +281,41 @@ export function SearchableMultiSelect<TValue extends SearchableSelectValue>({
             ) : null}
           </div>
           <div aria-label={ariaLabel} className="max-h-72 overflow-y-auto p-1" id={listboxId} role="listbox" aria-multiselectable="true">
-            {filteredOptions.length === 0 ? (
+            {filteredOptions.length === 0 && !(groups ?? []).some((group) => group.status) ? (
               <div className="px-3 py-6 text-center text-xs text-muted-foreground">{emptyMessage}</div>
-            ) : filteredOptions.map((option, index) => {
-              const selected = values.includes(option.value);
-              const atLimit = !selected && maxSelected !== undefined && values.length >= maxSelected;
-              return (
-                <button
-                  aria-selected={selected}
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-popover-hover",
-                    index === activeIndex && "bg-popover-hover",
-                    atLimit && "cursor-not-allowed opacity-40",
-                  )}
-                  disabled={atLimit}
-                  id={`${listboxId}-option-${index}`}
-                  key={option.value}
-                  onClick={() => toggle(option.value)}
-                  onMouseEnter={() => setActiveIndex(index)}
-                  role="option"
-                  tabIndex={-1}
-                  type="button"
-                >
-                  <span className={cn(
-                    "grid size-4 shrink-0 place-items-center rounded border",
-                    selected ? "border-primary bg-primary text-primary-foreground" : "border-border-strong",
-                  )}>
-                    {selected ? <Check className="size-3" /> : null}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-foreground">{option.label}</span>
-                    {option.description ? <span className="mt-0.5 block truncate text-2xs text-muted-foreground">{option.description}</span> : null}
-                  </span>
-                </button>
-              );
-            })}
+            ) : grouped ? (
+              <>
+                {filteredOptions.filter((option) => option.group === undefined).map((option) => renderOption(option))}
+                {groupNames.map((name) => {
+                  const members = filteredOptions.filter((option) => option.group === name);
+                  const status = groups?.find((group) => group.name === name)?.status;
+                  if (!members.length && !status) return null;
+                  return (
+                    <div key={name} role="group" aria-label={name}>
+                      <div className="px-2 pb-1 pt-2 text-2xs font-medium uppercase tracking-wide text-faint" role="presentation">{name}</div>
+                      {members.map((option) => renderOption(option))}
+                      {status ? <div className="px-2 pb-1.5 text-xs text-muted-foreground">{status}</div> : null}
+                    </div>
+                  );
+                })}
+              </>
+            ) : filteredOptions.map((option) => renderOption(option))}
           </div>
         </div>
       ) : null}
       </div>
       {selectedOptions.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {(showAllChips ? selectedOptions : selectedOptions.slice(0, CHIP_LIMIT)).map((option) => (
+          {(showAllChips ? selectedOptions : selectedOptions.slice(0, CHIP_LIMIT)).map((option) => option.locked ? (
+            <span
+              className="inline-flex h-6 max-w-full items-center gap-1 rounded-full border border-border bg-panel-subtle px-2 text-2xs font-medium text-muted-foreground"
+              key={String(option.value)}
+              title="Kept as it is"
+            >
+              {option.icon ? <span className="shrink-0">{option.icon}</span> : null}
+              <span className="max-w-56 truncate">{option.label}</span>
+            </span>
+          ) : (
             <button
               aria-label={`Remove ${option.label}`}
               className="inline-flex h-6 max-w-full items-center gap-1 rounded-full border border-border-strong bg-panel-subtle px-2 text-2xs font-medium text-secondary-foreground hover:border-faint hover:text-foreground"

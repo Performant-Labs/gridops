@@ -1,0 +1,42 @@
+shot connections-empty-admin @360: scrollWidth=360 clientWidth=360
+shot add-chooser-empty @360: scrollWidth=360 clientWidth=360
+shot add-github-linkout-unconfigured @360: scrollWidth=360 clientWidth=360
+shot connections-empty-member @360: scrollWidth=360 clientWidth=360
+shot connections-populated-admin @360: scrollWidth=360 clientWidth=360
+shot add-chooser-populated @360: scrollWidth=360 clientWidth=360
+shot add-github-linkout-configured @360: scrollWidth=360 clientWidth=360
+FAILED populated chooser: Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Back' }) resolved to 2 elements:
+shot connections-populated-member @360: scrollWidth=360 clientWidth=360
+shot new-pool-form @360: scrollWidth=360 clientWidth=360
+shot new-pool-targets-open @360: scrollWidth=360 clientWidth=360
+shot pool-settings-mixed @360: scrollWidth=360 clientWidth=360
+shot pool-settings-targets-open @360: scrollWidth=360 clientWidth=360
+shot pool-settings-org @360: scrollWidth=360 clientWidth=360
+shot connections-empty-admin @768: scrollWidth=768 clientWidth=768
+shot add-chooser-empty @768: scrollWidth=768 clientWidth=768
+shot add-github-linkout-unconfigured @768: scrollWidth=768 clientWidth=768
+shot connections-empty-member @768: scrollWidth=768 clientWidth=768
+shot connections-populated-admin @768: scrollWidth=768 clientWidth=768
+shot add-chooser-populated @768: scrollWidth=768 clientWidth=768
+shot add-github-linkout-configured @768: scrollWidth=768 clientWidth=768
+FAILED populated chooser: Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Back' }) resolved to 2 elements:
+shot connections-populated-member @768: scrollWidth=768 clientWidth=768
+shot new-pool-form @768: scrollWidth=768 clientWidth=768
+shot new-pool-targets-open @768: scrollWidth=768 clientWidth=768
+shot pool-settings-mixed @768: scrollWidth=768 clientWidth=768
+shot pool-settings-targets-open @768: scrollWidth=768 clientWidth=768
+shot pool-settings-org @768: scrollWidth=768 clientWidth=768
+shot connections-empty-admin @1280: scrollWidth=1280 clientWidth=1280
+shot add-chooser-empty @1280: scrollWidth=1280 clientWidth=1280
+shot add-github-linkout-unconfigured @1280: scrollWidth=1280 clientWidth=1280
+shot connections-empty-member @1280: scrollWidth=1280 clientWidth=1280
+shot connections-populated-admin @1280: scrollWidth=1280 clientWidth=1280
+shot add-chooser-populated @1280: scrollWidth=1280 clientWidth=1280
+shot add-github-linkout-configured @1280: scrollWidth=1280 clientWidth=1280
+FAILED populated chooser: Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Back' }) resolved to 2 elements:
+shot connections-populated-member @1280: scrollWidth=1280 clientWidth=1280
+shot new-pool-form @1280: scrollWidth=1280 clientWidth=1280
+shot new-pool-targets-open @1280: scrollWidth=1280 clientWidth=1280
+shot pool-settings-mixed @1280: scrollWidth=1280 clientWidth=1280
+shot pool-settings-targets-open @1280: scrollWidth=1280 clientWidth=1280
+shot pool-settings-org @1280: scrollWidth=1280 clientWidth=1280

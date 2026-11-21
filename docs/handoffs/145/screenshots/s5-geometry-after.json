@@ -1,0 +1,1554 @@
+{
+ "admin@320": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 226,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 280,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       20,
+       348,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 280,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       20,
+       1127,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       158,
+       1127,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       20,
+       1163,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 280,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 120,
+    "w": 278
+   },
+   {
+    "h": 98,
+    "w": 278
+   },
+   {
+    "h": 98,
+    "w": 278
+   },
+   {
+    "h": 122,
+    "w": 278
+   },
+   {
+    "h": 98,
+    "w": 278
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@360": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 266,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 320,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       20,
+       308,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 320,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       20,
+       1045,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       158,
+       1045,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       20,
+       1081,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 320,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 98,
+    "w": 318
+   },
+   {
+    "h": 98,
+    "w": 318
+   },
+   {
+    "h": 98,
+    "w": 318
+   },
+   {
+    "h": 122,
+    "w": 318
+   },
+   {
+    "h": 98,
+    "w": 318
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@480": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 386,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 295,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       327,
+       268,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 440,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       20,
+       985,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       158,
+       985,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       242,
+       985,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 440,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 98,
+    "w": 438
+   },
+   {
+    "h": 98,
+    "w": 438
+   },
+   {
+    "h": 98,
+    "w": 438
+   },
+   {
+    "h": 122,
+    "w": 438
+   },
+   {
+    "h": 98,
+    "w": 438
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@639": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 545,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 454,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       486,
+       248,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 250,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       282,
+       986,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       420,
+       986,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       504,
+       986,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 599,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 98,
+    "w": 597
+   },
+   {
+    "h": 98,
+    "w": 597
+   },
+   {
+    "h": 98,
+    "w": 597
+   },
+   {
+    "h": 122,
+    "w": 597
+   },
+   {
+    "h": 98,
+    "w": 597
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@640": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 292,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 431,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       475,
+       264,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 227,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       271,
+       822,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       409,
+       822,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       493,
+       822,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 576,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 574
+   },
+   {
+    "h": 62,
+    "w": 574
+   },
+   {
+    "h": 62,
+    "w": 574
+   },
+   {
+    "h": 86,
+    "w": 574
+   },
+   {
+    "h": 62,
+    "w": 574
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@768": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 372,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 511,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       579,
+       264,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 307,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       375,
+       781,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       513,
+       781,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       597,
+       781,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@1024": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 372,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 511,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       825,
+       229,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 307,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       621,
+       746,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       759,
+       746,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       843,
+       746,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "admin@1280": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "ada-admin": {
+    "w": 67,
+    "full": 67,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 372,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 511,
+    "actions": [
+     {
+      "t": "Add connection",
+      "r": [
+       953,
+       229,
+       133,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 307,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       749,
+       746,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       887,
+       746,
+       76,
+       28
+      ]
+     },
+     {
+      "t": "Manage App",
+      "r": [
+       971,
+       746,
+       115,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false
+ },
+ "member@320": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 226,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 280,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 280,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       20,
+       1038,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       158,
+       1038,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 280,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 110,
+    "w": 278
+   },
+   {
+    "h": 70,
+    "w": 278
+   },
+   {
+    "h": 94,
+    "w": 278
+   },
+   {
+    "h": 70,
+    "w": 278
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@360": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 266,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 320,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 320,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       20,
+       956,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       158,
+       956,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 320,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 88,
+    "w": 318
+   },
+   {
+    "h": 70,
+    "w": 318
+   },
+   {
+    "h": 94,
+    "w": 318
+   },
+   {
+    "h": 70,
+    "w": 318
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@480": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 386,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 440,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 214,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       246,
+       917,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       384,
+       917,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 440,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 88,
+    "w": 438
+   },
+   {
+    "h": 70,
+    "w": 438
+   },
+   {
+    "h": 94,
+    "w": 438
+   },
+   {
+    "h": 70,
+    "w": 438
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@639": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 545,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 599,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 373,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       405,
+       836,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       543,
+       836,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 599,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 88,
+    "w": 597
+   },
+   {
+    "h": 70,
+    "w": 597
+   },
+   {
+    "h": 94,
+    "w": 597
+   },
+   {
+    "h": 70,
+    "w": 597
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@640": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 420,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 576,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 350,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       394,
+       843,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       532,
+       843,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 576,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 574
+   },
+   {
+    "h": 62,
+    "w": 574
+   },
+   {
+    "h": 86,
+    "w": 574
+   },
+   {
+    "h": 62,
+    "w": 574
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@768": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 500,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 656,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 430,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       498,
+       782,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       636,
+       782,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@1024": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 500,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 656,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 430,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       744,
+       747,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       882,
+       747,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ },
+ "member@1280": {
+  "names": {
+   "acme-labs": {
+    "w": 66,
+    "full": 66,
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "w": 98,
+    "full": 98,
+    "clipped": false
+   },
+   "Platform Team": {
+    "w": 90,
+    "full": 90,
+    "clipped": false
+   },
+   "Extremely-long": {
+    "w": 500,
+    "full": 573,
+    "clipped": true
+   }
+  },
+  "headers": [
+   {
+    "t": "Connections",
+    "h2w": 656,
+    "actions": []
+   },
+   {
+    "t": "GitHub App",
+    "h2w": 430,
+    "actions": [
+     {
+      "t": "Refresh access",
+      "r": [
+       872,
+       747,
+       130,
+       28
+      ]
+     },
+     {
+      "t": "Install",
+      "r": [
+       1010,
+       747,
+       76,
+       28
+      ]
+     }
+    ]
+   },
+   {
+    "t": "Endpoints",
+    "h2w": 656,
+    "actions": []
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   },
+   {
+    "h": 86,
+    "w": 654
+   },
+   {
+    "h": 62,
+    "w": 654
+   }
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false
+ }
+}
