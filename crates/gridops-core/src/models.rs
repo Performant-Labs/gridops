@@ -777,12 +777,12 @@ mod tests {
             priority_repository_ids: None,
             priority_wait_minutes: None,
         };
-        assert!(update.validate().is_ok());
+        assert!(update.validate(false).is_ok());
 
         let mut undersized = update;
         undersized.repository_ids = Some(vec![2, 3]);
         undersized.max_count = 1;
-        assert!(undersized.validate().is_err());
+        assert!(undersized.validate(false).is_err());
 
         let mut bitbucket = pool();
         bitbucket.providers = vec!["docker".into(), "tart".into()];
@@ -837,7 +837,7 @@ mod tests {
         );
         assert_eq!(docker.selected_tart_image(), "");
         let docker_edit = update(pool());
-        assert!(docker_edit.validate().is_ok());
+        assert!(docker_edit.validate(false).is_ok());
         assert_eq!(docker_edit.selected_tart_image(), "");
 
         let mut tart = pool();
@@ -860,7 +860,7 @@ mod tests {
         let mut mixed = update(pool());
         mixed.providers = vec!["docker".into(), "tart".into()];
         mixed.tart_image = "acme-xcode-26".into();
-        assert!(mixed.validate().is_ok());
+        assert!(mixed.validate(false).is_ok());
         assert_eq!(
             mixed.selected_docker_image(),
             "ghcr.io/actions/actions-runner:latest"
@@ -876,12 +876,12 @@ mod tests {
         add_tart.providers = vec!["docker".into(), "tart".into()];
         add_tart.tart_image = String::new();
         assert_eq!(
-            add_tart.validate(),
+            add_tart.validate(false),
             Err("Tart base VM (tartImage) is required for a pool that uses macOS · Tart virtual machines.".into())
         );
         // Native execution clones no VM, so it needs no base VM.
         add_tart.macos_runtime = "native".into();
-        assert!(add_tart.validate().is_ok());
+        assert!(add_tart.validate(false).is_ok());
         assert_eq!(add_tart.selected_tart_image(), "");
 
         let mut create_mixed = pool();
@@ -899,19 +899,19 @@ mod tests {
         add_docker.tart_image = "acme-xcode-26".into();
         add_docker.docker_image = String::new();
         assert_eq!(
-            add_docker.validate(),
+            add_docker.validate(false),
             Err(
                 "Docker image (dockerImage) is required for a pool that uses Linux · Docker."
                     .into()
             )
         );
         add_docker.docker_image = "ghcr.io/acme/runner:2".into();
-        assert!(add_docker.validate().is_ok());
+        assert!(add_docker.validate(false).is_ok());
 
         // A value that is there but malformed keeps its own message.
         add_docker.docker_image = " runner:latest".into();
         assert_eq!(
-            add_docker.validate(),
+            add_docker.validate(false),
             Err("Docker image must contain 1-300 non-padding characters.".into())
         );
     }
@@ -926,20 +926,20 @@ mod tests {
         tart.providers = vec!["tart".into()];
         tart.image = "acme-xcode-26".into();
         tart.tart_image = "acme-xcode-26".into();
-        assert!(tart.validate().is_ok());
+        assert!(tart.validate(false).is_ok());
         tart.tart_image = String::new();
-        assert!(tart.validate().is_ok());
+        assert!(tart.validate(false).is_ok());
         assert_eq!(tart.selected_tart_image(), "acme-xcode-26");
         tart.tart_image = "gridops-macos-tahoe-base".into();
         assert_eq!(
-            tart.validate(),
+            tart.validate(false),
             Err("image and tartImage name different images for the primary provider; send the same value in both, or leave tartImage out.".into())
         );
 
         let mut docker = update(pool());
         docker.image = "ghcr.io/acme/runner:2".into();
         assert_eq!(
-            docker.validate(),
+            docker.validate(false),
             Err("image and dockerImage name different images for the primary provider; send the same value in both, or leave dockerImage out.".into())
         );
     }

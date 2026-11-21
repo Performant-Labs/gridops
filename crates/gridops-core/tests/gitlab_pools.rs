@@ -64,9 +64,11 @@ fn validate_create(body: &Value) -> Result<Result<(), String>> {
     Ok(input.validate())
 }
 
+/// Every update body here is for a GitLab pool: the handler passes
+/// `pool.scope == "gitlab"` (#172).
 fn validate_update(body: &Value) -> Result<Result<(), String>> {
     let input: UpdateRunnerPool = serde_json::from_value(body.clone())?;
-    Ok(input.validate())
+    Ok(input.validate(true))
 }
 
 fn many_ids(count: usize) -> Vec<String> {

@@ -60,6 +60,8 @@ describe("shared rows do not branch on a platform", () => {
     // #169: the runner row and the Overview's pool rows take the pool's platform from the registry.
     "src/features/runners/runner-row.tsx",
     "src/routes/_app/index.tsx",
+    // #172: the Fleet execution editor gets a GitLab pool's default image from the settings route.
+    "src/features/fleet/fleet-profile-section.tsx",
   ];
   const BRANCHING = [
     /["'](github|bitbucket|gitlab)(\.[a-z-]+)?["']/, // a platform or kind id
@@ -127,6 +129,24 @@ describe("shared rows do not branch on a platform", () => {
     // The fallback destination is GitHub's descriptor value now, not page copy.
     expect(page).not.toMatch(/["']GitHub App["']/);
     expect(page).toMatch(/from "~\/features\/platform-connections\/registry"/);
+  });
+});
+
+describe("the default Docker image is the descriptor's (#172)", () => {
+  it("validateProvider in schemas.ts reads no platform or scope: its caller says whether the Docker image is optional", () => {
+    const source = read("src/features/runner-pools/schemas.ts");
+    const start = source.indexOf("function validateProvider(");
+    expect(start, "validateProvider exists").toBeGreaterThanOrEqual(0);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    expect(body).not.toMatch(/github|bitbucket|gitlab|\bscope\b/i);
+  });
+
+  it("schemas.ts imports no descriptor or registry (gitlab.tsx and bitbucket.tsx import schemas.ts)", () => {
+    expect(read("src/features/runner-pools/schemas.ts")).not.toMatch(/from "[^"]*platform-connections\//);
+  });
+
+  it("targets.ts takes the descriptors as an argument and never imports the registry", () => {
+    expect(read("src/features/runner-pools/targets.ts")).not.toMatch(/from "[^"]*platform-connections\/registry"/);
   });
 });
 

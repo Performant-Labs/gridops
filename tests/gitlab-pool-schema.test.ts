@@ -115,3 +115,42 @@ describe("GitLab connection bounds (create and update)", () => {
     expect(parse(["not-a-uuid"]).success).toBe(false);
   });
 });
+
+/**
+ * #172: a GitLab pool may leave its Docker image empty; the server then runs the GitLab runner image.
+ * The schema stays free of platforms: create derives the relaxation from its own `scope`, and update
+ * takes it as a neutral option from the caller (the settings route asks the descriptor). The
+ * exported update schema keeps the GitHub rule.
+ */
+describe("a GitLab pool's Docker image is optional (#172)", () => {
+  const DOCKER_REQUIRED = "Docker image (dockerImage) is required for a pool that uses Linux · Docker.";
+  const noImage = { image: "", dockerImage: "" };
+
+  it("create accepts a gitlab-scoped pool with an empty Docker image and keeps it empty", () => {
+    const result = createRunnerPoolSchema.safeParse({ ...gitlabCreate, ...noImage });
+    expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
+    expect(result.data).toMatchObject({ scope: "gitlab", image: "", dockerImage: "" });
+  });
+
+  it.each([
+    ["a repository pool", { ...repositoryCreate, ...noImage }],
+    ["an organization pool", { ...configuration, installationId: 1, scope: "organization", repositoryIds: [], ...noImage }],
+  ])("create still rejects %s's empty Docker image with today's message", (_name, input) => {
+    const result = createRunnerPoolSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(firstError(result)).toMatchObject({ path: ["dockerImage"], message: DOCKER_REQUIRED });
+  });
+
+  it("update accepts an empty Docker image only when the caller says the image is optional", () => {
+    expect(parseUpdateRunnerPoolInput({ ...configuration, ...noImage }, { dockerImageOptional: true }))
+      .toMatchObject({ image: "", dockerImage: "" });
+    expect(() => parseUpdateRunnerPoolInput({ ...configuration, ...noImage }, { dockerImageOptional: false })).toThrow(DOCKER_REQUIRED);
+    expect(() => parseUpdateRunnerPoolInput({ ...configuration, ...noImage })).toThrow(DOCKER_REQUIRED);
+  });
+
+  it("the exported update schema keeps the GitHub rule", () => {
+    const result = updateRunnerPoolSchema.safeParse({ ...configuration, ...noImage });
+    expect(result.success).toBe(false);
+    expect(firstError(result)).toMatchObject({ path: ["dockerImage"], message: DOCKER_REQUIRED });
+  });
+});
