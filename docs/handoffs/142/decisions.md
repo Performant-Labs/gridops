@@ -133,3 +133,23 @@ Verdict PASS: gitlab.rs and the image script are brief-mandated; all other chang
 - **Assumed:** the workflow routes a self-reported test-only S REWORK to T (playbook #678).
 - **Hedged:** S's other advisory notes are PR-body items for O: the manual check deferred to #143, the registrationToken deviation (ignored, not refused), #147 being needed for end-to-end reachability, and the crash window. They are also contract-level items for epic #136 (instance-prefixed `glrt-` tokens) or upstream behaviour (the 300 s mid-run refusal delay, gitlab-runner's shortened-token log line). None is a #142 production change.
 - **Evidence:** `handoff-S.md`; `gitlab.rs:144-178` (the exit mapping the new rows pin).
+
+## A (Phase 3, up-front plan review, second pass): 2026-11-20T17:05:02-08:00
+- **Decided:**
+  - **PASS: no blocks, and 8 warnings** (see `handoff-A.md`, which this pass rewrites).
+  - **The brief is unchanged since the first pass** (last amended in 12421a7, before 229081c).
+  - **The baseline code is unchanged** in every file #142 touches. `origin/master`'s three new commits (#146, #145, #155) don't touch `gridops-tart-agent`, the manager's `validate`, `provisioning.rs`, `scripts/` or `docs/macos-runners.md`.
+  - **Warnings 1 to 7 from the first pass stand.** The implementation already on the branch (HEAD 6d5e2e1) follows all seven.
+  - **New warning 8: code already exists**, although the task text says "before any code exists". T and F in this run must extend the existing `gitlab.rs`, `gitlab_tests.rs`, the `main.rs` wiring, the image script and the docs section, not write them again. A second copy would be a parallel path, and the Phase 7 gate would block it.
+- **Assumed:** this is a fresh workflow run, restarted at Phase 3 after the previous run stopped on F's "implementation incomplete" (0f08494), which came after S's test-only REWORK. T's rework commit 6d5e2e1 landed after that.
+- **Hedged:**
+  - **NV-1 is still open.** It is unsettled whether `tart exec` returns the guest's status after an outside `tart stop` (from `control_runner` or `delete_runner`). This is a runtime question, not drift. The existing script lowers the risk: it never exits 0 unless it recognised a line from `run-single`.
+  - **The image scripts use two styles.** The GitLab image script runs its guest step as a stdin heredoc, as `prepare-tart-runner-image.sh` does, not as Bitbucket's `bash -lc` string. The repository uses both, so I raised no finding.
+- **Evidence:**
+  - **Read:**
+    - the brief in full, `git log` of the brief, and `handoff-A.md` and `decisions.md` from the first pass;
+    - `handoff-S.md`, `142-diff-result-r1.md`, F's rework section and T's rework section;
+    - the uncommitted diff of `142-brief-result-r1`.
+  - **Source at b22c451:** `crates/gridops-tart-agent/src/main.rs`: `TartRecord`, `ProvisionRunner`, `GitlabBootstrap`, `GITLAB_EXIT_*`, `validate`, `list_runners`, `provision_runner`, the native waiter, `control_runner`, `delete_runner`, `start_runner`, `bitbucket_runner_script`, `shell_single_quote`, the record helpers and `valid_guest_path`.
+  - **Source at HEAD:** `gitlab.rs` in full, the production diff of `main.rs`, the index of `gitlab_tests.rs`, the diff between the image script and Bitbucket's, and the section list of `docs/macos-runners.md`.
+  - **Source on `origin/master`:** `gridops-manager/src/main.rs:487`, `gridops-core/src/gitlab/{mod,http}.rs`, and `git diff --stat HEAD...origin/master`.
