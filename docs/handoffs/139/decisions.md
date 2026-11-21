@@ -103,3 +103,30 @@
     - `crates/gridops-reconciler/src/main.rs`: `reconcile` `:440-640`, `load_pools`, `reconcile_pool` `:786-1057`, `PassOutcome`, `pool_state`, `finish_pool_pass`, `provision`, the end of `provision_on_host` and `start_admitted_runner` `:2440-2530`, `:2640-2781`, `delete_runner`, `bitbucket_registration`, `deregister_bitbucket_runner`, `remove_manager_container`, `set_pool_wait_reason`, `record_provision_failure`, `provision_failure_policy`, `maybe_sync_github`, `retry_github_runner_cleanup` (head), `runners()`, `Pool::retry_deferred`;
     - `crates/gridops-core/src/fleet/start_health.rs` (`is_start_failure`), `crates/gridops-core/src/fleet/retry.rs` (`retry_failed_start`, head), `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`);
     - `migrations/0047_gitlab.sql` (`:1-60`, `installation_id` grep), `migrations/0001_initial.sql` (`runner_pools.installation_id NOT NULL`).
+
+## A (Phase 3, up-front plan review, round 5 on the round-4-amended brief, fresh run): 2026-11-20T16:30:28-08:00
+- **Decided:** PASS, with 0 block findings and 2 warn findings (see `handoff-A.md`).
+  - Round-4 block 1 is resolved:
+    - `load_pool` shares `load_pools`'s SELECT, the only `Pool` query in the reconciler.
+    - The manager path reloads after the status loop, so `retry_deferred`, `provisioning_blocked`, the start loop and `PassOutcome::for_pool` use the fresh copy. This follows the re-read at `main.rs:1028-1041`.
+    - The fleet path needs no reload. Every fleet count runs in `fleet::tick` (`register_and_start`, `follow`, `finish`) before `load_pools` (`main.rs:526`, `:566`); the start loop's `fleet::provision` only inserts and admits.
+  - Round-4 warnings 2-4 are resolved:
+    - The probe stop sits in the one shared start loop (`:947`), which serves both paths through `provision` (`:2320-2336`).
+    - The fleet rollback sets `gitlab_runner_id` to NULL after a successful inline delete. `GitLabError::NotFound` exists and counts as done.
+    - `StartOutcome::Failed` is still returned as the pool's `Err`.
+  - Warnings:
+    - (1) The probe limit is one start per pass, not one per cool-down. A GitLab start the manager or fleet accepts neither resets the circuit nor sets a new `provision_retry_at`, so passes keep making probe starts until the refusal is counted. On the fleet path, where the refusal comes several ticks later, that can still reach `desired - active` per cool-down. The options: hold back while the probe is in flight, as `tart_lane`'s `HeldBack` does, or record the per-pass limit as deliberate.
+    - (2) The rule "every GitLab count gets a `Pool` from `load_pool`" needs a scope: counts outside the start loop only, so `:942` and `:2503` get no GitLab-only branch. It also needs a rule for `load_pool` returning `None`. And the reloaded `pool.state` can repeat the `:855` host-off event once.
+- **Assumed:**
+  - A pool is GitLab-only when it has `runner_pool_gitlab_connections` rows (#138), so the start loop can tell a "GitLab start" from the pool.
+  - The brief-gate reviewer's pass on this amendment (`139-brief-result-r1.md`, PASS) has no bearing on this gate.
+- **Hedged:**
+  - Warning 1 stays a warning, not a block. The cost is bounded by `desired - active`, it is the remainder of round-4's warning 2, and option (a) trades it for a slower refill after recovery. O decides.
+  - Warning 2's `:855` repeated event is cosmetic and rare (a refusal counted while the built-in host is off).
+- **Evidence:**
+  - Read: the role document, the round-4 `handoff-A.md`, this journal, the brief in full (`git diff HEAD` for the round-4 section), and `139-brief-result-r1.md` (`git diff HEAD`).
+  - Source:
+    - `crates/gridops-reconciler/src/main.rs`: `Pool` and `retry_deferred` (`:55-106`), `ProvisionAttempt` (`:338-355`), `run_passes`, `run_pass` (`:398-433`), `reconcile` (`:522-633`), `load_pools` and `reconcile_pool` (`:771-1057`), `PassOutcome`, `pool_state`, `finish_pool_pass` (`:1059-1143`), `provision`, `provision_on_host`, `AdmittedStart`, `StartOutcome` (`:2284-2580`), `start_admitted_runner`'s end and `delete_runner` (`:2680-2904`), `remove_manager_container` (`:2938-2958`), `set_pool_wait_reason` and `record_provision_failure` through `provision_backoff_ms` (`:3580-3655`); grep for `query_as::<_, Pool>`, `load_pools` and `provision_circuit_open`.
+    - `crates/gridops-reconciler/src/fleet.rs`: `:1-50` and `:150-619`.
+    - `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`).
+    - `crates/gridops-reconciler/src/start_tests.rs` (grep for the reset test).
