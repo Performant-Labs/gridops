@@ -89,3 +89,13 @@
   - `cargo fmt --all --check`: clean.
   - clippy 1.98.1 on gridops-reconciler (`--all-targets -D warnings`): clean.
   - Preflight test at `7164fda`: FAILED (0/1), which confirms that failure predates this branch.
+
+## Phase 7 re-entry after diff gate round 1 (T) - 2026-11-21
+- **Decided:**
+  - Added tests the rework lacked: upstream detail absent from the event (B-1), one failing pool does not silence the others (W-1). Renamed `HOUR_AND_MORE` to `TWO_HOURS` (NIT-1). Verdict PASS, no production edits.
+- **Assumed:**
+  - The pre-existing `fleet_http` preflight failure stays non-blocking, on F's baseline at `7164fda`.
+- **Hedged:**
+  - I did not re-run the full `cargo test -p gridops-api`: no API or core production file changed in the rework.
+- **Evidence:**
+  - Mutation (Upstream uses full Display; loop returns on first failure) failed exactly the two tests; restored. reconciler 120 passed, core gitlab:: 36, vitest 603, fmt and clippy clean.

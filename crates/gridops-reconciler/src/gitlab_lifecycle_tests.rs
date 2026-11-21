@@ -810,7 +810,7 @@ async fn a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it(
     setup.gitlab.fail_next(
         &ACME.url()?,
         FakeMethod::DeleteRunner,
-        GitLabError::Upstream("502 from GitLab".to_owned()),
+        GitLabError::Upstream("502 from GitLab: internal-detail-7f3a".to_owned()),
     );
 
     pass(&setup).await?;
@@ -841,6 +841,14 @@ async fn a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it(
     assert_refusal(&refused[0], ACME.name, 1, "GitLab request failed");
     assert_eq!(refused[0].runner_id.as_deref(), Some(first[0].id.as_str()));
     assert!(!refused[0].message.contains("manage_runner"), "{refused:?}");
+    // The upstream detail is free-form text: it stays in the log, as the
+    // API keeps it out of its responses, and is not in the event.
+    for text in [&refused[0].message, &refused[0].metadata] {
+        assert!(
+            !text.contains("internal-detail-7f3a") && !text.contains("502"),
+            "no upstream detail in the event: {refused:?}"
+        );
+    }
 
     // The sweep's interval has passed.
     sqlx::query("UPDATE settings SET value='0' WHERE key='lastGitlabRunnerSweepAt'")
@@ -1380,7 +1388,9 @@ async fn the_sweeps_refused_deletions_warn_each_linked_pool_once_an_hour_per_rea
         path: "other/project",
         created_at: 2,
     };
-    const HOUR_AND_MORE: i64 = 2 * 3_600_000;
+    // Each backdating moves the warnings two hours back (more than the hour's
+    // window); it is applied twice, so the oldest rows end up four hours old.
+    const TWO_HOURS: i64 = 2 * 3_600_000;
     let setup = gitlab_setup(&format!(
         "{} {}",
         gitlab_pool("pool-a", "docker", RUNNER_IMAGE, "", 0),
@@ -1455,7 +1465,7 @@ async fn the_sweeps_refused_deletions_warn_each_linked_pool_once_an_hour_per_rea
 
     // An hour later the same reason warns again.
     sqlx::query("UPDATE runner_events SET created_at=created_at-? WHERE event=?")
-        .bind(HOUR_AND_MORE)
+        .bind(TWO_HOURS)
         .bind(DELETION_REFUSED)
         .execute(&setup.app.database)
         .await?;
@@ -1470,7 +1480,7 @@ async fn the_sweeps_refused_deletions_warn_each_linked_pool_once_an_hour_per_rea
 
     // A warning that cannot be written: the sweep still deletes what it can.
     sqlx::query("UPDATE runner_events SET created_at=created_at-? WHERE event=?")
-        .bind(HOUR_AND_MORE)
+        .bind(TWO_HOURS)
         .bind(DELETION_REFUSED)
         .execute(&setup.app.database)
         .await?;
@@ -1494,6 +1504,50 @@ async fn the_sweeps_refused_deletions_warn_each_linked_pool_once_an_hour_per_rea
         "and the next connection is swept"
     );
     assert_no_token_stored(&setup).await?;
+    setup.finish().await
+}
+
+/// #171: the sweep's warning for one pool that cannot be written does not
+/// keep the connection's other linked pools from being told.
+#[tokio::test]
+async fn a_pool_whose_sweep_warning_cannot_be_written_does_not_silence_the_others() -> Result<()> {
+    let setup = gitlab_setup(&format!(
+        "{} {}",
+        gitlab_pool("pool-a", "docker", RUNNER_IMAGE, "", 0),
+        gitlab_pool("pool-b", "docker", RUNNER_IMAGE, "", 0)
+    ))
+    .await?;
+    ACME.add(&setup, &["pool-a", "pool-b"]).await?;
+    seed(
+        &setup,
+        &ACME,
+        31,
+        &marker("00000000-0000-4000-8000-000000000031"),
+    )?;
+    // Pools are told in id order: pool-a, the first, is the one that fails.
+    sqlx::raw_sql(
+        "CREATE TRIGGER fail_pool_a_refusal BEFORE INSERT ON runner_events
+           WHEN NEW.event='GitLab runner not deleted' AND NEW.pool_id='pool-a'
+         BEGIN SELECT RAISE(ABORT,'disk I/O error'); END;",
+    )
+    .execute(&setup.app.database)
+    .await?;
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+
+    reconcile(&setup.app).await?;
+
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?,
+        [31],
+        "left for the sweep"
+    );
+    assert_eq!(counts(&setup).await?, (0, 1), "pool-b is still told");
+    let pool_b = refusals(&setup, "pool-b").await?;
+    assert_refusal(&pool_b[0], ACME.name, 31, "manage_runner");
     setup.finish().await
 }
 

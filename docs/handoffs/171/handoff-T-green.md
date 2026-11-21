@@ -6,7 +6,31 @@
 **Handoff-F reviewed:** docs/handoffs/171/handoff-F.md
 **Handoff-T-red:** docs/handoffs/171/handoff-T-red.md
 
-## GREEN confirmation
+## Re-entry after diff gate round 1 and F's rework (2026-11-21)
+
+F changed production in `gitlab_lifecycle.rs` (B-1 `client_safe_reason`, W-1 `warn_pool`). I re-verified and repaired the tests; I changed no production code.
+
+Test changes (all in `crates/gridops-reconciler/src/gitlab_lifecycle_tests.rs`):
+- **B-1 pinned.** `a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it` now fails the delete with `Upstream("502 from GitLab: internal-detail-7f3a")` and asserts neither the event message nor its metadata contains the detail or "502". Before, the test passed whether or not the detail leaked, which is the gap the gate found.
+- **W-1 pinned.** New `a_pool_whose_sweep_warning_cannot_be_written_does_not_silence_the_others`: a trigger aborts the refusal insert for `pool-a` only; the sweep must still warn `pool-b`. Before, the only failure test aborted every insert, so it could not tell "continue" from "stop".
+- **NIT-1.** `HOUR_AND_MORE` renamed `TWO_HOURS`, with a comment on the double backdating.
+
+Mutation check (temporary, production restored with `git checkout` afterwards, `git status` shows only the tests file modified): making `Upstream` use the full `Display`, and making `warn_linked_pools` return on the first pool failure, made exactly the two tests above FAIL (`20 passed; 2 failed`). With the real code both pass.
+
+Results after the changes (CARGO_BUILD_JOBS=2, RUST_TEST_THREADS=2):
+- `cargo test -p gridops-reconciler` -> 120 passed, 0 failed (was 119; +1 new test).
+- `cargo test -p gridops-reconciler gitlab_lifecycle_tests` -> 32 passed.
+- `cargo test -p gridops-core --lib gitlab::` -> 36 passed.
+- `cargo fmt --all --check` -> clean. `cargo +1.98.1 clippy -p gridops-reconciler --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` -> clean.
+- `npm run lint`, `npm run typecheck` -> clean. `npx vitest run` -> 53 files, 603 tests passed.
+- F's claim that the `fleet_http` release-preflight failure predates the branch (fails at `7164fda`) is accepted: the test is host-dependent fleet code this diff does not touch. gridops-api GitLab tests passed in my earlier run and no API or core production file changed in the rework.
+- B-2 (UI walkthrough) is U's Phase 9, not a T item; F's seed SQL is in handoff-F.md for U.
+
+Blocking issues after re-entry: None.
+
+---
+
+## GREEN confirmation (first pass)
 All Phase-4 tests that were RED now pass. I changed no tests and no production code (F reported "Tests that look wrong: None"; I found none).
 
 - `cargo test -p gridops-core --lib gitlab::` -> 36 passed (the 12-case scope table passes).
