@@ -407,7 +407,7 @@ fn gitlab_pool_body(name: &str, connections: &[&str]) -> Value {
         "idleTimeoutMinutes": 5,
         "cpuLimit": 2.0,
         "memoryLimitMb": 2048,
-        // Validation still wants a positive value; the handler stores 1.
+        // A GitLab pool takes any value or none (#172); the handler stores 1.
         "runnerGroupId": 5,
     })
 }
@@ -2341,5 +2341,277 @@ async fn the_pool_list_counts_no_runners_for_an_empty_pool_and_only_live_runners
         json!(1),
         "a pool with one live and one deleted runner"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #172: a GitLab Docker pool may leave its image and runner group out
+// ---------------------------------------------------------------------------
+
+const DOCKER_IMAGE_REQUIRED: &str =
+    "Docker image (dockerImage) is required for a pool that uses Linux · Docker.";
+const DOCKER_IMAGE_PADDED: &str = "Docker image must contain 1-300 non-padding characters.";
+const RUNNER_GROUP_NOT_POSITIVE: &str = "Runner group ID must be positive.";
+const REPOSITORY_POOL: &str = "c1000000-0000-4000-8000-000000000003";
+const MISSING_POOL: &str = "c1000000-0000-4000-8000-0000000000ff";
+
+/// `body` with `changes` merged in; a `null` change removes the field, the
+/// way a client that never sends it would.
+fn with_changes(mut body: Value, changes: &Value) -> Value {
+    for (key, value) in changes.as_object().into_iter().flatten() {
+        if value.is_null() {
+            if let Some(object) = body.as_object_mut() {
+                object.remove(key);
+            }
+        } else {
+            body[key] = value.clone();
+        }
+    }
+    body
+}
+
+/// `(image, docker_image, runner_group_id)` as stored.
+async fn pool_images(h: &Harness, pool_id: &str) -> Result<(String, String, i64)> {
+    Ok(
+        sqlx::query_as("SELECT image,docker_image,runner_group_id FROM runner_pools WHERE id=?")
+            .bind(pool_id)
+            .fetch_one(&h.database)
+            .await?,
+    )
+}
+
+fn error_message(body: &Value) -> &str {
+    body["error"].as_str().unwrap_or_default()
+}
+
+/// A GitHub pool create body: the GitLab body without its GitLab fields.
+fn github_pool_body(name: &str, scope: &str) -> Value {
+    let mut body = with_changes(
+        gitlab_pool_body(name, &[]),
+        &json!({"gitlabConnectionIds": null, "scope": scope}),
+    );
+    if scope == "repository" {
+        body["repositoryIds"] = json!([7]);
+    }
+    body
+}
+
+#[tokio::test]
+async fn a_gitlab_docker_pool_is_created_with_no_image_and_no_runner_group_and_runs_the_gitlab_runner_image()
+-> Result<()> {
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, project(42, "acme/app")?)
+        .await?;
+    // (pool name, runnerGroupId: null = left out). A GitLab pool uses no
+    // runner group, so absent, 0 and any other value are all accepted.
+    for (name, runner_group_id) in [
+        ("gitlab-group-zero", json!(0)),
+        ("gitlab-no-group", Value::Null),
+        ("gitlab-group-negative", json!(-4)),
+    ] {
+        let body = with_changes(
+            gitlab_pool_body(name, &[CONNECTION_1]),
+            &json!({"image": "", "dockerImage": "", "runnerGroupId": runner_group_id}),
+        );
+        let (status, created) = h
+            .as_admin(Method::POST, "/api/v1/runner-pools", Some(body))
+            .await?;
+        assert_eq!(status, StatusCode::CREATED, "{name}: {created}");
+        let pool_id = created["id"].as_str().context("pool id")?.to_owned();
+        let (image, docker_image, stored_group) = pool_images(&h, &pool_id).await?;
+        assert_eq!(docker_image, "", "{name}: the empty image is stored empty");
+        assert_eq!(image, "", "{name}: and so is the primary image");
+        assert_eq!(
+            stored_group, 1,
+            "{name}: a GitLab pool stores runner group 1"
+        );
+        assert_eq!(
+            gridops_core::fleet::targets::docker_runner_image(&docker_image, true),
+            gridops_core::provisioning::GITLAB_RUNNER_IMAGE,
+            "{name}: provisioning resolves the stored empty image to the GitLab runner image"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_gitlab_pool_is_updated_with_no_image_and_no_runner_group() -> Result<()> {
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, project(42, "acme/app")?)
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[CONNECTION_1])
+        .await?;
+    let uri = format!("/api/v1/runner-pools/{GITLAB_POOL}");
+    for (what, runner_group_id) in [("0", json!(0)), ("left out", Value::Null)] {
+        let body = with_changes(
+            pool_update_body("gitlab-pool", &json!({})),
+            &json!({"image": "", "dockerImage": "", "runnerGroupId": runner_group_id}),
+        );
+        let (status, saved) = h.as_admin(Method::PUT, &uri, Some(body)).await?;
+        assert_eq!(status, StatusCode::OK, "runner group {what}: {saved}");
+        assert_eq!(
+            pool_images(&h, GITLAB_POOL).await?,
+            (String::new(), String::new(), 1),
+            "runner group {what}: the image is saved empty and the group stays 1"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_gitlab_pools_docker_image_is_still_checked_when_one_is_given() -> Result<()> {
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, project(42, "acme/app")?)
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[CONNECTION_1])
+        .await?;
+    let padded = json!({"image": " runner:latest", "dockerImage": " runner:latest"});
+    let (status, body) = h
+        .as_admin(
+            Method::POST,
+            "/api/v1/runner-pools",
+            Some(with_changes(
+                gitlab_pool_body("gitlab-padded", &[CONNECTION_1]),
+                &padded,
+            )),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "create: {body}");
+    assert_eq!(error_message(&body), DOCKER_IMAGE_PADDED, "create");
+    let (status, body) = h
+        .as_admin(
+            Method::PUT,
+            &format!("/api/v1/runner-pools/{GITLAB_POOL}"),
+            Some(pool_update_body("gitlab-pool", &padded)),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "update: {body}");
+    assert_eq!(error_message(&body), DOCKER_IMAGE_PADDED, "update");
+    assert_eq!(
+        pool_images(&h, GITLAB_POOL).await?,
+        ("runner:latest".to_owned(), "runner:latest".to_owned(), 1),
+        "the refused update stored nothing"
+    );
+    let pools: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runner_pools")
+        .fetch_one(&h.database)
+        .await?;
+    assert_eq!(pools, 1, "the refused create stored nothing");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_github_pool_keeps_the_docker_image_and_runner_group_400s_on_create_and_update()
+-> Result<()> {
+    let h = harness().await?;
+    h.seed_pool(ORG_POOL, "org-pool", "organization", &[])
+        .await?;
+    h.seed_pool(REPOSITORY_POOL, "repo-pool", "repository", &[])
+        .await?;
+    let no_image = json!({"image": "", "dockerImage": ""});
+    let group_zero = json!({"runnerGroupId": 0});
+    for scope in ["repository", "organization"] {
+        for (what, changes, message) in [
+            ("an empty Docker image", &no_image, DOCKER_IMAGE_REQUIRED),
+            ("runner group 0", &group_zero, RUNNER_GROUP_NOT_POSITIVE),
+        ] {
+            let body = with_changes(github_pool_body("github-pool", scope), changes);
+            let (status, response) = h
+                .as_admin(Method::POST, "/api/v1/runner-pools", Some(body))
+                .await?;
+            assert_eq!(
+                (status, error_message(&response)),
+                (StatusCode::BAD_REQUEST, message),
+                "create a {scope} pool with {what}: {response}"
+            );
+        }
+    }
+    // `runnerGroupId` now has a serde default, so a GitHub organization body
+    // without it reaches validation: the 400, not serde's 422.
+    let (status, response) = h
+        .as_admin(
+            Method::POST,
+            "/api/v1/runner-pools",
+            Some(with_changes(
+                github_pool_body("github-pool", "organization"),
+                &json!({"runnerGroupId": null}),
+            )),
+        )
+        .await?;
+    assert_eq!(
+        (status, error_message(&response)),
+        (StatusCode::BAD_REQUEST, RUNNER_GROUP_NOT_POSITIVE),
+        "create an organization pool without runnerGroupId: {response}"
+    );
+    for (pool_id, name) in [(REPOSITORY_POOL, "repo-pool"), (ORG_POOL, "org-pool")] {
+        for (what, changes, message) in [
+            ("an empty Docker image", &no_image, DOCKER_IMAGE_REQUIRED),
+            ("runner group 0", &group_zero, RUNNER_GROUP_NOT_POSITIVE),
+        ] {
+            let (status, response) = h
+                .as_admin(
+                    Method::PUT,
+                    &format!("/api/v1/runner-pools/{pool_id}"),
+                    Some(pool_update_body(name, changes)),
+                )
+                .await?;
+            assert_eq!(
+                (status, error_message(&response)),
+                (StatusCode::BAD_REQUEST, message),
+                "update {name} with {what}: {response}"
+            );
+        }
+        assert_eq!(
+            pool_images(&h, pool_id).await?,
+            ("runner:latest".to_owned(), "runner:latest".to_owned(), 1),
+            "{name}: the refused updates stored nothing"
+        );
+    }
+    let pools: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runner_pools")
+        .fetch_one(&h.database)
+        .await?;
+    assert_eq!(pools, 2, "no refused create stored a pool");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invalid_update_is_a_404_for_a_missing_pool_and_still_a_400_for_a_pool_the_caller_only_reads()
+-> Result<()> {
+    let h = harness().await?;
+    h.seed_pool(ORG_POOL, "org-pool", "organization", &[])
+        .await?;
+    let invalid = pool_update_body("Bad Pool", &json!({}));
+
+    // The update validates once the pool has loaded, against its stored
+    // scope, so a pool that does not exist is reported first (#172).
+    let (status, body) = h
+        .as_admin(
+            Method::PUT,
+            &format!("/api/v1/runner-pools/{MISSING_POOL}"),
+            Some(invalid.clone()),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // Validation still comes before the pool-admin check: a caller who can
+    // read the pool but not administer it keeps getting the 400 for a bad
+    // body. The valid body is the control: it is refused as not an admin.
+    let reader = h.sign_in("reader-1", 3, "member").await?;
+    sqlx::query("UPDATE user_installations SET permission='read' WHERE user_id='reader-1'")
+        .execute(&h.database)
+        .await?;
+    let uri = format!("/api/v1/runner-pools/{ORG_POOL}");
+    let (status, body) = h
+        .send(Method::PUT, &uri, Some(&reader), Some(invalid))
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "an invalid body: {body}");
+    let (status, body) = h
+        .send(
+            Method::PUT,
+            &uri,
+            Some(&reader),
+            Some(pool_update_body("org-pool", &json!({}))),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the control: {body}");
     Ok(())
 }

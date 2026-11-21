@@ -27,8 +27,17 @@ Known problems in the current release are in the README's
   or in a Tart macOS VM, and deletes it from GitLab afterwards. Pending jobs
   scale pools through the Job events webhook or a pending-jobs poll. Pool
   labels are the runners' tags, and **Run untagged jobs** opts a pool into
-  untagged jobs. See [GitLab runners](docs/gitlab-runners.md). (#150, #153,
-  #157, #158, #160, #161, #162, #163, #164, #166)
+  untagged jobs. A GitLab Docker pool may leave its Docker image empty to run
+  `gitlab/gitlab-runner:ubuntu-v19.6.0`, and has no runner group. See
+  [GitLab runners](docs/gitlab-runners.md). (#150, #153, #157, #158, #160,
+  #161, #162, #163, #164, #166, #172)
+
+### Changed
+
+- Runner pool API: `runnerGroupId` may be left out. A GitHub pool without one
+  gets the 400 "Runner group ID must be positive." instead of a
+  422. An invalid update sent to a pool that does not exist, or that the caller
+  cannot see, is now a 404 instead of a 400. (#172)
 
 ### Fixed
 

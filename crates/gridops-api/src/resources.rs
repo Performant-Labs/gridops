@@ -1600,8 +1600,13 @@ pub async fn update_runner_pool(
     PoolWriteUser(user, ..): PoolWriteUser<PoolsManage>,
     Json(input): Json<UpdateRunnerPool>,
 ) -> ApiResult<Json<Value>> {
-    input.validate().map_err(ApiError::BadRequest)?;
     let pool = pool_access(&state, &user, &pool_id).await?;
+    // The body does not say whether the pool is a GitLab pool, so the rules
+    // that depend on it run once the pool is loaded (issue #172), and before
+    // the admin check so a reader's invalid body is still a 400.
+    input
+        .validate(pool.scope == "gitlab")
+        .map_err(ApiError::BadRequest)?;
     assert_pool_admin(&state, &user, &pool_id).await?;
     let existing_repository_ids = sqlx::query_scalar::<_, i64>(
         "SELECT repository_id FROM runner_pool_repositories WHERE pool_id=? ORDER BY created_at,repository_id",

@@ -139,9 +139,13 @@ export function createRunnerPoolAction({ data }: { data: CreateRunnerPoolInput }
   return api<{ id: string; cannotRun?: CannotRun }>("/api/v1/runner-pools", { method: "POST", body: input });
 }
 
-export function updateRunnerPoolAction({ data }: { data: UpdateRunnerPoolInput & { poolId: string } }) {
-  const { poolId, ...values } = data;
-  const input = parseUpdateRunnerPoolInput(values);
+/**
+ * `dockerImageOptional` is the settings form's word that the pool's platform has a default Docker
+ * image; like `poolId` it is never sent in the request body.
+ */
+export function updateRunnerPoolAction({ data }: { data: UpdateRunnerPoolInput & { poolId: string; dockerImageOptional?: boolean } }) {
+  const { poolId, dockerImageOptional, ...values } = data;
+  const input = parseUpdateRunnerPoolInput(values, { dockerImageOptional });
   return api<{ ok: true; configurationVersion: number; rollingReplacement: boolean }>(
     `/api/v1/runner-pools/${poolId}`,
     { method: "PUT", body: input },

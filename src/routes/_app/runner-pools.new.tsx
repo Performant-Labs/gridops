@@ -27,7 +27,7 @@ import { poolImages } from "~/features/runner-pools/pool-images";
 import type { CreateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import {
-  anyStandaloneKindAvailable, buildCreatePayload, initialPlatformOptionValues, labelError, labelRules, minMaxCount, prerequisiteEmptyState, requiredProviders,
+  anyStandaloneKindAvailable, buildCreatePayload, defaultDockerImage, dockerImageHelp, initialPlatformOptionValues, labelError, labelRules, minMaxCount, prerequisiteEmptyState, requiredProviders,
   targetPlanCheck,
 } from "~/features/runner-pools/targets";
 import { TargetsRow } from "~/features/runner-pools/targets-row";
@@ -100,7 +100,12 @@ function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; 
   const [providers, setProviders] = useState<RunnerProvider[]>(options.defaults.providers);
   const provider = providers[0] ?? options.defaults.provider;
   const includesTart = providers.includes("tart");
-  const [dockerImage, setDockerImage] = useState(options.defaults.dockerImage);
+  // Only what the user typed (null until then), so a typed image survives a change of targets. A
+  // platform with a default Docker image starts the field empty instead of with the control plane's
+  // default, which is the GitHub runner image (#172).
+  const [typedDockerImage, setTypedDockerImage] = useState<string | null>(null);
+  const platformDockerImage = defaultDockerImage(platforms, selection);
+  const dockerImage = typedDockerImage ?? (platformDockerImage ? "" : options.defaults.dockerImage);
   const [tartImage, setTartImage] = useState(options.defaults.tartImage);
   const [macosRuntime, setMacosRuntime] = useState<"vm" | "native">(options.defaults.macosRuntime ?? "vm");
   const [maxCount, setMaxCount] = useState(options.defaults.maxCount);
@@ -227,8 +232,20 @@ function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; 
             />
           </SettingsRow>
           {providers.includes("docker") ? (
-            <SettingsRow description="OCI image for each Linux runner." htmlFor="docker-image" label="Docker image">
-              <Input className="font-mono text-xs" id="docker-image" name="dockerImage" onChange={(event) => setDockerImage(event.target.value)} required value={dockerImage} />
+            <SettingsRow
+              description={dockerImageHelp(platformDockerImage)}
+              htmlFor="docker-image"
+              label={platformDockerImage ? <>Docker image <span className="ml-1 text-xs font-normal text-muted-foreground">optional</span></> : "Docker image"}
+            >
+              <Input
+                className="font-mono text-xs"
+                id="docker-image"
+                name="dockerImage"
+                onChange={(event) => setTypedDockerImage(event.target.value)}
+                placeholder={platformDockerImage ?? undefined}
+                required={!platformDockerImage}
+                value={dockerImage}
+              />
             </SettingsRow>
           ) : null}
           {includesTart ? (

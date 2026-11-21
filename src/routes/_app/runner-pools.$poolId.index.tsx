@@ -14,6 +14,7 @@ import { platformForPool } from "~/features/platform-connections/registry";
 import type { RunnerPoolDetail } from "~/features/runner-pools/runner-pools.functions";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { PoolEventTable, usePoolEvents } from "~/features/runner-pools/pool-events";
+import { shownDockerImage } from "~/features/runner-pools/targets";
 import { provisioningNotice } from "~/features/runner-pools/waiting-notice";
 import { RunnerRow, groupRunners } from "~/features/runners/runner-row";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
@@ -62,7 +63,10 @@ function PoolOverviewTab() {
   const items = runners.data?.items ?? [];
   const online = items.filter((runner) => !["failed", "stopped", "deleted", "paused"].includes(runner.status)).length;
   const busy = items.filter((runner) => runner.busy).length;
-  const PoolDestination = platformForPool(pool).pool.Destination;
+  const poolPlatform = platformForPool(pool);
+  const PoolDestination = poolPlatform.pool.Destination;
+  // An empty Docker image runs the platform's default, when it has one (#172).
+  const dockerImage = shownDockerImage(pool.dockerImage, poolPlatform.defaultDockerImage);
 
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
@@ -116,7 +120,7 @@ function PoolOverviewTab() {
             <span className="flex flex-wrap gap-1">{providers.map((provider) => <Badge dot={provider === "tart" ? "bg-[#bb87fc]" : "bg-info"} key={provider}>{providerLabel(provider, pool.macosRuntime)}</Badge>)}</span>
           </PropertyRow>
           <PropertyRow label="Mode"><span className="capitalize">{pool.mode}</span></PropertyRow>
-          {providers.includes("docker") ? <PropertyRow label="Image" title={pool.dockerImage}><span className="truncate font-mono text-xs">{pool.dockerImage}</span></PropertyRow> : null}
+          {providers.includes("docker") ? <PropertyRow label="Image" title={dockerImage}><span className="truncate font-mono text-xs">{dockerImage}</span></PropertyRow> : null}
           {providers.includes("tart") && pool.macosRuntime !== "native" ? <PropertyRow label="Base VM" title={pool.tartImage}><span className="truncate font-mono text-xs">{pool.tartImage}</span></PropertyRow> : null}
           <PropertyRow label="Per runner"><span className="tabular">{formatRunnerShape(pool.cpuLimit, pool.memoryLimitMb)}</span></PropertyRow>
           <PropertyRow label="Labels">

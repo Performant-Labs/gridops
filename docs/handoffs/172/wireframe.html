@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Wireframe #172: GitLab Docker pool default image</title>
+<style>
+body{font:13px/1.45 system-ui,sans-serif;background:#f4f4f5;color:#222;margin:0;padding:24px;max-width:1100px}
+h1{font-size:18px}h2{font-size:15px;margin:28px 0 4px}p.n{color:#555;margin:2px 0 8px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.frame{background:#fff;border:1px solid #bbb;border-radius:8px;padding:12px}
+.frame>.t{font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin-bottom:8px}
+.sec{border:1px solid #ccc;border-radius:6px;margin:6px 0}
+.row{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border-top:1px solid #e5e5e5}
+.row:first-child{border-top:0}
+.lbl{font-weight:600}.desc{color:#666;font-size:12px}
+.in{border:1px solid #888;border-radius:4px;padding:4px 8px;min-width:240px;font-family:ui-monospace,monospace;font-size:12px;background:#fff}
+.in.ph{color:#999}.in.req:after{content:" *";color:#c00}
+.in.dis{background:#eee}
+.btn{display:inline-block;border:1px solid #444;border-radius:4px;padding:3px 10px;font-weight:600}
+.ann{background:#fff8d6;border:1px dashed #b8a200;border-radius:4px;padding:4px 8px;margin:6px 0;font-size:12px}
+.err{background:#fde8e8;border:1px solid #c33;border-radius:4px;padding:6px 8px;color:#900}
+.tag{display:inline-block;font-size:11px;border:1px solid #888;border-radius:10px;padding:0 6px;color:#444}
+.gone{text-decoration:line-through;color:#999}
+table{border-collapse:collapse;width:100%;font-size:12px}td,th{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}
+</style></head><body>
+<h1>#172 Wireframe: GitLab Docker pool, default runner image (low-fi)</h1>
+<p class="n">Scope: only the Docker image row on four existing screens (plus the Fleet execution starting image). No runner-group control exists or is added. Everything else on these screens is unchanged and omitted. Yellow notes are behaviour annotations. Marker * = required. All layout reuses SettingsSection / SettingsRow / Input.</p>
+
+<h2>1. New pool form: Runner definition, Docker image row</h2>
+<p class="n">The row only exists while "Linux · Docker" is among the providers (unchanged). The state is driven by the platform descriptor for the current Targets selection (registry decides; no platform id in the route).</p>
+<div class="grid">
+ <div class="frame"><div class="t">1a. No target yet / GitHub or Bitbucket target (today, unchanged)</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image</div><div class="desc">OCI image for each Linux runner.</div></div><div class="in req">ghcr.io/…/runner:latest</div></div></div>
+  <div class="ann">Required. Prefilled with options.defaults.dockerImage (GRIDOPS_RUNNER_IMAGE). Empty submit blocked by the browser (required) and by the schema with today's message.</div></div>
+ <div class="frame"><div class="t">1b. GitLab target selected, image never edited</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image <span class="tag">optional</span></div><div class="desc">OCI image for each Linux runner. Leave empty to use gitlab/gitlab-runner:ubuntu-v19.6.0.</div></div><div class="in ph">gitlab/gitlab-runner:ubuntu-v19.6.0</div></div></div>
+  <div class="ann">Not required, no asterisk. Field is empty (the GitHub default is NOT shown); the placeholder names the default. Help text is built from the descriptor's default-image text. Submit sends dockerImage: "". The body still carries runnerGroupId: 1 (no form change; the server ignores it for a GitLab pool).</div></div>
+ <div class="frame"><div class="t">1c. GitLab target selected, user typed an image</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image <span class="tag">optional</span></div><div class="desc">OCI image for each Linux runner. Leave empty to use gitlab/gitlab-runner:ubuntu-v19.6.0.</div></div><div class="in">registry.example.com/ci/gitlab-runner:1.2</div></div></div>
+  <div class="ann">Typed value is sent as is (server still validates a non-empty image). Switching Targets back to GitHub/Bitbucket keeps this typed value.</div></div>
+ <div class="frame"><div class="t">1d. Switch GitLab to GitHub (image left untouched by user)</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image</div><div class="desc">OCI image for each Linux runner.</div></div><div class="in req">ghcr.io/…/runner:latest</div></div></div>
+  <div class="ann">Back to 1a: required, GitHub default prefilled again. Rule: the field stores only what the user typed; the GitHub default is the fallback shown when the user has typed nothing and the platform has no default image. A typed value is never replaced in either direction.</div></div>
+ <div class="frame"><div class="t">1e. Error: server rejects a non-empty bad image (GitLab)</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image <span class="tag">optional</span></div></div><div class="in"> bad image </div></div></div>
+  <div class="err">Could not create the pool: Docker image … (server's existing valid_image message, unchanged)</div>
+  <div class="ann">Existing danger Callout "Could not create the pool". Empty is never an error for GitLab.</div></div>
+ <div class="frame"><div class="t">1f. Error: GitHub pool, image cleared</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image</div></div><div class="in req"></div></div></div>
+  <div class="ann">Unchanged: browser required prompt; schema message "Docker image (dockerImage) is required for a pool that uses Linux · Docker." if it gets past the browser.</div></div>
+</div>
+<div class="ann">Not shown, intentionally: there is no runner-group control on any form today and none is added. Runner group on the wire (brief, option A): the request body keeps carrying runnerGroupId: 1 for every pool, as today; the server accepts absent, 0 or any value for a GitLab pool and stores 1. "A GitLab pool needs no runner group" is an API behaviour, not a visible form change. Providers including Tart: Docker row is absent; Tart rules are unchanged.</div>
+
+<h2>2. Pool settings form (editable): Docker image row</h2>
+<div class="grid">
+ <div class="frame"><div class="t">2a. GitLab pool, stored image empty</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image <span class="tag">optional</span></div><div class="desc">OCI image for each Linux runner. Leave empty to use gitlab/gitlab-runner:ubuntu-v19.6.0.</div></div><div class="in ph">gitlab/gitlab-runner:ubuntu-v19.6.0</div></div></div>
+  <div class="ann">Empty is valid; Save changes sends dockerImage: "" and saves. The legacy fallback to pool.image stays as is.</div></div>
+ <div class="frame"><div class="t">2b. GitLab pool, stored image set</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image <span class="tag">optional</span></div><div class="desc">same help as 2a</div></div><div class="in">registry.example.com/ci/gitlab-runner:1.2</div></div></div>
+  <div class="ann">Clearing it and saving returns the pool to the default image.</div></div>
+ <div class="frame"><div class="t">2c. GitHub / Bitbucket pool (unchanged)</div>
+  <div class="sec"><div class="row"><div><div class="lbl">Docker image</div><div class="desc">OCI image for each Linux runner.</div></div><div class="in req">ghcr.io/…/runner:1</div></div></div>
+  <div class="ann">Required, no default text.</div></div>
+ <div class="frame"><div class="t">2d. Settings, Fleet execution: GitLab pool, image empty, add a Docker platform</div>
+  <div class="sec">
+   <div class="row"><div><div class="lbl">Platform: Docker container, Linux, arm64</div><div class="desc">Machines pull this image for each runner.</div></div><div class="in">gitlab/gitlab-runner:ubuntu-v19.6.0</div></div>
+  </div>
+  <div class="ann">The new platform starts from the RAW reference, never "Default (...)" and never ghcr.io/actions/actions-runner:latest. The settings route passes FleetExecutionSection dockerImage = pool image, else legacy image, else the descriptor's default image (empty for GitHub/Bitbucket, so they pass exactly what they pass today). fleet-profile-section.tsx has no platform code and its stock fallback is unchanged. No "Not the pool's Docker image" hint appears while the platform keeps this value; if the operator edits it, the existing hint names gitlab/gitlab-runner:ubuntu-v19.6.0 with "Use the pool's image".</div></div>
+ <div class="frame"><div class="t">2e. Settings, Fleet execution: GitHub / Bitbucket pool (unchanged)</div>
+  <div class="sec">
+   <div class="row"><div><div class="lbl">Platform: Docker container, Linux, arm64</div><div class="desc">Machines pull this image for each runner.</div></div><div class="in">ghcr.io/…/runner:1</div></div>
+  </div>
+  <div class="ann">New Docker platform starts from the pool's image as today.</div></div>
+</div>
+
+<h2>3. Read-only settings view and pool detail</h2>
+<div class="grid">
+ <div class="frame"><div class="t">3a. Read-only settings, GitLab pool, empty image</div>
+  <div class="sec"><div class="row"><div class="lbl">Docker image</div><div class="in dis">Default (gitlab/gitlab-runner:ubuntu-v19.6.0)</div></div></div>
+  <div class="ann">Replaces a blank value. Text from the descriptor; monospace as today.</div></div>
+ <div class="frame"><div class="t">3b. Read-only settings, any pool with an image</div>
+  <div class="sec"><div class="row"><div class="lbl">Docker image</div><div class="in dis">registry.example.com/ci/gitlab-runner:1.2</div></div></div>
+  <div class="ann">Unchanged: the stored value verbatim. GitHub/Bitbucket pools never show "Default (…)".</div></div>
+ <div class="frame"><div class="t">3c. Pool detail, Properties, GitLab pool, empty image</div>
+  <div class="sec"><div class="row"><div class="lbl">Image</div><div class="in dis" style="min-width:0">Default (gitlab/gitlab-runner:ubuntu-v19.6.0)</div></div></div>
+  <div class="ann">Same text; the title (hover) attribute carries the same string. Truncates as today.</div></div>
+ <div class="frame"><div class="t">3d. Pool detail, image set</div>
+  <div class="sec"><div class="row"><div class="lbl">Image</div><div class="in dis" style="min-width:0">ghcr.io/…/runner:latest</div></div></div>
+  <div class="ann">Unchanged.</div></div>
+</div>
+
+<h2>4. State matrix (Docker image field)</h2>
+<table>
+<tr><th>Platform of selection / pool</th><th>Required</th><th>Initial value (new)</th><th>Help text</th><th>Empty submit</th><th>Display of empty (read-only, detail)</th></tr>
+<tr><td>GitLab</td><td>no</td><td>empty (placeholder = default)</td><td>"…Leave empty to use gitlab/gitlab-runner:ubuntu-v19.6.0."</td><td>sent empty, 201 / saved</td><td>"Default (gitlab/gitlab-runner:ubuntu-v19.6.0)"</td></tr>
+<tr><td>GitHub, Bitbucket</td><td>yes</td><td>options.defaults.dockerImage</td><td>"OCI image for each Linux runner."</td><td>blocked, today's message</td><td>blank (cannot occur: required)</td></tr>
+<tr><td>No target chosen yet</td><td>yes</td><td>options.defaults.dockerImage</td><td>as GitHub</td><td>blocked</td><td>n/a</td></tr>
+</table>
+<div class="ann">Empty/one/many: this change touches single-value fields, not lists, so no empty/one/many list states exist. Error states are 1e and 1f. Loading and no-connection states of the new-pool page are unchanged (the blocker EmptyState).</div>
+<h2>5. Docs surface (not a screen)</h2>
+<p class="n">docs/gitlab-runners.md: "The Docker image field can be left empty for a GitLab pool; it then uses gitlab/gitlab-runner:ubuntu-v19.6.0. A GitLab pool has no runner group." plus CHANGELOG Unreleased entry.</p>
+</body></html>

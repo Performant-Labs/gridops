@@ -1,0 +1,36 @@
+# Handoff-A: Phase 3 - GitLab Docker pool default image and no runner group (#172)  (up-front plan review, round 2)
+
+**Date:** 2026-11-21
+**Branch:** claude/gitlab-172-pool-image-bb7d36
+**Brief reviewed:** docs/handoffs/172-brief.md (amended in 7afb7c5; sha256 442f8432…)   **Reuse map:** none (no survey.md for #172; the brief's Scope section, which now names every seam, stands in for it)   **Wireframe:** docs/handoffs/172/wireframe.html (revised in 2c1abdf)
+**Verdict:** PASS
+
+## Summary
+PASS. The amended brief resolves both round-1 blocks (round 1 is in commit 8785432). Runner group is decided as option A: the body keeps GitHub's `runnerGroupId: 1`, the server ignores it, and the Done-when asserts it at the API only. The Fleet execution editor now gets the descriptor's raw default image, so a GitLab pool's new fleet Docker platform no longer starts from the GitHub image. The brief also adopts all six round-1 warns as decided seams, and each one matches the code: a `gitlab: bool` parameter on `validate_pool_configuration`, `pool.scope` checked after `pool_access`, reuse of the handler normalisation, a top-level optional `PlatformDescriptor` key, no registry import in `schemas.ts`, and a constant-equality test. This round leaves three warns, all about placement inside the decided seams.
+
+## Findings
+
+| # | Severity | Plan element | Drift dimension | Finding | Suggested fix |
+|---|---|---|---|---|---|
+| 1 | warn | "a pure helper in `src/features/runner-pools/targets.ts` … that resolves it from the selection (new pool) or from `platformForPool(pool)` (settings/detail)" | dependency direction / pattern consistency | Every function in `targets.ts` is pure and takes the descriptor list as a parameter: `labelRules(descriptors, selection)` (`targets.ts:112`), `readOnlySummaries(descriptors, pool)` (`:146`), and the rest. Its only imports are types, and it never imports the registry, so tests can pass fixture registries. If one helper calls `platformForPool` inside `targets.ts`, the module gains a runtime registry import and stops honouring its `descriptors` argument. Matching on `pool.scope` there instead would copy the registry's private `ownsPoolScope` (`registry.tsx:86`). | Split it the way the code already does. (a) New pool: `targets.ts` gets `defaultDockerImage(descriptors, selection)` over `targetedPlatforms`, in the same shape as `labelRules`. (b) Settings form, read-only settings and pool detail: the route reads `platformForPool(pool).defaultDockerImage`, as `runner-pools.$poolId.index.tsx:65` does for `Destination` (the #169 pattern pinned in `tests/platform-neutral-source.test.ts:90-97`). (c) The "Default (…)" composer is a pure function of the image string. |
+| 2 | warn | "the update handler … moves validation after the pool loads (`pool_access`) … Accepted precedence change: … 404 instead of 400" | cross-cutting (error precedence) | Today `update_runner_pool` runs `input.validate()` → `pool_access` (404) → `assert_pool_admin` (`resources.rs:1603-1605`). `assert_pool_admin` (`auth.rs:218`) rejects a member who can read the pool but is not its admin. If the scope-aware validate moves to after `assert_pool_admin`, an invalid body from such a user changes from 400 to the admin rejection. The brief accepts only the 404 change. | Call `input.validate(pool.scope == "gitlab")` immediately after `pool_access` and **before** `assert_pool_admin`. Then the only precedence change is the accepted 400→404 for a missing or inaccessible pool. |
+| 3 | warn | "Update receives it through `parseUpdateRunnerPoolInput(values, { dockerImageOptional })`, which the settings route feeds from the descriptor helper" | pattern consistency (action contract) | The route never calls `parseUpdateRunnerPoolInput` itself. It calls `updateRunnerPoolAction({ data })` (`runner-pools.functions.ts:142-149`), and that action destructures `poolId` out of `data` before it parses. The brief does not say how the flag crosses the action, so F could put it in the request body or change the action's signature in some ad hoc way. | Follow the `poolId` precedent. The action's `data` type gains `dockerImageOptional?: boolean`, the action destructures it next to `poolId` (`const { poolId, dockerImageOptional, ...values } = data`) and passes it to `parseUpdateRunnerPoolInput(values, { dockerImageOptional })`. It is never sent in the PUT body. Missing means `false`, which keeps GitHub's rules. |
+
+Plan is otherwise consistent with existing patterns. Verified against source:
+- `validate_pool_configuration` already takes a context fact that relaxes an image rule (`macos_runtime`, `models.rs:378,461`). Its external callers are `resources.rs:1603`, `crates/gridops-core/tests/gitlab_pools.rs:69` and the `models.rs` unit tests. `control_plane_contracts.rs:729` is a create caller and keeps its signature.
+- The runner-group normalisation exists on both handlers (`resources.rs:1737-1741`, `:2670-2674`).
+- The reconciler resolves an empty GitLab Docker image through `docker_runner_image(.., true)` (`crates/gridops-reconciler/src/main.rs:2559-2561`), and so does `save_pool_fleet` (`fleet/targets.rs:530-574`).
+- GitHub's partial always carries `runnerGroupId: 1` (`github.tsx:276-282`), and `configurationShape.runnerGroupId` has `.default(1)` (`schemas.ts:30`), so option A is what happens on the wire today.
+- `gitlab.tsx:17` and `bitbucket.tsx:4` import from `schemas.ts`, so the "no registry import in `schemas.ts`" rule is load-bearing.
+- `FleetExecutionSection`'s `defaultImages` and the "Not the pool's Docker image" hint (`fleet-profile-section.tsx:40-41, 322-325`) work unchanged with the raw default passed as `dockerImage`.
+- The "GitLab code has one home" test (`platform-neutral-source.test.ts:133-163`) still passes as long as the image literal lives only in `gitlab.tsx` and the routes, `targets.ts` and `fleet-profile-section.tsx` read it through the descriptor key without naming GitLab, comments included.
+
+## Notes for O
+None required (PASS). Warns 1-3 are placement details inside seams the brief has already decided. Pass them to T and F as they stand. Each affects which public signatures T pins: the `targets.ts` helper signature, the order of the 404 and admin checks against validation, and the `updateRunnerPoolAction` `data` shape.
+
+## Patterns referenced
+- `crates/gridops-core/src/models.rs:153-475` (`validate_pool_configuration`; `macos_runtime` precedent; both `validate()` entry points)
+- `crates/gridops-api/src/resources.rs:1597-1741, 2626-2675` + `crates/gridops-api/src/auth.rs:218` (validate/`pool_access`/`assert_pool_admin` ordering; `pool.scope == "gitlab"` checks; runner-group normalisation)
+- `crates/gridops-core/src/fleet/targets.rs:495-574` + `crates/gridops-reconciler/src/main.rs:2541-2561` (the single Docker image resolver and its callers)
+- `src/features/runner-pools/targets.ts` + `src/features/platform-connections/registry.tsx:86-98` + `src/routes/_app/runner-pools.$poolId.index.tsx:65` (pure descriptor helpers vs. route-level `platformForPool`)
+- `src/features/runner-pools/schemas.ts`, `src/features/runner-pools/runner-pools.functions.ts:137-149`, `src/features/fleet/fleet-profile-section.tsx:24-41,158-190,322`, `tests/platform-neutral-source.test.ts`
