@@ -279,6 +279,32 @@ The guest needs the Java version currently required by Bitbucket and Git. The pr
 
 In **System → Platform connections**, add an API token restricted to the target workspace with workspace read and Pipelines runner read/write permissions. GridOps verifies the workspace before storing the token encrypted at rest. In the pool form, select the workspace under **Bitbucket Cloud workspaces** and choose the prepared Bitbucket Tart image. Bitbucket adds its own `self.hosted` and `macos` labels; GridOps adds `gridops.<pool-name>` plus the pool's dot-separated custom labels.
 
+## GitLab
+
+GitLab jobs that need macOS run on the same Tart pools. Unlike Bitbucket's, a GitLab macOS runner is ephemeral: each runner is one VM cloned for it, running `gitlab-runner run-single` with the shell executor for at most one job, and the VM is stopped when the runner exits. The runner waits for a job for the pool's wait timeout (600 seconds when the pool sets none) and exits if none arrives.
+
+Prepare a stopped Tart base image containing `gitlab-runner`:
+
+```sh
+./scripts/prepare-tart-gitlab-runner-image.sh \
+  gridops-macos-tahoe-base \
+  gridops-macos-tahoe-gitlab
+```
+
+The script installs the gitlab-runner release pinned in it (19.5.3), downloaded over HTTPS and checked against the SHA-256 GitLab publishes for it, at `/Users/admin/gitlab-runner/bin/gitlab-runner`, and prints its version. It takes no token: each runner's `glrt-` token reaches its VM only when the runner starts, on the agent's stdin channel. It never appears on a command line or in a log, and inside the VM only `gitlab-runner` receives it, as `CI_SERVER_TOKEN`. The guest needs a working Git, which the script checks rather than installing. To install `gitlab-runner` elsewhere, set `GRIDOPS_TART_GITLAB_RUNNER_BINARY` to the same absolute guest path for both the script and the Tart agent.
+
+The shell executor ignores a job's `image:`. A macOS GitLab job runs on the base VM's own toolchain, so install what the jobs need in the image. The runner's tags are the ones it is given when it is created in GitLab; the VM adds none.
+
+Before `run-single` starts, the VM checks the token with GitLab's runner verify API. When the runner exits, `GET /v1/runners` lists it as `exited` with an `exitReason`:
+
+| Runner script exit | `exitReason` | Meaning |
+|---|---|---|
+| 0 | `completed` | The runner took its one job, whatever the job's result. |
+| 75 | `idle_expired` | The wait timeout passed with no job. |
+| 77 | `registration_refused` | GitLab refused the token, at the verify call or while `run-single` asked for jobs. |
+
+Any other exit lists as `exited` with no `exitReason`. That includes 78 for an image without `gitlab-runner` at the configured path, 69 when GitLab did not answer the verify call with 200 or 403, and 70 when `run-single` stopped without taking a job or reaching its wait timeout. The runner's output, including `gitlab-runner`'s own log, is in the runner's logs.
+
 ## Workflow labels
 
 One pool can include both Docker and Tart. The pool keeps a separate image for each provider it uses and one shared minimum, target, and maximum runner count. GridOps matches each queued job to a compatible provider, then replaces an idle runner from the wrong provider when the pool is already at its maximum.

@@ -74,3 +74,42 @@
     - a throwaway draft: 51 passed on 9 consecutive runs, `cargo fmt --check` clean, and clippy clean in the test code;
     - 15 mutations, each failing exactly the intended tests;
     - every scaffold and draft file removed afterwards: `git status` shows only the two test files plus the handoffs.
+
+## F (Phase 5, implementation / GREEN): 2026-11-20T16:30:26-08:00
+- **Decided:**
+  - **GREEN:** all 51 tests in `cargo test -p gridops-tart-agent` pass. `cargo fmt --check` is clean. Clippy on CI's pinned 1.98.1 toolchain, with CI's flags, is clean. The 3 `assert_is_empty` lines T flagged belong to the newer local clippy, not CI's.
+  - **Default binary:** `/Users/admin/gitlab-runner/bin/gitlab-runner`, defined once as `gitlab::DEFAULT_GITLAB_RUNNER_BINARY`. The image script and the docs use the same literal.
+  - **Refused-token detection uses both mechanisms:**
+    - the verify call (`printf` builtin → `curl --data-binary @-`, `-w '%{http_code}'`): 200 continues, 403 exits 77, anything else exits 69;
+    - `run-single`'s output: a job received or the build limit reached exits 0, otherwise "forbidden" exits 77, otherwise the wait-timeout line exits 75, otherwise 70.
+    - This leaves no W-1 time-of-check gap. If the runner itself exits 75 or 77, the script exits 70, so 0, 75 and 77 come only from the three named situations.
+  - **A finding 4:** `shell_single_quote` is fixed in place (`'\''`), and `'` in the URL is accepted. `gitlab.rs` has no quoting helper.
+  - **A finding 1:**
+    - the exit code is recorded for every VM runner, so `start_runner` stays platform-agnostic;
+    - `record_exit_code` updates through `get_mut` under `records.write()` and persists while holding the lock, before `tart stop`;
+    - it never inserts.
+  - **A finding 2:** `platform: Option<String>` is written verbatim, and `exit_code: Option<i32>`. Both are `#[serde(default)]`.
+  - **A finding 3:** tuple arms, then a fall-through to the CPU and memory checks. The native message names GitLab. The URL is capped at 512 bytes and checked by hand.
+  - **A finding 6:**
+    - `//!` header, explicit `use crate::{...}`, `pub(crate)`;
+    - a local `GITLAB_RUNNER_TOKEN_PREFIX`;
+    - no installer or plist entry.
+  - **Token validation:** printable ASCII, excluding `"` and `\`, from 6 to 1024 bytes, so it can go into the JSON body unescaped.
+  - **Pinned release:** gitlab-runner **19.5.3**, with each macOS SHA-256 from GitLab's `release.sha256`. Both binaries were downloaded, and their checksums match.
+- **Assumed:**
+  - The guest's `/usr/bin/curl`, `tee` and `grep` are on the login shell's PATH. They are stock macOS.
+  - A pre-#142 record whose VM exited before the upgrade has no code and lists no `exitReason`, which is correct.
+- **Hedged:**
+  - **A mid-`run-single` refusal surfaces after about 300 s.** That is upstream's `NotHealthyCheckInterval`, or the wait timeout if that is longer. The script exits 77 then, but not sooner.
+  - **One path was checked only against T's fake:** the "job received" → 0 path. A real-binary check would need a full job payload.
+  - **Two pre-existing full-suite flakes:** `a_runner_waiting_for_a_slot_is_listed_as_waiting` and `every_tart_command_gets_a_path_starting_with_tarts_directory`. They reproduce at 2/15 on the untouched base `229081c`, and were 2/24 on this branch. Flagged for T and left untouched, because it is test code.
+  - **The open A hedge on NV-1:** whether `tart exec` returns the guest's status after an explicit `tart stop` is still not settled. If the stopped guest's exit event reports 0, a GitLab runner stopped from outside could list "completed".
+- **Evidence:**
+  - **Upstream, read for NV-1/2/3:**
+    - `cirruslabs/tart` 2.41.1 (`Exec.swift:195-196`, `Root.swift:164-168`);
+    - gitlab-runner v19.5.3 (`network/gitlab.go:451-466, 690, 701-702`; `network/client.go:636`; `commands/single.go:24, 27, 87-89, 168, 172`; `common/config.go:1417, 1421, 1456-1457`; `common/consts.go:14`).
+    - The real 19.5.3 binary's `run-single --help` confirmed the flags and `$CI_SERVER_TOKEN`.
+  - **Runs:**
+    - the rendered guest script with the real 19.5.3 binary and real curl against a stub GitLab: verify 403 exited 77, idle exited 75, mid-run 403 exited 77, and no token appeared in any output or argv;
+    - the image script with a fake `tart` (a real download plus `shasum --check`);
+    - 24 full test runs, and 15 baseline runs.

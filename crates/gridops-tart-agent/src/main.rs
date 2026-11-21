@@ -33,6 +33,8 @@ use tokio::{
 use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
+mod gitlab;
+
 #[derive(Clone)]
 struct AgentState {
     token: SecretString,
@@ -42,6 +44,8 @@ struct AgentState {
     home: PathBuf,
     runner_root: String,
     bitbucket_runner_root: String,
+    /// The guest path of `gitlab-runner` in a GitLab runner's VM (#142).
+    gitlab_runner_binary: String,
     network_mode: NetworkMode,
     limits: AgentLimits,
     /// How long a VM start waits for one of the Mac's two VM slots.
@@ -211,6 +215,15 @@ struct TartRecord {
     /// Filesystem root of a native runner's private actions-runner instance.
     #[serde(default)]
     root: Option<String>,
+    /// The request's platform, "github", "bitbucket" or "gitlab". Records
+    /// written before #142 have none and are treated as non-GitLab; it is not
+    /// defaulted, because those records include Bitbucket runners.
+    #[serde(default)]
+    platform: Option<String>,
+    /// The guest runner script's exit status, once its `tart exec` has ended
+    /// with one (#142). The listing turns a GitLab runner's into `exitReason`.
+    #[serde(default)]
+    exit_code: Option<i32>,
 }
 
 fn default_runtime() -> String {
@@ -267,14 +280,13 @@ struct ProvisionRunner {
     /// on this host. Defaulted so older control planes keep getting VMs.
     #[serde(default = "default_runtime")]
     runtime: String,
-    /// A GitLab runner's non-secret bootstrap (#137 R2-1); #142 reads it.
+    /// A GitLab runner's non-secret bootstrap (#137 R2-1).
     #[serde(default)]
-    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
     gitlab: Option<GitlabBootstrap>,
     /// The secret `glrt-` GitLab runner token, handled like `jit_config`:
-    /// never logged, never in VM env or args. #142 reads it.
+    /// never logged, never in VM env or args. This struct derives `Debug`, so
+    /// the GitLab path never formats a request.
     #[serde(default)]
-    #[allow(dead_code, reason = "the GitLab module of #142 reads it")]
     gitlab_runner_token: Option<String>,
 }
 
@@ -290,22 +302,18 @@ struct BitbucketBootstrap {
 /// Where a GitLab runner registers and how long it waits for a job.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code, reason = "the GitLab module of #142 reads it")]
 struct GitlabBootstrap {
     url: String,
     wait_timeout_seconds: u32,
 }
 
-/// This crate's copy of `gridops_core::provisioning`'s GitLab exit codes and
-/// `exitReason` values (the Tart agent does not depend on `gridops-core`).
-/// Keep the names and values equal to core's.
-#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
+/// This crate's copy of `gridops_core::provisioning`'s GitLab runner token
+/// prefix, exit codes and `exitReason` values (the Tart agent does not depend
+/// on `gridops-core`). Keep the names and values equal to core's.
+const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";
 const GITLAB_EXIT_COMPLETED: i32 = 0;
-#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
 const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
-#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
 const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
-#[allow(dead_code, reason = "the GitLab runner listing of #142 reads them")]
 const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
     (GITLAB_EXIT_COMPLETED, "completed"),
     (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
@@ -352,7 +360,9 @@ impl ProvisionRunner {
         }
         if self.is_native() && self.platform != "github" {
             return Err(AgentError::BadRequest(
-                "Native macOS runners support GitHub only; Bitbucket runners require a VM.".into(),
+                "Native macOS runners support GitHub only; Bitbucket and GitLab runners require \
+                 a VM."
+                    .into(),
             ));
         }
         match (self.platform.as_str(), self.mode.as_str()) {
@@ -399,9 +409,10 @@ impl ProvisionRunner {
                     "Bitbucket Tart runners must be persistent.".into(),
                 ));
             }
+            ("gitlab", "ephemeral") => gitlab::validate(self)?,
             ("gitlab", _) => {
                 return Err(AgentError::BadRequest(
-                    "GitLab runners are not supported yet: Tart is #142.".into(),
+                    "GitLab Tart runners must be ephemeral.".into(),
                 ));
             }
             _ => return Err(AgentError::BadRequest("Runner platform is invalid.".into())),
@@ -534,6 +545,12 @@ async fn main() -> Result<()> {
         valid_guest_path(&bitbucket_runner_root),
         "GRIDOPS_TART_BITBUCKET_RUNNER_ROOT is invalid"
     );
+    let gitlab_runner_binary = env::var("GRIDOPS_TART_GITLAB_RUNNER_BINARY")
+        .unwrap_or_else(|_| gitlab::DEFAULT_GITLAB_RUNNER_BINARY.into());
+    anyhow::ensure!(
+        valid_guest_path(&gitlab_runner_binary),
+        "GRIDOPS_TART_GITLAB_RUNNER_BINARY is invalid"
+    );
     let network_mode = match env::var("GRIDOPS_TART_NETWORK_MODE")
         .unwrap_or_else(|_| "softnet".into())
         .to_ascii_lowercase()
@@ -593,6 +610,7 @@ async fn main() -> Result<()> {
         home,
         runner_root,
         bitbucket_runner_root,
+        gitlab_runner_binary,
         network_mode,
         limits,
         vm_slot_wait,
@@ -736,7 +754,7 @@ async fn list_runners(
                 };
                 (mapped, vm_state.to_owned())
             };
-            json!({
+            let mut runner = json!({
                 "id": record.id,
                 "names": [record.name],
                 "image": record.image,
@@ -752,7 +770,17 @@ async fn list_runners(
                 },
                 "createdAt": record.created_at,
                 "provider": "tart",
-            })
+            });
+            // Only an exited GitLab runner says why (#137 D15): the key is
+            // absent, not null, for every other runner and for a status
+            // outside the table.
+            if runtime_state == "exited"
+                && record.platform.as_deref() == Some("gitlab")
+                && let Some(reason) = record.exit_code.and_then(gitlab::exit_reason)
+            {
+                runner["exitReason"] = reason.into();
+            }
+            runner
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({ "runners": runners })))
@@ -810,6 +838,8 @@ async fn provision_runner(
         created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         runtime: "vm".into(),
         root: None,
+        platform: Some(input.platform.clone()),
+        exit_code: None,
     };
 
     let result = async {
@@ -862,6 +892,21 @@ async fn provision_runner(
                         .bitbucket_oauth_client_secret
                         .take()
                         .context("validated Bitbucket OAuth secret disappeared")?,
+                ),
+            ),
+            "gitlab" => (
+                gitlab::runner_script(
+                    &state.gitlab_runner_binary,
+                    input
+                        .gitlab
+                        .as_ref()
+                        .context("validated GitLab bootstrap disappeared")?,
+                ),
+                SecretString::from(
+                    input
+                        .gitlab_runner_token
+                        .take()
+                        .context("validated GitLab runner token disappeared")?,
                 ),
             ),
             _ => anyhow::bail!("validated runner platform disappeared"),
@@ -927,6 +972,8 @@ async fn provision_native(
         created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         runtime: "native".into(),
         root: Some(root.to_string_lossy().into_owned()),
+        platform: Some(input.platform.clone()),
+        exit_code: None,
     };
 
     let result = async {
@@ -1777,12 +1824,26 @@ async fn start_runner(
         .await?;
     stdin.write_all(b"\n").await?;
     stdin.shutdown().await?;
-    let tart = state.tart.clone();
+    let state = state.clone();
+    let id = record.id.clone();
     let vm_name = record.vm_name.clone();
     tokio::spawn(async move {
         let status = child.wait().await;
         tracing::info!(%vm_name, ?status, "macOS runner process exited");
-        let _ = tart
+        // `tart exec` exits with the guest script's status. It is recorded
+        // before the VM is stopped, so a listing never sees the VM exited
+        // without it. If the agent dies between the exec ending and this
+        // write, nothing is recorded and the runner lists as exited with no
+        // `exitReason`; that is the accepted outcome for that window.
+        if let Some(code) = status
+            .as_ref()
+            .ok()
+            .and_then(std::process::ExitStatus::code)
+        {
+            record_exit_code(&state, &id, code).await;
+        }
+        let _ = state
+            .tart
             .command()
             .args(["stop", vm_name.as_str()])
             .stdout(Stdio::null())
@@ -1791,6 +1852,21 @@ async fn start_runner(
             .await;
     });
     Ok(())
+}
+
+/// Sets a VM runner's exit status on its record, in memory and on disk, but
+/// only while the record still exists: a delete that raced the runner's exit
+/// has removed it, and the record must not come back. The file is written
+/// under the records lock, so a delete cannot remove the record in between.
+async fn record_exit_code(state: &AgentState, id: &str, code: i32) {
+    let mut records = state.records.write().await;
+    let Some(record) = records.get_mut(id) else {
+        return;
+    };
+    record.exit_code = Some(code);
+    if let Err(error) = persist_record(state, record).await {
+        tracing::warn!(runner_id = %id, error = ?error, "could not record the runner's exit status");
+    }
 }
 
 fn bitbucket_runner_script(runner_root: &str, bootstrap: &BitbucketBootstrap) -> String {
@@ -1818,8 +1894,10 @@ exec ./start.sh --accountUuid {account_uuid}{repository_argument} --runnerUuid {
     )
 }
 
+/// One shell word for `value`, whatever it contains: an embedded `'` closes
+/// the quotes, adds an escaped quote and reopens them (`'\''`).
 fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn runner_script(runner_root: &str) -> String {
