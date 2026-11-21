@@ -32,7 +32,10 @@ use bollard::{
     },
 };
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use gridops_core::provisioning::instrumented_runner_script;
+use gridops_core::provisioning::{
+    GITLAB_EXIT_REASONS, GITLAB_RUNNER_TOKEN_PREFIX, gitlab_runner_env, gitlab_runner_script,
+    instrumented_runner_script, valid_gitlab_url,
+};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -484,10 +487,30 @@ impl ProvisionRunner {
                     "Bitbucket runners are persistent until their VM is drained.".into(),
                 ));
             }
-            ("gitlab", _) => {
-                return Err(ManagerError::BadRequest(
-                    "GitLab runners are not supported yet: Docker is #147, Tart is #142.".into(),
-                ));
+            ("gitlab", mode) => {
+                // A GitLab runner takes one job, registers with its `glrt-`
+                // token on stdin, and carries no other platform's secret. The
+                // message never echoes the token.
+                if mode != "ephemeral"
+                    || self
+                        .gitlab
+                        .as_ref()
+                        .is_none_or(|bootstrap| !valid_gitlab_url(&bootstrap.url))
+                    || self.gitlab_runner_token.as_ref().is_none_or(|token| {
+                        token.len() <= GITLAB_RUNNER_TOKEN_PREFIX.len()
+                            || token.len() > 2_048
+                            || !token.starts_with(GITLAB_RUNNER_TOKEN_PREFIX)
+                            || token.contains(['\n', '\r'])
+                    })
+                    || self.jit_config.is_some()
+                    || self.registration_token.is_some()
+                    || self.bitbucket.is_some()
+                    || self.bitbucket_oauth_client_secret.is_some()
+                {
+                    return Err(ManagerError::BadRequest(
+                        "GitLab runner registration is invalid.".into(),
+                    ));
+                }
             }
             _ => {
                 return Err(ManagerError::BadRequest(
@@ -601,7 +624,15 @@ struct ManagedRunner {
     labels: HashMap<String, String>,
     created_at: String,
     provider: String,
+    /// Why an exited GitLab runner ended (`completed`, `idle_expired` or
+    /// `registration_refused`), from `GITLAB_EXIT_REASONS`. Absent for every
+    /// other runner. A Tart agent's own survives the manager's re-parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_reason: Option<String>,
 }
+
+/// Labels a GitLab runner container, so the listing can tell it is one.
+const PLATFORM_LABEL: &str = "io.gridops.platform";
 
 fn default_provider() -> String {
     "docker".into()
@@ -1521,8 +1552,16 @@ async fn list_runners(
             created_at: chrono::DateTime::from_timestamp(container.created.unwrap_or_default(), 0)
                 .map_or_else(String::new, |value| value.to_rfc3339()),
             provider: "docker".into(),
+            exit_reason: None,
         })
         .collect::<Vec<_>>();
+    for runner in &mut runners {
+        if runner.state == "exited"
+            && runner.labels.get(PLATFORM_LABEL).map(String::as_str) == Some("gitlab")
+        {
+            runner.exit_reason = gitlab_exit_reason(&state.docker, &runner.id).await;
+        }
+    }
     // The Mac sleeps, or its agent is down: its runners cannot be listed,
     // but the Docker runners have nothing to do with it. A caller that opts
     // in (`?partial=true`) still gets a list: the providers it could not ask
@@ -1581,6 +1620,22 @@ fn provider_error(error: &ManagerError) -> Value {
         tracing::warn!(error = ?error, "the Tart agent answered its runner list with an error");
     }
     json!({ "kind": kind, "message": message })
+}
+
+/// Why an exited GitLab runner container ended, from its exit status. A
+/// status outside `GITLAB_EXIT_REASONS`, or one Docker can't tell, gives
+/// none.
+async fn gitlab_exit_reason(docker: &Docker, id: &str) -> Option<String> {
+    let status = docker
+        .inspect_container(id, None)
+        .await
+        .ok()?
+        .state?
+        .exit_code?;
+    GITLAB_EXIT_REASONS
+        .iter()
+        .find(|(code, _)| i64::from(*code) == status)
+        .map(|(_, reason)| (*reason).to_owned())
 }
 
 async fn tart_runners(agent: &TartAgent) -> Result<Vec<ManagedRunner>, ManagerError> {
@@ -1777,6 +1832,14 @@ async fn provision_runner_inner(
     state: &ManagerState,
     input: &mut ProvisionRunner,
 ) -> Result<(StatusCode, Json<Value>), ManagerError> {
+    let gitlab = input.platform == "gitlab";
+    // GitLab's Docker executor runs every job on this host's daemon, through
+    // the runners' Docker socket: without it the runner could run none.
+    if gitlab && state.shared_docker_socket.is_none() {
+        return Err(ManagerError::BadRequest(
+            "GitLab runners need the runners' Docker socket (GRIDOPS_RUNNER_DOCKER_SOCKET), which this runner manager does not share.".into(),
+        ));
+    }
     let bootstrap_secret = take_bootstrap_secret(input)?;
     ensure_network(&state.docker, &input.network).await?;
     ensure_image(&state.docker, &input.image, input.pull_image).await?;
@@ -1805,24 +1868,29 @@ async fn provision_runner_inner(
 
     let memory_bytes = input.memory_limit_mb * 1_024 * 1_024;
     let (cmd, mut env) = runner_command(input)?;
-    // Images that run as root (myoung34's) export this from the entrypoint skipped below,
-    // and the runner's own run-helper.sh refuses to start as root without it, exiting 0
-    // with "Must not run interactively with sudo" and no indication anything is wrong.
-    // GitHub's image runs as `runner`, which this doesn't affect.
-    env.push("RUNNER_ALLOW_RUNASROOT=1".into());
-    let labels = HashMap::from([
+    let mut labels = HashMap::from([
         ("io.gridops.managed".into(), "true".into()),
         ("io.gridops.runner-id".into(), input.runner_id.clone()),
         ("io.gridops.pool-id".into(), input.pool_id.clone()),
         ("io.gridops.mode".into(), input.mode.clone()),
     ]);
+    if gitlab {
+        labels.insert(PLATFORM_LABEL.into(), "gitlab".into());
+    } else {
+        // Images that run as root (myoung34's) export this from the entrypoint skipped below,
+        // and the runner's own run-helper.sh refuses to start as root without it, exiting 0
+        // with "Must not run interactively with sudo" and no indication anything is wrong.
+        // GitHub's image runs as `runner`, which this doesn't affect.
+        env.push("RUNNER_ALLOW_RUNASROOT=1".into());
+    }
     let body = ContainerCreateBody {
         image: Some(input.image.clone()),
         // An empty entrypoint runs `cmd` as given. myoung34/github-runner's
         // `/entrypoint.sh` would otherwise take it as arguments and first run a
         // registration from env vars GridOps never sets, which fails before
         // `cmd` runs. GitHub's image has no entrypoint, so this changes nothing
-        // there.
+        // there. gitlab/gitlab-runner's `/entrypoint` would likewise hand
+        // `cmd` to gitlab-runner as its arguments.
         entrypoint: Some(vec![String::new()]),
         cmd: Some(cmd),
         env: Some(env),
@@ -2655,6 +2723,17 @@ fn valid_log_size(value: &str) -> bool {
 }
 
 fn runner_command(input: &ProvisionRunner) -> Result<(Vec<String>, Vec<String>), ManagerError> {
+    // GitLab branches on the platform: its runners are ephemeral too, but run
+    // the shared GitLab runner script, never GitHub's `--jitconfig`.
+    if input.platform == "gitlab" {
+        let gitlab = input.gitlab.as_ref().ok_or_else(|| {
+            ManagerError::BadRequest("GitLab runner registration is invalid.".into())
+        })?;
+        return Ok((
+            vec!["/bin/bash".into(), "-c".into(), gitlab_runner_script()],
+            gitlab_runner_env(&gitlab.url, gitlab.wait_timeout_seconds),
+        ));
+    }
     match input.mode.as_str() {
         "ephemeral" => Ok((
             vec![
@@ -2706,9 +2785,10 @@ fi"#;
 }
 
 fn take_bootstrap_secret(input: &mut ProvisionRunner) -> Result<SecretString, ManagerError> {
-    let value = match input.mode.as_str() {
-        "ephemeral" => input.jit_config.take(),
-        "persistent" => input.registration_token.take(),
+    let value = match (input.platform.as_str(), input.mode.as_str()) {
+        ("gitlab", _) => input.gitlab_runner_token.take(),
+        (_, "ephemeral") => input.jit_config.take(),
+        (_, "persistent") => input.registration_token.take(),
         _ => None,
     }
     .ok_or_else(|| ManagerError::BadRequest("Runner bootstrap credential is required.".into()))?;

@@ -116,3 +116,27 @@
   - `cargo fmt --check` is clean. `cargo +1.98.1 clippy --all-targets` reports nothing in the test files.
   - gitlab-runner `commands/single.go` (lines 76-81, 167-195) and `common/config.go:1462,1466` at v19.6.0, fetched from gitlab.com.
   - Read: the brief (all amendments), `handoff-A.md` round 3, `decisions.md`, the #137 RED precedent, and `docker.rs`, `helper.rs`, `dispatch.rs`, `provisioning.rs`, `agent.rs` (`GitlabRunnerMaterial`), `outcomes.rs`, the manager's `main.rs` (validate, `runner_command`, `take_bootstrap_secret`, `list_runners`, `provision_runner_inner`), `stand_in_docker.rs` and `route_timeout_tests.rs`.
+
+## F (Phase 6, implement against RED): 2026-11-20T16:44:58-08:00
+- **Decided:** implemented #147 against T's suite in one pass (see `handoff-F.md`); every authored test is GREEN.
+  - No Scope Cap split. The brief's ownership list was reviewed by A over three rounds for one pass, the RED suite covers all of it, and 4 of the 10 production files are mechanical (`diagnostic: None`, one doc comment). Splitting would have left T's tests red with no gain.
+  - Core: `GITLAB_RUNNER_IMAGE = gitlab/gitlab-runner:ubuntu-v19.6.0`, `GITLAB_DEFAULT_JOB_IMAGE = alpine:3.24.4`, `GITLAB_EXIT_VERIFY_UNAVAILABLE = 69` (`EX_UNAVAILABLE`), a readiness marker, the run-single job signal, `valid_gitlab_url`, `gitlab_runner_env` and one constant `gitlab_runner_script`.
+  - The token reaches `gitlab-runner` as `CI_SERVER_TOKEN` set on that child only. It is not in argv (which host `ps` shows to every user), not in the container metadata, and not in bash's environment. The verify call reads it as `--data-urlencode token@-` from a `printf` pipe.
+  - The script tells completed from idle by tee-ing run-single's output and searching it for the build-limit line, which matches as a substring. The runner's formatter pads messages and adds ANSI codes, so a whole-line match would miss it.
+  - Fleet: the shared `docker create` flags were pulled into `create_args`, used by GitHub and GitLab alike. GitHub's flags are unchanged, and `docker_runtime` still passes. The GitLab Start keeps stdin attached until it sees the marker or an exit, polling every 200 ms for up to 15 s. It reads the exit status before `rm -f`, which covers A's warning 1.
+  - Manager: the GitLab platform is branched on in `validate`, `runner_command` and `take_bootstrap_secret`. A GitLab start is refused with 400 when there is no runner socket. The `io.gridops.platform=gitlab` label is set, `exitReason` comes from `inspect_container`, and `RUNNER_ALLOW_RUNASROOT` is now set only for GitHub.
+- **Assumed:**
+  - When Docker's `--init` is PID 1, it passes SIGTERM to bash. The script's trap passes it on to `gitlab-runner` and waits. I checked this headlessly with a stand-in runner, not with the real image.
+  - `wait_timeout_seconds` is always positive. A 0 would make run-single wait forever. Neither path rejects it: the contract does not, and the reconciler (#139) sends the default of 600. This is noted for #139.
+- **Hedged:**
+  - The verify call sends no `system_id`. GitLab's docs say it is required for `glrt-` tokens, but GitLab's source has it optional: `current_runner_manager` falls back to the legacy manager, which "doesn't count toward the limit". A random `system_id` would create a manager that counts toward the per-runner creation limit and could take the runner's own slot. If GitLab ever enforces the documented rule, verify answers non-200/non-403, and that surfaces as a retryable `GITLAB_EXIT_VERIFY_UNAVAILABLE` rather than a silent failure.
+  - GitLab's 422 "Runner is orphaned" counts as verify-unavailable (retryable), as the brief says for any non-200/non-403 answer.
+  - A runner whose script printed the marker and then exited before the first readiness poll counts as started. Inspect then reports how it ended, because a job may already have run.
+- **Evidence:**
+  - NV-1: `commands/single.go:24,27` (`--wait-timeout`, `--max-builds`) and `common/config.go:293,324,1462,1505,1556,1592-1593` at v19.6.0.
+  - NV-2: `common/config.go:1466` (`env:"CI_SERVER_TOKEN"`).
+  - NV-3: `single.go:76-82,167-176` and `log/runner_formatter.go:35`.
+  - NV-4: GitLab `lib/api/ci/runner.rb:133-149`, `lib/api/ci/helpers/runner.rb:18-29,78-94`, and `doc/api/runners.md:1093-1117`.
+  - NV-6: the registry manifest for `ubuntu-v19.6.0` amd64. It has `LABEL org.opencontainers.image.version=24.04`, layer 1 has `usr/bin/bash` and layer 2 has `usr/bin/curl`.
+  - Docker Hub lists `ubuntu-v19.6.0` (same digests as `v19.6.0`) and `alpine:3.24.4` as active.
+  - Tier 1 results: script 11/11, `docker_gitlab` 10/10, dispatch 8/8, manager 111/111, and 610/0 across core, host agent, manager, Tart agent and reconciler. CI's clippy and `cargo fmt --check` are clean. `fleet_http` is 143/144; the 1 failure is environmental (macOS workstation).
