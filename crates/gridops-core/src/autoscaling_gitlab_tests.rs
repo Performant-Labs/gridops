@@ -483,3 +483,47 @@ async fn a_saturated_gitlab_pool_hands_pending_jobs_to_the_next_compatible_gitla
 
     finish(directory, database).await
 }
+
+#[tokio::test]
+async fn one_gitlab_job_recorded_under_a_project_and_its_group_connection_is_one_job()
+-> anyhow::Result<()> {
+    // D18: `conn-a` (project 11) and `conn-a-group` (its group, on the same
+    // GitLab instance) each record job 501, so it has two `gitlab_jobs` rows.
+    // It is one GitLab job: deduplicated on (base_url, job_id), it is demand
+    // once, whichever connection's pools take it. (Job 100 on `conn-a` and on
+    // `conn-b`, which are different instances, stays two jobs: see
+    // `a_github_job_and_gitlab_jobs_with_the_same_numeric_id_never_collide`.)
+    let group_connection = "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+          VALUES ('conn-a-group','a group','https://gitlab-a.example.test','group',3,'group','gitlab.conn-a-group.token','gitlab.conn-a-group.webhook',1,1);";
+
+    // One pool linked to both connections counts it once.
+    let (directory, database) = gitlab_fixture(&format!(
+        "{group_connection}{}{}{}",
+        gitlab_pool("both", 1, 10, &["docker"], &["conn-a", "conn-a-group"]),
+        gitlab_job("conn-a", 501, "pending", &["docker"], 1),
+        gitlab_job("conn-a-group", 501, "pending", &["docker"], 2),
+    ))
+    .await?;
+    assert_eq!(demand(&database, "both").await?, 1);
+    finish(directory, database).await?;
+
+    // A pool on each connection: the candidate pools are the pools of either
+    // connection, and the one job goes to one of them, the older pool first.
+    let (directory, database) = gitlab_fixture(&format!(
+        "{group_connection}{}{}{}{}",
+        gitlab_pool("group-only", 1, 10, &["docker"], &["conn-a-group"]),
+        gitlab_pool("project-only", 2, 10, &["docker"], &["conn-a"]),
+        gitlab_job("conn-a", 501, "pending", &["docker"], 1),
+        gitlab_job("conn-a-group", 501, "pending", &["docker"], 2),
+    ))
+    .await?;
+    assert_eq!(
+        (
+            demand(&database, "group-only").await?,
+            demand(&database, "project-only").await?
+        ),
+        (1, 0)
+    );
+
+    finish(directory, database).await
+}

@@ -1,158 +1,155 @@
-# Handoff-T-red: Phase 4 - GitLab demand matching, scale-down and a pending-jobs poll (#148)
+# Handoff-T-red: Phase 4 - GitLab demand matching, scale-down and a pending-jobs poll (#148)  (round 2: D18)
 
 **Date:** 2026-11-20
-**Branch:** claude/gitlab-148-scaling-71c514 (head 99c5a07)
-**Brief / wireframe reviewed:** docs/handoffs/148-brief.md (all 233 lines, both amendment rounds); wireframe N/A (no UI surface)
+**Branch:** claude/gitlab-148-scaling-71c514 (head 4a1fbbd)
+**Brief / wireframe reviewed:** docs/handoffs/148-brief.md (all 271 lines; this round adds the "Amendments, round 3: the shared `gitlab_jobs` write (D18, agreed with #140)" section and its Constraints line, read with `git diff 1a4c512 572f828`). Also read: #140's D18 text, `gitlab-140-webhooks-a9fae5/docs/handoffs/140-brief.md:280-372` at `ba0a441`. Wireframe N/A (no UI surface).
 
 ## A precondition
 
-Confirmed: A returned **PASS** on the plan in round 3 (`docs/handoffs/148/handoff-A.md`, commit 99c5a07), with four warnings. The brief was not amended after that, so no test pins a warning's suggested fix:
+Confirmed: A returned **PASS** on the amended plan in round 4 (`docs/handoffs/148/handoff-A.md`, commit 4a1fbbd), with 6 warnings. The brief was not amended after that, so no test pins a warning's suggested fix. Here is how each warning bears on the tests:
 
-- **Warning 1** (a shared `gridops-core` write helper): it is about where the code lives. The tests drive the poll through `poll_once`, so they pass wherever the guarded write lives.
-- **Warning 2** (an identical status leaves `status_changed_at` alone): not adopted. No test asserts `status_changed_at` on a row whose status the poll leaves unchanged. The two invariant tests assert it only where the rank forbids any write.
-- **Warning 3** (a failed `group_projects` skips the conclusion step): not adopted, so not pinned. A2-W6's per-project rule is pinned (see below).
-- **Warning 4** (pin the interval; the A2-W4 column name): `worker`'s loop and interval aren't unit-testable through `poll_once`. I check them by reading the code in Phase 6. The busy-clear test matches on `runners.gitlab_runner_id`, `runners.gitlab_connection_id = gitlab_jobs.connection_id` and `deleted_at IS NULL`, as A's wording fixes it.
+- **Warning 1** (the dedupe key and where it runs): the new dedupe test pins what the brief states: dedupe on `(base_url, job_id)`, demand counted once, candidate pools from either connection. It doesn't pin the display tier or the private key's shape.
+- **Warning 2** (one row `running`, its duplicate `pending`): not adopted, so not pinned.
+- **Warning 3** (where the D18 tests live): I put them in `gitlab/jobs_tests.rs`, as A suggested. I mounted them from `gitlab/mod.rs`, not from `jobs.rs`; the reason is under "Test wiring".
+- **Warning 4** (status guard on the re-check mark): not adopted, so not pinned.
+- **Warning 5** (`runner_events`): the test pins the brief's fields. It doesn't pin the message, and it doesn't pin the duplicate-row case.
+- **Warning 6** (a failed `group_projects`; the interval): not adopted. I check the interval by reading the code in Phase 6.
+
+A's "Notes for O" asked T for three items: the D18 unit tests, the dedupe test and the `runner_events` row. All three are below.
 
 ## Tests authored
 
-The tests sit at two tiers:
-- **Demand matching** is tested against a real SQLite database through the public `autoscaling` API. That is the cheapest tier where the queue SQL runs.
-- **The poll** is tested against a real SQLite database and `FakeGitLab`, through `gitlab_poll::poll_once`. That is the cheapest tier where the API calls, the status rule and the conclusion step all run together.
+The first T-red (`1a4c512`) authored 26 tests. This round adds 10 tests and changes 1, for 36 in total. Every earlier test was re-read against D18. They are consistent with it: both fixtures put each connection on its own base URL, so D18's `base_url` busy match and the dedupe leave their expectations unchanged.
 
-There are no e2e tests, because there is no UI.
+There are three tiers, and each is the cheapest one where the rule actually runs:
+- **The D18 writer** is unit-tested against a real migrated SQLite database through its public API (`record_gitlab_job`, `set_gitlab_runner_busy`, `status_tier`, `status_write_applies`). The rules are SQL, so a database is the cheapest sufficient tier.
+- **Demand matching** is tested through the public `autoscaling` API on SQLite.
+- **The poll** is tested through `gitlab_poll::poll_once` on SQLite with `FakeGitLab`.
 
-### `crates/gridops-core/src/autoscaling_gitlab_tests.rs` (new, 10 tests)
-
-Mounted from `autoscaling.rs` with `#[cfg(test)] #[path = "autoscaling_gitlab_tests.rs"] mod gitlab_tests;`, which is already in the staged diff. It has its own fixture: installation 1, repository 10, run 20, and connections `conn-a` and `conn-b`.
-
-| Test | What it pins |
-|---|---|
-| `a_pending_gitlab_job_matches_a_pool_only_when_the_pool_configures_every_tag` | Tag matching: all tags configured → match; tags in another case → match; one tag missing → no match. Done-when 1. |
-| `a_gitlab_job_is_counted_only_by_pools_linked_to_its_connection` | Candidates come through `runner_pool_gitlab_connections`. An older pool linked to another connection never counts the job, and `project_id` plays no part (NV-3). |
-| `an_untagged_gitlab_job_matches_only_pools_that_run_untagged` | `tag_list = []` matches only `run_untagged = 1`, whatever the pool's labels. An older tagged-only pool with room is skipped. With no such pool, the job has no owner. |
-| `gitlab_tags_match_configured_labels_only_never_implied_system_or_catch_all_labels` | A-B4. For `self-hosted`, `self-hosted-linux`, `linux` and the host's arch label, a plain pool and an exclusive pool that don't configure the label never match. A non-exclusive pool that does configure it matches. An exclusive pool matches a job whose tags it configures. |
-| `a_pool_with_no_runnable_platform_never_owns_a_gitlab_job` | A2-W5. An older pool with `providers='[]'` (no platform), room and the tag configured is passed over, and the next pool owns the job. |
-| `only_pending_gitlab_jobs_are_scaler_demand` | A-B3 and the W-5 Done-when. Eleven rows match the pool's tags: `created`, `waiting_for_resource`, `preparing`, `running`, `manual`, `scheduled`, `unknown`, `success`, `failed`, `canceled` and `skipped`. They give `assigned_queued_jobs = 0` and an empty `queued_job_ownership`. Adding one `pending` row gives 1. |
-| `waiting_gitlab_jobs_take_display_room_but_other_unready_statuses_take_none` | A-B3's display tier, read with A-B2 ("a GitLab job still consumes room ahead of a later GitHub job"). An older `created`, `waiting_for_resource` or `preparing` GitLab job takes the room of `shared` (max 1), so GitHub's `waiting` job 100 is shown under `overflow` in `waiting_job_ownership`. With an older `running`, `manual`, `scheduled`, `unknown` or `success` GitLab job, job 100 stays under `shared`. None of these is scaler demand. |
-| `github_and_gitlab_jobs_share_one_ordered_queue_and_only_github_jobs_are_listed` | A-W4 and A-B2. An older GitLab job takes `shared`'s room, so the GitHub job overflows; `assigned_queued_jobs` counts both. `queued_job_ownership` and `queued_job_assignments` list the GitHub job only, with `repository_id` 10. When the two jobs are queued at the same time, GitHub goes first. |
-| `a_github_job_and_gitlab_jobs_with_the_same_numeric_id_never_collide` | A-B2's key. GitHub job 100 and GitLab job 100 on each of two connections, all with the same `created_at` so they sit next to each other in the candidate list, are **3** jobs for the pool. Ownership lists `(100, both, false)` once, and `queued_job_assignments` lists one job, from repository 10. An `i64` key collapses them to 1. |
-| `a_saturated_gitlab_pool_hands_pending_jobs_to_the_next_compatible_gitlab_pool` | The handoff. `older` is full (2 busy of max 2), and the `paused` and `manual` pools never count, so `newer` owns all 3 jobs. When one runner of `older` frees, it takes back the oldest job (1 and 2). |
-
-### `crates/gridops-reconciler/src/gitlab_poll_tests.rs` (new, 16 tests)
-
-Mounted from `main.rs` with `#[cfg(test)] mod gitlab_poll_tests;`, next to `start_tests`. That line is in the staged diff.
-
-`Harness::new` builds the fixture:
-- installation 1;
-- four connections, each on its own base URL, with the token sealed in `runtime_secrets` under `access_token_key`: `conn-a` (project 11), `conn-b` (project 12), `conn-g` (group 7) and `conn-z` (project 13, which no pool targets);
-- a `Reconciler` whose `gitlab` is `Arc::new(FakeGitLab)`.
+### `crates/gridops-core/src/gitlab/jobs_tests.rs` (new, 9 tests): D18's Done-when list
 
 | Test | What it pins |
 |---|---|
-| `the_conclusion_step_bounds_are_the_briefed_values` | `GITLAB_JOB_CHECK_LIMIT == 10` and `GITLAB_JOB_CHECK_AGE_MS == 300_000`. |
-| `a_pending_job_with_no_webhook_row_is_recorded_once_and_scales_its_pool` | A pending job with no row is recorded with these values: a UUID v4 `id`, `pending`, project 11, pipeline 1, and `tag_list` exactly `["docker","Gpu"]` (the contract encoding, in GitLab's order). Its three timestamps fall within the poll. It becomes demand (`assigned_queued_jobs = 1`). `conn-z` (no pool) is never polled. A second poll keeps one row with the same `id`. |
-| `a_group_connection_is_polled_through_its_projects` | One `group_projects` call and one `pending_jobs` call per project. Rows are recorded under `conn-g`, with projects 21 and 22. A job of project 23, which is outside the group, is not recorded. Demand is 2. |
-| `a_stale_recorded_job_is_concluded_through_each_job_outcome` | W-4. Two stale rows that aren't pending are checked through `job`. A `Success` answer is written as `JobStatus::Success.as_str()`. `NotFound` concludes the row as **`canceled`**. `status_changed_at` falls within the poll. |
-| `a_rate_limited_connection_is_skipped_until_its_retry_after_while_others_are_polled` | `RateLimited { Some(60 s) }` on `conn-a` and `RateLimited { None }` on `conn-g`'s `group_projects`. `poll_once` still returns `Ok`, and `conn-b` is recorded. At `now + 1 s`, neither limited connection is called, but `conn-b` is. At `now + 61 s`, `conn-a` is polled and recorded. The backoff is measured on the `now` argument. |
-| `the_conclusion_step_checks_at_most_the_limit_and_only_rows_older_than_the_age` | LIMIT + 2 stale rows and one fresh row, none pending on GitLab. Exactly LIMIT `job` calls are made. The LIMIT oldest rows are concluded; the 2 newest stale rows and the fresh row are not. |
-| `stale_pending_rows_are_checked_first_and_running_rows_last` | A2-B1's order. LIMIT stale `running` rows are older than a stale `created` row, which is older than a stale `pending` row. `pending` is checked first, then `created`, then the LIMIT − 2 oldest `running` rows; the 2 newest `running` rows wait. |
-| `a_checked_row_is_not_asked_about_again_within_the_age_whatever_the_answer` | One row whose answer is unchanged (`Running`) and one whose `job` call fails both get `updated_at` stamped at the check. A second poll asks about neither. |
-| `the_poll_never_moves_a_running_row_back_to_pending` | B-1 and A2-W2/W3. One `running` row has `status_changed_at` after the poll and one before. GitLab lists both as pending. Both keep `running` and their `status_changed_at`. A third job with no row is recorded, as a control that proves the poll ran. Demand is 1. |
-| `the_poll_never_resurrects_a_terminal_row` | B-1. A `success` row that GitLab lists as pending keeps its `status` and `status_changed_at`, and produces no demand. A control job is recorded. |
-| `a_manual_or_scheduled_row_gitlab_now_lists_as_pending_becomes_pending_demand` | A2 Done-when. `manual` and `scheduled` rows become `pending`, the `manual` row keeps its surrogate `id`, no rows are added, and demand goes from 0 to 2. |
-| `concluding_a_running_row_clears_its_runners_busy_flag` | A2-W4. Concluding a `running` row with `gitlab_runner_id = 55` frees only the live runner 55 on `conn-a`. Runner 56, runner 55 on `conn-b` and a deleted runner 55 all stay busy. |
-| `rows_of_a_project_whose_pending_jobs_failed_are_not_concluded` | A2-W6. `group_projects` lists two projects, each with a stale row, and one `pending_jobs` call fails (`Upstream`). Exactly one row is concluded, with one `job` call, and the other stays `pending`. `poll_once` returns `Ok`. On the next poll, both rows are concluded. |
-| `gitlab_credentials_reads_the_base_url_and_unseals_the_access_token` | A-W2/A2-W7. `gitlab_credentials(&app, id)` returns the parsed `base_url` and the unsealed token. It returns `None` for an unknown connection, and `None` when the secret is gone. |
-| `the_placeholder_client_refuses_every_call_by_name` | A-W1/A2-W7. All seven `UnavailableGitLab` methods return `GitLabError::Upstream("GitLab client not available yet")`. |
-| `an_idle_gitlab_pool_scales_down_only_once_it_owns_no_gitlab_job` | It calls `maybe_scale_down` on a pool with an idle GitLab runner, `desired_count 2` and `min 0`. While the pool owns a pending GitLab job, `desired_count` stays 2. Once the job is `success`, it drops to 0. This proves the Bitbucket guard needs no edit. |
+| `status_tier_ranks_every_status_into_its_d18_tier` | Tier 0 is `created`, `waiting_for_resource`, `preparing`, `manual` and `scheduled`. Tier 1 is `pending`, 2 is `running`, and 3 is the four terminal statuses. `unknown` has no tier (`None`). |
+| `a_status_write_applies_only_upward_or_at_the_same_tier_when_newer_and_never_to_a_terminal_row` | **Each tier transition.** All 11 × 11 stored/incoming status pairs, each with the incoming time older, equal and newer (363 cases). It checks both `status_write_applies` and `record_gitlab_job`. When the write applies, the outcome is `StatusApplied` with `previous_status` = the stored status. Only `status`, `status_changed_at`, `pipeline_id` and `updated_at = now_ms` change, and `pool_id` (seeded `p1`) is never written. Otherwise the outcome is `Ignored` and the row is unchanged in every column. This also pins the same-tier rule: equal times don't apply. |
+| `a_new_row_gets_a_uuid_and_the_given_values_or_the_defaults` | An `Inserted` row has a UUID v4 `id`, the given tags (contract encoding), retries and runner, `pool_id` NULL and `updated_at = now_ms`. The outcome has `previous_status` None. With no optional values the row gets `[]`, 0 and NULL. `Some([])` is stored as `[]`. |
+| `unknown_writes_nothing` | `unknown` gives `Ignored`. It creates no row, and on a row with room for every fill it fills nothing. *Control:* the same observation with `Pending` is `Inserted`. |
+| `a_terminal_row_never_changes_in_any_column` | Each of the 4 terminal statuses gets a newer `pending`, `running`, `success` or `failed`, with tags, a runner, retries and a pipeline. Each is `Ignored`, and every column is unchanged. *Control:* the same observation onto a `running` row is `StatusApplied`, and it fills the runner and the tags. |
+| `the_runner_id_is_filled_once_and_never_cleared_or_overwritten` | A rejected (older) write fills `gitlab_runner_id`. The outcome is `FilledOnly` with `previous_status`/`status` = `running`, and only the runner and `updated_at` change. An applied write with another id keeps the first id, and an applied write with `None` doesn't clear it. An applied write fills an empty id. A rejected write onto a row that already has a runner is `Ignored`. |
+| `tags_are_replaced_only_by_non_empty_tags_and_filled_on_a_rejected_write` | On applied writes, `Some([])` and `None` keep the stored tags, and non-empty tags replace them. A rejected write fills empty stored tags (`FilledOnly`, and only the tags and `updated_at` change). A rejected write never replaces stored tags and never "fills" with `[]` (`Ignored`). |
+| `retries_count_and_pipeline_move_only_with_an_applied_status_write` | `None` keeps the stored retries, `Some` moves them, and `pipeline_id` moves with an applied status. On a rejected write, neither moves (`Ignored`). |
+| `set_gitlab_runner_busy_matches_the_runner_id_on_any_connection_of_the_same_instance` | **The `base_url` match.** The job's connection is `conn-a`. The runner that is matched was registered through `conn-a-group`, a sibling connection on the same base URL. These runners are not matched, and none of them changes: runner 55 on another instance, a deleted 55, runner 56, and a `github` runner carrying 55. Setting busy writes `busy=1`, `status='busy'`, `last_heartbeat_at` and `updated_at`; clearing it writes `0` and `'online'`. No other column of any runner changes. The call returns `("sibling", Some("p1"))`, or `None` for an unknown id. |
+
+### `crates/gridops-core/src/autoscaling_gitlab_tests.rs` (+1 test, 11 in total)
+
+| Test | What it pins |
+|---|---|
+| `one_gitlab_job_recorded_under_a_project_and_its_group_connection_is_one_job` | **The D18 dedupe.** `conn-a` (project) and `conn-a-group` (group, same base URL) each record job 501. With one pool linked to both connections, demand is **1**, not 2. With one pool per connection, the pools of either connection are candidates and the job is owned once: the older pool (`group-only`) gets 1 and the other gets 0. A per-row scan gives (1, 1). A dedupe that keeps only the first row's connection gives (0, 1). The case where the same id is on *different* instances stays at 3, in the existing collision test. |
+
+The other 10 tests are unchanged (see the round-1 table in git history at `1a4c512`). They cover: tag matching; connection linkage; untagged jobs; A-B4 matching on configured labels only; the A2-W5 platform gate; the A-B3 tiers and D8 statuses; the display tier taking room; A-W4's one ordered list; the A-B2 rule that ids never collide; and the saturated-pool handoff.
+
+### `crates/gridops-reconciler/src/gitlab_poll_tests.rs` (1 test changed, 16 in total)
+
+| Test | Change |
+|---|---|
+| `concluding_a_running_row_clears_its_runners_busy_flag_and_records_one_runner_event` (was `concluding_a_running_row_clears_its_runners_busy_flag`) | The test now also checks:<br>- the freed runner's `status` is `online` (D18);<br>- **exactly one** `runner_events` row matches `event LIKE 'GitLab job %'`: `runner_id` `ran-it`, `pool_id` `gl`, `level` `info`, `event` `GitLab job failed`, and metadata `jobId` 841, `projectId` 11, `pipelineId` 1, `connectionId` `conn-a`. Each value may be a JSON number or a string;<br>- a second `running` row (842) with **no** `gitlab_runner_id` is concluded (`success`) and frees no runner and writes no event.<br>The runner on another instance (`conn-b`, `BASE_B`) stays busy, as D18's `base_url` match requires. |
+
+The other 15 poll tests are unchanged. They cover: recording a job; the group poll; concluding through each `job` outcome; the rate-limit backoff; the A2-B1 limit, age and order; the re-check stamp; no backwards move; no resurrection; manual→pending; the A2-W6 failed-project rule; `gitlab_credentials`; `UnavailableGitLab`; `maybe_scale_down`; and the constants. They already conclude only through `GitLabApi::job` (they count `FakeMethod::Job` calls). D18 doesn't change any of them.
 
 ### Test wiring (not production code)
 
-- `crates/gridops-reconciler/Cargo.toml` `[dev-dependencies]` gains `gridops-core = { path = "../gridops-core", features = ["test-support"] }`. `FakeGitLab` is behind `cfg(any(test, feature = "test-support"))`, and `cfg(test)` of another crate doesn't enable it. `Cargo.lock` is unchanged.
+- `crates/gridops-core/src/gitlab/mod.rs` gains `#[cfg(test)] #[path = "jobs_tests.rs"] mod jobs_tests;`, after `pub mod fake;`. This is a test-only line. A suggested mounting from `jobs.rs` instead (the `fake.rs` pattern). I mounted from `mod.rs` so the tests stay independent of whichever copy of `jobs.rs` is used. If #140's `jobs.rs` replaces #148's at the second merge, these tests keep running against it. That gives the "union of both test sets" A asked for, without anyone re-mounting them. The tests use only `crate::gitlab::jobs::` public items.
+- The round-1 wiring is unchanged and already committed: the reconciler's `gridops-core` dev-dependency with `test-support`, `mod gitlab_tests` in `autoscaling.rs`, and `mod gitlab_poll_tests;` in `main.rs`.
 
-**Not tests I author** (Tier 1 / review in Phase 6): `worker`'s spawn from `main()`, its `reconcileIntervalSeconds` interval, `retry_when_busy` around the writes, the D8 IN-list text in the SQL, and the per-request `GITLAB_REQUEST_TIMEOUT`.
-
-**Coverage hole, by design:** the timeout path can't be driven. `FakeGitLab` has no delay knob, and tokio's `test-util` (paused time) isn't enabled in the workspace. The A2-W6 rule ("don't conclude a project whose `pending_jobs` didn't answer") is pinned through an `Upstream` failure instead, the same code path minus the timer.
+**Coverage holes, by design:**
+- The timeout path (round 1) still can't be driven.
+- The poll's use of D18 isn't directly observable. That the poll calls `record_gitlab_job`/`set_gitlab_runner_busy` and has no SQL merge of its own is checked by reading the code in Phase 6.
+- The re-check mark being a one-column `UPDATE` is also checked by reading the code in Phase 6.
 
 ## RED confirmation
 
-### Runtime RED: `cargo test -p gridops-core --lib autoscaling`
+### Compile RED (the real state of the branch)
 
-**10 failed / 24 passed.** All 24 existing autoscaling tests are still green. Each new test fails on its feature assertion, because `queued_job_candidates` reads no `gitlab_jobs`:
+`cargo test -p gridops-core --lib --no-run`:
 
-    a_pending_gitlab_job_matches_..._every_tag                     left: 0  right: 2
-    a_gitlab_job_is_counted_only_by_pools_linked_to_its_connection  left: 0  right: 2
-    an_untagged_gitlab_job_matches_only_pools_that_run_untagged     left: 0  right: 1
-    gitlab_tags_match_configured_labels_only_...                    left: 0  right: 1   (self-hosted, "configures")
-    a_pool_with_no_runnable_platform_never_owns_a_gitlab_job        left: 0  right: 1
-    only_pending_gitlab_jobs_are_scaler_demand                      left: 0  right: 1
-    waiting_gitlab_jobs_take_display_room_...                       created: left: [(100, "shared")]  right: [(100, "overflow")]
-    github_and_gitlab_jobs_share_one_ordered_queue_...              left: 0  right: 1
-    a_github_job_and_gitlab_jobs_with_the_same_numeric_id_...       left: 1  right: 3
-    a_saturated_gitlab_pool_hands_pending_jobs_...                  left: 0  right: 3
+    error[E0432]: unresolved import `crate::gitlab::jobs`
+      --> crates/gridops-core/src/gitlab/jobs_tests.rs:33:20
+    error: could not compile `gridops-core` (lib test) due to 1 previous error
 
-### Compile RED: `cargo test -p gridops-reconciler --no-run`
+`cargo test -p gridops-reconciler --no-run` gives the same 8 errors as round 1. Each names a missing #148 item:
+- E0432 `crate::gitlab_poll`;
+- E0560 `Reconciler.gitlab`;
+- E0425 `gitlab_credentials` ×3;
+- E0277/E0599, knock-on effects of the missing `gitlab_credentials`.
 
-Each error names a missing #148 item; none is a typo or a wrong import of mine:
+**Consequence F should expect:** the core test binary won't compile until `gitlab/jobs.rs` exists. Until then, none of core's tests can run, including the 24 existing autoscaling tests. Add `jobs.rs` (even a skeleton) first.
 
-    E0432 unresolved import `crate::gitlab_poll`                         (gitlab_poll_tests.rs:11)
-    E0560 struct `Reconciler` has no field named `gitlab`                (gitlab_poll_tests.rs:79)
-    E0425 cannot find function `gitlab_credentials` in this scope        (x3)
-    E0277 `!: anyhow::Context` / E0599 no method `is_none` on `_`        (knock-on effects of the missing `gitlab_credentials`)
+### Runtime RED behind the compile RED (throwaway stubs, never staged)
 
-Consequence F should expect: until `gitlab_poll`, the `gitlab` field and `gitlab_credentials` exist, the reconciler's test binary doesn't compile, so its existing tests can't run either. That is inherent to RED over new items in Rust, as in #137.
+Each stub came from the session scratchpad, was applied for one run, and was then removed (`git checkout` / `rm`). `git status` now shows only the four test paths.
 
-### Runtime RED behind the compile RED (throwaway stub, never staged)
+**1. A no-behaviour D18 stub** (`jobs.rs` with the exact signatures: `status_tier` → None, `status_write_applies` → false, `record_gitlab_job` → `Ignored`, `set_gitlab_runner_busy` → None), plus `pub mod jobs;`.
 
-To prove the poll tests type-check and fail for the right reason once they compile, I applied a **no-behaviour stub** for one run. It came from the session scratchpad, and the working tree was then restored from the index: `git status` shows only the five staged paths. The stub contained:
-- `gitlab_poll.rs` with the constants, an `UnavailableGitLab`, and a `poll_once` that returns `Ok(())`;
-- the `gitlab` field, plus its three constructor sites;
-- a `gitlab_credentials` that returns `Ok(None)`.
+`cargo test -p gridops-core --lib -- gitlab::jobs_tests autoscaling` gave **20 failed / 24 passed** (the 24 are the existing autoscaling tests, all still green):
 
-With it, `cargo test -p gridops-reconciler gitlab_poll_tests` gives **14 failed / 2 passed**. Every failure is the feature missing:
+    gitlab::jobs_tests::status_tier_ranks_every_status_...              left: None       right: Some(0)
+    gitlab::jobs_tests::a_status_write_applies_only_upward_...          left: false      right: true
+    gitlab::jobs_tests::a_new_row_gets_a_uuid_...                        left: "Ignored"  right: "Inserted"
+    gitlab::jobs_tests::unknown_writes_nothing                           left: "Ignored"  right: "Inserted"       (the control)
+    gitlab::jobs_tests::a_terminal_row_never_changes_in_any_column       left: "Ignored"  right: "StatusApplied"  (the control)
+    gitlab::jobs_tests::the_runner_id_is_filled_once_...                 left: "Ignored"  right: "FilledOnly"
+    gitlab::jobs_tests::tags_are_replaced_only_by_non_empty_tags_...     left: "Ignored"  right: "StatusApplied"
+    gitlab::jobs_tests::retries_count_and_pipeline_move_only_...         left: "Ignored"  right: "StatusApplied"
+    gitlab::jobs_tests::set_gitlab_runner_busy_matches_...               left: None       right: Some(("sibling", Some("p1")))
+    autoscaling::gitlab_tests::one_gitlab_job_recorded_under_a_project_and_its_group_connection_is_one_job   left: 0  right: 1
+    + the 10 round-1 autoscaling tests, with the same failures as round 1 (e.g. collision left: 1 right: 3)
 
-    a_pending_job_..._scales_its_pool        Error: the pending job is recorded
-    a_group_connection_is_polled_...         left: 0  right: 1        (GroupProjects calls)
-    a_stale_recorded_job_is_concluded_...    left: 0  right: 2        (Job calls)
-    a_rate_limited_connection_...            panicked at :354  (conn-b not recorded)
-    the_conclusion_step_checks_at_most_...   left: 0  right: 10
-    stale_pending_rows_are_checked_first_... left: "pending"  right: "canceled"
-    a_checked_row_is_not_asked_about_again_  left: 0  right: 2
-    the_poll_never_moves_a_running_row_...   Error: conn-a/813 is not recorded   (the control)
-    the_poll_never_resurrects_a_terminal_row Error: conn-a/822 is not recorded   (the control)
-    a_manual_or_scheduled_row_...            left: "manual"  right: "pending"
-    concluding_a_running_row_clears_...      left: "running"  right: "failed"
-    rows_of_a_project_whose_pending_jobs_... left: ["pending","pending"]  right: ["canceled","pending"]
-    gitlab_credentials_reads_...             Error: conn-a has credentials
-    an_idle_gitlab_pool_scales_down_only_... left: 0  right: 2   (scaled down while it owned a pending GitLab job)
+At first, `unknown_writes_nothing` and `a_terminal_row_never_changes_in_any_column` **passed** against this stub, because a writer that does nothing meets an invariant that says "nothing changes". That is not a valid RED. I added a live-writer control to each (above). Both now fail on that control.
 
-The 2 that pass against the stub are `the_conclusion_step_bounds_are_the_briefed_values` and `the_placeholder_client_refuses_every_call_by_name`. They pin contract items whose RED is their absence (the compile RED above), so the stub, which provides them, passes them.
+**2. A throwaway reference D18 implementation** (scratchpad `jobs_ref.rs`, written from the brief's rules), run to show the tests can be passed and agree with D18: **9 passed / 0 failed**. So the D18 unit tests aren't contradictory or wrong against a faithful implementation. It was removed afterwards.
 
-The two invariant tests (no backwards move, no resurrection) each carry a control job that a no-op poll fails. So they aren't vacuous, even though their invariant half would hold for a poll that does nothing.
+**3. The round-1 no-behaviour reconciler stub** (`gitlab_poll.rs` with the constants, `UnavailableGitLab` and a `poll_once` that returns `Ok`; the `gitlab` field and its three constructor sites; and a `gitlab_credentials` that returns `Ok(None)`).
+
+`cargo test -p gridops-reconciler gitlab_poll_tests` gave **14 failed / 2 passed**, as in round 1. The changed test fails on its feature assertion:
+
+    concluding_a_running_row_clears_its_runners_busy_flag_and_records_one_runner_event   left: "running"  right: "failed"
+
+The 2 that pass are still the contract-item tests (the constants and `UnavailableGitLab`), whose RED is the compile RED.
 
 ### Hygiene
 
 - `cargo fmt --all -- --check` is clean.
-- `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (CI's toolchain and flags) is clean.
-- The reconciler's clippy, run against the stub, reported only the stub's own dead-code and unused-`async` lints, none in `gitlab_poll_tests.rs`.
+- `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (CI's toolchain and flags) exits 0. It was run with the reference `jobs.rs` in place, because the tests need the module to compile.
+- `cargo +1.98.1 clippy -p gridops-reconciler --all-targets ...`, run with the stub, reports only the stub's own two `main.rs` lines and nothing in `gitlab_poll_tests.rs`.
 
 ## Ready for F
 
-**RED is valid. F may implement against these tests.** Where the brief leaves a choice open, the tests take one reading. F implements to these, or tells T if one contradicts the brief:
+**RED is valid. F may implement against these tests.** The round-1 readings still hold (items 1-8 and 10-12 of the round-1 list, commit `1a4c512`): the `poll_once` signature, the `i64` constants, the `UnavailableGitLab` unit struct, `gitlab_credentials` in `main.rs`, the `Reconciler.gitlab` field, `NotFound` → `canceled`, group routing, the display tier using room, no edit to the Bitbucket guard, and the evidence appendix in Phase 6.
 
-1. **`gitlab_poll` API** (`crates/gridops-reconciler/src/gitlab_poll.rs`, `mod gitlab_poll;` in `main.rs`):
-   - `pub(crate) async fn poll_once(app: &Reconciler, backoff: &mut HashMap<String, std::time::Instant>, now: std::time::Instant) -> anyhow::Result<()>`. The backoff key's type is inferred, so any `HashMap<K, std::time::Instant>` compiles.
-   - `poll_once` returns `Ok` when one connection is rate-limited or fails.
-   - The skip-until is measured on `now`, not on `Instant::now()`.
-   - `RateLimited { retry_after: None }` must still skip the connection one second later. The documented default is F's choice, as long as it is longer than 1 s.
-2. **Constants:** `pub(crate) const GITLAB_JOB_CHECK_LIMIT: i64 = 10;` and `pub(crate) const GITLAB_JOB_CHECK_AGE_MS: i64 = 300_000;`, both `i64` like `JOB_CHECK_LIMIT`/`JOB_CHECK_AGE_MS`.
-3. **`UnavailableGitLab`** is a `pub(crate)` **unit struct** in `gitlab_poll.rs`, constructed as `UnavailableGitLab`.
-4. **`gitlab_credentials(app: &Reconciler, connection_id: &str) -> Result<Option<GitLabCredentials>>`** lives in `main.rs` (the tests call it through `use super::*`).
-5. **`Reconciler.gitlab: Arc<dyn GitLabApi>`.** My harness builds a `Reconciler` literal with every current field plus `gitlab`. F adds the field to `main()` and to the two other existing literals (`main.rs` `reconciler_with_github`, `start_tests.rs`), as A-W1 allows.
-6. **`NotFound` concludes as `canceled`.**
-7. **Status written on conclusion** is `JobStatus::as_str()` of GitLab's answer. A non-terminal answer that ranks higher (for example `Running` for a `pending` row) may be written as well; no test forbids it.
-8. **Group routing:** rows are stored with the group connection's `connection_id` and the project's `project_id`.
-9. **Busy clear** matches `runners.gitlab_runner_id = gitlab_jobs.gitlab_runner_id AND runners.gitlab_connection_id = gitlab_jobs.connection_id AND runners.deleted_at IS NULL`.
-10. **Display tier and A-B2:** in `waiting_job_pools`, a `created`, `waiting_for_resource` or `preparing` GitLab job uses up room before it is filtered out. The tests expect this.
-11. **Do not edit the Bitbucket guard in `maybe_scale_down`.** The scale-down test passes without that edit once `assigned_queued_jobs` counts GitLab jobs.
-12. **Evidence appendix:** in Phase 6 I'll add entries for the unchanged-code facts these tests rely on: the `maybe_scale_down` guard, and `FakeGitLab`'s pending filter, its `NotFound` and its per-base-URL state.
+What changes or is new with D18:
+
+1. **Create `crates/gridops-core/src/gitlab/jobs.rs` and add `pub mod jobs;` to `gitlab/mod.rs` first.** Use the brief's exact signatures. Do **not** move the `jobs_tests` mount; it stays in `mod.rs` (see "Test wiring").
+2. **`JobWrite` needs no derives.** The tests name the outcome through an exhaustive `match`, so whatever derives #140's copy has, the tests still compile against it.
+3. **Outcome fields:**
+   - On `Inserted`, `previous_status` is `None`.
+   - On `StatusApplied` and `FilledOnly`, `previous_status` is `Some(stored status)`, `status` is the stored status after the call, and `gitlab_runner_id` is the stored id after the call (as `140-brief.md` states).
+   - A rejected write that fills nothing, and any write onto a terminal row, is `Ignored`, which is the only variant left. The other fields of an `Ignored` outcome are not pinned.
+4. **Not pinned:** a new row's `created_at`. The round-1 poll test still requires it to fall within the poll, so `now_ms` (or the observation time) both pass.
+5. **Busy clear (replaces round-1 item 9):** go through `set_gitlab_runner_busy`, matched on `base_url` among live `ci_platform='gitlab'` runners. The freed runner ends `busy=0`, `status='online'`.
+6. **`runner_events`:** on a conclusion with `StatusApplied` from `running` and a known `gitlab_runner_id`, when `set_gitlab_runner_busy` returns a runner, write exactly one row with:
+   - `runner_id` and `pool_id` from that return;
+   - `level` `info`;
+   - `event` `GitLab job <status>`;
+   - metadata keys `jobId`, `projectId`, `pipelineId` and `connectionId` (numbers or strings both pass).
+
+   The message is not pinned; A suggests `Job · pipeline {pipeline_id}`, #140's fallback. Write no row when the row had no runner id.
+7. **Dedupe:** the demand scan counts a GitLab job once per `(gitlab_connections.base_url, job_id)`. Its candidate pools are the pools of every connection that recorded it, in the usual pool order. In the test, the older pool owns it.
+
+## Evidence appendix (for Phase 6)
+
+These tests rely on these unchanged-code facts, in addition to round 1's:
+- the `runner_events` columns (`migrations/0001_initial.sql:83-94`);
+- `gitlab_connections.base_url` and the unique `(base_url, scope_kind, scope_id)` index, which allow a project connection and a group connection on one instance (`migrations/0047_gitlab.sql:25-39`);
+- the `gitlab_jobs` column defaults (`0047_gitlab.sql:62-77`).
+
+I'll add them to `evidence.md` in Phase 6 with verbatim excerpts.

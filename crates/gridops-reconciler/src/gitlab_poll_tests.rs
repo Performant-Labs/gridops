@@ -592,14 +592,18 @@ async fn a_manual_or_scheduled_row_gitlab_now_lists_as_pending_becomes_pending_d
 }
 
 #[tokio::test]
-async fn concluding_a_running_row_clears_its_runners_busy_flag() -> Result<()> {
+async fn concluding_a_running_row_clears_its_runners_busy_flag_and_records_one_runner_event()
+-> Result<()> {
     // GitLab runner 55 on conn-a ran 841, which finished with no webhook.
-    // Only that live runner is freed: not runner 56, not runner 55 of another
-    // connection, not a deleted runner that had the same id.
+    // Only that live runner is freed (D18's `set_gitlab_runner_busy`): not
+    // runner 56, not runner 55 on another GitLab instance (conn-b), not a
+    // deleted runner that had the same id. 842 was running with no known
+    // runner, so concluding it frees nobody and records no event.
     let harness = Harness::new(&format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         pool("gl", "conn-a"),
-        row("conn-a", 11, 841, "running", stale(0)),
+        row("conn-a", 11, 841, "running", stale(1)),
+        row("conn-a", 11, 842, "running", stale(0)),
         "UPDATE gitlab_jobs SET gitlab_runner_id=55 WHERE job_id=841;",
         "INSERT INTO runners (id,pool_id,name,status,busy,ci_platform,gitlab_connection_id,gitlab_runner_id,deleted_at,created_at,updated_at)
            VALUES
@@ -610,21 +614,60 @@ async fn concluding_a_running_row_clears_its_runners_busy_flag() -> Result<()> {
     ))
     .await?;
     harness.seed(BASE_A, job(11, 841, JobStatus::Failed, &["docker"])?)?;
+    harness.seed(BASE_A, job(11, 842, JobStatus::Success, &["docker"])?)?;
 
     poll_once(&harness.app, &mut HashMap::new(), Instant::now()).await?;
 
     assert_eq!(harness.status("conn-a", 841).await?, "failed");
-    let busy = sqlx::query_as::<_, (String, bool)>("SELECT id,busy FROM runners ORDER BY id")
-        .fetch_all(harness.database())
-        .await?;
+    assert_eq!(harness.status("conn-a", 842).await?, "success");
+    let busy = sqlx::query_as::<_, (String, bool, String)>(
+        "SELECT id,busy,status FROM runners ORDER BY id",
+    )
+    .fetch_all(harness.database())
+    .await?;
     assert_eq!(
         busy,
         vec![
-            ("deleted".to_owned(), true),
-            ("other-connection".to_owned(), true),
-            ("other-runner".to_owned(), true),
-            ("ran-it".to_owned(), false),
+            ("deleted".to_owned(), true, "busy".to_owned()),
+            ("other-connection".to_owned(), true, "busy".to_owned()),
+            ("other-runner".to_owned(), true, "busy".to_owned()),
+            ("ran-it".to_owned(), false, "online".to_owned()),
         ]
+    );
+
+    // One event, on the freed runner, shaped like #140's.
+    let events = sqlx::query_as::<_, (Option<String>, Option<String>, String, String, String)>(
+        "SELECT runner_id,pool_id,level,event,metadata FROM runner_events WHERE event LIKE 'GitLab job %'",
+    )
+    .fetch_all(harness.database())
+    .await?;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let (runner_id, pool_id, level, event, metadata) = &events[0];
+    assert_eq!(
+        (
+            runner_id.as_deref(),
+            pool_id.as_deref(),
+            level.as_str(),
+            event.as_str()
+        ),
+        (Some("ran-it"), Some("gl"), "info", "GitLab job failed")
+    );
+    // The ids may be stored as JSON numbers or strings; their values are pinned.
+    let metadata: serde_json::Value = serde_json::from_str(metadata)?;
+    let field = |key: &str| match &metadata[key] {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    };
+    assert_eq!(
+        ["jobId", "projectId", "pipelineId", "connectionId"].map(field),
+        [
+            Some("841".to_owned()),
+            Some("11".to_owned()),
+            Some("1".to_owned()),
+            Some("conn-a".to_owned()),
+        ],
+        "{metadata}"
     );
 
     harness.finish().await

@@ -18,6 +18,12 @@ use crate::fleet::{CiTarget, ExternalId, GitlabConnectionId};
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 
+// D18's tests sit here, not in `jobs.rs`, so they keep running against
+// whichever copy of `jobs.rs` (#140's or #148's) lands on master.
+#[cfg(test)]
+#[path = "jobs_tests.rs"]
+mod jobs_tests;
+
 /// The GitLab instance and the access token one connection calls it with.
 pub struct GitLabCredentials {
     pub base_url: Url,

@@ -180,3 +180,47 @@
     - a grep for every `sqlx` user in `gridops-core/src` (the platform modules `github.rs`, `bitbucket.rs` and `gitlab/mod.rs` have none);
     - a grep for every `INSERT INTO runner_events`;
     - `git worktree list`, and the #140 worktree's `git log` and `ls crates/gridops-core/src/gitlab/`.
+
+## T (Phase 4, author tests / RED, round 2: D18): 2026-11-20T16:35:50-08:00
+- **Decided:** RED is valid; F may implement (see `handoff-T-red.md`, round 2). This round adds 10 tests and changes 1, for 36 tests in total, covering the three Done-when items A's round 4 handed to T.
+  - `crates/gridops-core/src/gitlab/jobs_tests.rs` (new, 9 tests). The D18 unit tests run on real SQLite through the public `gitlab::jobs` API:
+    - the tier table;
+    - all 363 stored × incoming × time cases of the status rule, through both `status_write_applies` and `record_gitlab_job`;
+    - the defaults on insert;
+    - `unknown` → `Ignored`;
+    - a terminal row freezes in every column;
+    - the runner fill and no overwrite, the tag fill and no empty overwrite, and retries and the pipeline moving only with the status;
+    - `set_gitlab_runner_busy` matching on `base_url` across a sibling connection.
+  - `autoscaling_gitlab_tests.rs` (+1 test). One job recorded under a project connection and under its group's connection (same `base_url`) is demand 1, with candidate pools from either connection.
+  - `gitlab_poll_tests.rs` (1 test changed, and renamed). Concluding a `running` row with a known runner writes exactly one `runner_events` row (#140's fields) and sets the runner `online`. A `running` row with no runner writes none.
+  - Wiring: a `#[cfg(test)] mod jobs_tests` mount in `gitlab/mod.rs`.
+  - RED results:
+    - Compile RED: E0432 `crate::gitlab::jobs`, plus round 1's 8 reconciler errors.
+    - Runtime RED with a no-behaviour D18 stub: 20 failed / 24 existing passed, every failure on a feature assertion.
+    - With the round-1 reconciler stub: 14 failed / 2 passed, unchanged.
+- **Assumed:**
+  - I mounted the D18 tests from `gitlab/mod.rs`, not from `jobs.rs` as A's warning 3 suggested, so they survive whichever copy of `jobs.rs` (#140's or #148's) lands. They use only public items, and `JobWrite` is matched exhaustively, so no derives are needed.
+  - A rejected write that fills nothing returns `Ignored`, the only one of D18's four variants left. `previous_status`/`status` follow `140-brief.md` ("stored before" / "stored after").
+  - The `runner_events` metadata ids may be JSON numbers or strings; neither brief fixes the type.
+- **Hedged:**
+  - Two invariant-only D18 tests first passed against the do-nothing stub. I added a live-writer control to each, as the round-1 poll invariant tests have, and both now fail on the stub.
+  - The D18 tests were also run to **green** against a throwaway reference implementation written from the brief (9/9), then removed. The poll tests are still checked against a stub only (round 1's hedge).
+  - A's round-4 warnings 2, 4, 5 (the message and duplicate events) and 6 aren't in the brief, so no test pins them either way. A different later reading would need a test change, not just an F change.
+- **Evidence:**
+  - Read:
+    - the brief (271 lines) and `git diff 1a4c512 572f828`;
+    - `handoff-A.md` (round 4), `decisions.md`, and the round-1 `handoff-T-red.md`;
+    - `gitlab-140-webhooks-a9fae5/docs/handoffs/140-brief.md:280-372` and its `runner_events` lines (202, 227-242).
+  - Source:
+    - `migrations/0047_gitlab.sql`, in full, and `0001_initial.sql:83-94`;
+    - `crates/gridops-core/src/gitlab/mod.rs:1-300`, `fake.rs:300-303` and `fake_tests.rs:1-30`;
+    - `crates/gridops-core/src/db.rs:23-43` and the workspace `[workspace.lints]`;
+    - `crates/gridops-reconciler/src/main.rs:1-60` and the `Reconciler` literal sites;
+    - `crates/gridops-api/src/webhooks.rs:625-650`;
+    - both existing #148 test files, in full.
+  - Commands:
+    - `cargo test -p gridops-core --lib --no-run` and `cargo test -p gridops-reconciler --no-run`;
+    - stub runs of `cargo test -p gridops-core --lib -- gitlab::jobs_tests autoscaling` (20 failed / 24 passed) and `cargo test -p gridops-reconciler gitlab_poll_tests` (14 failed / 2 passed);
+    - the reference run of `cargo test -p gridops-core --lib -- gitlab::jobs_tests` (9 passed);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (exit 0).
