@@ -2920,14 +2920,18 @@ case "$1" in
     [ -f "$dir/running" ] || exit 1
     if [ "$2" = "-i" ]; then
       # The runner start: keep what the agent wrote to stdin, optionally run
-      # until the runner is deleted, and exit with a scripted status, as
-      # `tart exec` returns the guest command's.
+      # until the runner is deleted or while `exec-hold` exists, and exit
+      # with a scripted status, as `tart exec` returns the guest command's.
+      # `killed` ends it by a signal instead, with no status at all.
       cat > "$dir/stdin"
       if [ -f "$dir/exec-until-deleted" ]; then
         while [ ! -f "$dir/deleted" ]; do sleep 0.05; done
         sleep 0.3
       fi
-      exit "$(cat "$dir/exec-status" 2>/dev/null || echo 0)"
+      while [ -f "$dir/exec-hold" ]; do sleep 0.05; done
+      status=$(cat "$dir/exec-status" 2>/dev/null || echo 0)
+      if [ "$status" = killed ]; then kill -KILL $$; fi
+      exit "$status"
     fi
     exit 0 ;;
   stop)
@@ -3562,15 +3566,19 @@ admin     tart run
     /// The token reaches the guest only on `tart exec`'s stdin. The guest
     /// script's exit status is recorded before the VM is stopped, survives an
     /// agent restart, and is listed as `exitReason` when the table knows it.
+    /// An exec killed by a signal has no status: nothing is recorded, and in
+    /// particular not 0, which would list a killed runner as completed.
     #[tokio::test]
     async fn a_gitlab_runner_gets_its_token_on_stdin_and_lists_its_exit_reason() -> Result<()> {
-        for (status, reason) in [
-            (77, Some("registration_refused")),
-            (0, Some("completed")),
-            (78, None),
+        // (the fake exec's ending, the recorded exit code, the exitReason)
+        for (ending, recorded, reason) in [
+            ("77", Some(77), Some("registration_refused")),
+            ("0", Some(0), Some("completed")),
+            ("78", Some(78), None),
+            ("killed", None, None),
         ] {
             let tart = FakeTart::new(Duration::from_secs(30)).await?;
-            tart.flag("exec-status", &status.to_string()).await?;
+            tart.flag("exec-status", ending).await?;
             let id = start(&tart, gitlab_input()?).await?;
             wait_for_stops(&tart, 1).await?;
 
@@ -3594,11 +3602,11 @@ admin     tart run
             // without the code.
             let at_stop: TartRecord =
                 serde_json::from_str(&fs::read_to_string(tart.dir.join("records-at-stop")).await?)?;
-            assert_eq!(at_stop.exit_code, Some(status), "exit {status}");
+            assert_eq!(at_stop.exit_code, recorded, "exec {ending}");
 
             let reloaded = load_records(&tart.state.home).await?;
             let record = reloaded.get(&id).context("the record was not kept")?;
-            assert_eq!(record.exit_code, Some(status));
+            assert_eq!(record.exit_code, recorded, "exec {ending}");
             assert_eq!(record.platform.as_deref(), Some("gitlab"));
 
             tart.flag("list.json", &stopped(&[CLONE])).await?;
@@ -3610,10 +3618,34 @@ admin     tart run
             assert_eq!(
                 runner.get("exitReason").cloned(),
                 reason.map(Value::from),
-                "exit {status}: {runner}"
+                "exec {ending}: {runner}"
             );
             assert!(!runner.to_string().contains(GITLAB_TOKEN));
         }
+        Ok(())
+    }
+
+    /// A failed exit-code write must not leave the VM running (A finding 1):
+    /// the runner is stopped all the same.
+    #[tokio::test]
+    async fn a_gitlab_runner_whose_exit_code_cannot_be_written_is_still_stopped() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("exec-status", "77").await?;
+        tart.flag("exec-hold", "").await?;
+        let id = start(&tart, gitlab_input()?).await?;
+        // The record is written through `<id>.json.tmp`; a directory there
+        // makes that write fail, even for root.
+        let blocker = record_path(&tart.state, &id).with_extension("json.tmp");
+        fs::create_dir(&blocker).await?;
+        fs::remove_file(tart.dir.join("exec-hold")).await?;
+
+        wait_for_stops(&tart, 1).await?;
+        let on_disk: TartRecord =
+            serde_json::from_str(&fs::read_to_string(record_path(&tart.state, &id)).await?)?;
+        assert_eq!(
+            on_disk.exit_code, None,
+            "the write did not fail, so this test did not exercise the failure"
+        );
         Ok(())
     }
 

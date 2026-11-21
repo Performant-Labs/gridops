@@ -153,3 +153,20 @@ Verdict PASS: gitlab.rs and the image script are brief-mandated; all other chang
   - **Source at b22c451:** `crates/gridops-tart-agent/src/main.rs`: `TartRecord`, `ProvisionRunner`, `GitlabBootstrap`, `GITLAB_EXIT_*`, `validate`, `list_runners`, `provision_runner`, the native waiter, `control_runner`, `delete_runner`, `start_runner`, `bitbucket_runner_script`, `shell_single_quote`, the record helpers and `valid_guest_path`.
   - **Source at HEAD:** `gitlab.rs` in full, the production diff of `main.rs`, the index of `gitlab_tests.rs`, the diff between the image script and Bitbucket's, and the section list of `docs/macos-runners.md`.
   - **Source on `origin/master`:** `gridops-manager/src/main.rs:487`, `gridops-core/src/gitlab/{mod,http}.rs`, and `git diff --stat HEAD...origin/master`.
+
+## T (Phase 4, author tests / RED, second run): 2026-11-20T17:15:45-08:00
+- **Decided:**
+  - **The existing suite was extended in place, not re-authored** (A finding 8). The changes:
+    - +2 token refusal rows (`"` and `\`, the verify body's JSON precondition);
+    - +1 script row (a job received with no build-limit line → 0);
+    - the hostile-URL `'` case now has a fixed expectation instead of a conditional one (a sibling of S's finding 1);
+    - +1 waiter row (a `tart exec` killed by a signal records no code and lists no `exitReason`);
+    - one new test (a failed exit-code write still stops the VM, A finding 1).
+  - **RED is valid, proved by removal.** I made 7 production mutations, one per new or changed behaviour, plus 4 re-checks of the existing listing and waiter contracts on F's own code. Each fails exactly the intended test, with the intended assertion. HEAD with the new tests is 52/52 GREEN, so F has no production change to make.
+  - **S's optional item 7 (trimming the refusal table) is not done.** The rows are distinct inputs at the behaviour level, so they are not redundant.
+- **Assumed:** this second run's RED contract is the full existing suite plus these additions. The original fails-before-code RED against `b22c451` stands from the first run (handoff-T-red.md at 48c5c0e).
+- **Hedged:** NV-1 (what `tart exec` returns after an outside `tart stop`) is still a runtime question that no fake can settle. The `killed` row pins only the agent's side: no status means no recorded code.
+- **Evidence:**
+  - `handoff-T-red.md`: the mutation tables;
+  - `evidence.md`, "T (Phase 4, RED, second run)": `persist_record`'s `.json.tmp`, the waiter's `code()` guard, and the `std` doc on signal exits;
+  - the test runs: `cargo test -p gridops-tart-agent` 52/52 on 4 runs, `cargo fmt --check` clean, and CI's 1.98.1 clippy line clean.

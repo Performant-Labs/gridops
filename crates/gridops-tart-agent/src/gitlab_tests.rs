@@ -84,7 +84,7 @@ fn each_invalid_gitlab_request_is_refused_without_its_token() -> Result<()> {
         "the valid request was refused: {control:?}"
     );
 
-    let refused: [(&str, Edit); 22] = [
+    let refused: [(&str, Edit); 24] = [
         ("no token", |input| input.gitlab_runner_token = None),
         ("an empty token", |input| {
             input.gitlab_runner_token = Some(String::new());
@@ -97,6 +97,14 @@ fn each_invalid_gitlab_request_is_refused_without_its_token() -> Result<()> {
         }),
         ("a token with a carriage return", |input| {
             input.gitlab_runner_token = Some(format!("{TOKEN}\r"));
+        }),
+        // The guest script writes the token into the verify call's JSON body
+        // unescaped, so a token that would break out of the string is refused.
+        ("a token with a double quote", |input| {
+            input.gitlab_runner_token = Some(format!("{TOKEN}\",\"x\":\"y"));
+        }),
+        ("a token with a backslash", |input| {
+            input.gitlab_runner_token = Some(format!("{TOKEN}\\"));
         }),
         ("no bootstrap", |input| input.gitlab = None),
         ("a zero wait timeout", |input| {
@@ -224,6 +232,9 @@ case "$(cat "$dir/runner-behaviour" 2>/dev/null)" in
     echo 'Checking for jobs... received                     job=1 repo_url=https://gitlab.example.com/group/project.git runner=T0KEN-ab' >&2
     echo 'Job succeeded                                     duration_s=1.2 job=1 project=1 runner=T0KEN-ab' >&2
     echo 'This runner has processed its build limit, so now exiting' >&2
+    exit 0 ;;
+  job-taken)
+    echo 'Checking for jobs... received                     job=1 repo_url=https://gitlab.example.com/group/project.git runner=T0KEN-ab' >&2
     exit 0 ;;
   job-failed)
     echo 'Checking for jobs... received                     job=1 repo_url=https://gitlab.example.com/group/project.git runner=T0KEN-ab' >&2
@@ -504,6 +515,9 @@ async fn the_guest_script_exits_with_the_status_each_ending_maps_to() -> Result<
     let cases = [
         ("a job that passed", "200", "job-passed", 0),
         ("a job that failed", "200", "job-failed", 0),
+        // A job was taken, then run-single stopped before its build-limit
+        // line: still the job's runner, so completed, not 70.
+        ("a job taken, then stopped early", "200", "job-taken", 0),
         ("no job before the wait timeout", "200", "idle", 75),
         ("another runner failure", "200", "crash", 3),
         // Refused during run-single, after a verify that passed (W-1's
@@ -583,6 +597,10 @@ async fn hostile_urls_reach_gitlab_runner_verbatim_and_run_nothing() -> Result<(
         r#"https://gitlab.example.com/;touch${IFS}pwned-semicolon;"x\"#,
         r#"https://gitlab.example.com/a&&touch${IFS}pwned-and||b|c>pwned-redirect"#,
         r#"https://gitlab.example.com/$HOME/${PATH}/*"#,
+        // A single quote, which closes the quoting unless it is escaped
+        // (`shell_single_quote` writes `'\''`). The Bitbucket script quotes
+        // its values with the same helper.
+        r#"https://gitlab.example.com/it';touch${IFS}pwned-quote;'s"#,
     ];
     for url in hostile {
         let guest = Guest::new().await?;
@@ -597,32 +615,6 @@ async fn hostile_urls_reach_gitlab_runner_verbatim_and_run_nothing() -> Result<(
         assert_runner_invocation(&guest, url, url).await?;
         let pwned = guest.pwned().await?;
         assert!(pwned.is_empty(), "{url} ran as shell: {pwned:?}");
-    }
-
-    // A single quote: `shell_single_quote` mis-quotes it today (brief,
-    // "Edge case found while verifying"). The validation may refuse it, or
-    // the helper may be fixed (A finding 4, F's choice); either way it must
-    // never reach bash broken.
-    let quoted = "https://gitlab.example.com/it's";
-    let mut input = gitlab_input(|_| {})?;
-    input.gitlab = Some(bootstrap(quoted, WAIT_TIMEOUT));
-    match input.validate() {
-        Err(AgentError::BadRequest(message)) => {
-            assert!(!message.contains(LEAK_MARKER), "{message}");
-        }
-        Ok(()) => {
-            let guest = Guest::new().await?;
-            guest.flag("runner-behaviour", "job-passed").await?;
-            let run = guest
-                .run(&runner_script(
-                    &guest.runner_binary(),
-                    &bootstrap(quoted, WAIT_TIMEOUT),
-                ))
-                .await?;
-            assert_eq!(run.status, Some(0), "{}", run.output);
-            assert_runner_invocation(&guest, quoted, quoted).await?;
-        }
-        Err(other) => anyhow::bail!("expected BadRequest or acceptance, got {other:?}"),
     }
     Ok(())
 }

@@ -178,3 +178,31 @@ Source facts in unchanged code (and upstream code) that the change, or T's tests
   > WaitTimeout       int `long:"wait-timeout" description:"How long to wait in seconds before receiving the first job"`
 
   > MaxBuilds         int `long:"max-builds" description:"How many builds to process before exiting"`
+
+## T (Phase 4, RED, second run)
+
+### This repository (at 85150ff; the lines are unchanged by this run's test edits)
+
+- **Fact:** a record is written to `<id>.json.tmp` and then renamed over `<id>.json`. A directory at `<id>.json.tmp` therefore makes the write fail for any user, including root. That is how `a_gitlab_runner_whose_exit_code_cannot_be_written_is_still_stopped` forces the exit-code write to fail.
+  **Source:** `crates/gridops-tart-agent/src/main.rs:2301-2303`
+  **Verbatim excerpt:**
+  > let temporary = path.with_extension("json.tmp");
+  > fs::write(&temporary, serde_json::to_vec_pretty(record)?).await?;
+  > fs::rename(temporary, path).await?;
+
+- **Fact:** the waiter records an exit code only when `ExitStatus::code` gives one. The `killed` row of `a_gitlab_runner_gets_its_token_on_stdin_and_lists_its_exit_reason` depends on this.
+  **Source:** `crates/gridops-tart-agent/src/main.rs:1838-1844`
+  **Verbatim excerpt:**
+  > if let Some(code) = status
+  >     .as_ref()
+  >     .ok()
+  >     .and_then(std::process::ExitStatus::code)
+  > {
+  >     record_exit_code(&state, &id, code).await;
+  > }
+
+### Rust standard library (`std::process::ExitStatus::code`, https://doc.rust-lang.org/std/process/struct.ExitStatus.html, fetched 2026-11-20)
+
+- **Fact:** on Unix, a process killed by a signal has no exit code. So a `tart exec` the fake ends with `kill -KILL $$` reaches the waiter with `code() == None`.
+  **Verbatim excerpt:**
+  > On Unix, this will return None if the process was terminated by a signal.
