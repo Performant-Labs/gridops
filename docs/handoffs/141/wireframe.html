@@ -117,6 +117,10 @@
 <h1>#141 &middot; GitLab in the shared connections and targets UI &mdash; low-fi wireframe</h1>
 <p class="lede">GitLab adds <b>no page, nav item or pool-form row</b>. Every frame below is an <i>existing</i> #145 surface (Settings &rarr; Connections, the Targets row, Platform options, the runner details panel, the deliveries list) drawn with GitLab content, plus the generic descriptor-contract gaps (frame I). Structure, labels, controls and per-state copy only; no final visuals. Icons are Unicode glyphs; the real GitLab badge uses the registry descriptor&rsquo;s <code>icon</code> (lucide <code>Gitlab</code>, if the installed lucide has it, else a generic fallback) and was not rendered here.</p>
 
+<div class="legend" style="border-color:#ecd98a;background:#fff9e2">
+  <b>Revision 2 (after architecture review round 1 and the amended brief):</b> path label is now static (&ldquo;Project or group path&rdquo;); tag cap is the shared 64 characters (not 255); gaps renumbered to the brief (frame I); a GitLab pool&rsquo;s settings no longer show a locked GitHub chip (gap 4); delivery platform lookup moved to the registry (gap 7); registry order pinned (gap 6).
+</div>
+
 <div class="legend">
   <b>Tags:</b> <span class="tag new">NEW</span> new element for GitLab &nbsp; <span class="tag keep">KEEP</span> existing element, unchanged &nbsp; <span class="tag gap">GAP</span> generic descriptor-contract extension (frame I). <span class="copy">Yellow</span> text is the exact copy to build. <b>All GitLab strings live in <code>src/features/platform-connections/gitlab.tsx</code>.</b> The brief wins on any difference.
 </div>
@@ -194,17 +198,17 @@
       <div><span class="lbl">Connection name</span><div class="input ph">Mobile app</div></div>
       <div><span class="lbl copy">GitLab address</span><div class="input mono">https://gitlab.com</div><div class="d mut copy">Change it for a self-managed GitLab, for example https://git.example.com.</div></div>
       <div><span class="lbl copy">Connect a</span><div class="sel-box"><span>Project</span><span class="mut">&#x25BE;</span></div><div class="d mut copy">A project registers a project runner; a group registers a group runner shared by its projects.</div></div>
-      <div><span class="lbl copy">Project path</span><div class="input mono ph">acme/platform/mobile-app</div><div class="d mut copy">The path in the project&rsquo;s URL, without a leading or trailing slash.</div></div>
+      <div><span class="lbl copy">Project or group path</span><div class="input mono ph">acme/platform/mobile-app</div><div class="d mut copy">The path in the project&rsquo;s or group&rsquo;s URL, without a leading or trailing slash.</div></div>
       <div><span class="lbl">Access token</span><div class="input ph">Paste a token</div><div class="d mut copy">The token needs the create_runner and read_api scopes, and its owner needs the Owner role on the project or group. GridOps checks both before saving.</div></div>
     </div>
     <div class="df"><span class="btn g">Back</span><span class="btn p copy">Connect GitLab</span></div>
   </div></div>
-  <p class="faint" style="margin:6px 0 0">Field labels in the new form: <i>Connection name, GitLab address, Connect a (Project | Group), Project path / Group path (label follows the kind), Access token</i>. Submit stays disabled while a required field is empty (existing behaviour).</p></div>
+  <p class="faint" style="margin:6px 0 0">Field labels in the new form: <i>Connection name, GitLab address, Connect a (Project | Group), Project or group path, Access token</i>. All labels are static (no label depends on another field&rsquo;s value). Defaults seeded on open: address <code>https://gitlab.com</code>, kind Project. Submit stays disabled while a required field is empty (existing behaviour).</p></div>
 
   <div><p class="sub-h">B3 &middot; Inline field errors (client-side; the submit is blocked and nothing is sent)</p>
   <div class="dlg-bg"><div class="dlg"><div class="db" style="display:grid;gap:10px">
     <div><span class="lbl">GitLab address</span><div class="input mono err">gitlab.com?x=1</div><div class="fe copy">Enter a full address starting with http:// or https://, with no query or fragment.</div></div>
-    <div><span class="lbl">Project path</span><div class="input mono err">/acme//mobile app/</div><div class="fe copy">Use a path like group/project: no leading or trailing slash, no spaces, no empty or &ldquo;..&rdquo; parts.</div></div>
+    <div><span class="lbl">Project or group path</span><div class="input mono err">/acme//mobile app/</div><div class="fe copy">Use a path like group/project: no leading or trailing slash, no spaces, no empty or &ldquo;..&rdquo; parts.</div></div>
     <div><span class="lbl">Access token</span><div class="input err ph">&nbsp;</div><div class="fe">Required (browser validation, as for other platforms)</div></div>
   </div></div></div>
   <p class="faint" style="margin:6px 0 0">A trailing slash on the address is silently removed on submit (<code>https://gitlab.com/</code> &rarr; <code>https://gitlab.com</code>); a blank address sends the default <code>https://gitlab.com</code>. The path rule is the one authoritative regex <code>segment(/segment)*</code> (segment = non-empty, no whitespace, not <code>..</code>).</p></div>
@@ -225,11 +229,11 @@
 
 </div>
 <ol class="notes">
-  <li><span class="n">1</span><b>Why a Project/Group choice:</b> the API needs <code>scopeKind</code> and it cannot be derived from the path. This is <b>one more generic gap</b> (frame I, gap 4: a <code>select</code> field type), listed as an open question. The edit form never shows it.</li>
+  <li><span class="n">1</span><b>Why a Project/Group choice:</b> the API needs <code>scopeKind</code> and it cannot be derived from the path. It is served by generic gap 5 (frame I): <code>select</code> field type, <code>defaultValue</code>, <code>validate</code>. The edit form never shows it.</li>
   <li><span class="n">2</span><b>Order</b> = name, address, kind, path, token. The address defaults to <code>https://gitlab.com</code> (pre-filled, editable).</li>
   <li><span class="n">3</span><b>Help text</b> names exactly <code>create_runner</code> + <code>read_api</code> and the <b>Owner</b> role (issue text). Copy above is final wording.</li>
   <li><span class="n">4</span><b>Success</b> closes this dialog and opens the reveal in frame C; toast is not used for create.</li>
-  <li><span class="n">5</span>Client validation (B3) uses the descriptor&rsquo;s validators from the Vitest list: URL, scope path. Everything else is checked by the server (B4).</li>
+  <li><span class="n">5</span>Client validation (B3) is each field&rsquo;s <code>validate</code> (gap 5c): <code>aria-invalid</code> plus a <code>text-danger</code> line, like the labels row; it blocks submit. URL and scope path only; everything else is checked by the server (B4).</li>
 </ol></div>
 </section>
 
@@ -276,7 +280,7 @@
 
 </div>
 <ol class="notes">
-  <li><span class="n">1</span><b>Built by hooks, not page code:</b> C1 is the descriptor&rsquo;s <code>postCreate(created)</code> returning a <code>PostCreateReveal</code>; C3 is the same shape returned by the row action. The Connections page renders both with the one <code>SecretRevealDialog</code>.</li>
+  <li><span class="n">1</span><b>Built by hooks, not page code:</b> C1 is the descriptor&rsquo;s <code>postCreate(created)</code> returning a <code>SecretReveal</code> (renamed from <code>PostCreateReveal</code>); C3 is the same shape returned by the row action and passed up through <code>onReveal</code>. <code>ConnectionsSection</code> owns the <b>one</b> <code>SecretRevealDialog</code>; rows never render their own.</li>
   <li><span class="n">2</span><b>Show once:</b> neither the secret nor the URL is kept in any query cache or list; dropping the reveal from state removes them.</li>
   <li><span class="n">3</span>&ldquo;Job events&rdquo; is the only trigger to enable, as the issue text says; the wording names it in bold in both reveals.</li>
   <li><span class="n">4</span>No copy button is disabled; if the clipboard is blocked the shared <code>CopyButton</code> already handles it.</li>
@@ -390,7 +394,7 @@
     <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut">2 GitLab targets selected.</div></div>
     <div class="trigger"><div><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Mobile app <i>&#x2715;</i></span><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Platform group <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
   </div></div></div>
-  <p class="faint" style="margin:6px 0 0">Offered on settings like on create; saving sends the full set (<code>gitlabConnectionIds</code>), which replaces the stored one. GitHub and Bitbucket options are disabled with E2&rsquo;s reason, since a pool never changes between GitLab and other scopes. Read-only summary (members, or the pool header): <span class="copy">Mobile app, Platform group</span> (connection names). A non-GitLab pool never sends <code>gitlabConnectionIds</code>.</p></div>
+  <p class="faint" style="margin:6px 0 0">Offered on settings like on create; saving sends the full set (<code>gitlabConnectionIds</code>), which replaces the stored one. GitHub and Bitbucket options are disabled with E2&rsquo;s reason, since a pool never changes between GitLab and other scopes. Read-only summary (members, or the pool header): <span class="copy">Mobile app, Platform group</span> (connection names). A non-GitLab pool never sends <code>gitlabConnectionIds</code>. <b>No locked GitHub runner-group chip</b> appears here: GitHub&rsquo;s descriptor returns empty values for any scope other than repository or organization (gap 4), so the GitLab options stay selectable.</p></div>
 
 </div>
 <ol class="notes">
@@ -413,7 +417,7 @@
       <div class="disc"><div><b>&#x25BE; Platform options</b></div><span class="faint">Hide</span></div>
       <div style="padding:10px 14px"><span class="badge gl">&#x25C8; GitLab</span>
         <ul class="d mut" style="margin:6px 0 8px;padding-left:18px">
-          <li class="copy">Labels on a GitLab pool become the runner&rsquo;s tags. A tag may contain any character except a comma and is at most 255 characters.</li>
+          <li class="copy">Labels on a GitLab pool become the runner&rsquo;s tags. A tag may contain any character except a comma and is at most 64 characters.</li>
           <li class="copy">Jobs with no tags run on this runner only when &ldquo;Run untagged jobs&rdquo; is on.</li>
         </ul>
         <div class="row" style="padding:6px 0"><div class="grow"><div class="t copy">Run untagged jobs</div><div class="d copy">Let this pool&rsquo;s runners also pick up jobs that have no tags. Off by default.</div></div><span class="sw"></span> <span class="faint">Off</span></div>
@@ -425,28 +429,28 @@
 
   <div><p class="sub-h">F2 &middot; Additional labels row while the pool targets GitLab (labels = runner tags)</p>
   <div class="screen tight"><div class="panel">
-    <div class="row top"><div class="grow"><div class="t">Additional labels</div><div class="d copy">Comma-separated tags for the GitLab runner. A tag cannot contain a comma and is at most 255 characters.</div></div><div class="ctl"><div class="input ph copy">build, ios</div></div></div>
+    <div class="row top"><div class="grow"><div class="t">Additional labels</div><div class="d copy">Comma-separated tags for the GitLab runner. A tag cannot contain a comma and is at most 64 characters.</div></div><div class="ctl"><div class="input ph copy">build, ios</div></div></div>
   </div></div></div>
 
-  <div><p class="sub-h">F3 &middot; Tag validation errors (live, row stays visible although Platform options is collapsed)</p>
-  <div class="screen tight"><div class="panel">
-    <div class="row top"><div class="grow"><div class="t">Additional labels</div></div><div class="ctl"><div class="input err">build, a-very-long-tag&hellip;(300 characters)</div><div class="fe copy">GitLab tags are at most 255 characters: &ldquo;a-very-long-tag&hellip;&rdquo; is 300.</div></div></div>
-    <div class="row top"><div class="grow"><div class="t">Additional labels</div></div><div class="ctl"><div class="input err">build, , ios</div><div class="fe copy">GitLab tags cannot be empty.</div></div></div>
-  </div></div>
-  <p class="faint" style="margin:6px 0 0"><b>The comma rule cannot be triggered from this field:</b> the field splits its text on commas, so no tag can contain one. The rule is still in the validator (<code>gitlabLabelError</code>, unit-tested with <code>["a,b"]</code>) as a defence for payloads that do not come through the field. See open question 2.</p></div>
+  <div><p class="sub-h">F3 &middot; Tag errors: what can actually appear (labels = runner tags)</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
+    <div class="panel"><div class="row top"><div class="grow"><div class="t">Additional labels</div></div><div class="ctl"><div class="input err">build, a-tag-of-65-characters&hellip;</div></div></div></div>
+    <div class="callout danger"><b>Could not create the pool</b><span class="copy">{shared label-schema message, verbatim}</span> <span class="faint">e.g. zod&rsquo;s &ldquo;at most 64 characters&rdquo; text from <code>schemas.ts</code>; also &ldquo;System labels are assigned automatically by the selected provider.&rdquo; for a tag such as <code>macos</code>.</span></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0"><b>Revised after review (finding 8).</b> The cap is the shared 64 characters (<code>schemas.ts</code> and the server), so the issue&rsquo;s 255 is not drawn. The 64-character error appears at submit in the existing callout, not live under the field: <code>gitlabLabelError</code> checks only <i>non-empty</i> and <i>no comma</i>, and the shared schema owns the cap. <b>Neither of those two rules is reachable from this field</b>: it splits on commas and drops empty entries, so no tag can contain a comma or be empty. They remain a validator defence (<code>gitlabLabelError</code>, Vitest with <code>["a,b"]</code> and <code>[""]</code>) for payloads that bypass the field. The walkthrough therefore cannot show a live comma error. See open question 2.</p></div>
 
   <div><p class="sub-h">F4 &middot; Submit: errors in the existing &ldquo;Could not create the pool&rdquo; callout</p>
   <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
     <div class="callout danger"><b>Could not create the pool</b><span class="copy">{server message, verbatim}</span> <span class="faint">e.g. 400 &ldquo;a GitLab pool cannot also use GitHub repositories&rdquo;, 400 a connection no longer exists, 403 not an admin.</span></div>
-    <div class="callout danger"><b>Could not create the pool</b><span class="copy">{the shared create schema&rsquo;s message for installationId, verbatim}</span> <span class="faint">GitLab target selected but the account has <b>no GitHub App installation</b>: the create payload has no positive <code>installationId</code> (#138 still requires one). The GitLab kinds stay offered; the failure is reported here. No new copy is drawn for this case.</span></div>
+    <div class="callout danger"><b>Could not create the pool</b><span class="copy">{the shared create schema&rsquo;s message for installationId, verbatim}</span> <span class="faint">GitLab target selected but the account has <i>no GitHub App installation</i>: the create payload has no positive <code>installationId</code> (#138 still requires one). The GitLab kinds stay offered; the failure is reported here. No new copy is drawn for this case.</span></div>
   </div>
-  <p class="faint" style="margin:6px 0 0">Body sent (create): <code>scope:"gitlab", gitlabConnectionIds:[&hellip;], runUntagged, runnerGroupId:1, installationId:&lt;first installation&gt;</code> (values per the brief&rsquo;s mocked spec, not verified against #138&rsquo;s final handler). Settings sends <code>gitlabConnectionIds</code> and <code>runUntagged</code> only for a GitLab pool.</p></div>
+  <p class="faint" style="margin:6px 0 0">Body sent (create): <code>scope:"gitlab", gitlabConnectionIds:[&hellip;], runUntagged, runnerGroupId:1, installationId:&lt;first installation&gt;, repositoryIds:[]</code> (per the brief, from #138&rsquo;s branch; GitLab is registered last so its partial overrides GitHub&rsquo;s defaults). Settings sends <code>gitlabConnectionIds</code> and <code>runUntagged</code> only for a GitLab pool.</p></div>
 
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>Shared rows stay neutral.</b> The labels row copy in F2 comes from <code>labelRules.help/placeholder</code>; Tart base VM and the rest are not GitLab-specific (no Provider requirement).</li>
-  <li><span class="n">2</span><b>Toggle state</b> flows through gap 2 (frame I): the form owns per-platform option values, the section hands <code>{values, onChange}</code> to the descriptor&rsquo;s component, and the payload partials receive them.</li>
-  <li><span class="n">3</span><b>Tag rule</b> = any character but a comma, at most 255 characters, non-empty after trimming; stated once. The error names the offending tag.</li>
+  <li><span class="n">2</span><b>Toggle state</b> flows through gap 2 (frame I): the form holds <code>platformOptions: Record&lt;platformId, unknown&gt;</code> (seeded by <code>initialPlatformOptionValues</code>), the section hands <code>{values, onChange}</code> to the descriptor&rsquo;s component, and the values reach the partials inside the existing values object.</li>
+  <li><span class="n">3</span><b>Tag rule</b> = non-empty, no comma (<code>gitlabLabelError</code>), plus the shared 64-character cap; the help line states the cap once.</li>
 </ol></div>
 </section>
 
@@ -488,7 +492,7 @@
     <div class="rr"><span class="dot b"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">Job Hook</b><span class="badge bad">&#x26A0; Invalid signature</span><span style="flex:1"></span><span class="badge gl">&#x25C8; GitLab</span><span class="faint">9m</span></div>
     <div class="rr"><span class="dot"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">installation</b><span class="badge">created</span><span style="flex:1"></span><span class="badge gh">&#x25C9; GitHub</span><span class="faint copy">GitHub App</span><span class="faint">2h</span></div>
   </div>
-  <p class="faint" style="margin:6px 0 0">The platform is derived generically from the delivery id: an id prefix equal to a registered descriptor id (<code>gitlab:&lt;connection id&gt;:&lt;key&gt;</code>) means that platform, anything else is GitHub. The badge is the registry badge, placed just before the destination text, hidden below <code>lg</code> with it. <b>The &ldquo;GitHub App&rdquo; fallback text stays for GitHub rows only</b>; a GitLab row with no repository shows the badge and no destination text, because the list has no project field. Status, event, action, retry, relative time and the inspect-payload sheet are untouched.</p></div>
+  <p class="faint" style="margin:6px 0 0">The platform is derived generically from the delivery id by <code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> (an id prefix equal to a registered descriptor id, e.g. <code>gitlab:&lt;connection id&gt;:&lt;key&gt;</code>, else GitHub); <code>webhooks.tsx</code> holds no platform comparison. The badge is the registry badge, placed just before the destination text, hidden below <code>lg</code> with it. <b>The fallback destination text is a descriptor value</b> (GitHub: &ldquo;GitHub App&rdquo;; others none, rendered &ldquo;&mdash;&rdquo;); a GitLab row with no repository shows the badge and no destination text, because the list has no project field. Status, event, action, retry, relative time and the inspect-payload sheet are untouched.</p></div>
 
   <div><p class="sub-h">H2 &middot; Detail sheet for a GitLab delivery</p>
   <div class="screen tight"><dl class="kv"><dt>Status</dt><dd>Processed</dd><dt>Platform</dt><dd class="copy"><span class="badge gl">&#x25C8; GitLab</span></dd><dt>Signature</dt><dd>Verified</dd><dt>Destination</dt><dd class="copy">&mdash;</dd><dt>Received</dt><dd>Nov 20, 2026, 10:14 AM</dd></dl></div>
@@ -507,14 +511,17 @@
 <h2>I &middot; Descriptor-contract gaps and what is out of reach <small>no screen; these are the generic fixes the frames above depend on</small></h2>
 <table class="map">
 <tr><th>#</th><th>Gap exposed by GitLab</th><th>Generic fix (no <code>gitlab</code> string in shared files)</th><th>Frames</th></tr>
-<tr><td>1</td><td>Row actions: only Edit and Remove exist.</td><td><code>connections.actions?(item)</code> returns <code>{label, run, confirm?, confirmLabel?, success?}[]</code>; <code>run</code> may return a <code>PostCreateReveal</code>. Rendered by <code>connections-section.tsx</code> beside Edit/Remove; a reveal opens the existing <code>SecretRevealDialog</code>.</td><td>A, C, D</td></tr>
-<tr><td>2</td><td><code>platformOptions.Component</code> gets no props, so the toggle has no way into the payload.</td><td>Forms hold per-platform option values (<code>platformOptions.initialValues(pool?)</code>); the section passes <code>{values, onChange}</code> to <code>Component</code>; partials get the values as an extra argument. Existing descriptors ignore it.</td><td>F</td></tr>
-<tr><td>3</td><td>Reveal has one secret value; GitLab shows URL + secret + a setting.</td><td><b>No change needed</b>: <code>SecretRevealDialog.details</code> is a <code>ReactNode</code> and the shared <code>CopyButton</code> can sit inside it.</td><td>C</td></tr>
-<tr><td>4 <span class="tag new">NEW</span></td><td>Create form needs a Project/Group choice; <code>ConnectionField</code> only knows <code>text</code> and <code>secret</code>.</td><td>Add <code>type: "select"</code> with <code>options: {value,label}[]</code> and optional <code>labelFor(values)</code> / <code>helpFor(values)</code> so the path label follows the kind; <code>FieldInput</code> renders a select. Not editable on update (<code>editableOnUpdate:false</code>). Alternative if the operator prefers: two chooser entries (&ldquo;GitLab project&rdquo;, &ldquo;GitLab group&rdquo;) sharing one descriptor, which needs a larger contract change.</td><td>B</td></tr>
-<tr><td>5</td><td>Deliveries have no platform field.</td><td>Derive from the id prefix against the registry (see H); <code>webhooks.tsx</code> only.</td><td>H</td></tr>
-<tr><td>6 <span class="tag rm">OUT</span></td><td>Polling errors (#148) are logged only; no API lists them.</td><td>Nothing is built; recorded as a gap for #148/#140.</td><td>H</td></tr>
+<tr><td>1</td><td>Row actions: only Edit and Remove exist; a row action may need to show a one-time secret.</td><td><code>ConnectionBindings.actions?(item)</code> returns <code>{label, run, confirm?, confirmOptions?: {confirmLabel?}, success?}[]</code>, run through <code>useAction</code> and rendered beside Edit/Remove. A returned reveal goes to the one <code>SecretRevealDialog</code> in <code>ConnectionsSection</code> via <code>onReveal</code> (<code>FetchedConnections</code> &rarr; <code>ConnectionRows</code> &rarr; <code>ConnectionRow</code>). <code>PostCreateReveal</code> is renamed <code>SecretReveal</code>.</td><td>A, C, D</td></tr>
+<tr><td>2</td><td><code>platformOptions.Component</code> gets no props, so the toggle has no way into the payload.</td><td><code>initialValues?(pool?)</code>; <code>Component</code> takes <code>{values, onChange}</code>; forms hold <code>platformOptions: Record&lt;platformId, unknown&gt;</code> seeded by <code>initialPlatformOptionValues(descriptors, pool?)</code> in <code>targets.ts</code>; values travel inside <code>TargetUpdateValues</code> (update) and a matching values argument (create). The two routes stay platform-free.</td><td>F</td></tr>
+<tr><td>3</td><td>Reveal has one secret value; GitLab shows URL + secret + a setting.</td><td><b>No change needed</b>: <code>SecretRevealDialog.details</code> is a <code>ReactNode</code> and <code>CopyButton</code> can sit inside it.</td><td>C</td></tr>
+<tr><td>4</td><td>GitHub descriptor assumes two scopes: a <code>scope:"gitlab"</code> pool would get a locked GitHub runner-group chip that disables every GitLab option.</td><td><code>github.tsx</code> <code>initialSelection</code>, <code>initialPriorityKeys</code>, <code>readOnlySummary</code>, <code>toUpdatePayload</code> branch on <code>"repository"</code> and <code>"organization"</code> and return the empty value for any other scope. No GitLab string; repository and organization output unchanged.</td><td>E5</td></tr>
+<tr><td>5</td><td>Create form needs a Project/Group choice, a pre-filled address and inline field errors; <code>ConnectionField</code> has none of them.</td><td>(a) <code>type:"select"</code> with <code>options: {value,label}[]</code>; (b) <code>defaultValue?</code> seeding create values; (c) <code>validate?(value): string|null</code> rendered by <code>FieldInput</code> with <code>aria-invalid</code> and a <code>text-danger</code> line, blocking submit. Static labels only.</td><td>B</td></tr>
+<tr><td>6</td><td>Registry order: <code>buildCreatePayload</code> merges with <code>Object.assign</code> in registry order, and GitHub always sends <code>scope</code>, <code>installationId</code>, <code>repositoryIds</code>, <code>runnerGroupId</code>.</td><td>Register GitLab last, with a comment; pin with a Vitest on the real registry (GitLab-only selection &rarr; <code>scope:"gitlab"</code>, positive <code>installationId</code>, <code>repositoryIds:[]</code>, <code>runnerGroupId:1</code>).</td><td>F4</td></tr>
+<tr><td>7</td><td>Deliveries have no platform field; &ldquo;GitHub App&rdquo; is hard-wired as the fallback destination.</td><td><code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> beside <code>getPlatform</code>; fallback destination text is a descriptor value (GitHub &ldquo;GitHub App&rdquo;, others none &rarr; &ldquo;&mdash;&rdquo;). <code>webhooks.tsx</code> is added to <code>platform-neutral-source.test.ts</code>.</td><td>H</td></tr>
+<tr><td>&ndash; <span class="tag rm">OUT</span></td><td>Polling errors (#148) are logged only; no API lists them.</td><td>Nothing is built; recorded as a gap for #148/#140.</td><td>H</td></tr>
+<tr><td>&ndash; <span class="tag rm">OUT</span></td><td>Pool list destination (<code>runner-pools.index.tsx</code>) and pool detail Account row still show a GitLab pool as its installation&rsquo;s GitHub account.</td><td>Tracked as #159 in epic #136; not drawn, not changed.</td><td>&ndash;</td></tr>
 </table>
-<p class="faint" style="margin:10px 0 0">Everything GitLab-specific (labels, help, errors copy, kinds, validators wiring, runner link) is in <code>gitlab.tsx</code>; the API functions are in <code>platform-connections.functions.ts</code>; the tag rule is in <code>schemas.ts</code>.</p>
+<p class="faint" style="margin:10px 0 0">Everything GitLab-specific (labels, help, errors copy, kinds, validators wiring, runner link) is in <code>gitlab.tsx</code>; the API functions are in <code>platform-connections.functions.ts</code>; the wire-field files (<code>schemas.ts</code>: <code>gitlabConnectionIds</code>, <code>runUntagged</code>, <code>validateGitlabConnections</code>, <code>gitlabLabelError</code>; <code>runner-pools.functions.ts</code> and <code>operations.functions.ts</code>: optional GitLab fields) carry the only other GitLab names.</p>
 </section>
 
 </body>
