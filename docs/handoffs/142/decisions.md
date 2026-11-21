@@ -123,3 +123,6 @@
 - **Assumed:** CI uses short temp paths and a non-macOS-arm64 fleet fixture, so these two do not fail there.
 - **Hedged:** the two flaky pre-existing fixtures F named did not reproduce in my runs, so they are left as advisory.
 - **Evidence:** the commands and counts are in `handoff-T-green.md`.
+
+## A Phase 7 (anti-duplication gate), 2026-11-20
+Verdict PASS: gitlab.rs and the image script are brief-mandated; all other changes extend existing objects in place (see handoff-A-dup.md).
