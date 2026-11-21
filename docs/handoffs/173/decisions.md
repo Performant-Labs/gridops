@@ -104,3 +104,9 @@
 - **Assumed:** the pre-existing clippy lints (`assert_is_empty` x6, `unused_async_trait_impl` x1) are outside #173, since none of those lines are in the diff.
 - **Hedged:** the CI job was not run on a hosted macOS runner; I ran the driver under this Mac's /bin/bash 3.2.57. No real VM run.
 - **Evidence:** I reproduced F's cargo, driver, shellcheck and clippy results. Mutations (drop `sync`, drop the `wait` on the target pid, drop the core guard placeholder) each made the matching test fail; all restored. Details: docs/handoffs/173/handoff-T-green.md.
+
+## A (Phase 7, anti-duplication gate)
+- **Decided:** PASS. F extended the exit-reason tables, both collision guards, `Exit` and `left_service` (one shared failure path), and the two prep scripts in place. No parallel path.
+- **Assumed:** the brief's own analogue list stands in for the Reuse map (there is no survey.md).
+- **Hedged:** one warn only. About 40 lines of cleanup and agent-wait code are duplicated between the two prep scripts, which the brief and handoff-F justify (self-contained is the repo's dominant shape).
+- **Evidence:** diff 2d6e458..42ac8e5 read in full for the reconciler, core, Tart agent, manager and both prep scripts; details in docs/handoffs/173/handoff-A-dup.md.
