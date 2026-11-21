@@ -1,15 +1,16 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>#141 GitLab in the shared UI: spec audit report</title>
+<html lang="en"><head><meta charset="utf-8"><title>#141 GitLab in the shared UI: spec audit report (cycle 2)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 body{font:15px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;margin:0;color:#1c1f26;background:#f6f7f9}
 nav{position:sticky;top:0;background:#1c1f26;padding:8px 20px;z-index:5} nav a{color:#cfd6e4;margin-right:16px;text-decoration:none;font-size:13px}
 main{max-width:1180px;margin:0 auto;padding:20px}
-.banner{background:#7a1d1d;color:#fff;padding:22px 26px;border-radius:10px} .banner h1{margin:0;font-size:40px;letter-spacing:.5px}
-.banner p{margin:6px 0 0;color:#ffd9d9}
+.banner{background:#0f5a2b;color:#fff;padding:22px 26px;border-radius:10px} .banner h1{margin:0;font-size:40px;letter-spacing:.5px}
+.banner p{margin:6px 0 0;color:#d6f5e1} .banner table{background:transparent;margin-top:10px} .banner th,.banner td{border-color:#2f8a55;color:#fff;background:transparent}
 table{border-collapse:collapse;width:100%;background:#fff;margin:10px 0} th,td{border:1px solid #d9dde5;padding:7px 9px;text-align:left;vertical-align:top;font-size:13.5px} th{background:#eef0f4}
 .ok{color:#0a7a3c;font-weight:600} .dl{color:#9a6a00;font-weight:600} .bad{color:#b00020;font-weight:700}
-h2{margin-top:34px;border-bottom:2px solid #d9dde5;padding-bottom:4px}
+.banner .ok,.banner .dl{color:#fff}
+h2{margin-top:34px;border-bottom:2px solid #d9dde5;padding-bottom:4px} h3{margin:18px 0 4px}
 details.surface{background:#fff;border:1px solid #d9dde5;border-radius:8px;margin:10px 0;padding:6px 12px} summary{cursor:pointer;padding:6px 0}
 .wipe label{display:block;font-size:13px;margin:6px 0} .wipe input{width:100%}
 .stage{position:relative;max-height:700px;overflow:auto;background:#000;line-height:0} .stage img{display:block;width:100%;height:auto} .stage img.over{position:absolute;top:0;left:0}
@@ -19,330 +20,383 @@ details.surface{background:#fff;border:1px solid #d9dde5;border-radius:8px;margi
 img.crop{width:300px;height:auto;border:1px solid #d9dde5;background:#000}
 ul li{margin:4px 0} code{background:#eceff4;padding:1px 4px;border-radius:3px;font-size:12.5px}
 </style></head><body>
-<nav><a href="#verdict">Verdict</a><a href="#different">What I see different</a><a href="#vp-1280">1280</a><a href="#vp-768">768</a><a href="#vp-360">360</a><a href="#gitlab">GitLab states</a><a href="#sections">Per-section table</a><a href="#rework">Rework</a></nav>
+<nav><a href="#verdict">Verdict</a><a href="#different">What I see different</a><a href="#fix">The rework, measured</a><a href="#vp-1280">1280</a><a href="#vp-768">768</a><a href="#vp-360">360</a><a href="#gitlab">GitLab states</a><a href="#sections">Per-section table</a><a href="#followups">Follow-ups</a></nav>
 <main>
-<div class="banner" id="verdict"><h1>REWORK</h1>
-<p>GitLab connection rows: the <b>Edit</b> button is clipped by the card at 360 px wide (13 of 44 px visible; none at 320 px) and cannot be read or tapped. Everything else I checked matches the brief.</p></div>
-<p>Audit of #141 (GitLab in the shared connections and targets UI), branch <code>claude/gitlab-141-ui-3ae7f5</code>, 2026-11-20 7:02 PM PST. Rendered headlessly with Playwright 1.63 (Chromium) against the real Vite dev server with the API mocked to the brief&rsquo;s contract; no window opened on the desktop.</p>
-<p><b>Reference used.</b> The only design reference is the low-fidelity wireframe (Mode (a), glyph stand-ins), so a pixel diff against it decides nothing. As in #145, I diffed <b>HEAD against the build before #141</b> (<code>0086aa9</code>) with identical GitHub + Bitbucket data, which shows exactly what #141 changed on every existing surface. The GitLab-only states have no earlier build to diff against, so they are shown below for review (not diffed). No operator waiver of the wireframe diff is recorded for #141; I applied the #145 precedent and flag it for the operator.</p>
-<table><tr><th>Surface (before vs after)</th><th>1280</th><th>768</th><th>360</th></tr><tr><td>Settings > Connections (GitHub and Bitbucket connected, no GitLab yet)</td><td>25,401 px / 1.323%</td><td>25,401 px / 1.946%</td><td>22,278 px / 2.579%</td></tr><tr><td>Add connection chooser</td><td>7,324 px / 0.715%</td><td>8,977 px / 1.142%</td><td>5,160 px / 1.792%</td></tr><tr><td>New runner pool form</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>New runner pool, Targets picker open</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>Settings of a repository pool</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>Webhooks list (GitHub deliveries)</td><td>169 px / 0.009%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>Delivery detail sheet (GitHub delivery)</td><td>84 px / 0.008%</td><td>84 px / 0.011%</td><td>43 px / 0.015%</td></tr><tr><td>Runners list (GitHub runner)</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr></table>
-<p style="font-size:12.5px;color:#555">Counts are differing pixels over the full capture (360&times;2400, 768&times;1700 and 1280&times;1500 for page views; 360&times;800, 768&times;1024 and 1280&times;800 for dialogs and sheets). The app scrolls inside its own container, so page views use tall viewports. Counts come from the original PNGs; the PNGs saved here are colour-reduced for size.</p>
+<div class="banner" id="verdict"><h1>PASS</h1>
+<p>The one defect from the first audit (the <b>Edit</b> button cut off by the card at 360 px wide on GitLab connection rows) is fixed. Every button on every row sits inside the card, responds to a click, and nothing else on any page changed.</p>
+<table><tr><th>GitLab rows, before vs after the rework</th><th>1280</th><th>768</th><th>360</th></tr>
+<tr><td>Pixels different (whole page capture)</td><td>9 px / 0.000%</td><td>9 px / 0.001%</td><td>23,988 px / 2.776%</td></tr>
+<tr><td>What it is</td><td>clock text only</td><td>clock text only</td><td>the intended re-layout of the row actions</td></tr></table></div>
+<p>Re-audit of #141 (GitLab in the shared connections and targets UI), branch <code>claude/gitlab-141-ui-3ae7f5</code>, head <code>a746d23</code>, 2026-11-20 7:50 PM PST. Rendered headlessly with Playwright 1.63 (Chromium) against a fresh Vite dev build of this head, with the API mocked to the brief&rsquo;s contract. No window opened on the desktop.</p>
+<p><b>Reference used.</b> As in cycle 1 (and #145), the only design reference is the low-fidelity wireframe, so a pixel diff against it decides nothing. I diffed two things instead: (a) this head against the build before #141 (<code>0086aa9</code>) on every existing surface, and (b) this head against the previous head on every GitLab state, which isolates exactly what the rework changed. No operator waiver of the wireframe diff is recorded for #141; I flag that again for the operator.</p>
+<h3>Every existing surface, before #141 vs after (same mock data, identical to cycle 1)</h3>
+<table><tr><th>Surface</th><th>1280</th><th>768</th><th>360</th></tr><tr><td>Settings > Connections (GitHub and Bitbucket connected, no GitLab yet)</td><td>25,401 px / 1.323%</td><td>25,401 px / 1.946%</td><td>22,278 px / 2.579%</td></tr><tr><td>Add connection chooser</td><td>7,324 px / 0.715%</td><td>8,977 px / 1.142%</td><td>5,160 px / 1.792%</td></tr><tr><td>New runner pool form</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>New runner pool, Targets picker open</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>Settings of a repository pool</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td><td>0 px / 0.000%</td></tr><tr><td>Webhooks list (GitHub deliveries)</td><td>177 px / 0.009%</td><td>9 px / 0.001%</td><td>9 px / 0.001%</td></tr><tr><td>Delivery detail sheet (GitHub delivery)</td><td>84 px / 0.008%</td><td>84 px / 0.011%</td><td>43 px / 0.015%</td></tr><tr><td>Runners list (GitHub runner)</td><td>4 px / 0.000%</td><td>4 px / 0.000%</td><td>4 px / 0.000%</td></tr></table>
+<p style="font-size:12.5px;color:#555">Counts are differing pixels over the full capture (360&times;2400, 768&times;1700, 1280&times;1500 for page views; 360&times;800, 768&times;1024, 1280&times;800 for dialogs and sheets). A few counts of 4 to 17 px on pages unrelated to the change are clock text ticking over between capture runs (for example &ldquo;Verified 8h ago&rdquo; becoming &ldquo;9h ago&rdquo;). Counts come from the original PNGs; the PNGs saved here are colour-reduced for size.</p>
 
 <h2 id="different">What I see different</h2>
 <ul>
-<li><b>360 and 320 (blocking):</b> on each GitLab connection row the <b>Edit</b> button is clipped by the card: 13 px of its 44 px width is visible at 360 and none at 320, so its label cannot be read or tapped. The four buttons (Edit, Verify, Rotate webhook secret, Remove) are wider than the row. From 390 px up all four fit.</li>
-<li><b>768 and 1280 (cosmetic):</b> on a GitLab row the Project/Group badge drops to a second line and the path is cut off with an ellipsis, because the four buttons take most of the row.</li>
-<li><b>Connections page, all widths (intended):</b> one new row, &ldquo;GitLab &ndash; No GitLab projects or groups are connected yet.&rdquo;, until a GitLab connection exists.</li>
-<li><b>Add connection (intended):</b> GitLab appears as a third choice.</li>
-<li><b>Webhooks list at 1280 (intended):</b> a GitHub badge now precedes each row&rsquo;s destination; a GitLab row shows a GitLab badge and no destination text. At 768 and 360 the badge is hidden (by design), so a GitLab delivery looks like a GitHub one in the list there; the detail sheet shows the badge at every width.</li>
-<li><b>Delivery detail sheet (intended):</b> a badge beside the heading; a GitLab delivery&rsquo;s Destination reads &ldquo;&mdash;&rdquo;.</li>
-<li><b>Not changed:</b> the new-pool form, its Targets picker at rest, pool settings of a repository pool and the Runners list are pixel-identical to before at all three widths.</li>
-<li><b>Seen, not caused by #141:</b> the Targets dropdown is clipped by its card (only the search box shows when it opens), exactly as in #145&rsquo;s advisory note.</li>
+<li><b>360 and 320, GitLab connection rows (the fix):</b> the four buttons (Edit, Verify, Rotate webhook secret, Remove) now wrap onto two lines, right-aligned, instead of running off the left edge. Edit is fully visible and tappable. At 390 the same wrap applies; from 414 up all four fit on one line.</li>
+<li><b>768 and 1280, GitLab connection rows:</b> no change from the first audit. On a long project path the Project badge drops under the name and the path is cut with an ellipsis. Cosmetic, not blocking.</li>
+<li><b>Connections page (intended, unchanged since cycle 1):</b> one new row &ldquo;GitLab&rdquo; with &ldquo;No GitLab projects or groups are connected yet.&rdquo; when none exist. Add connection lists GitLab as a third choice.</li>
+<li><b>Webhooks and delivery sheet (intended):</b> a platform badge; at 1280 the list rows show it, below 1024 px only the sheet does.</li>
+<li><b>Not changed at all:</b> the new-pool form, its Targets picker at rest, a repository pool&rsquo;s settings, and the Runners list are pixel-identical to the build before #141 at all three widths.</li>
+<li><b>Every other GitLab state</b> (add form, errors, reveal, rotate, verify error, pool picker, Platform options, pool settings, runner link, deliveries) is pixel-identical to the first audit, apart from the connection list showing behind dialogs at 360, which takes the new row layout.</li>
 </ul>
 
-<section id="vp-1280"><h2>1280px wide</h2>
-<details class="surface" open>
+<h2 id="fix">The rework, measured</h2>
+<p>The first audit asked for measurement per button, not page-level overflow: &ldquo;each of Edit, Verify, Rotate webhook secret and Remove lies inside the card and <code>elementFromPoint</code> at its centre returns that button; no page-level horizontal overflow; Bitbucket and GitHub rows and everything at 768/1280 unchanged.&rdquo; Results below are from my own run of a fresh build, not copied from F or U (they agree with both).</p>
+<div class="row">
+<figure><figcaption>Before the rework, 360 px</figcaption><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-before-fix-360-crop-20261120.png" alt="before"></figure>
+<figure><figcaption>After, 320 px</figcaption><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-fixed-320-crop-20261120.png" alt="after 320"></figure>
+<figure><figcaption>After, 360 px</figcaption><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-fixed-360-crop-20261120.png" alt="after 360"></figure>
+<figure><figcaption>After, 390 px</figcaption><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-fixed-390-crop-20261120.png" alt="after 390"></figure>
+<figure><figcaption>GitLab Edit opened at 360 px</figcaption><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-edit-open-360-crop-20261120.png" alt="edit open"></figure>
+</div>
+<h3>Per-button geometry (Mobile app row; the Platform group row gives the same numbers)</h3>
+<table><tr><th>Width</th><th>Card x</th><th>Lines</th><th>Edit x</th><th>Verify x</th><th>Rotate webhook secret x</th><th>Remove x</th><th>Page overflow</th><th>Result</th></tr></table>
+<p style="font-size:12.5px;color:#555">Each button was also hit-tested at five points (centre, left, right, top, bottom) with <code>elementFromPoint</code>, and checked for clipped label text. The Bitbucket row (Edit and Remove only) was measured the same way at every width and is inside the card at all of them. The app shell has a 320 px minimum width, so widths below 320 overflow with or without GitLab rows (pre-existing, F&rsquo;s note).</p>
+<h3>Raw click at the centre of each button</h3>
+<table><tr><th>Width</th><th>Button</th><th>Result</th><th>Effect observed</th><th>Size (px)</th></tr><tr><td>320</td><td>Edit</td><td class="ok">OK</td><td>edit form opened</td><td>44x28</td></tr><tr><td>320</td><td>Verify</td><td class="ok">OK</td><td>POST /verify sent</td><td>56x28</td></tr><tr><td>320</td><td>Rotate webhook secret</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>154x28</td></tr><tr><td>320</td><td>Remove</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>68x28</td></tr><tr><td>360</td><td>Edit</td><td class="ok">OK</td><td>edit form opened</td><td>44x28</td></tr><tr><td>360</td><td>Verify</td><td class="ok">OK</td><td>POST /verify sent</td><td>56x28</td></tr><tr><td>360</td><td>Rotate webhook secret</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>154x28</td></tr><tr><td>360</td><td>Remove</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>68x28</td></tr><tr><td>390</td><td>Edit</td><td class="ok">OK</td><td>edit form opened</td><td>44x28</td></tr><tr><td>390</td><td>Verify</td><td class="ok">OK</td><td>POST /verify sent</td><td>56x28</td></tr><tr><td>390</td><td>Rotate webhook secret</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>154x28</td></tr><tr><td>390</td><td>Remove</td><td class="ok">OK</td><td>confirm dialog opened (nothing sent: true)</td><td>68x28</td></tr></table>
+
+<section id="vp-1280"><h2>1280px wide</h2><h3>The change under test: GitLab connection rows, before and after the rework</h3>
+<details class="surface" >
+  <summary><b>Settings &gt; Connections with GitLab rows</b> &middot; 1280px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 9 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after the rework (HEAD); right = before the rework (previous HEAD).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-gitlab-connections-rework-1280-stage"></label>
+    <div class="stage" id="w-gitlab-connections-rework-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-1280-ref-20261120.png" alt="before the rework (previous HEAD)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-1280-live-20261120.png" alt="after the rework (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
+  </div>
+  <h4>Difference (red = changed pixels)</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-1280-diff-20261120.png" alt="diff Settings > Connections with GitLab rows 1280"></div>
+  <h4>Side by side (before the rework (previous HEAD) | after the rework (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-1280-composite-20261120.png" alt="composite Settings > Connections with GitLab rows 1280"></div>
+</details><h3>Every existing surface, before #141 and after (regression check)</h3>
+<details class="surface" >
   <summary><b>Settings &gt; Connections (GitHub and Bitbucket connected, no GitLab yet)</b> &middot; 1280px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 25,401 px (1.323%)</summary>
-  <div class="wipe" id="w-connections-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-connections-1280-stage"></label>
-    <div class="stage" id="w-connections-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-connections-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-connections-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-connections-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-connections-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-connections-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-1280-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-1280-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-1280-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-1280-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 1280"></div>
 </details>
-<details class="surface" open>
+<details class="surface" >
   <summary><b>Add connection chooser</b> &middot; 1280px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 7,324 px (0.715%)</summary>
-  <div class="wipe" id="w-add-chooser-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-add-chooser-1280-stage"></label>
-    <div class="stage" id="w-add-chooser-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-add-chooser-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-1280-diff-20261120.png" alt="diff Add connection chooser 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-1280-composite-20261120.png" alt="composite Add connection chooser 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-1280-diff-20261120.png" alt="diff Add connection chooser 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-1280-composite-20261120.png" alt="composite Add connection chooser 1280"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool form</b> &middot; 1280px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-1280-stage"></label>
-    <div class="stage" id="w-new-pool-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool form</b> &middot; 1280px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-1280-stage"></label>
+    <div class="stage" id="w-newpool-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-1280-diff-20261120.png" alt="diff New runner pool form 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-1280-composite-20261120.png" alt="composite New runner pool form 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-1280-diff-20261120.png" alt="diff New runner pool form 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-1280-composite-20261120.png" alt="composite New runner pool form 1280"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool, Targets picker open</b> &middot; 1280px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-picker-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-picker-1280-stage"></label>
-    <div class="stage" id="w-new-pool-picker-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool, Targets picker open</b> &middot; 1280px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-picker-1280-stage"></label>
+    <div class="stage" id="w-newpool-picker-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-1280-diff-20261120.png" alt="diff New runner pool, Targets picker open 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-1280-composite-20261120.png" alt="composite New runner pool, Targets picker open 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-1280-diff-20261120.png" alt="diff New runner pool, Targets picker open 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-1280-composite-20261120.png" alt="composite New runner pool, Targets picker open 1280"></div>
 </details>
 <details class="surface" >
-  <summary><b>Settings of a repository pool</b> &middot; 1280px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-pool-settings-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Settings of a repository pool</b> &middot; 1280px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-pool-settings-1280-stage"></label>
-    <div class="stage" id="w-pool-settings-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-pool-settings-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-1280-diff-20261120.png" alt="diff Settings of a repository pool 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-1280-composite-20261120.png" alt="composite Settings of a repository pool 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-1280-diff-20261120.png" alt="diff Settings of a repository pool 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-1280-composite-20261120.png" alt="composite Settings of a repository pool 1280"></div>
 </details>
-<details class="surface" open>
-  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 1280px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 169 px (0.009%)</summary>
-  <div class="wipe" id="w-webhooks-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+<details class="surface" >
+  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 1280px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 177 px (0.009%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhooks-1280-stage"></label>
-    <div class="stage" id="w-webhooks-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhooks-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhooks-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-webhooks-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhooks-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhooks-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-1280-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-1280-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-1280-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-1280-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 1280"></div>
 </details>
-<details class="surface" open>
+<details class="surface" >
   <summary><b>Delivery detail sheet (GitHub delivery)</b> &middot; 1280px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 84 px (0.008%)</summary>
-  <div class="wipe" id="w-webhook-sheet-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhook-sheet-1280-stage"></label>
-    <div class="stage" id="w-webhook-sheet-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-webhook-sheet-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-1280-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-1280-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 1280"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-1280-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-1280-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 1280"></div>
 </details>
 <details class="surface" >
-  <summary><b>Runners list (GitHub runner)</b> &middot; 1280px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-runners-1280">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Runners list (GitHub runner)</b> &middot; 1280px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 4 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-runners-1280-stage"></label>
-    <div class="stage" id="w-runners-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-runners-1280-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-runners-1280-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-runners-1280-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-runners-1280-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-runners-1280-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-1280-diff-20261120.png" alt="diff Runners list (GitHub runner) 1280"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-1280-composite-20261120.png" alt="composite Runners list (GitHub runner) 1280"></div>
-</details></section><section id="vp-768"><h2>768px wide</h2>
-<details class="surface" open>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-1280-diff-20261120.png" alt="diff Runners list (GitHub runner) 1280"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-1280-composite-20261120.png" alt="composite Runners list (GitHub runner) 1280"></div>
+</details></section><section id="vp-768"><h2>768px wide</h2><h3>The change under test: GitLab connection rows, before and after the rework</h3>
+<details class="surface" >
+  <summary><b>Settings &gt; Connections with GitLab rows</b> &middot; 768px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 9 px (0.001%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after the rework (HEAD); right = before the rework (previous HEAD).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-gitlab-connections-rework-768-stage"></label>
+    <div class="stage" id="w-gitlab-connections-rework-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-768-ref-20261120.png" alt="before the rework (previous HEAD)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-768-live-20261120.png" alt="after the rework (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
+  </div>
+  <h4>Difference (red = changed pixels)</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-768-diff-20261120.png" alt="diff Settings > Connections with GitLab rows 768"></div>
+  <h4>Side by side (before the rework (previous HEAD) | after the rework (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-768-composite-20261120.png" alt="composite Settings > Connections with GitLab rows 768"></div>
+</details><h3>Every existing surface, before #141 and after (regression check)</h3>
+<details class="surface" >
   <summary><b>Settings &gt; Connections (GitHub and Bitbucket connected, no GitLab yet)</b> &middot; 768px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 25,401 px (1.946%)</summary>
-  <div class="wipe" id="w-connections-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-connections-768-stage"></label>
-    <div class="stage" id="w-connections-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-connections-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-connections-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-connections-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-connections-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-connections-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-768-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-768-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-768-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-768-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 768"></div>
 </details>
-<details class="surface" open>
+<details class="surface" >
   <summary><b>Add connection chooser</b> &middot; 768px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 8,977 px (1.142%)</summary>
-  <div class="wipe" id="w-add-chooser-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-add-chooser-768-stage"></label>
-    <div class="stage" id="w-add-chooser-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-add-chooser-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-768-diff-20261120.png" alt="diff Add connection chooser 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-768-composite-20261120.png" alt="composite Add connection chooser 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-768-diff-20261120.png" alt="diff Add connection chooser 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-768-composite-20261120.png" alt="composite Add connection chooser 768"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool form</b> &middot; 768px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-768-stage"></label>
-    <div class="stage" id="w-new-pool-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool form</b> &middot; 768px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-768-stage"></label>
+    <div class="stage" id="w-newpool-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-768-diff-20261120.png" alt="diff New runner pool form 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-768-composite-20261120.png" alt="composite New runner pool form 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-768-diff-20261120.png" alt="diff New runner pool form 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-768-composite-20261120.png" alt="composite New runner pool form 768"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool, Targets picker open</b> &middot; 768px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-picker-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-picker-768-stage"></label>
-    <div class="stage" id="w-new-pool-picker-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool, Targets picker open</b> &middot; 768px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-picker-768-stage"></label>
+    <div class="stage" id="w-newpool-picker-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-768-diff-20261120.png" alt="diff New runner pool, Targets picker open 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-768-composite-20261120.png" alt="composite New runner pool, Targets picker open 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-768-diff-20261120.png" alt="diff New runner pool, Targets picker open 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-768-composite-20261120.png" alt="composite New runner pool, Targets picker open 768"></div>
 </details>
 <details class="surface" >
-  <summary><b>Settings of a repository pool</b> &middot; 768px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-pool-settings-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Settings of a repository pool</b> &middot; 768px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-pool-settings-768-stage"></label>
-    <div class="stage" id="w-pool-settings-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-pool-settings-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-768-diff-20261120.png" alt="diff Settings of a repository pool 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-768-composite-20261120.png" alt="composite Settings of a repository pool 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-768-diff-20261120.png" alt="diff Settings of a repository pool 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-768-composite-20261120.png" alt="composite Settings of a repository pool 768"></div>
 </details>
 <details class="surface" >
-  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 768px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-webhooks-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 768px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 9 px (0.001%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhooks-768-stage"></label>
-    <div class="stage" id="w-webhooks-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhooks-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhooks-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-webhooks-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhooks-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhooks-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-768-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-768-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-768-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-768-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 768"></div>
 </details>
-<details class="surface" open>
+<details class="surface" >
   <summary><b>Delivery detail sheet (GitHub delivery)</b> &middot; 768px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 84 px (0.011%)</summary>
-  <div class="wipe" id="w-webhook-sheet-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhook-sheet-768-stage"></label>
-    <div class="stage" id="w-webhook-sheet-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-webhook-sheet-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-768-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-768-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 768"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-768-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-768-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 768"></div>
 </details>
 <details class="surface" >
-  <summary><b>Runners list (GitHub runner)</b> &middot; 768px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-runners-768">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Runners list (GitHub runner)</b> &middot; 768px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 4 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-runners-768-stage"></label>
-    <div class="stage" id="w-runners-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-runners-768-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-runners-768-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-runners-768-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-runners-768-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-runners-768-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-768-diff-20261120.png" alt="diff Runners list (GitHub runner) 768"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-768-composite-20261120.png" alt="composite Runners list (GitHub runner) 768"></div>
-</details></section><section id="vp-360"><h2>360px wide</h2>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-768-diff-20261120.png" alt="diff Runners list (GitHub runner) 768"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-768-composite-20261120.png" alt="composite Runners list (GitHub runner) 768"></div>
+</details></section><section id="vp-360"><h2>360px wide</h2><h3>The change under test: GitLab connection rows, before and after the rework</h3>
 <details class="surface" open>
+  <summary><b>Settings &gt; Connections with GitLab rows</b> &middot; 360px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 23,988 px (2.776%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after the rework (HEAD); right = before the rework (previous HEAD).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-gitlab-connections-rework-360-stage"></label>
+    <div class="stage" id="w-gitlab-connections-rework-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-360-ref-20261120.png" alt="before the rework (previous HEAD)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-360-live-20261120.png" alt="after the rework (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
+  </div>
+  <h4>Difference (red = changed pixels)</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-360-diff-20261120.png" alt="diff Settings > Connections with GitLab rows 360"></div>
+  <h4>Side by side (before the rework (previous HEAD) | after the rework (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-connections-rework-360-composite-20261120.png" alt="composite Settings > Connections with GitLab rows 360"></div>
+</details><h3>Every existing surface, before #141 and after (regression check)</h3>
+<details class="surface" >
   <summary><b>Settings &gt; Connections (GitHub and Bitbucket connected, no GitLab yet)</b> &middot; 360px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 22,278 px (2.579%)</summary>
-  <div class="wipe" id="w-connections-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-connections-360-stage"></label>
-    <div class="stage" id="w-connections-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-connections-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-connections-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-connections-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-connections-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-connections-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-360-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-connections-360-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-360-diff-20261120.png" alt="diff Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-connections-360-composite-20261120.png" alt="composite Settings > Connections (GitHub and Bitbucket connected, no GitLab yet) 360"></div>
 </details>
-<details class="surface" open>
+<details class="surface" >
   <summary><b>Add connection chooser</b> &middot; 360px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 5,160 px (1.792%)</summary>
-  <div class="wipe" id="w-add-chooser-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-add-chooser-360-stage"></label>
-    <div class="stage" id="w-add-chooser-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-add-chooser-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-add-chooser-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-add-chooser-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-360-diff-20261120.png" alt="diff Add connection chooser 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-add-chooser-360-composite-20261120.png" alt="composite Add connection chooser 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-360-diff-20261120.png" alt="diff Add connection chooser 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-add-chooser-360-composite-20261120.png" alt="composite Add connection chooser 360"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool form</b> &middot; 360px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-360-stage"></label>
-    <div class="stage" id="w-new-pool-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool form</b> &middot; 360px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-360-stage"></label>
+    <div class="stage" id="w-newpool-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-360-diff-20261120.png" alt="diff New runner pool form 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-360-composite-20261120.png" alt="composite New runner pool form 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-360-diff-20261120.png" alt="diff New runner pool form 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-360-composite-20261120.png" alt="composite New runner pool form 360"></div>
 </details>
 <details class="surface" >
-  <summary><b>New runner pool, Targets picker open</b> &middot; 360px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-new-pool-picker-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-new-pool-picker-360-stage"></label>
-    <div class="stage" id="w-new-pool-picker-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>New runner pool, Targets picker open</b> &middot; 360px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-newpool-picker-360-stage"></label>
+    <div class="stage" id="w-newpool-picker-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-360-diff-20261120.png" alt="diff New runner pool, Targets picker open 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-new-pool-picker-360-composite-20261120.png" alt="composite New runner pool, Targets picker open 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-360-diff-20261120.png" alt="diff New runner pool, Targets picker open 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-newpool-picker-360-composite-20261120.png" alt="composite New runner pool, Targets picker open 360"></div>
 </details>
 <details class="surface" >
-  <summary><b>Settings of a repository pool</b> &middot; 360px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-pool-settings-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Settings of a repository pool</b> &middot; 360px &middot; <span class="ok">MATCH</span> &middot; 0 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-pool-settings-360-stage"></label>
-    <div class="stage" id="w-pool-settings-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-pool-settings-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-pool-settings-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-pool-settings-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-360-diff-20261120.png" alt="diff Settings of a repository pool 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-pool-settings-360-composite-20261120.png" alt="composite Settings of a repository pool 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-360-diff-20261120.png" alt="diff Settings of a repository pool 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-pool-settings-360-composite-20261120.png" alt="composite Settings of a repository pool 360"></div>
 </details>
 <details class="surface" >
-  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 360px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-webhooks-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
+  <summary><b>Webhooks list (GitHub deliveries)</b> &middot; 360px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 9 px (0.001%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
       <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhooks-360-stage"></label>
-    <div class="stage" id="w-webhooks-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhooks-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhooks-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+    <div class="stage" id="w-webhooks-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhooks-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhooks-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-360-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhooks-360-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 360"></div>
-</details>
-<details class="surface" open>
-  <summary><b>Delivery detail sheet (GitHub delivery)</b> &middot; 360px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 43 px (0.015%)</summary>
-  <div class="wipe" id="w-webhook-sheet-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhook-sheet-360-stage"></label>
-    <div class="stage" id="w-webhook-sheet-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
-  </div>
-  <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-360-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-webhook-sheet-360-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-360-diff-20261120.png" alt="diff Webhooks list (GitHub deliveries) 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhooks-360-composite-20261120.png" alt="composite Webhooks list (GitHub deliveries) 360"></div>
 </details>
 <details class="surface" >
-  <summary><b>Runners list (GitHub runner)</b> &middot; 360px &middot; <span class="ok">MATCH (pixel-identical)</span> &middot; 0 px (0.000%)</summary>
-  <div class="wipe" id="w-runners-360">
-    <label>Drag to reveal: left = after (HEAD), right = before (pre-#141 build)
-      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-runners-360-stage"></label>
-    <div class="stage" id="w-runners-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-1/t3-runners-360-ref-20261120.png" alt="before"><img class="over" loading="lazy" src="screenshots/cycle-1/t3-runners-360-live-20261120.png" alt="after" style="clip-path:inset(0 50% 0 0)"></div>
+  <summary><b>Delivery detail sheet (GitHub delivery)</b> &middot; 360px &middot; <span class="dl">DELTA (intended, see table)</span> &middot; 43 px (0.015%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-webhook-sheet-360-stage"></label>
+    <div class="stage" id="w-webhook-sheet-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
   </div>
   <h4>Difference (red = changed pixels)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-360-diff-20261120.png" alt="diff Runners list (GitHub runner) 360"></div>
-  <h4>Side by side (before | after)</h4>
-  <div class="scroll"><img loading="lazy" src="screenshots/cycle-1/t3-runners-360-composite-20261120.png" alt="composite Runners list (GitHub runner) 360"></div>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-360-diff-20261120.png" alt="diff Delivery detail sheet (GitHub delivery) 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-webhook-sheet-360-composite-20261120.png" alt="composite Delivery detail sheet (GitHub delivery) 360"></div>
+</details>
+<details class="surface" >
+  <summary><b>Runners list (GitHub runner)</b> &middot; 360px &middot; <span class="ok">MATCH (clock text only)</span> &middot; 4 px (0.000%)</summary>
+  <div class="wipe">
+    <label>Drag to reveal. Left of the handle = after (HEAD); right = before (pre-#141 build).
+      <input type="range" min="0" max="100" value="50" oninput="wipe(this)" data-target="w-runners-360-stage"></label>
+    <div class="stage" id="w-runners-360-stage"><img class="under" loading="lazy" src="screenshots/cycle-2/t3-runners-360-ref-20261120.png" alt="before (pre-#141 build)"><img class="over" loading="lazy" src="screenshots/cycle-2/t3-runners-360-live-20261120.png" alt="after (HEAD)" style="clip-path:inset(0 50% 0 0)"></div>
+  </div>
+  <h4>Difference (red = changed pixels)</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-360-diff-20261120.png" alt="diff Runners list (GitHub runner) 360"></div>
+  <h4>Side by side (before (pre-#141 build) | after (HEAD))</h4>
+  <div class="scroll"><img loading="lazy" src="screenshots/cycle-2/t3-runners-360-composite-20261120.png" alt="composite Runners list (GitHub runner) 360"></div>
 </details></section>
 
-<h2 id="gitlab">GitLab states (HEAD only, for review; no earlier build to diff)</h2>
-<p>Click an image to open it at full size. The 360 capture of &ldquo;Connections with a GitLab project and a GitLab group&rdquo; is where the Edit button is cut off; the 360 &ldquo;Edit&rdquo; capture opened the Bitbucket row&rsquo;s Edit for that reason.</p>
-<div class="g"><h4>Connections with a GitLab project and a GitLab group</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b1-connections-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b1-connections-1280-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b1-connections-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b1-connections-768-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b1-connections-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b1-connections-360-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 360"></a></figure></div></div><div class="g"><h4>Add connection &gt; GitLab form (defaults)</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2-form-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2-form-1280-live-20261120.png" alt="Add connection &gt; GitLab form (defaults) 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2-form-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2-form-768-live-20261120.png" alt="Add connection &gt; GitLab form (defaults) 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2-form-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2-form-360-live-20261120.png" alt="Add connection &gt; GitLab form (defaults) 360"></a></figure></div></div><div class="g"><h4>GitLab form with a bad address and path (inline errors)</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2b-form-errors-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2b-form-errors-1280-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2b-form-errors-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2b-form-errors-768-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b2b-form-errors-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b2b-form-errors-360-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 360"></a></figure></div></div><div class="g"><h4>After create: webhook secret, URL and Job events (one-time reveal)</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b3-reveal-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b3-reveal-1280-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b3-reveal-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b3-reveal-768-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b3-reveal-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b3-reveal-360-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 360"></a></figure></div></div><div class="g"><h4>Rotate webhook secret: confirm</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-1280-live-20261120.png" alt="Rotate webhook secret: confirm 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-768-live-20261120.png" alt="Rotate webhook secret: confirm 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4-rotate-confirm-360-live-20261120.png" alt="Rotate webhook secret: confirm 360"></a></figure></div></div><div class="g"><h4>Rotate webhook secret: new secret revealed once</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-1280-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-768-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4b-rotate-reveal-360-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 360"></a></figure></div></div><div class="g"><h4>Verify failure: server message in a toast</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4c-verify-error-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4c-verify-error-1280-live-20261120.png" alt="Verify failure: server message in a toast 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4c-verify-error-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4c-verify-error-768-live-20261120.png" alt="Verify failure: server message in a toast 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4c-verify-error-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4c-verify-error-360-live-20261120.png" alt="Verify failure: server message in a toast 360"></a></figure></div></div><div class="g"><h4>Edit (first Edit on the page; at 360 the GitLab Edit is off-screen, see below)</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-1280-live-20261120.png" alt="Edit (first Edit on the page; at 360 the GitLab Edit is off-screen, see below) 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-768-live-20261120.png" alt="Edit (first Edit on the page; at 360 the GitLab Edit is off-screen, see below) 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-360-live-20261120.png" alt="Edit (first Edit on the page; at 360 the GitLab Edit is off-screen, see below) 360"></a></figure></div></div><div class="g"><h4>New pool, Targets picker open</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-1280-live-20261120.png" alt="New pool, Targets picker open 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-768-live-20261120.png" alt="New pool, Targets picker open 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-360-live-20261120.png" alt="New pool, Targets picker open 360"></a></figure></div></div><div class="g"><h4>New pool with a GitLab project and group selected</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-1280-live-20261120.png" alt="New pool with a GitLab project and group selected 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-768-live-20261120.png" alt="New pool with a GitLab project and group selected 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-360-live-20261120.png" alt="New pool with a GitLab project and group selected 360"></a></figure></div></div><div class="g"><h4>Targets picker after picking a GitLab project</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-1280-live-20261120.png" alt="Targets picker after picking a GitLab project 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-768-live-20261120.png" alt="Targets picker after picking a GitLab project 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-360-live-20261120.png" alt="Targets picker after picking a GitLab project 360"></a></figure></div></div><div class="g"><h4>Platform options expanded: Run untagged jobs</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-1280-live-20261120.png" alt="Platform options expanded: Run untagged jobs 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-768-live-20261120.png" alt="Platform options expanded: Run untagged jobs 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-360-live-20261120.png" alt="Platform options expanded: Run untagged jobs 360"></a></figure></div></div><div class="g"><h4>GitLab pool settings</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-1280-live-20261120.png" alt="GitLab pool settings 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-768-live-20261120.png" alt="GitLab pool settings 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-360-live-20261120.png" alt="GitLab pool settings 360"></a></figure></div></div><div class="g"><h4>GitLab pool settings, Targets picker open</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-1280-live-20261120.png" alt="GitLab pool settings, Targets picker open 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-768-live-20261120.png" alt="GitLab pool settings, Targets picker open 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-360-live-20261120.png" alt="GitLab pool settings, Targets picker open 360"></a></figure></div></div><div class="g"><h4>Runners list with a GitLab runner</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-1280-live-20261120.png" alt="Runners list with a GitLab runner 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-768-live-20261120.png" alt="Runners list with a GitLab runner 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-360-live-20261120.png" alt="Runners list with a GitLab runner 360"></a></figure></div></div><div class="g"><h4>Runner detail sheet (GitLab link)</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-1280-live-20261120.png" alt="Runner detail sheet (GitLab link) 1280"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-360-live-20261120.png" alt="Runner detail sheet (GitLab link) 360"></a></figure></div></div><div class="g"><h4>Webhooks list with GitLab deliveries</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-1280-live-20261120.png" alt="Webhooks list with GitLab deliveries 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-768-live-20261120.png" alt="Webhooks list with GitLab deliveries 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-360-live-20261120.png" alt="Webhooks list with GitLab deliveries 360"></a></figure></div></div><div class="g"><h4>GitLab delivery detail sheet</h4><div class="row"><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-1280-live-20261120.png" alt="GitLab delivery detail sheet 1280"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-768-live-20261120.png" alt="GitLab delivery detail sheet 768"></a></figure><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-360-live-20261120.png" alt="GitLab delivery detail sheet 360"></a></figure></div></div>
+<h2 id="gitlab">GitLab states (HEAD, for review; no earlier build to diff)</h2>
+<p>Click an image to open it at full size. States the rework touched are new captures; states it did not touch point at the cycle-1 captures, which my diff shows are identical.</p>
+<div class="g"><h4>Connections with a GitLab project and a GitLab group <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b1-connections-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b1-connections-360-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b1-connections-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b1-connections-768-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b1-connections-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b1-connections-1280-live-20261120.png" alt="Connections with a GitLab project and a GitLab group 1280"></a></figure></div></div><div class="g"><h4>Add connection &gt; GitLab form (defaults); the connection list shows behind it <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2-form-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2-form-360-live-20261120.png" alt="Add connection &gt; GitLab form (defaults); the connection list shows behind it 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2-form-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2-form-768-live-20261120.png" alt="Add connection &gt; GitLab form (defaults); the connection list shows behind it 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2-form-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2-form-1280-live-20261120.png" alt="Add connection &gt; GitLab form (defaults); the connection list shows behind it 1280"></a></figure></div></div><div class="g"><h4>GitLab form with a bad address and path (inline errors) <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2b-form-errors-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2b-form-errors-360-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2b-form-errors-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2b-form-errors-768-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b2b-form-errors-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b2b-form-errors-1280-live-20261120.png" alt="GitLab form with a bad address and path (inline errors) 1280"></a></figure></div></div><div class="g"><h4>After create: webhook secret, URL and Job events (one-time reveal) <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b3-reveal-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b3-reveal-360-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b3-reveal-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b3-reveal-768-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b3-reveal-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b3-reveal-1280-live-20261120.png" alt="After create: webhook secret, URL and Job events (one-time reveal) 1280"></a></figure></div></div><div class="g"><h4>Rotate webhook secret: confirm first <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-360-live-20261120.png" alt="Rotate webhook secret: confirm first 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-768-live-20261120.png" alt="Rotate webhook secret: confirm first 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4-rotate-confirm-1280-live-20261120.png" alt="Rotate webhook secret: confirm first 1280"></a></figure></div></div><div class="g"><h4>Rotate webhook secret: new secret revealed once <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-360-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-768-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4b-rotate-reveal-1280-live-20261120.png" alt="Rotate webhook secret: new secret revealed once 1280"></a></figure></div></div><div class="g"><h4>Verify failure: the server&#x27;s message in a toast <span class="dl">new capture, cycle 2</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4c-verify-error-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4c-verify-error-360-live-20261120.png" alt="Verify failure: the server&#x27;s message in a toast 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4c-verify-error-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4c-verify-error-768-live-20261120.png" alt="Verify failure: the server&#x27;s message in a toast 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-2/t3-gitlab-b4c-verify-error-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-2/t3-gitlab-b4c-verify-error-1280-live-20261120.png" alt="Verify failure: the server&#x27;s message in a toast 1280"></a></figure></div></div><div class="g"><h4>Edit (first Edit on the page, the Bitbucket row) <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-360-live-20261120.png" alt="Edit (first Edit on the page, the Bitbucket row) 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-768-live-20261120.png" alt="Edit (first Edit on the page, the Bitbucket row) 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b4d-edit-row-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b4d-edit-row-1280-live-20261120.png" alt="Edit (first Edit on the page, the Bitbucket row) 1280"></a></figure></div></div><div class="g"><h4>New pool, Targets picker open <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-360-live-20261120.png" alt="New pool, Targets picker open 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-768-live-20261120.png" alt="New pool, Targets picker open 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5-newpool-picker-1280-live-20261120.png" alt="New pool, Targets picker open 1280"></a></figure></div></div><div class="g"><h4>New pool with a GitLab project and group selected <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-360-live-20261120.png" alt="New pool with a GitLab project and group selected 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-768-live-20261120.png" alt="New pool with a GitLab project and group selected 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5b-newpool-selected-1280-live-20261120.png" alt="New pool with a GitLab project and group selected 1280"></a></figure></div></div><div class="g"><h4>Targets picker after picking a GitLab project <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-360-live-20261120.png" alt="Targets picker after picking a GitLab project 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-768-live-20261120.png" alt="Targets picker after picking a GitLab project 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5c-picker-after-gitlab-pick-1280-live-20261120.png" alt="Targets picker after picking a GitLab project 1280"></a></figure></div></div><div class="g"><h4>Platform options expanded: Run untagged jobs <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-360-live-20261120.png" alt="Platform options expanded: Run untagged jobs 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-768-live-20261120.png" alt="Platform options expanded: Run untagged jobs 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b5d-platform-options-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b5d-platform-options-1280-live-20261120.png" alt="Platform options expanded: Run untagged jobs 1280"></a></figure></div></div><div class="g"><h4>GitLab pool settings <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-360-live-20261120.png" alt="GitLab pool settings 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-768-live-20261120.png" alt="GitLab pool settings 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6-pool-settings-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6-pool-settings-1280-live-20261120.png" alt="GitLab pool settings 1280"></a></figure></div></div><div class="g"><h4>GitLab pool settings, Targets picker open <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-360-live-20261120.png" alt="GitLab pool settings, Targets picker open 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-768-live-20261120.png" alt="GitLab pool settings, Targets picker open 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b6b-pool-settings-picker-1280-live-20261120.png" alt="GitLab pool settings, Targets picker open 1280"></a></figure></div></div><div class="g"><h4>Runners list with a GitLab runner <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-360-live-20261120.png" alt="Runners list with a GitLab runner 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-768-live-20261120.png" alt="Runners list with a GitLab runner 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7-runners-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7-runners-1280-live-20261120.png" alt="Runners list with a GitLab runner 1280"></a></figure></div></div><div class="g"><h4>Runner detail sheet (GitLab link) <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-360-live-20261120.png" alt="Runner detail sheet (GitLab link) 360"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b7b-runner-sheet-1280-live-20261120.png" alt="Runner detail sheet (GitLab link) 1280"></a></figure></div></div><div class="g"><h4>Webhooks list with GitLab deliveries <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-360-live-20261120.png" alt="Webhooks list with GitLab deliveries 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-768-live-20261120.png" alt="Webhooks list with GitLab deliveries 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8-webhooks-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8-webhooks-1280-live-20261120.png" alt="Webhooks list with GitLab deliveries 1280"></a></figure></div></div><div class="g"><h4>GitLab delivery detail sheet <span class="ok">unchanged by the rework (0 to 17 px, clock text only); cycle-1 capture</span></h4><div class="row"><figure><figcaption>360px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-360-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-360-live-20261120.png" alt="GitLab delivery detail sheet 360"></a></figure><figure><figcaption>768px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-768-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-768-live-20261120.png" alt="GitLab delivery detail sheet 768"></a></figure><figure><figcaption>1280px</figcaption><a href="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-1280-live-20261120.png"><img loading="lazy" src="screenshots/cycle-1/t3-gitlab-b8b-webhook-gitlab-sheet-1280-live-20261120.png" alt="GitLab delivery detail sheet 1280"></a></figure></div></div>
 
 <h2 id="sections">Per-section delta table</h2>
-<table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop preview</th></tr><tr><td>Connections list</td><td>1280 / 768 / 360</td><td><span class="dl">DELTA (intended)</span></td><td>One new row, &ldquo;GitLab &ndash; No GitLab projects or groups are connected yet.&rdquo;, appears under Bitbucket. Everything below moves down by that row and nothing else changes.</td><td><a href="screenshots/cycle-1/t3-connections-empty-gitlab-row-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-connections-empty-gitlab-row-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Add connection chooser</td><td>1280 / 768 / 360</td><td><span class="dl">DELTA (intended)</span></td><td>A third choice, GitLab, is listed after Bitbucket.</td><td><a href="screenshots/cycle-1/t3-add-chooser-gitlab-entry-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-add-chooser-gitlab-entry-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Webhooks list</td><td>1280</td><td><span class="dl">DELTA (intended)</span></td><td>Every row gets a GitHub badge in front of its destination. At 768 and 360 the list is pixel-identical because the badge is hidden below 1024 px (as designed, wireframe H1).</td><td><a href="screenshots/cycle-1/t3-webhooks-list-github-badge-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-webhooks-list-github-badge-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Delivery detail sheet</td><td>1280 / 768 / 360</td><td><span class="dl">DELTA (intended)</span></td><td>A small GitHub badge appears beside the heading. Nothing else moves.</td><td><a href="screenshots/cycle-1/t3-webhook-sheet-badge-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-webhook-sheet-badge-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>New pool form, Targets picker, repository pool settings, Runners list</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH</span></td><td>Pixel-identical to the build before GitLab. GitHub and Bitbucket pools show no GitLab content.</td><td>&mdash;</td></tr><tr><td>GitLab connection row: Edit button</td><td>360 (and 320)</td><td><span class="bad">REWORK</span></td><td>&ldquo;Edit&rdquo; is cut off by the left edge of the card: only a 13 px sliver of its 44 px width shows at 360 (nothing at 320), so its label cannot be read or tapped. Verify, Rotate webhook secret and Remove are fine. All four fit from 390 px up.</td><td><a href="screenshots/cycle-1/t3-connections-gitlab-row-actions-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-connections-gitlab-row-actions-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>GitLab connection row: name and path</td><td>1280 / 768</td><td><span class="dl">DELTA (minor)</span></td><td>The Project/Group badge drops onto its own line and the path is cut with an ellipsis (&ldquo;gitlab.com/acme/platform&hellip;&rdquo;), because four actions and the &ldquo;Verified&rdquo; text take the row. Cosmetic; same cause as the row above.</td><td><a href="screenshots/cycle-1/t3-connections-gitlab-row-actions-768-crop-20261120.png"><img class="crop" src="screenshots/cycle-1/t3-connections-gitlab-row-actions-768-crop-20261120.png" alt="crop"></a></td></tr></table>
+<table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop preview</th></tr><tr><td>GitLab connection row: Edit, Verify, Rotate webhook secret, Remove</td><td>360 (and 320, 390)</td><td><span class="ok">MATCH (fixed)</span></td><td>Before the rework Edit was cut off by the card edge (13 of 44 px visible at 360, none at 320). Now the buttons wrap: three on the first line and Remove right-aligned under them (two and two at 320). All four sit inside the card and respond to a click at their centre. The Edit form opens and shows only the name and token.</td><td><a href="screenshots/cycle-2/t3-connections-gitlab-rows-fixed-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-fixed-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Same row before the rework (for comparison)</td><td>360</td><td><span class="ok">REWORK (cycle 1), now resolved</span></td><td>The cut-off Edit is the sliver at the left edge of the row; Verify, Rotate webhook secret and Remove are on one line.</td><td><a href="screenshots/cycle-2/t3-connections-gitlab-rows-before-fix-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-before-fix-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>GitLab connection row at 1280</td><td>1280</td><td><span class="ok">MATCH (unchanged by the rework)</span></td><td>Single line of four actions. Known cosmetic point from cycle 1, still present: on a long project path the path ends with an ellipsis and the Project badge drops under the name.</td><td><a href="screenshots/cycle-2/t3-connections-gitlab-rows-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>GitLab connection row at 768</td><td>768</td><td><span class="ok">MATCH (unchanged by the rework)</span></td><td>Same as 1280.</td><td><a href="screenshots/cycle-2/t3-connections-gitlab-rows-768-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-connections-gitlab-rows-768-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Connections list, existing rows</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH (intended, unchanged)</span></td><td>One new row, &ldquo;GitLab: No GitLab projects or groups are connected yet.&rdquo;, appears under Bitbucket when no GitLab connection exists. Nothing else moves. Identical to cycle 1.</td><td><a href="screenshots/cycle-2/t3-connections-empty-gitlab-row-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-connections-empty-gitlab-row-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Add connection chooser</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH (intended)</span></td><td>A third choice, GitLab, after Bitbucket.</td><td><a href="screenshots/cycle-2/t3-add-chooser-gitlab-entry-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-add-chooser-gitlab-entry-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Webhooks list</td><td>1280</td><td><span class="ok">MATCH (intended)</span></td><td>A GitHub badge precedes each destination at 1280. At 768 and 360 the list is identical to before, because the badge is hidden below 1024 px (by design).</td><td><a href="screenshots/cycle-2/t3-webhooks-list-github-badge-1280-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-webhooks-list-github-badge-1280-crop-20261120.png" alt="crop"></a></td></tr><tr><td>Delivery detail sheet</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH (intended)</span></td><td>A small badge beside the heading.</td><td><a href="screenshots/cycle-2/t3-webhook-sheet-badge-360-crop-20261120.png"><img class="crop" src="screenshots/cycle-2/t3-webhook-sheet-badge-360-crop-20261120.png" alt="crop"></a></td></tr><tr><td>New pool form, Targets picker, repository pool settings</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH</span></td><td>Pixel-identical to the build before #141. GitHub and Bitbucket pools show no GitLab content.</td><td>&mdash;</td></tr><tr><td>Runners list</td><td>1280 / 768 / 360</td><td><span class="ok">MATCH</span></td><td>4 px of clock text only.</td><td>&mdash;</td></tr></table>
 
-<h2 id="rework">Sub-issue recommendations</h2>
+<h2 id="followups">Sub-issue recommendations</h2>
+<p><b>None are required: the verdict is PASS.</b> These non-blocking follow-ups are for O to file if wanted:</p>
 <ol>
-<li><b>Branch:</b> rework on <code>claude/gitlab-141-ui-3ae7f5</code> (F), or <code>fix/gitlab-141-connection-row-actions-360</code> if O prefers a separate fix.<br>
-<b>Problem:</b> the shared connection row&rsquo;s action cluster (<code>connections-section.tsx</code>, the <code>flex shrink-0 items-center gap-1</code> div around Edit, the row actions and Remove) cannot wrap, so with four actions it overflows its card to the left below about 390 px and clips Edit. The fix is generic (let the cluster wrap or otherwise fit, no GitLab string) and may also stop the 768/1280 badge wrap and path truncation.<br>
-<b>Done when:</b> at 320, 360 and 390 all four buttons of a GitLab row lie inside the card and are hit-testable; no change at 768/1280 other than the cosmetic improvement; Bitbucket and GitHub rows unchanged.<br>
-<b>Operator decision needed:</b> none for the fix. One process decision: confirm that the wireframe pixel-diff gate is waived for #141 as it was for #145 (this audit used the before/after build diff instead).</li>
+<li><b>Branch:</b> <code>fix/connection-row-detail-and-targets</code>. <b>Problem:</b> in the shared connection row, a long GitLab project path is cut with an ellipsis at 768 and 1280 and the full path cannot be read on hover; four buttons are also only 28 px tall (the shared small ghost button, same as Edit and Remove on GitHub and Bitbucket rows since #145). <b>Decision for O:</b> add a hover title or let the detail wrap, and decide whether row actions should become a menu on narrow widths.</li>
+<li><b>Branch:</b> <code>fix/pool-create-no-installation-message</code>. <b>Problem:</b> a GitLab-only create with no GitHub App installation shows &ldquo;Could not create the pool: Too small: expected number to be &gt;0&rdquo;, which does not tell the operator what to do. The brief and wireframe F4 chose not to draw new copy, so F is compliant. <b>Decision for O:</b> add a plain-language message on the shared <code>installationId</code> rule, or lift the server&rsquo;s installation requirement (#138).</li>
+<li>Add the runner row&rsquo;s Repository column to #159 (a GitLab runner shows under its installation&rsquo;s GitHub login).</li>
 </ol>
 </main>
 <script>
