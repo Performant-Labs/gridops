@@ -46,3 +46,9 @@
   - cargo test `--bins`: 125/125, which includes the two #169 tests;
   - clippy is clean apart from the pre-existing `unused-async-trait-impl` sites in untouched files;
   - source facts are in docs/handoffs/169/evidence.md.
+
+## Phase 7 Tests GREEN (T) - 2026-11-21
+- **Decided:** GREEN with no blocking issue (docs/handoffs/169/handoff-T-green.md). No test repair needed; F flagged none.
+- **Assumed:** the `release_preflight` failure and the 5 `unused-async-trait-impl` clippy sites are pre-existing and unrelated to this diff (the F diff touches only the `runners` and `runner_pools` handlers; the preflight calls only /api/v1/fleet).
+- **Hedged:** the live UI walkthrough is U's; jsdom does not apply CSS breakpoints, so real-width behavior of the narrow line and right column is unconfirmed until U.
+- **Evidence:** vitest 602/602; cargo unit 125/125 and control_plane_contracts 36/36; fleet_http 143/144 (host-environmental one); mutation spot-check (GitLab fallback to `accountLogin`) made 1 test fail and was reverted; independent sweep of all `LEFT JOIN runners` counts found only `total_runners` wrong.
