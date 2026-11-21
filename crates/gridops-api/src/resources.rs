@@ -86,8 +86,15 @@ macro_rules! visible_queued_jobs {
     };
 }
 
+mod gitlab;
+#[cfg(test)]
+mod gitlab_tests;
 mod overview_queue;
 mod tart_host;
+pub use self::gitlab::{
+    create_gitlab_connection, delete_gitlab_connection, gitlab_connections,
+    rotate_gitlab_webhook_secret, update_gitlab_connection, verify_gitlab_connection,
+};
 pub use self::tart_host::tart_host;
 
 #[derive(Debug, FromRow)]
@@ -114,6 +121,7 @@ struct PoolAccess {
     cpu_limit: f64,
     memory_limit_mb: i64,
     runner_group_id: i64,
+    run_untagged: bool,
     ephemeral: bool,
     paused: bool,
     state: String,
@@ -137,6 +145,8 @@ struct RunnerAccess {
     ci_platform: String,
     bitbucket_connection_id: Option<String>,
     bitbucket_runner_uuid: Option<String>,
+    gitlab_connection_id: Option<String>,
+    gitlab_runner_id: Option<i64>,
     provider: String,
     runner_status: String,
     busy: bool,
@@ -1455,6 +1465,11 @@ pub async fn runner_pool(
         .iter()
         .filter_map(|connection| connection.get("id").and_then(Value::as_str))
         .collect::<Vec<_>>();
+    let gitlab_connections = gitlab::pool_gitlab_connections(&state, &pool_id).await?;
+    let gitlab_connection_ids = gitlab_connections
+        .iter()
+        .filter_map(|connection| connection.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
     let runner_host = manager_resource_capacity(&state).await;
     let (max_cpu_limit, max_memory_limit_mb) = (runner_host.cpu, runner_host.memory_mb);
     let builtin_enabled = builtin_host_enabled(&state).await;
@@ -1504,6 +1519,9 @@ pub async fn runner_pool(
         "provisionWaitReason": pool.provision_wait_reason,
         "canManage": user.role == "admin" || pool.installation_permission == "admin",
     });
+    detail["gitlabConnectionIds"] = json!(gitlab_connection_ids);
+    detail["gitlabConnections"] = json!(gitlab_connections);
+    detail["runUntagged"] = json!(pool.run_untagged);
     detail["builtinRunnerHostEnabled"] = json!(builtin_enabled);
     detail["cannotRun"] = cannot_run(blocked);
     Ok(Json(detail))
@@ -1606,6 +1624,40 @@ pub async fn update_runner_pool(
         .unwrap_or_else(|| existing_bitbucket_connection_ids.clone());
     let bitbucket_connections =
         selected_bitbucket_connections(&state, &user, &bitbucket_connection_ids).await?;
+    let existing_gitlab_connection_ids =
+        gitlab::pool_gitlab_connection_ids(&state, &pool_id).await?;
+    let gitlab_connection_ids = input
+        .gitlab_connection_ids
+        .clone()
+        .unwrap_or_else(|| existing_gitlab_connection_ids.clone());
+    // A pool never moves between GitLab and the other platforms: the scope
+    // it was created with decides which targets it may have.
+    if pool.scope == "gitlab" {
+        if gitlab_connection_ids.is_empty() {
+            return Err(ApiError::BadRequest(
+                "A GitLab pool needs at least one GitLab connection.".into(),
+            ));
+        }
+        if !bitbucket_connections.is_empty() || input.repository_ids.is_some() {
+            return Err(ApiError::BadRequest(
+                "A GitLab pool can't also serve GitHub repositories or Bitbucket workspaces."
+                    .into(),
+            ));
+        }
+    } else if !gitlab_connection_ids.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Only a GitLab pool can serve GitLab connections; create a GitLab pool instead.".into(),
+        ));
+    }
+    let gitlab_connections =
+        gitlab::selected_gitlab_connections(&state, &user, &gitlab_connection_ids).await?;
+    // GitLab fixes untagged-job pickup when a runner registers, so it only
+    // means something for a GitLab pool.
+    let run_untagged = if pool.scope == "gitlab" {
+        input.run_untagged.unwrap_or(pool.run_untagged)
+    } else {
+        pool.run_untagged
+    };
     let repository_ids = if pool.scope == "repository" {
         input.repository_ids.clone().unwrap_or_else(|| {
             if existing_repository_ids.is_empty() {
@@ -1673,7 +1725,8 @@ pub async fn update_runner_pool(
     } else {
         &docker_image
     };
-    let runner_group_id = if pool.scope == "repository" {
+    // Only GitHub organization pools use a runner group.
+    let runner_group_id = if matches!(pool.scope.as_str(), "repository" | "gitlab") {
         1
     } else {
         input.runner_group_id
@@ -1685,6 +1738,10 @@ pub async fn update_runner_pool(
         .iter()
         .collect::<HashSet<_>>()
         != bitbucket_connections.iter().collect::<HashSet<_>>();
+    let gitlab_connections_changed = existing_gitlab_connection_ids
+        .iter()
+        .collect::<HashSet<_>>()
+        != gitlab_connections.iter().collect::<HashSet<_>>();
     let runtime_changed = pool.name != input.name
         || pool.mode != input.mode
         || pool.provider != primary_provider
@@ -1705,13 +1762,17 @@ pub async fn update_runner_pool(
         || pool.memory_limit_mb != input.memory_limit_mb
         || pool.runner_group_id != runner_group_id
         || repositories_changed
-        || bitbucket_connections_changed;
+        || bitbucket_connections_changed
+        // A GitLab runner registers for its connection's scope and with the
+        // pool's untagged-job choice, so a change to either rolls the runners.
+        || gitlab_connections_changed
+        || pool.run_untagged != run_untagged;
     let version_increment = i64::from(runtime_changed);
     let now = now_millis();
     let mut transaction = state.database.begin().await?;
     let result = sqlx::query(
         r#"UPDATE runner_pools SET installation_id=?,name=?,mode=?,provider=?,providers=?,labels=?,image=?,docker_image=?,tart_image=?,macos_runtime=?,desired_count=?,min_count=?,
-          max_count=?,cpu_limit=?,memory_limit_mb=?,ephemeral=?,runner_group_id=?,
+          max_count=?,cpu_limit=?,memory_limit_mb=?,ephemeral=?,runner_group_id=?,run_untagged=?,
           autoscaling_enabled=?,queue_scale_factor=?,idle_timeout_minutes=?,
           repository_id=?,
           configuration_version=configuration_version+?,
@@ -1735,6 +1796,7 @@ pub async fn update_runner_pool(
     .bind(input.memory_limit_mb)
     .bind(input.mode == "ephemeral")
     .bind(runner_group_id)
+    .bind(run_untagged)
     .bind(input.autoscaling_enabled)
     .bind(input.queue_scale_factor)
     .bind(input.idle_timeout_minutes)
@@ -1805,6 +1867,20 @@ pub async fn update_runner_pool(
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query("DELETE FROM runner_pool_gitlab_connections WHERE pool_id=?")
+        .bind(&pool_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (position, connection_id) in gitlab_connections.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,?,?)",
+        )
+        .bind(&pool_id)
+        .bind(connection_id)
+        .bind(now.saturating_add(i64::try_from(position).unwrap_or(i64::MAX)))
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     audit(
         &state,
@@ -1824,6 +1900,8 @@ pub async fn update_runner_pool(
                 .collect::<Vec<_>>(),
             "priorityWaitMinutes": input.priority_wait_minutes,
             "bitbucketConnectionIds": bitbucket_connections,
+            "gitlabConnectionIds": gitlab_connections,
+            "runUntagged": run_untagged,
             "configurationVersion": pool.configuration_version + version_increment,
         }),
     )
@@ -2414,9 +2492,11 @@ pub async fn runner_pool_options(
         })
     })
     .collect::<Vec<_>>();
+    let gitlab_connections = gitlab::gitlab_connection_options(&state).await?;
     let runner_host = manager_resource_capacity(&state).await;
     Ok(Json(json!({
         "authenticated": true, "installations": installations, "repositories": [], "runnerGroups": [], "bitbucketConnections": bitbucket_connections,
+        "gitlabConnections": gitlab_connections,
         "installUrl": format!("https://github.com/apps/{app_slug}/installations/new"),
         "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
         "defaults": runner_pool_defaults(state.config.runner_image(), &runner_host)
@@ -2533,6 +2613,8 @@ pub async fn create_runner_pool(
     input.validate().map_err(ApiError::BadRequest)?;
     let bitbucket_connections =
         selected_bitbucket_connections(&state, &user, &input.bitbucket_connection_ids).await?;
+    let gitlab_connections =
+        gitlab::selected_gitlab_connections(&state, &user, &input.gitlab_connection_ids).await?;
     let repository_ids = input.selected_repository_ids();
     let selected = if input.scope == "repository" {
         selected_available_repositories(&state, &user, &repository_ids).await?
@@ -2566,19 +2648,21 @@ pub async fn create_runner_pool(
     } else {
         &docker_image
     };
-    let runner_group_id = if input.scope == "repository" {
+    // Only GitHub organization pools use a runner group.
+    let runner_group_id = if matches!(input.scope.as_str(), "repository" | "gitlab") {
         1
     } else {
         input.runner_group_id
     };
+    let run_untagged = input.scope == "gitlab" && input.run_untagged;
     let now = now_millis();
     let mut transaction = state.database.begin().await?;
     let result = sqlx::query(
         r#"INSERT INTO runner_pools (
           id,installation_id,repository_id,name,scope,mode,provider,providers,labels,image,docker_image,tart_image,macos_runtime,desired_count,min_count,
           max_count,cpu_limit,memory_limit_mb,ephemeral,paused,state,created_by,created_at,updated_at,
-          runner_group_id,autoscaling_enabled,queue_scale_factor,idle_timeout_minutes
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'active',?,?,?,?,?,?,?)"#,
+          runner_group_id,autoscaling_enabled,queue_scale_factor,idle_timeout_minutes,run_untagged
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'active',?,?,?,?,?,?,?,?)"#,
     )
     .bind(&pool_id).bind(primary_installation_id).bind(repository_ids.first().copied()).bind(&input.name)
     .bind(&input.scope).bind(&input.mode).bind(&primary_provider).bind(&encoded_providers)
@@ -2587,6 +2671,7 @@ pub async fn create_runner_pool(
     .bind(input.desired_count).bind(input.min_count).bind(input.max_count).bind(input.cpu_limit)
     .bind(input.memory_limit_mb).bind(input.mode == "ephemeral").bind(&user.id).bind(now).bind(now)
     .bind(runner_group_id).bind(input.autoscaling_enabled).bind(input.queue_scale_factor).bind(input.idle_timeout_minutes)
+    .bind(run_untagged)
     .execute(&mut *transaction).await;
     if let Err(sqlx::Error::Database(error)) = &result
         && error.is_unique_violation()
@@ -2616,6 +2701,16 @@ pub async fn create_runner_pool(
         .execute(&mut *transaction)
         .await?;
     }
+    for (position, connection_id) in gitlab_connections.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,?,?)",
+        )
+        .bind(&pool_id)
+        .bind(connection_id)
+        .bind(now.saturating_add(i64::try_from(position).unwrap_or(i64::MAX)))
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     audit(
         &state,
@@ -2623,7 +2718,7 @@ pub async fn create_runner_pool(
         "runner_pool.created",
         "runner_pool",
         Some(&pool_id),
-        json!({ "name": input.name, "scope": input.scope, "providers": providers, "repositoryIds": repository_ids, "bitbucketConnectionIds": bitbucket_connections, "desiredCount": input.desired_count }),
+        json!({ "name": input.name, "scope": input.scope, "providers": providers, "repositoryIds": repository_ids, "bitbucketConnectionIds": bitbucket_connections, "gitlabConnectionIds": gitlab_connections, "runUntagged": run_untagged, "desiredCount": input.desired_count }),
     )
     .await?;
     // A new pool has no fleet execution yet. With the built-in host off it
@@ -2635,7 +2730,8 @@ pub async fn create_runner_pool(
         .await
         .map_err(ApiError::Internal)?;
     let mut provisioned = Vec::new();
-    let handed_over = !blocked && starts_belong_to_reconciler(&providers);
+    let handed_over =
+        !blocked && starts_belong_to_reconciler(&providers, !gitlab_connections.is_empty());
     for _ in 0..if blocked || handed_over {
         0
     } else {
@@ -2789,7 +2885,8 @@ pub async fn runner_action(
             delete_runner_resources(&state, &user, &runner).await?;
             // A pool with Tart gets its replacement from the reconciler.
             let pool = pool_access(&state, &user, &runner.pool_id).await?;
-            if !starts_belong_to_reconciler(&json_array(&pool.providers)) {
+            let gitlab_targets = gitlab::pool_has_gitlab_targets(&state, &runner.pool_id).await?;
+            if !starts_belong_to_reconciler(&json_array(&pool.providers), gitlab_targets) {
                 provision(&state, &user, &runner.pool_id, runner.target_repository_id).await?;
             }
         }
@@ -4163,8 +4260,12 @@ pub async fn database_backup(State(state): State<AppState>, user: AuthUser) -> A
 /// answers; the reconciler's next pass starts the runners, through the same
 /// line as every other start. A pool with only Docker keeps starting in the
 /// request. (Open question 1 of #96.)
-fn starts_belong_to_reconciler(providers: &[String]) -> bool {
-    providers.iter().any(|provider| provider == "tart")
+///
+/// A pool with GitLab targets never starts in the request either: GitLab
+/// runner registration belongs to the reconciler's GitLab module (#139, D14),
+/// so the API's in-request start only ever serves GitHub or Bitbucket.
+fn starts_belong_to_reconciler(providers: &[String], has_gitlab_targets: bool) -> bool {
+    has_gitlab_targets || providers.iter().any(|provider| provider == "tart")
 }
 
 async fn provision(
@@ -4613,7 +4714,10 @@ async fn reconcile_pool(state: &AppState, user: &AuthUser, pool_id: &str) -> Api
     // as unable to run.
     let host_on = builtin_host_enabled(state).await;
     if active.len() < pool.desired_count as usize {
-        if starts_belong_to_reconciler(&json_array(&pool.providers)) {
+        if starts_belong_to_reconciler(
+            &json_array(&pool.providers),
+            gitlab::pool_has_gitlab_targets(state, pool_id).await?,
+        ) {
             handed_over = pool.desired_count as usize - active.len();
         } else if host_on {
             for _ in active.len()..pool.desired_count as usize {
@@ -4673,56 +4777,84 @@ async fn delete_runner_resources(
     {
         tracing::warn!(runner_id = %runner.runner_id, error = ?error, "could not archive runner logs");
     }
-    let github_cleanup = if runner.ci_platform == "bitbucket" {
-        cleanup_bitbucket_runner(state, runner).await
-    } else {
-        cleanup_github_runner(state, user, runner).await
-    };
-    let github_cleanup_error = github_cleanup
-        .err()
-        .map(|error| error.to_string().chars().take(2_000).collect::<String>());
-    if let Some(error) = &github_cleanup_error {
-        if runner.ci_platform == "bitbucket" {
-            return Err(ApiError::ServiceUnavailable(format!(
-                "Bitbucket runner cleanup failed; the local runner was left intact: {error}"
+    // Each platform removes its own registration first, and the event below
+    // names only that platform's cleanup.
+    let (cleanup_key, cleanup_error, deferred_note) = match runner.ci_platform.as_str() {
+        "github" => {
+            let github_cleanup_error = cleanup_github_runner(state, user, runner)
+                .await
+                .err()
+                .map(|error| error.to_string().chars().take(2_000).collect::<String>());
+            if let Some(error) = &github_cleanup_error {
+                tracing::warn!(runner_id = %runner.runner_id, error, "GitHub runner cleanup deferred");
+                let now = now_millis();
+                sqlx::query(
+                    r#"INSERT INTO github_runner_cleanup (
+                      id,installation_id,target_owner,target_repository,github_runner_id,runner_name,
+                      attempts,last_error,next_attempt_at,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,0,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                      installation_id=excluded.installation_id,target_owner=excluded.target_owner,
+                      target_repository=excluded.target_repository,
+                      github_runner_id=COALESCE(excluded.github_runner_id,github_runner_cleanup.github_runner_id),
+                      runner_name=excluded.runner_name,last_error=excluded.last_error,
+                      next_attempt_at=excluded.next_attempt_at,updated_at=excluded.updated_at"#,
+                )
+                .bind(&runner.runner_id)
+                .bind(runner.installation_id)
+                .bind(
+                    runner
+                        .repository_owner
+                        .as_deref()
+                        .unwrap_or(&runner.account_login),
+                )
+                .bind(&runner.repository_name)
+                .bind(runner.github_runner_id)
+                .bind(&runner.runner_name)
+                .bind(error)
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .execute(&state.database)
+                .await?;
+            } else {
+                sqlx::query("DELETE FROM github_runner_cleanup WHERE id=?")
+                    .bind(&runner.runner_id)
+                    .execute(&state.database)
+                    .await?;
+            }
+            (
+                "githubCleanup",
+                github_cleanup_error,
+                "GitHub cleanup will retry",
+            )
+        }
+        "bitbucket" => {
+            if let Err(error) = cleanup_bitbucket_runner(state, runner).await {
+                let error = error.to_string().chars().take(2_000).collect::<String>();
+                return Err(ApiError::ServiceUnavailable(format!(
+                    "Bitbucket runner cleanup failed; the local runner was left intact: {error}"
+                )));
+            }
+            sqlx::query("DELETE FROM github_runner_cleanup WHERE id=?")
+                .bind(&runner.runner_id)
+                .execute(&state.database)
+                .await?;
+            ("githubCleanup", None, "")
+        }
+        // D17: GitLab being unreachable never fails a delete. A runner that
+        // could not be removed at GitLab is left for #139's orphan sweep.
+        "gitlab" => (
+            "gitlabCleanup",
+            gitlab::cleanup_gitlab_runner(state, runner).await,
+            "its GitLab registration is left for the orphan sweep",
+        ),
+        other => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "runner {} has an unknown CI platform {other:?}",
+                runner.runner_id
             )));
         }
-        tracing::warn!(runner_id = %runner.runner_id, error, "GitHub runner cleanup deferred");
-        let now = now_millis();
-        sqlx::query(
-            r#"INSERT INTO github_runner_cleanup (
-              id,installation_id,target_owner,target_repository,github_runner_id,runner_name,
-              attempts,last_error,next_attempt_at,created_at,updated_at
-            ) VALUES (?,?,?,?,?,?,0,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-              installation_id=excluded.installation_id,target_owner=excluded.target_owner,
-              target_repository=excluded.target_repository,
-              github_runner_id=COALESCE(excluded.github_runner_id,github_runner_cleanup.github_runner_id),
-              runner_name=excluded.runner_name,last_error=excluded.last_error,
-              next_attempt_at=excluded.next_attempt_at,updated_at=excluded.updated_at"#,
-        )
-        .bind(&runner.runner_id)
-        .bind(runner.installation_id)
-        .bind(
-            runner
-                .repository_owner
-                .as_deref()
-                .unwrap_or(&runner.account_login),
-        )
-        .bind(&runner.repository_name)
-        .bind(runner.github_runner_id)
-        .bind(&runner.runner_name)
-        .bind(error)
-        .bind(now)
-        .bind(now)
-        .bind(now)
-        .execute(&state.database)
-        .await?;
-    } else {
-        sqlx::query("DELETE FROM github_runner_cleanup WHERE id=?")
-            .bind(&runner.runner_id)
-            .execute(&state.database)
-            .await?;
-    }
+    };
     if let Some(container_id) = &runner.container_id {
         if let Err(error) = manager_json(
             state,
@@ -4746,16 +4878,19 @@ async fn delete_runner_resources(
         .await?;
     sqlx::query("INSERT INTO runner_events (id,runner_id,pool_id,level,event,message,metadata,created_at) VALUES (?,?,?,?, 'Runner deleted',?,?,?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&runner.runner_id).bind(&runner.pool_id)
-        .bind(if github_cleanup_error.is_some() { "warn" } else { "info" })
-        .bind(if github_cleanup_error.is_some() {
-            format!("{} was removed locally; GitHub cleanup will retry", runner.runner_name)
+        .bind(if cleanup_error.is_some() { "warn" } else { "info" })
+        .bind(if cleanup_error.is_some() {
+            format!("{} was removed locally; {deferred_note}", runner.runner_name)
         } else {
             format!("{} was removed", runner.runner_name)
         })
-        .bind(json!({
-            "githubCleanup": if github_cleanup_error.is_some() { "deferred" } else { "complete" },
-            "error": github_cleanup_error,
-        }).to_string())
+        .bind(Value::Object(serde_json::Map::from_iter([
+            (
+                cleanup_key.to_owned(),
+                json!(if cleanup_error.is_some() { "deferred" } else { "complete" }),
+            ),
+            ("error".to_owned(), json!(cleanup_error)),
+        ])).to_string())
         .bind(now).execute(&state.database).await?;
     Ok(())
 }
@@ -4854,7 +4989,7 @@ async fn pool_access(state: &AppState, user: &AuthUser, pool_id: &str) -> ApiRes
       p.mode,p.provider,p.providers,p.labels,p.image,p.docker_image,p.tart_image,p.macos_runtime,
       p.desired_count,p.min_count,p.max_count,
       CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
-      p.runner_group_id,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.queue_scale_factor,
+      p.runner_group_id,p.run_untagged,p.ephemeral,p.paused,p.state,p.autoscaling_enabled,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.queue_scale_factor,
       p.idle_timeout_minutes,p.configuration_version,p.provision_failure_count,
       p.provision_retry_at,p.provision_circuit_open,
       (SELECT w.reason FROM runner_pool_waits w WHERE w.pool_id=p.id AND p.state IN ('waiting','provider-unavailable')) AS provision_wait_reason
@@ -4882,7 +5017,7 @@ async fn runner_access(
     runner_id: &str,
 ) -> ApiResult<RunnerAccess> {
     sqlx::query_as::<_, RunnerAccess>(r#"SELECT r.id AS runner_id,r.name AS runner_name,r.container_id,
-      r.github_runner_id,r.ci_platform,r.bitbucket_connection_id,r.bitbucket_runner_uuid,r.provider,r.status AS runner_status,r.busy,r.ephemeral,r.configuration_version,
+      r.github_runner_id,r.ci_platform,r.bitbucket_connection_id,r.bitbucket_runner_uuid,r.gitlab_connection_id,r.gitlab_runner_id,r.provider,r.status AS runner_status,r.busy,r.ephemeral,r.configuration_version,
       r.last_job_id,p.id AS pool_id,p.name AS pool_name,
       COALESCE(repo.installation_id,p.installation_id) AS installation_id,
       COALESCE(target_installation.account_login,primary_installation.account_login) AS account_login,
@@ -4905,7 +5040,7 @@ async fn runner_access(
 
 async fn runners_for_pool(state: &AppState, pool_id: &str) -> ApiResult<Vec<RunnerAccess>> {
     Ok(sqlx::query_as::<_, RunnerAccess>(r#"SELECT r.id AS runner_id,r.name AS runner_name,r.container_id,
-      r.github_runner_id,r.ci_platform,r.bitbucket_connection_id,r.bitbucket_runner_uuid,r.provider,r.status AS runner_status,r.busy,r.ephemeral,r.configuration_version,
+      r.github_runner_id,r.ci_platform,r.bitbucket_connection_id,r.bitbucket_runner_uuid,r.gitlab_connection_id,r.gitlab_runner_id,r.provider,r.status AS runner_status,r.busy,r.ephemeral,r.configuration_version,
       r.last_job_id,p.id AS pool_id,p.name AS pool_name,
       COALESCE(repo.installation_id,p.installation_id) AS installation_id,
       COALESCE(target_installation.account_login,primary_installation.account_login) AS account_login,
@@ -5213,13 +5348,18 @@ async fn configuration(state: &AppState) -> ApiResult<ConfigurationState> {
 
 fn effective_webhook_url(base_url: &url::Url, override_url: Option<&url::Url>) -> String {
     override_url.cloned().map_or_else(
-        || {
-            base_url
-                .join("/api/webhooks/github")
-                .map_or_else(|_| "/api/webhooks/github".into(), |url| url.to_string())
-        },
+        || public_webhook_url(base_url, "/api/webhooks/github"),
         |url| url.to_string(),
     )
+}
+
+/// The public URL a platform delivers its webhooks to: `path` on the
+/// configured base URL. GitHub's can be overridden (`effective_webhook_url`);
+/// GitLab's (`/api/v1/webhooks/gitlab`) can't.
+fn public_webhook_url(base_url: &url::Url, path: &str) -> String {
+    base_url
+        .join(path)
+        .map_or_else(|_| path.to_owned(), |url| url.to_string())
 }
 
 fn workflow_run_json(row: &sqlx::sqlite::SqliteRow, system_admin: bool) -> Value {

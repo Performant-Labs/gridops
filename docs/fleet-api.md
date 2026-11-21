@@ -186,6 +186,12 @@ cookie-only on purpose. Paths not listed here answer `404`.
 | POST | `/api/v1/platform-connections/bitbucket` | required | — | foreign refused | 403 `token_not_accepted` |
 | PUT | `/api/v1/platform-connections/bitbucket/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
 | DELETE | `/api/v1/platform-connections/bitbucket/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/platform-connections/gitlab` | required | — | — | 403 `token_not_accepted` |
+| POST | `/api/v1/platform-connections/gitlab` | required | — | foreign refused | 403 `token_not_accepted` |
+| PATCH | `/api/v1/platform-connections/gitlab/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| DELETE | `/api/v1/platform-connections/gitlab/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/platform-connections/gitlab/{connection_id}/verify` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate` | required | — | foreign refused | 403 `token_not_accepted` |
 | POST | `/api/v1/github-app/manifest` | required | — | foreign refused | 403 `token_not_accepted` |
 | GET | `/api/v1/backups/database` | required | — | — | 403 `token_not_accepted` |
 | GET | `/api/backups/database` | required | — | — | 403 `token_not_accepted` |
