@@ -98,3 +98,9 @@
   - `bash -n`, `shellcheck` and `actionlint` are clean.
   - A manual SIGINT to the process group during the clone check exited 130, kept the target, deleted the clone and left nothing running.
   - Evidence entries: docs/handoffs/173/evidence.md.
+
+## T (Phase 7, GREEN + Tier 2)
+- **Decided:** the suite is GREEN and Tier 2 is clean, so the verdict is PASS. I repaired my own test `gitlab_runner_constants_are_pinned` to pin `GITLAB_EXIT_RUNNER_MISSING == 78` by name; no production code touched.
+- **Assumed:** the pre-existing clippy lints (`assert_is_empty` x6, `unused_async_trait_impl` x1) are outside #173, since none of those lines are in the diff.
+- **Hedged:** the CI job was not run on a hosted macOS runner; I ran the driver under this Mac's /bin/bash 3.2.57. No real VM run.
+- **Evidence:** I reproduced F's cargo, driver, shellcheck and clippy results. Mutations (drop `sync`, drop the `wait` on the target pid, drop the core guard placeholder) each made the matching test fail; all restored. Details: docs/handoffs/173/handoff-T-green.md.

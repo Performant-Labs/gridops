@@ -576,9 +576,10 @@ mod tests {
             (
                 GITLAB_EXIT_COMPLETED,
                 GITLAB_EXIT_IDLE_EXPIRED,
-                GITLAB_EXIT_REGISTRATION_REFUSED
+                GITLAB_EXIT_REGISTRATION_REFUSED,
+                GITLAB_EXIT_RUNNER_MISSING
             ),
-            (0, 75, 77)
+            (0, 75, 77, 78)
         );
     }
 
