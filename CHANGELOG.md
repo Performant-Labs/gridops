@@ -8,6 +8,28 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
+## Unreleased
+
+### Upgrading
+
+- Migration `0047` adds GitLab connections, GitLab jobs and the GitLab
+  columns on runners and fleet CI targets. It rebuilds the `fleet_ci_targets`
+  and `runners` tables, copying every row. (#150)
+- GitLab runners on the built-in runner host need the runner manager's
+  `GRIDOPS_RUNNER_DOCKER_SOCKET`; on an enrolled machine, the agent's
+  `GRIDOPS_AGENT_DOCKER_SOCKET` and a profile that shares the socket. (#158)
+
+### Added
+
+- **GitLab CI runners.** Connect a gitlab.com or self-managed GitLab project
+  or group under **Settings → Connections**, add it to a runner pool, and
+  GridOps creates a one-job GitLab runner for each runner it starts, on Docker
+  or in a Tart macOS VM, and deletes it from GitLab afterwards. Pending jobs
+  scale pools through the Job events webhook or a pending-jobs poll. Pool
+  labels are the runners' tags, and **Run untagged jobs** opts a pool into
+  untagged jobs. See [GitLab runners](docs/gitlab-runners.md). (#150, #153,
+  #157, #158, #160, #161, #162, #163, #164, #166)
+
 ## 0.2.0 - 2026-11-04
 
 ### Upgrading

@@ -281,7 +281,7 @@ In **System → Platform connections**, add an API token restricted to the targe
 
 ## GitLab
 
-GitLab jobs that need macOS run on the same Tart pools. Unlike Bitbucket's, a GitLab macOS runner is ephemeral: each runner is one VM cloned for it, running `gitlab-runner run-single` with the shell executor for at most one job, and the VM is stopped when the runner exits. The runner waits for a job for the pool's wait timeout (600 seconds when the pool sets none) and exits if none arrives.
+GitLab jobs that need macOS run on the same Tart pools. Unlike Bitbucket's, a GitLab macOS runner is ephemeral: each runner is one VM cloned for it, running `gitlab-runner run-single` with the shell executor for at most one job, and the VM is stopped when the runner exits. The runner waits 600 seconds for a job and exits if none arrives. See [GitLab runners](gitlab-runners.md) for connections, tags and the webhook.
 
 Prepare a stopped Tart base image containing `gitlab-runner`:
 
