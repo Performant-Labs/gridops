@@ -18,6 +18,13 @@ use crate::fleet::{CiTarget, ExternalId, GitlabConnectionId};
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod http;
+pub mod jobs;
+
+// D18's tests sit here, not in `jobs.rs`, so they keep running against
+// whichever copy of `jobs.rs` (#140's or #148's) lands on master.
+#[cfg(test)]
+#[path = "jobs_tests.rs"]
+mod jobs_tests;
 
 pub use http::GitLabClient;
 
@@ -115,6 +122,15 @@ impl fmt::Debug for CreatedRunner {
             .field("token", &"[redacted]")
             .finish()
     }
+}
+
+/// One runner of a project or group, as the runner listing returns it (D17).
+/// `id` is the GitLab runner id; the orphan sweep converts it to an
+/// [`ExternalId`] in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerSummary {
+    pub id: u64,
+    pub description: String,
 }
 
 /// A GitLab CI job. `id` is the GitLab job id (`gitlab_jobs.job_id`), not the
@@ -238,6 +254,14 @@ pub trait GitLabApi: Send + Sync {
         credentials: &GitLabCredentials,
         runner_id: ExternalId,
     ) -> Result<(), GitLabError>;
+
+    /// The project's or group's own runners (`type=project_type` /
+    /// `type=group_type`), so shared and instance runners are never listed.
+    async fn list_runners(
+        &self,
+        credentials: &GitLabCredentials,
+        scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError>;
 
     async fn job(
         &self,

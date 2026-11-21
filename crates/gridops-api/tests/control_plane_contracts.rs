@@ -2185,9 +2185,9 @@ async fn a_rerun_job_arriving_before_its_run_event_reopens_the_completed_run() -
 
 // ---------------------------------------------------------------------------
 // #138: the GitLab platform-connection routes, at the binary level. The
-// binary wires no GitLab client yet (#146 does), so `AppState` holds the
-// placeholder whose every call fails with `Upstream`: these cases need no
-// answer from GitLab. The handler behaviour behind a working client is pinned
+// binary wires the real `GitLabClient`, so these cases are chosen to need no
+// answer from GitLab: refusals before any GitLab call, seeded rows, and a
+// create against a closed local port, which fails with `Upstream`. The handler behaviour behind a working client is pinned
 // by the in-crate tests in `src/resources/gitlab_tests.rs`; a bearer token on
 // these routes is checked by `tests/fleet_http/token_access.rs` from the
 // documented matrix.
@@ -2448,17 +2448,18 @@ async fn gitlab_connection_list_shows_seeded_connections_and_delete_answers_404_
 }
 
 #[tokio::test]
-async fn without_a_gitlab_client_a_create_is_a_400_and_invalid_input_never_gets_that_far()
+async fn an_unreachable_gitlab_makes_a_create_a_400_and_invalid_input_never_gets_that_far()
 -> Result<()> {
     use reqwest::Method;
     let fixture = ApiFixture::start().await?;
     fixture.make_admin().await?;
+    // Port 1 on loopback refuses the connection: no request leaves the host.
     let (status, body) = fixture
         .gitlab_request(
             Method::POST,
             GITLAB_CONNECTIONS,
             "",
-            Some(gitlab_create_body("https://gitlab.example.com")),
+            Some(gitlab_create_body("http://127.0.0.1:1")),
             true,
         )
         .await?;

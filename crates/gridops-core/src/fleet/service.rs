@@ -802,6 +802,27 @@ pub(crate) async fn ensure_target_identity_for_pool(
             .await?
                 != 0
         }
+        // #139 D11: the target is the connection's own project or group, and
+        // the pool is linked to that connection.
+        "gitlab_project" | "gitlab_group" => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM fleet_ci_targets t
+                  JOIN gitlab_connections gc ON gc.id=t.gitlab_connection_id
+                 WHERE t.id=? AND EXISTS (
+                   SELECT 1 FROM runner_pool_gitlab_connections rpc
+                    WHERE rpc.pool_id=? AND rpc.connection_id=gc.id
+                 )
+                   AND ((t.kind='gitlab_project' AND gc.scope_kind='project'
+                         AND t.gitlab_project_id=gc.scope_id)
+                     OR (t.kind='gitlab_group' AND gc.scope_kind='group'
+                         AND t.gitlab_group_id=gc.scope_id))",
+            )
+            .bind(target_id)
+            .bind(pool_id)
+            .fetch_one(&mut **tx)
+            .await?
+                != 0
+        }
         _ => false,
     };
     if valid {

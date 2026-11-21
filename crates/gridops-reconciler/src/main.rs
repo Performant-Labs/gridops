@@ -1,8 +1,14 @@
 mod agent;
 mod builtin_host;
 mod fleet;
+mod gitlab_lifecycle;
+mod gitlab_poll;
 mod tart_lane;
 
+#[cfg(test)]
+mod gitlab_lifecycle_tests;
+#[cfg(test)]
+mod gitlab_poll_tests;
 #[cfg(test)]
 mod jit_conflict_tests;
 #[cfg(test)]
@@ -21,6 +27,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
+use gridops_core::gitlab::{GitLabApi, GitLabCredentials};
 use gridops_core::{
     BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowJob,
     GitHubWorkflowRun, JitRequest, ProviderCapacity, RepositoryCapacity, RunnerTarget, Vault,
@@ -46,6 +53,9 @@ struct Reconciler {
     database: SqlitePool,
     github: GitHubClient,
     bitbucket: BitbucketClient,
+    /// One GitLab client for every connection; each call takes that
+    /// connection's credentials ([`gitlab_credentials`]).
+    gitlab: Arc<dyn GitLabApi>,
     vault: Vault,
     http: reqwest::Client,
     /// The round of the Mac's VM slot line under way, sent with admissions
@@ -117,6 +127,10 @@ struct Runner {
     ci_platform: String,
     bitbucket_connection_id: Option<String>,
     bitbucket_runner_uuid: Option<String>,
+    /// The GitLab connection a GitLab runner registered on, and the GitLab
+    /// runner id it got (#139).
+    gitlab_connection_id: Option<String>,
+    gitlab_runner_id: Option<i64>,
     target_repository_id: Option<i64>,
     repository_owner: Option<String>,
     repository_name: Option<String>,
@@ -169,9 +183,21 @@ struct PendingGitHubCleanup {
 const MANAGER_RUNNER_LIST: &str = "v1/runners?partial=true";
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(from = "ListedManagerRunners")]
 struct ManagerRunners {
     runners: Vec<ManagedRunner>,
+    /// The `exitReason` the manager reports for an exited GitLab runner, by
+    /// container or VM id (#139, D10): one of `GITLAB_EXIT_REASONS`.
+    exit_reasons: HashMap<String, String>,
+    unavailable_providers: Vec<String>,
+    provider_errors: HashMap<String, ProviderError>,
+}
+
+/// The runner list as the manager sends it; see [`ManagerRunners`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListedManagerRunners {
+    runners: Vec<ListedRunner>,
     /// Providers the manager could not ask for their runners (the Mac
     /// sleeps): their runners are left out of `runners`, not gone. A manager
     /// from before #122 never sends it.
@@ -181,6 +207,41 @@ struct ManagerRunners {
     /// before round 2 of #122 does not send it.
     #[serde(default)]
     provider_errors: HashMap<String, ProviderError>,
+}
+
+/// One listed runner, with the `exitReason` a manager from #147 / #142 adds
+/// for an exited GitLab runner; an older manager sends none.
+#[derive(Debug, Deserialize)]
+struct ListedRunner {
+    #[serde(flatten)]
+    runner: ManagedRunner,
+    #[serde(default, rename = "exitReason")]
+    exit_reason: Option<String>,
+}
+
+impl From<ListedManagerRunners> for ManagerRunners {
+    fn from(list: ListedManagerRunners) -> Self {
+        let exit_reasons = list
+            .runners
+            .iter()
+            .filter_map(|listed| {
+                listed
+                    .exit_reason
+                    .clone()
+                    .map(|reason| (listed.runner.id.clone(), reason))
+            })
+            .collect();
+        Self {
+            runners: list
+                .runners
+                .into_iter()
+                .map(|listed| listed.runner)
+                .collect(),
+            exit_reasons,
+            unavailable_providers: list.unavailable_providers,
+            provider_errors: list.provider_errors,
+        }
+    }
 }
 
 /// Why the runner manager could not ask a provider for its runners.
@@ -220,6 +281,7 @@ fn provider_label(provider: &str) -> String {
 #[derive(Debug)]
 struct ManagerView {
     container_states: HashMap<String, String>,
+    exit_reasons: HashMap<String, String>,
     unavailable_providers: HashSet<String>,
     provider_errors: HashMap<String, ProviderError>,
 }
@@ -232,6 +294,7 @@ impl ManagerView {
                 .into_iter()
                 .map(|runner| (runner.id, runner.state))
                 .collect(),
+            exit_reasons: list.exit_reasons,
             unavailable_providers: list.unavailable_providers.into_iter().collect(),
             provider_errors: list.provider_errors,
         }
@@ -266,6 +329,11 @@ impl ManagerView {
 
     fn provider_unavailable(&self, provider: &str) -> bool {
         self.unavailable_providers.contains(provider)
+    }
+
+    /// The `exitReason` the manager listed for an exited container or VM.
+    fn exit_reason(&self, container_id: &str) -> Option<&str> {
+        self.exit_reasons.get(container_id).map(String::as_str)
     }
 
     /// A runner whose container or VM the manager could not ask about.
@@ -374,6 +442,7 @@ async fn main() -> Result<()> {
         database,
         github,
         bitbucket,
+        gitlab: Arc::new(gridops_core::gitlab::GitLabClient::new()?),
         vault,
         http: reqwest::Client::builder()
             .user_agent("GridOps reconciler/0.1")
@@ -392,6 +461,9 @@ async fn main() -> Result<()> {
     // Syncing every repository from GitHub takes over a minute; inside the
     // pass it held up every runner waiting to be told to start.
     tokio::spawn(github_sync_worker(reconciler.clone()));
+    // Polling GitLab for pending jobs a webhook may have missed; its own
+    // schedule, for the same reason.
+    tokio::spawn(gitlab_poll::worker(reconciler.clone()));
     tokio::spawn(watch_vm_slots(reconciler.clone()));
     run_passes(reconciler).await;
     Ok(())
@@ -524,6 +596,9 @@ async fn record_pass(database: &SqlitePool, started_at: i64, elapsed: Duration) 
 async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Err(error) = retry_github_runner_cleanup(app).await {
         tracing::warn!(error = ?error, "deferred GitHub runner cleanup pass failed");
+    }
+    if let Err(error) = gitlab_lifecycle::maybe_sweep(app).await {
+        tracing::warn!(error = ?error, "GitLab orphaned runner sweep failed");
     }
     if let Err(error) = fleet::tick(app).await {
         tracing::warn!(error = ?error, "fleet reconciliation pass failed");
@@ -770,8 +845,10 @@ async fn end_provider_unavailable(database: &SqlitePool, pool: &mut Pool) -> Res
     Ok(())
 }
 
-async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
-    Ok(sqlx::query_as::<_, Pool>(
+/// The reconciler's one `Pool` query, shared by [`load_pools`] and
+/// [`load_pool`]: pools that are not being deleted.
+macro_rules! pool_query {
+    () => {
         r#"SELECT p.id,p.installation_id,i.account_login,p.scope,p.name,p.state,p.mode,p.provider,p.providers,p.labels,p.docker_image,p.tart_image,p.macos_runtime,p.desired_count,p.min_count,
           p.max_count,CAST(p.cpu_limit AS REAL) AS cpu_limit,p.memory_limit_mb,
           p.runner_group_id,p.ephemeral,p.paused,
@@ -779,10 +856,27 @@ async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
           p.provision_failure_count,p.provision_retry_at,p.provision_circuit_open,
           EXISTS(SELECT 1 FROM runner_pool_waits w WHERE w.pool_id=p.id) AS wait_recorded FROM runner_pools p
           JOIN installations i ON i.id=p.installation_id
-          WHERE p.state != 'deleting' ORDER BY p.created_at"#,
+          WHERE p.state != 'deleting'"#
+    };
+}
+
+async fn load_pools(database: &SqlitePool) -> Result<Vec<Pool>> {
+    Ok(
+        sqlx::query_as::<_, Pool>(concat!(pool_query!(), " ORDER BY p.created_at"))
+            .fetch_all(database)
+            .await?,
     )
-    .fetch_all(database)
-    .await?)
+}
+
+/// The pool as it is now, for a failure count or reset made mid-pass (#139);
+/// `None` once it is gone or being deleted.
+async fn load_pool(database: &SqlitePool, pool_id: &str) -> Result<Option<Pool>> {
+    Ok(
+        sqlx::query_as::<_, Pool>(concat!(pool_query!(), " AND p.id=?"))
+            .bind(pool_id)
+            .fetch_optional(database)
+            .await?,
+    )
 }
 
 async fn reconcile_pool(
@@ -793,6 +887,10 @@ async fn reconcile_pool(
     builtin_enabled: bool,
 ) -> Result<()> {
     let known_runners = runners(app, &pool.id).await?;
+    // A GitLab runner leaving service counts towards, or resets, the pool's
+    // provisioning circuit (#139); the rest of the pass then uses the pool
+    // as that left it.
+    let mut circuit_changed = false;
     for runner in &known_runners {
         // Not listed because the manager could not ask, not because it is
         // gone: it keeps the status it had.
@@ -813,6 +911,11 @@ async fn reconcile_pool(
                 "exited" | "dead" | "missing" => "failed",
                 value => value,
             };
+            if runner.ci_platform == "gitlab" && status == "failed" {
+                let exit = gitlab_lifecycle::Exit::from_exit_reason(view.exit_reason(container_id));
+                circuit_changed |=
+                    gitlab_lifecycle::runner_exited(app, &pool.id, runner, exit).await?;
+            }
             let heartbeat = now_millis();
             sqlx::query(
                 "UPDATE runners SET status=?,last_heartbeat_at=?,updated_at=CASE WHEN status<>? THEN ? ELSE updated_at END WHERE id=?",
@@ -826,6 +929,18 @@ async fn reconcile_pool(
                 .await?;
         }
     }
+    // The state the pool started the pass in, for the host-off event below.
+    let entry_state = pool.state.clone();
+    let reloaded;
+    let pool = if circuit_changed {
+        reloaded = load_pool(&app.database, &pool.id).await?;
+        match &reloaded {
+            Some(pool) => pool,
+            None => return Ok(()),
+        }
+    } else {
+        pool
+    };
 
     let failed = runners(app, &pool.id)
         .await?
@@ -854,7 +969,7 @@ async fn reconcile_pool(
     // run while the host is off.
     let host_blocked = !builtin_enabled
         && gridops_core::builtin_host::depends_on_host(&app.database, &pool.id).await?;
-    if host_blocked && pool.state != gridops_core::builtin_host::POOL_STATE && !pool.paused {
+    if host_blocked && entry_state != gridops_core::builtin_host::POOL_STATE && !pool.paused {
         system_event(
             app,
             Some(&pool.id),
@@ -946,6 +1061,11 @@ async fn reconcile_pool(
             return Err(error);
         }
     }
+    // While a GitLab pool's circuit is open, its half-open probe is one start:
+    // a start the manager or a machine accepts proves nothing about the
+    // registration, which only the runner's exit or refusal shows (#139).
+    let single_probe = pool.provision_circuit_open
+        && gridops_core::fleet::targets::is_gitlab_pool(&app.database, &pool.id).await?;
     if !provisioning_blocked && !start_ended && active.len() < desired as usize {
         for _ in active.len()..desired as usize {
             let mut attempt = provision(app, view, pool, builtin_enabled).await?;
@@ -964,6 +1084,10 @@ async fn reconcile_pool(
                     attempt = provision(app, view, pool, builtin_enabled).await?;
                 }
             }
+            let started = matches!(
+                attempt,
+                ProvisionAttempt::Provisioned | ProvisionAttempt::Started
+            );
             match attempt {
                 ProvisionAttempt::Provisioned => provisioned += 1,
                 // Counted when it ends, by the pass that records it.
@@ -988,6 +1112,9 @@ async fn reconcile_pool(
                     capacity_deferred = true;
                     break;
                 }
+            }
+            if started && single_probe {
+                break;
             }
         }
     } else if active.len() > desired as usize {
@@ -2384,7 +2511,13 @@ async fn provision_on_host(
         return Ok(ProvisionAttempt::NoDemand);
     }
     let labels = serde_json::from_str::<Vec<String>>(&pool.labels).unwrap_or_default();
-    let pending_bitbucket_connection = next_bitbucket_connection(app, &pool.id).await?;
+    // A pool with a GitLab connection runs GitLab runners (#139).
+    let gitlab_connection = gitlab_lifecycle::next_connection(app, &pool.id).await?;
+    let pending_bitbucket_connection = if gitlab_connection.is_some() {
+        None
+    } else {
+        next_bitbucket_connection(app, &pool.id).await?
+    };
     let provider =
         if pending_bitbucket_connection.is_some() && providers.iter().any(|item| item == "tart") {
             "tart".to_owned()
@@ -2405,9 +2538,11 @@ async fn provision_on_host(
     let bitbucket_connection = (provider == "tart")
         .then_some(pending_bitbucket_connection)
         .flatten();
-    let plan = gridops_core::ProvisioningPlan::for_selected_provider(
+    let mut plan = gridops_core::ProvisioningPlan::for_selected_provider(
         &provider,
-        if bitbucket_connection.is_some() {
+        if gitlab_connection.is_some() {
+            gridops_core::fleet::CiPlatform::Gitlab
+        } else if bitbucket_connection.is_some() {
             gridops_core::fleet::CiPlatform::Bitbucket
         } else {
             gridops_core::fleet::CiPlatform::Github
@@ -2418,6 +2553,12 @@ async fn provision_on_host(
         &pool.docker_image,
         &pool.tart_image,
     );
+    // A GitLab Docker runner needs a gitlab-runner image; the stock GitHub
+    // runner image cannot run it. A pool with no Docker image of its own gets
+    // the pinned one (D147-1). A Tart start keeps the pool's Tart image.
+    if gitlab_connection.is_some() && provider == "docker" {
+        plan.image = gridops_core::fleet::targets::docker_runner_image(&pool.docker_image, true);
+    }
     let platform = plan.platform;
     let runner_ephemeral = plan.ephemeral;
     // A Tart start runs beside the pass, one at a time (see `tart_lane`), so
@@ -2455,7 +2596,7 @@ async fn provision_on_host(
     } else {
         ("linux", gridops_core::runner_arch_label())
     };
-    if let Err(error) = sqlx::query("INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,bitbucket_connection_id,os,architecture,status,ephemeral,configuration_version,runtime,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'starting',?,?,?,?,?)")
+    if let Err(error) = sqlx::query("INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,bitbucket_connection_id,gitlab_connection_id,os,architecture,status,ephemeral,configuration_version,runtime,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,'starting',?,?,?,?,?)")
         .bind(&runner_id)
         .bind(&pool.id)
         .bind((platform == "github").then(|| target_repository.as_ref().map(|repository| repository.repository_id)).flatten())
@@ -2463,6 +2604,7 @@ async fn provision_on_host(
         .bind(&provider)
         .bind(platform)
         .bind(bitbucket_connection.as_ref().map(|connection| &connection.id))
+        .bind(gitlab_connection.as_ref().map(|connection| &connection.id))
         .bind(runner_os)
         .bind(runner_architecture)
         .bind(runner_ephemeral)
@@ -2489,6 +2631,7 @@ async fn provision_on_host(
         labels,
         target_repository,
         bitbucket_connection,
+        gitlab_connection,
         capacity_lease,
     };
     let Some(mut claim) = tart_claim else {
@@ -2548,6 +2691,7 @@ struct AdmittedStart {
     labels: Vec<String>,
     target_repository: Option<RepositoryCapacity>,
     bitbucket_connection: Option<BitbucketPoolConnection>,
+    gitlab_connection: Option<gitlab_lifecycle::GitlabConnection>,
     capacity_lease: String,
 }
 
@@ -2565,8 +2709,8 @@ enum StartOutcome {
     Failed(anyhow::Error),
 }
 
-/// Registers the admitted runner with GitHub or Bitbucket and asks the
-/// manager to start it, then records how that ended.
+/// Registers the admitted runner with GitHub, Bitbucket or GitLab and asks
+/// the manager to start it, then records how that ended.
 async fn start_admitted_runner(
     app: &Reconciler,
     pool: &Pool,
@@ -2583,9 +2727,13 @@ async fn start_admitted_runner(
         labels,
         target_repository,
         bitbucket_connection,
+        gitlab_connection,
         capacity_lease,
     } = start;
     let runner_mode = mode.as_str();
+    // The GitLab runner registered for this start, deleted again if the
+    // start fails after it.
+    let mut gitlab_runner_id: Option<i64> = None;
     let result = async {
         let mut request = json!({
             "runnerId": runner_id,
@@ -2626,6 +2774,15 @@ async fn start_admitted_runner(
             });
             request["bitbucketOauthClientSecret"] = Value::String(oauth_secret);
             (None, Some(runner.uuid))
+        } else if let Some(connection) = &gitlab_connection {
+            let runner = gitlab_lifecycle::register(app, &pool.id, connection, &runner_id).await?;
+            gitlab_runner_id = Some(i64::try_from(runner.id.get())?);
+            request["gitlab"] = json!({
+                "url": connection.base_url,
+                "waitTimeoutSeconds": gridops_core::provisioning::GITLAB_DEFAULT_WAIT_TIMEOUT_SECS,
+            });
+            request["gitlabRunnerToken"] = Value::String(runner.token.expose_secret().to_owned());
+            (None, None)
         } else {
             let target_installation_id = target_repository
                 .as_ref()
@@ -2704,9 +2861,10 @@ async fn start_admitted_runner(
             }
         };
         let updated = now_millis();
-        sqlx::query("UPDATE runners SET github_runner_id=?,bitbucket_runner_uuid=?,container_id=?,container_name=?,status=?,registered_at=?,last_heartbeat_at=?,updated_at=? WHERE id=?")
+        sqlx::query("UPDATE runners SET github_runner_id=?,bitbucket_runner_uuid=?,gitlab_runner_id=?,container_id=?,container_name=?,status=?,registered_at=?,last_heartbeat_at=?,updated_at=? WHERE id=?")
             .bind(github_runner_id)
             .bind(&bitbucket_runner_uuid)
+            .bind(gitlab_runner_id)
             .bind(&created.id)
             .bind(&created.name)
             .bind(if created.state == "running" { "online" } else { "starting" })
@@ -2722,6 +2880,14 @@ async fn start_admitted_runner(
     if let Err(error) = result {
         if gridops_core::failure_cleanup(true, false, false).release_capacity {
             release_runner_capacity(app, &capacity_lease).await;
+        }
+        if let (Some(connection), Some(gitlab_runner_id)) = (&gitlab_connection, gitlab_runner_id)
+            && gridops_core::failure_cleanup(true, true, false).remove_provider_runner
+            && let Err(cleanup_error) =
+                gitlab_lifecycle::deregister(app, &connection.id, gitlab_runner_id).await
+        {
+            // The orphan sweep removes it later.
+            tracing::warn!(runner_id = %runner_id, error = ?cleanup_error, "could not remove the GitLab runner of a failed start");
         }
         let message = error.to_string().chars().take(2_000).collect::<String>();
         let cleanup = cleanup_unrecorded_manager_runner(app, &runner_id, &provider).await;
@@ -2764,13 +2930,13 @@ async fn start_admitted_runner(
         }
         return Ok(StartOutcome::Failed(error));
     }
-    sqlx::query(
-        "UPDATE runner_pools SET provision_failure_count=0,provision_retry_at=NULL,provision_circuit_open=0 WHERE id=?",
-    )
-    .bind(&pool.id)
-    .execute(&app.database)
-    .await?;
-    set_pool_wait_reason(&app.database, &pool.id, None).await?;
+    if gitlab_connection.is_some() {
+        // A GitLab start the manager accepted proves nothing about its
+        // registration: the runner's exit (or busy) does, and resets then.
+        set_pool_wait_reason(&app.database, &pool.id, None).await?;
+    } else {
+        clear_provision_failures(app, &pool.id).await?;
+    }
     system_audit(
         app,
         "runner.provisioned",
@@ -2817,6 +2983,10 @@ async fn delete_runner(
         if let Some(runner_uuid) = bitbucket_registration(runner) {
             deregister_bitbucket_runner(app, runner, runner_uuid).await?;
         }
+    } else if runner.ci_platform == "gitlab" {
+        // A failed GitLab delete is logged and left to the orphan sweep: it
+        // never keeps the runner in service or fails the pass (#139).
+        gitlab_lifecycle::deregister_runner(app, runner).await;
     } else {
         let target = match (&runner.repository_owner, &runner.repository_name) {
             (Some(owner), Some(repository)) => RunnerTarget::Repository { owner, repository },
@@ -3090,6 +3260,7 @@ async fn runners(app: &Reconciler, pool_id: &str) -> Result<Vec<Runner>> {
         r#"SELECT runner.id,COALESCE(repo.installation_id,pool.installation_id) AS installation_id,
            runner.name,runner.container_id,runner.github_runner_id,runner.ci_platform,
            runner.bitbucket_connection_id,runner.bitbucket_runner_uuid,
+           runner.gitlab_connection_id,runner.gitlab_runner_id,
            runner.target_repository_id,repo.owner AS repository_owner,repo.name AS repository_name,
            runner.provider,runner.status,runner.busy,runner.last_job_id,runner.configuration_version,runner.updated_at,
            EXISTS(SELECT 1 FROM workload_intents intent WHERE intent.workload_id=runner.id) AS fleet
@@ -3607,6 +3778,20 @@ async fn set_pool_wait_reason(
     Ok(())
 }
 
+/// Ends the pool's provisioning failures: its count, pause and circuit, and
+/// any wait. A start that proved the pool can provision calls it: a GitHub or
+/// Bitbucket start the manager accepted, or a GitLab runner that proved its
+/// registration (#139).
+async fn clear_provision_failures(app: &Reconciler, pool_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE runner_pools SET provision_failure_count=0,provision_retry_at=NULL,provision_circuit_open=0 WHERE id=?",
+    )
+    .bind(pool_id)
+    .execute(&app.database)
+    .await?;
+    set_pool_wait_reason(&app.database, pool_id, None).await
+}
+
 async fn record_provision_failure(database: &SqlitePool, pool: &Pool) -> Result<()> {
     let attempts = pool.provision_failure_count.saturating_add(1);
     let (circuit_open, delay_ms) = provision_failure_policy(attempts);
@@ -3710,6 +3895,34 @@ async fn installation_token(app: &Reconciler, installation_id: i64) -> Result<Op
         .installation_token_with_credentials(installation_id, &app_id, &private_key)
         .await
         .map(Some)
+}
+
+/// The credentials GitLab connection `connection_id` calls GitLab with: its
+/// `base_url`, and its access token unsealed from `access_token_key` as a
+/// Bitbucket connection's is. `None` when the connection or its token is
+/// gone.
+async fn gitlab_credentials(
+    app: &Reconciler,
+    connection_id: &str,
+) -> Result<Option<GitLabCredentials>> {
+    let Some((base_url, access_token_key)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT base_url,access_token_key FROM gitlab_connections WHERE id=?",
+    )
+    .bind(connection_id)
+    .fetch_optional(&app.database)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(access_token) = runtime_secret(app, &access_token_key).await? else {
+        return Ok(None);
+    };
+    Ok(Some(GitLabCredentials {
+        base_url: reqwest::Url::parse(&base_url).with_context(|| {
+            format!("GitLab connection {connection_id} has an invalid base URL")
+        })?,
+        access_token: secrecy::SecretString::from(access_token),
+    }))
 }
 
 async fn runtime_secret(app: &Reconciler, key: &str) -> Result<Option<String>> {
@@ -3843,6 +4056,8 @@ mod tests {
             ci_platform: "github".into(),
             bitbucket_connection_id: None,
             bitbucket_runner_uuid: None,
+            gitlab_connection_id: None,
+            gitlab_runner_id: None,
             target_repository_id: None,
             repository_owner: None,
             repository_name: None,
@@ -4831,6 +5046,7 @@ mod tests {
             config,
             database,
             bitbucket: BitbucketClient::new()?,
+            gitlab: Arc::new(gridops_core::gitlab::fake::FakeGitLab::default()),
             vault: Vault::new([0; 32], b"reconciler-test".to_vec()),
             http: reqwest::Client::new(),
             pass: Arc::default(),

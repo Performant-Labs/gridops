@@ -1,0 +1,157 @@
+# Decision journal: #147 GitLab runners in Linux Docker (host agent and manager)
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:19:02-08:00
+- **Decided:** BLOCK, with 3 block findings and 5 warn findings (see `handoff-A.md`).
+  - (1) **[correctness]** The plan puts a pinned default `gitlab/gitlab-runner` image in `docker.rs`, "overridable by the pool's `docker_image`". The established layering doesn't allow that:
+    - the server chooses the image: `targets.rs::pool_docker_image` and `STOCK_DOCKER_IMAGE` on the fleet path, `ProvisioningPlan.image` on the manager path;
+    - the agent runs `PrepareEnvironment.image`, which is always non-empty, and Docker pools must have a `docker_image` (#103);
+    - so the default can't apply on either path, and the two paths would diverge.
+
+    The meaning of `docker_image` for a GitLab pool (runner image or default job image) is also unpinned.
+  - (2) **[correctness]** The brief drops #137's "start command's result" for `RegistrationRefused`, and today's Start (`feed_secret`) can't observe a refusal. An Inspect reported as `Configuration` would never satisfy `reported_gone` (which needs `ResourceUnavailable`), so the exited runner would never be cleaned up.
+  - (3) **[completeness]** `HelperResponse::Failed` can't carry a diagnostic, and `dispatch::outcome` hardcodes `diagnostic: None`. `helper.rs` and `dispatch.rs` aren't in the owned list.
+  - The warnings:
+    - parse `GitlabRunnerMaterial` instead of adding a private `Material` copy;
+    - refuse at Prepare when the profile doesn't request the socket, and #139 must set `requires_docker_socket` for GitLab profiles;
+    - the manager's `runner_command` and `take_bootstrap_secret` branch on mode only, its containers have no platform label, and its listing has no exit code;
+    - the docs should name `GRIDOPS_RUNNER_DOCKER_SOCKET` and `GRIDOPS_AGENT_DOCKER_SOCKET`, not just `compose.no-docker-socket.yaml`;
+    - the GitLab script should be its own function, not wrapped in the GitHub-specific `instrumented_runner_script`.
+  - Accepted as consistent:
+    - one shared GitLab script in `gridops-core::provisioning`;
+    - the token on stdin;
+    - parsing the core `GitlabRunnerMaterial`;
+    - advertising the D6 kinds in `docker_backend`;
+    - reusing the existing socket grant;
+    - replacing the manager's `("gitlab", _)` placeholder;
+    - `exitReason` through `GITLAB_EXIT_REASONS`;
+    - `ManagedRunner.exit_reason` (D15).
+- **Assumed:**
+  - `gitlab-runner` learns that GitLab refused its token only from a network request after it starts, so the refusal usually arrives after `feed_secret`'s roughly 0.5 s detach. I didn't verify this against gitlab-runner's source; the brief review's NV-1 to NV-3 cover the runner's behaviour.
+  - The host agent and its privileged helper run from the same build. That is why an optional, skip-if-none `diagnostic` field is safe across an upgrade.
+- **Hedged:**
+  - Finding 1 offers two resolutions: (a) `docker_image` is the runner image and the server applies the default from a core constant; or (b) `docker_image` is the default job image and the runner image is a fixed core constant. I recommend (a) because it leaves the agent and manager contracts unchanged.
+  - Finding 2 leaves the Start mechanism to F and pins only the reported outcomes. A late exit 77 on Inspect needs either a new `ResourceUnavailable` + `RegistrationRefused` pairing or no diagnostic; O must choose and record it for #139.
+  - Finding 3 is marked block, not warn. It touches the privileged helper boundary, and T needs to know which layer to test. No other wave-1 issue owns these files, so the fix is only a brief amendment.
+  - No Reuse map (`survey.md`) was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - Read: the brief, `147-brief-result-r1.md`, `137-brief.md` (D5, D9, D10; lines 419-435 and 673-678), `docs/handoffs/137/handoff-A.md` and `decisions.md`, epic #136, and issue #139 (`gh issue view`).
+  - Host agent: `crates/gridops-host-agent/src/{docker.rs (full),helper.rs (full),dispatch.rs (full),runtime.rs (full)}`, plus `native.rs` and `main.rs` (socket settings).
+  - Core: `crates/gridops-core/src/provisioning.rs` (full), `fleet/protocol/agent.rs` (`ExecutionConfiguration`, `PrepareEnvironment`, `GitlabRunnerMaterial`), `fleet/protocol/outcomes.rs` (`DiagnosticCode`, `FailureCode`), `fleet/protocol/primitives.rs` (`ImageReference`), `fleet/targets.rs:430-480`, `fleet/placement.rs:163-189`, `fleet/admission.rs:725` and `models.rs:400-440`.
+  - Reconciler: `crates/gridops-reconciler/src/fleet.rs:480-560` (`follow`).
+  - Manager: `crates/gridops-manager/src/main.rs` (`ProvisionRunner`, `GitlabBootstrap`, `validate`, `ManagedRunner`, `shared_docker_socket`, `list_runners`, `tart_runners`, `start_runner`, `provision_runner_inner`, `runner_command`, `take_bootstrap_secret`).
+  - Deployment and docs: `compose.no-docker-socket.yaml` and `docs/fleet-agent.md` (the socket rows).
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:33:39-08:00
+- **Decided:** BLOCK, with 1 block finding and 4 warn findings (see `handoff-A.md`; round 1 is at `5339e22`).
+  - The three round-1 blocks and five round-1 warnings are resolved by the brief's "Amendments (architecture review R1)". Each was checked against the code: the image is chosen server-side (D147-1); Inspect always reports `ResourceUnavailable`, so `reported_gone` fires; `prepared` reaches Inspect; `is_gitlab()` exists; the helper's `CALL_TIMEOUT` is 330 s; manager containers are created with `auto_remove: false`.
+  - (1) **[correctness]** B-2's readiness wait, "a pinned timeout such as 60 s", is twice the reconciler's 30 s start-command deadline (`START_COMMAND_DEADLINE_MILLIS`, `gridops-reconciler/src/fleet.rs:48`). The agent runs one command at a time (`supervisor.rs` `in_flight`; one command per poll in `registry/commands.rs:91-97`). The heartbeat's `cancel_undeliverable` turns a late-running start `uncertain` and fails the placements queued behind it (`commands.rs:735-790`, the 2026-10-16 incident). Fix: pin the wait at 15 s or less, and give the script's verify `curl` a smaller `--max-time`. Or drop the Start wait and record a deviation from #137 D5.
+  - The warnings:
+    - the `HelperResponse::Failed` field addition breaks struct literals in `crates/gridops-host-agent/tests/` and `crates/gridops-api/tests/fleet_http/placement.rs`, which aren't in Owns;
+    - non-secret values reach runner scripts through env vars elsewhere (`GRIDOPS_REGISTRATION_URL`), not shell-quoted script text;
+    - the late `ResourceUnavailable` with `RegistrationRefused` pairing contradicts the `outcomes.rs:41-43` doc comment and needs deviation row D147-2;
+    - the Docker executor's sibling containers and cache volumes aren't covered by Stop or Cleanup.
+- **Assumed:**
+  - Start commands are normally delivered with close to 30 s left. The agent polls every 0.5 s, so the 15 s bound is a slow-path cap, and the typical verify takes a second or two.
+  - `run-single` accepts the runner-config Docker flags (for example `--docker-disable-cache`). I didn't verify this against the pinned gitlab-runner version; it's F's to confirm with the brief review's NV items.
+- **Hedged:**
+  - Finding 1 gives two resolutions: (a) a bounded wait, recommended because it keeps #137 D5; or (b) no wait, with the refusal reported only on Inspect.
+  - Finding 1 traces back to my own round-1 suggestion, which left the mechanism unbounded.
+  - W-2 is a warn, not a block. The seam is planned and reviewed; only the list of mechanical fallout sites is incomplete. No wave-1 issue owns `crates/gridops-api/tests/fleet_http/placement.rs` (epic #136 table).
+- **Evidence:**
+  - Read: the amended brief, `147-brief-result-r1.md`, round-1 `handoff-A.md`, epic #136 (`gh issue view 136`) and `docs/handoffs/137/handoff-A.md` (the round-numbering precedent).
+  - Host agent: `crates/gridops-host-agent/src/{docker.rs (full),helper.rs (full),dispatch.rs (full)}` and `supervisor.rs:430-500`.
+  - Core: `crates/gridops-core/src/fleet/registry/commands.rs:20-125,200-290,625-790`, `registry/inventory.rs:321`, `fleet/protocol/outcomes.rs:15-80,195-330`, `fleet/protocol/agent.rs:120-150`, `fleet/domain.rs:195-215`, `fleet/placement.rs:155-195,210-290`, `fleet/targets.rs:440-475` and `provisioning.rs:1-175`.
+  - Reconciler: `crates/gridops-reconciler/src/fleet.rs:36-56,446-478`.
+  - Manager: `crates/gridops-manager/src/main.rs:320-610,770-810,1485-1600,1700-2000,2645-2730`.
+  - Every `HelperResponse::Failed` literal in the workspace: `grep -rn "HelperResponse::Failed" crates/`.
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:49:45-08:00
+- **Decided:** PASS, with 0 block findings and 2 warn findings (see `handoff-A.md`; round 1 is at `5339e22`, round 2 at `2df6790`).
+  - The round-2 block is resolved. `GITLAB_START_READY_TIMEOUT_SECS = 15` and `GITLAB_VERIFY_MAX_TIME_SECS = 10` are pinned with a doc comment and a test, `START_COMMAND_DEADLINE_MILLIS` is unchanged, and a slow verify exits with `GITLAB_EXIT_VERIFY_UNAVAILABLE` as a retryable runtime failure. The verify runs inside the readiness wait, so the budget is create + `feed_secret` + at most 15 s, which is under 25 s. The brief review's round-2 W-1 ("10 + 15 = 25 s") double-counts, and the constants should not be shrunk on that basis.
+  - The four round-2 warnings are resolved: all 15 `HelperResponse::Failed` sites in 8 files are owned; values reach the script as env vars; D147-2 is recorded and the `outcomes.rs` doc-comment edit is spec'd (no wave-1 issue owns that file); `--docker-disable-cache` is set, and orphaned job containers are a known gap for #143.
+  - The brief-review amendments add no drift. The fleet URL check sits at Start next to today's material parse (`docker.rs:117-119`), the token read matches `docker.rs:128`, and NIT-2's ownership list is complete.
+  - (W-1) **[cross-cutting]** Only Start can remove a container that a failed Start leaves: later commands need the journaled `local_identity` (`dispatch.rs:256`, `:269`), and the reconciler cleans up only with `RunnerStarted` evidence (`fleet.rs:505`, `:593`). The brief doesn't say to remove the container on exit 77. A fast 403 also lands inside `feed_secret`, whose `running || exit == 0` check (`docker.rs:523-526`) would turn it into `rm -f` plus `Runtime, retryable`. The fix: read `State.ExitCode` first, then `rm -f`, then report.
+  - (W-2) **[abstraction]** With the GitLab script shared in core, its env names (three places) and the http(s) URL rule (two places) should live in `provisioning.rs`, as an env builder or name constants plus one URL check.
+- **Assumed:**
+  - `docker create` is fast because Prepare has already pulled the image (`docker.rs:89-95`), and `feed_secret`'s Running poll ends within about 1 s on a healthy daemon.
+  - A GitLab 403 to the verify call can arrive within about 1 s on a nearby instance. I didn't measure this; it only shows that the race in W-1 is realistic.
+- **Hedged:**
+  - Both findings are warn, not block. W-1 follows the existing failed-start pattern that F would see in the code, and T can test it from this handoff. W-2 has no dominant pattern to cite, because no runner script is shared today.
+  - The 15 s cap can still overrun a Start that was delivered late, with only the 5 s margin left. GitHub's Start has the same exposure, and I accepted that bound in round 2.
+  - No Reuse map (`survey.md`) was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - Read: the amended brief, `147-brief-result-r1.md`, `147-brief-result-r2.md`, round-2 `handoff-A.md`, `decisions.md`, and `git diff 3404250 52ff7bb -- docs/handoffs/147-brief.md`. Also epic #136's ownership table (`gh issue view 136`).
+  - Host agent: `crates/gridops-host-agent/src/docker.rs` (full), `helper.rs:55-80` and `dispatch.rs:140-300,405-425`.
+  - Reconciler: `crates/gridops-reconciler/src/fleet.rs:30-60,440-640`.
+  - Core: `crates/gridops-core/src/fleet/placement.rs:150-300`, `registry/commands.rs:32`, `fleet/protocol/outcomes.rs:30-50`, `fleet/protocol/agent.rs:120-180`, `provisioning.rs` (the `GITLAB_*` items) and `admission.rs` (the `docker_socket` matching).
+  - Manager: `crates/gridops-manager/src/main.rs:380-490,593-610,2655-2736,2760-2790`.
+  - `grep -rn "HelperResponse::Failed" crates/` and `grep -rn GRIDOPS_REGISTRATION_URL crates/`.
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:31:00-08:00
+- **Decided:** RED is valid. F may implement against the authored tests (see `handoff-T-red.md`).
+  - New test files:
+    - `crates/gridops-core/tests/gitlab_runner_script.rs`: 11 tests. The script runs for real in bash, against a local verify server, the real curl and a stand-in gitlab-runner.
+    - `crates/gridops-host-agent/tests/docker_gitlab.rs`: 10 tests, against a stand-in docker CLI that fills in any inspect template.
+    - `crates/gridops-manager/src/gitlab_runner_tests.rs`: 3 route-level tests.
+  - Extended:
+    - `tests/dispatch.rs`: 2 tests;
+    - `main.rs` tests module: 4 tests, replacing the placeholder-refusal test;
+    - `stand_in_docker.rs`: lists and inspects given containers, and records create bodies and stdin.
+  - Mechanical `diagnostic: None` fallout in `tests/dispatch.rs`, `tests/docker_runtime.rs` and `gridops-api/tests/fleet_http/placement.rs`. These are test files, so they are mine (R2 W-2).
+  - RED is a compile error in each binary over a missing #147 item: the core constants and functions, and `HelperResponse::Failed.diagnostic`. Once core exists, the manager tests fail at runtime on the placeholder `BadRequest`, a missing `exitReason`, and 400 instead of 201.
+  - Two guards are green by design, because the placeholder refuses everything: the invalid-request refusal and the no-socket refusal. Each is paired with a RED test that requires the valid request to pass.
+- **Assumed:**
+  - Names the brief left open. Core: `GITLAB_READY_MARKER`, `GITLAB_JOB_RECEIVED_SIGNAL`, `gitlab_runner_script() -> String`, `gitlab_runner_env(&str, u32) -> Vec<String>` (A's suggested builder) and `valid_gitlab_url(&str) -> bool`. Manager: the label `io.gridops.platform=gitlab`.
+  - The script finds `curl` and `gitlab-runner` on PATH.
+  - The Prepare refusal (W-5) lives in the helper (`docker.rs`), per NIT-2.
+  - `GITLAB_EXIT_VERIFY_UNAVAILABLE` must be in 3..=125, so it isn't `set -e`'s 1, bash's 2 or a shell-reserved code. A stricter reading of "distinct" than the brief spells out.
+  - The runner image tag is `vX.Y.Z` or `ubuntu-vX.Y.Z`. Docker Hub shows both forms, alongside the alpine, alpine3.x and ubi-fips variants (checked through the registry tags API). F confirms NV-6.
+- **Hedged:**
+  - "Not in `/proc/<pid>/environ` of the main process" is shown on both paths by the container metadata never holding the token: the fleet `docker create` args and the manager create body. `/proc/1/environ` is the environment the container was created with (with `--init`, PID 1 is Docker's init). The script tier adds that the token reaches neither curl's argv nor its inherited environment, so it is never exported. There is no real-Docker test: it would need the gitlab-runner image pulled in CI.
+  - I first wrote a test for a job that outlasts `--wait-timeout` logging both exit lines. Reading `single.go` at v19.6.0 showed `postBuild` resets `lastBuild` after the job, so that can't happen, and I deleted the test.
+  - The never-ready test costs about 15 s (the real bound), run in parallel with the rest.
+  - The manager route tests need `TMPDIR=/tmp` on this workstation (`SUN_LEN`). The existing `provision_lock_tests` fail the same way, so it is environmental.
+- **Evidence:**
+  - Harness check: a throwaway draft of every production change, written into the source files, never staged, reverted to HEAD. With it, every affected suite went GREEN: script 11/11 (12/12 before the deletion), host-agent all targets, manager 111/111, and `fleet_http` compiled. 21 behaviour mutations each failed their named test; a few malformed mutation attempts were rerun until they changed only the behaviour under test.
+  - `cargo fmt --check` is clean. `cargo +1.98.1 clippy --all-targets` reports nothing in the test files.
+  - gitlab-runner `commands/single.go` (lines 76-81, 167-195) and `common/config.go:1462,1466` at v19.6.0, fetched from gitlab.com.
+  - Read: the brief (all amendments), `handoff-A.md` round 3, `decisions.md`, the #137 RED precedent, and `docker.rs`, `helper.rs`, `dispatch.rs`, `provisioning.rs`, `agent.rs` (`GitlabRunnerMaterial`), `outcomes.rs`, the manager's `main.rs` (validate, `runner_command`, `take_bootstrap_secret`, `list_runners`, `provision_runner_inner`), `stand_in_docker.rs` and `route_timeout_tests.rs`.
+
+## F (Phase 6, implement against RED): 2026-11-20T16:44:58-08:00
+- **Decided:** implemented #147 against T's suite in one pass (see `handoff-F.md`); every authored test is GREEN.
+  - No Scope Cap split. The brief's ownership list was reviewed by A over three rounds for one pass, the RED suite covers all of it, and 4 of the 10 production files are mechanical (`diagnostic: None`, one doc comment). Splitting would have left T's tests red with no gain.
+  - Core: `GITLAB_RUNNER_IMAGE = gitlab/gitlab-runner:ubuntu-v19.6.0`, `GITLAB_DEFAULT_JOB_IMAGE = alpine:3.24.4`, `GITLAB_EXIT_VERIFY_UNAVAILABLE = 69` (`EX_UNAVAILABLE`), a readiness marker, the run-single job signal, `valid_gitlab_url`, `gitlab_runner_env` and one constant `gitlab_runner_script`.
+  - The token reaches `gitlab-runner` as `CI_SERVER_TOKEN` set on that child only. It is not in argv (which host `ps` shows to every user), not in the container metadata, and not in bash's environment. The verify call reads it as `--data-urlencode token@-` from a `printf` pipe.
+  - The script tells completed from idle by tee-ing run-single's output and searching it for the build-limit line, which matches as a substring. The runner's formatter pads messages and adds ANSI codes, so a whole-line match would miss it.
+  - Fleet: the shared `docker create` flags were pulled into `create_args`, used by GitHub and GitLab alike. GitHub's flags are unchanged, and `docker_runtime` still passes. The GitLab Start keeps stdin attached until it sees the marker or an exit, polling every 200 ms for up to 15 s. It reads the exit status before `rm -f`, which covers A's warning 1.
+  - Manager: the GitLab platform is branched on in `validate`, `runner_command` and `take_bootstrap_secret`. A GitLab start is refused with 400 when there is no runner socket. The `io.gridops.platform=gitlab` label is set, `exitReason` comes from `inspect_container`, and `RUNNER_ALLOW_RUNASROOT` is now set only for GitHub.
+- **Assumed:**
+  - When Docker's `--init` is PID 1, it passes SIGTERM to bash. The script's trap passes it on to `gitlab-runner` and waits. I checked this headlessly with a stand-in runner, not with the real image.
+  - `wait_timeout_seconds` is always positive. A 0 would make run-single wait forever. Neither path rejects it: the contract does not, and the reconciler (#139) sends the default of 600. This is noted for #139.
+- **Hedged:**
+  - The verify call sends no `system_id`. GitLab's docs say it is required for `glrt-` tokens, but GitLab's source has it optional: `current_runner_manager` falls back to the legacy manager, which "doesn't count toward the limit". A random `system_id` would create a manager that counts toward the per-runner creation limit and could take the runner's own slot. If GitLab ever enforces the documented rule, verify answers non-200/non-403, and that surfaces as a retryable `GITLAB_EXIT_VERIFY_UNAVAILABLE` rather than a silent failure.
+  - GitLab's 422 "Runner is orphaned" counts as verify-unavailable (retryable), as the brief says for any non-200/non-403 answer.
+  - A runner whose script printed the marker and then exited before the first readiness poll counts as started. Inspect then reports how it ended, because a job may already have run.
+- **Evidence:**
+  - NV-1: `commands/single.go:24,27` (`--wait-timeout`, `--max-builds`) and `common/config.go:293,324,1462,1505,1556,1592-1593` at v19.6.0.
+  - NV-2: `common/config.go:1466` (`env:"CI_SERVER_TOKEN"`).
+  - NV-3: `single.go:76-82,167-176` and `log/runner_formatter.go:35`.
+  - NV-4: GitLab `lib/api/ci/runner.rb:133-149`, `lib/api/ci/helpers/runner.rb:18-29,78-94`, and `doc/api/runners.md:1093-1117`.
+  - NV-6: the registry manifest for `ubuntu-v19.6.0` amd64. It has `LABEL org.opencontainers.image.version=24.04`, layer 1 has `usr/bin/bash` and layer 2 has `usr/bin/curl`.
+  - Docker Hub lists `ubuntu-v19.6.0` (same digests as `v19.6.0`) and `alpine:3.24.4` as active.
+  - Tier 1 results: script 11/11, `docker_gitlab` 10/10, dispatch 8/8, manager 111/111, and 610/0 across core, host agent, manager, Tart agent and reconciler. CI's clippy and `cargo fmt --check` are clean. `fleet_http` is 143/144; the 1 failure is environmental (macOS workstation).
+
+## T (Phase 7, verify GREEN + Tier 2): 2026-11-20
+- **Decided:** the suite is GREEN and Tier 2 is clean, so the verdict is PASS (`handoff-T-green.md`). No test was changed: F flagged none as wrong and I found none.
+  - I re-ran the core script, host agent, manager, Tart agent and reconciler suites, and `fleet_http`. Everything passes except one `fleet_http` case, `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine`.
+  - CI's clippy command and `cargo fmt --check` are clean.
+  - A mutation (idle-expiry diagnostic replaced by `None`) fails `an_exited_gitlab_runner_inspects_as_gone_saying_why`, and I reverted it.
+- **Assumed:** the `release_preflight` failure is environmental. The native backend reports the OS from `cfg!(target_os)` (`native.rs:199-206`), and #147 changes `native.rs` only to add `diagnostic: None`. I did not run that test on a pre-#147 build.
+- **Hedged:** the real `gitlab-runner` image, a real GitLab and a real daemon were not exercised. That is the manual check deferred to #143, and the PR must say so.
+- **Evidence:** the run outputs in `handoff-T-green.md`; `evidence.md` already lists the unchanged-code facts the tests rely on.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20
+- **Decided:** PASS (`handoff-A-dup.md`). F extended the analogous objects: `HelperResponse::Failed`, `dispatch::outcome`, `DockerRuntime` Prepare/Start/Inspect, and the manager's `validate`, `runner_command`, `take_bootstrap_secret`, `list_runners` and `ManagedRunner`. The shared create flags were folded into `create_args` instead of being copied. The URL check and script live once in core, and both paths use them.
+- **Assumed:** the brief's W-8 and B-2 justify the separate GitLab script and the `start_gitlab_runner` readiness wait. `valid_registration_url` in the manager is GitHub-host specific, so it is not a duplicate of `valid_gitlab_url`.
+- **Hedged:** 2 warnings, neither blocking. `start_gitlab` repeats the shape of the GitHub create-and-feed sequence. A second stdin-feeding routine sits beside `feed_secret`.
+- **Evidence:** the diff `7db0f88..ec7ffda`, `docker.rs`, `provisioning.rs` and the manager `main.rs` read in full.

@@ -19,7 +19,7 @@ use gridops_core::fleet::{
     protocol::{
         agent::{AgentOperation, LocalResourceIdentity, PrepareEnvironment},
         inventory::ObservedBackend,
-        outcomes::{FailureCode, SuccessEvidence},
+        outcomes::{DiagnosticReference, FailureCode, SuccessEvidence},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -63,8 +63,18 @@ impl std::fmt::Debug for Bootstrap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HelperResponse {
-    Succeeded { evidence: Box<SuccessEvidence> },
-    Failed { code: FailureCode, retryable: bool },
+    Succeeded {
+        evidence: Box<SuccessEvidence>,
+    },
+    Failed {
+        code: FailureCode,
+        retryable: bool,
+        /// Why, when the runtime can tell (a GitLab runner's refused token or
+        /// idle expiry). Absent from the wire when `None`, so every other
+        /// failure keeps its form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<DiagnosticReference>,
+    },
 }
 
 /// What a start cut short by an agent restart left in its environment.
@@ -179,6 +189,7 @@ impl RuntimeHelper for NoRuntime {
         HelperResponse::Failed {
             code: FailureCode::Unsupported,
             retryable: false,
+            diagnostic: None,
         }
     }
 }
@@ -273,6 +284,7 @@ mod socket {
                         Err(_) => HelperResponse::Failed {
                             code: FailureCode::Configuration,
                             retryable: false,
+                            diagnostic: None,
                         },
                     },
                     Err(_) => return,
@@ -301,6 +313,7 @@ mod socket {
         HelperResponse::Failed {
             code: FailureCode::Dependency,
             retryable: true,
+            diagnostic: None,
         }
     }
 }

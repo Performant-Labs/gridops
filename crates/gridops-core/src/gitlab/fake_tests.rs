@@ -15,8 +15,8 @@ use url::Url;
 use crate::{
     fleet::ExternalId,
     gitlab::{
-        GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, Scope, ScopeKind,
-        fake::{FakeCall, FakeGitLab, FakeMethod},
+        GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, RunnerSummary, Scope, ScopeKind,
+        fake::{FakeCall, FakeGitLab, FakeMethod, FakeRunner},
     },
 };
 
@@ -379,5 +379,125 @@ async fn every_call_is_recorded_in_invocation_order_across_clones_without_tokens
     );
     let log = format!("{:?}", first.calls());
     assert!(!log.contains("glpat-recorded"), "{log}");
+    Ok(())
+}
+
+/// #139 (D17): the orphan sweep lists a connection's runners. The fake lists
+/// the runners of that scope on that instance only, a runner seeded with
+/// `with_runner` (one `GridOps` never created) among them, honours a queued
+/// failure once, and records the call.
+#[tokio::test]
+async fn listed_runners_are_the_scopes_own_on_that_instance_seeded_ones_included() -> Result<()> {
+    let fake = FakeGitLab::default();
+    let api: Arc<dyn GitLabApi> = Arc::new(fake.clone());
+    let (a, b) = (instance(INSTANCE_A)?, instance(INSTANCE_B)?);
+    let api_project = project(42, "acme/api")?;
+    let web_group = Scope::Group {
+        id: id(7)?,
+        path: "acme".to_owned(),
+    };
+    let on_a = credentials(&a, "glpat-a");
+    let on_b = credentials(&b, "glpat-b");
+    let created = api
+        .create_runner(&on_a, &api_project, &[], false, "gridops-runner:x:1")
+        .await?;
+    api.create_runner(&on_a, &web_group, &[], false, "group runner")
+        .await?;
+    api.create_runner(&on_b, &api_project, &[], false, "other instance")
+        .await?;
+    fake.with_runner(
+        &a,
+        FakeRunner {
+            id: id(900)?,
+            scope: api_project.clone(),
+            tags: vec!["shell".to_owned()],
+            run_untagged: true,
+            description: "a laptop runner".to_owned(),
+        },
+    );
+
+    let mut listed = api.list_runners(&on_a, &api_project).await?;
+    listed.sort_by_key(|runner| runner.id);
+    assert_eq!(
+        listed,
+        [
+            RunnerSummary {
+                id: created.id.get(),
+                description: "gridops-runner:x:1".to_owned(),
+            },
+            RunnerSummary {
+                id: 900,
+                description: "a laptop runner".to_owned(),
+            },
+        ],
+        "this scope's runners on this instance, the seeded one included"
+    );
+    assert_eq!(
+        api.list_runners(&on_a, &web_group).await?,
+        [RunnerSummary {
+            id: 2,
+            description: "group runner".to_owned(),
+        }]
+    );
+    assert_eq!(
+        api.list_runners(&on_b, &api_project).await?,
+        [RunnerSummary {
+            id: 1,
+            description: "other instance".to_owned(),
+        }]
+    );
+    // A seeded runner is a live runner of the instance: it can be deleted.
+    api.delete_runner(&on_a, id(900)?).await?;
+    assert_eq!(api.list_runners(&on_a, &api_project).await?.len(), 1);
+
+    fake.fail_next(
+        &a,
+        FakeMethod::ListRunners,
+        GitLabError::Upstream("502 from GitLab".to_owned()),
+    );
+    assert_eq!(
+        api.list_runners(&on_a, &api_project).await.err(),
+        Some(GitLabError::Upstream("502 from GitLab".to_owned()))
+    );
+    assert_eq!(
+        api.list_runners(&on_a, &api_project).await?.len(),
+        1,
+        "the failure was one-shot"
+    );
+    let listings = fake
+        .calls()
+        .into_iter()
+        .filter(|call| call.method == FakeMethod::ListRunners)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listings,
+        [
+            FakeCall {
+                base_url: a.clone(),
+                method: FakeMethod::ListRunners,
+            },
+            FakeCall {
+                base_url: a.clone(),
+                method: FakeMethod::ListRunners,
+            },
+            FakeCall {
+                base_url: b.clone(),
+                method: FakeMethod::ListRunners,
+            },
+            FakeCall {
+                base_url: a.clone(),
+                method: FakeMethod::ListRunners,
+            },
+            FakeCall {
+                base_url: a.clone(),
+                method: FakeMethod::ListRunners,
+            },
+            FakeCall {
+                base_url: a,
+                method: FakeMethod::ListRunners,
+            },
+        ],
+        "every listing is recorded, the failed one included"
+    );
     Ok(())
 }

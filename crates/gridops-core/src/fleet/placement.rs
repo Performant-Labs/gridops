@@ -18,7 +18,7 @@ use super::{
     },
     protocol::{
         agent::{AgentCommandEnvelope, AgentOperation, CommandScope, PrepareEnvironment},
-        outcomes::{AgentCommandResult, CommandOutcome, SuccessEvidence},
+        outcomes::{AgentCommandResult, CommandOutcome, DiagnosticCode, SuccessEvidence},
         primitives::{IdempotencyKey, ProtocolVersion, WireTimestamp},
     },
 };
@@ -186,6 +186,39 @@ pub async fn reported_gone(
             ..
         }
     ))
+}
+
+/// The diagnostic code of the newest applied result of the placement's `kind`
+/// command, when that result is a failure that carries one (#139): a GitLab
+/// runner's `IdleExpired` or `RegistrationRefused`. `None` when there is no
+/// such result, it did not fail, or it failed without a diagnostic (a
+/// completed GitLab runner).
+pub async fn reported_diagnostic(
+    pool: &SqlitePool,
+    placement: PlacementId,
+    kind: &str,
+) -> Result<Option<DiagnosticCode>, FleetError> {
+    let Some(json) = sqlx::query_scalar::<_, String>(
+        "SELECT r.result_json FROM host_command_results r JOIN host_commands c ON c.id=r.command_id
+          WHERE c.placement_id=? AND c.kind=? AND r.disposition='applied'
+          ORDER BY r.received_at DESC LIMIT 1",
+    )
+    .bind(placement.to_string())
+    .bind(kind)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let result: AgentCommandResult =
+        serde_json::from_str(&json).map_err(|_| FleetError::Invariant("stored result"))?;
+    Ok(match result.outcome {
+        CommandOutcome::Failed {
+            diagnostic: Some(diagnostic),
+            ..
+        } => Some(diagnostic.code),
+        _ => None,
+    })
 }
 
 /// State of the newest command of `kind` for this placement, if any.

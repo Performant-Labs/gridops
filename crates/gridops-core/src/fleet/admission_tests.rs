@@ -3489,3 +3489,127 @@ async fn gitlab_targets_are_stored_once_and_load_back_unchanged() -> Result<()> 
     assert_eq!(count().fetch_one(&database.pool).await?, before);
     database.close().await
 }
+
+/// Four GitLab connections, two of them members of `legacy-pool` (a project
+/// and a group) and two of no pool, and each connection's own target (the
+/// project or group it is scoped to): `(linked, unlinked)` target ids.
+async fn gitlab_targets_for_legacy_pool(database: &Database) -> Result<(Vec<String>, Vec<String>)> {
+    use crate::fleet::{ExternalId, domain::GitlabConnectionId, targets::ensure_target};
+    sqlx::raw_sql(
+        "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+           VALUES ('gl-linked-project','Linked project','https://gitlab.example.com','project',42,'acme/api','k1','w1',1,1),
+                  ('gl-linked-group','Linked group','https://gitlab.example.com','group',7,'acme','k2','w2',2,2),
+                  ('gl-unlinked-project','Unlinked project','https://gitlab.example.com','project',43,'other/api','k3','w3',3,3),
+                  ('gl-unlinked-group','Unlinked group','https://gitlab.example.com','group',8,'other','k4','w4',4,4);
+         INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at)
+           VALUES ('legacy-pool','gl-linked-project',1),('legacy-pool','gl-linked-group',2);",
+    )
+    .execute(&database.pool)
+    .await?;
+    let project = |connection: &str, id: u64| -> Result<CiTarget> {
+        Ok(CiTarget::GitlabProject {
+            connection_id: GitlabConnectionId::new(connection)?,
+            project_id: ExternalId::new(id)?,
+        })
+    };
+    let group = |connection: &str, id: u64| -> Result<CiTarget> {
+        Ok(CiTarget::GitlabGroup {
+            connection_id: GitlabConnectionId::new(connection)?,
+            group_id: ExternalId::new(id)?,
+        })
+    };
+    let mut linked = Vec::new();
+    for target in [
+        project("gl-linked-project", 42)?,
+        group("gl-linked-group", 7)?,
+    ] {
+        linked.push(ensure_target(&database.pool, &target).await?);
+    }
+    let mut unlinked = Vec::new();
+    for target in [
+        project("gl-unlinked-project", 43)?,
+        group("gl-unlinked-group", 8)?,
+    ] {
+        unlinked.push(ensure_target(&database.pool, &target).await?);
+    }
+    Ok((linked, unlinked))
+}
+
+/// #139 D11: a GitLab target is valid for a pool exactly when the pool has a
+/// `runner_pool_gitlab_connections` row for the target's connection. Today
+/// every GitLab target falls through to `_ => false`.
+#[tokio::test]
+async fn gitlab_targets_are_valid_only_for_pools_linked_to_their_connection() -> Result<()> {
+    use crate::fleet::service::ensure_target_identity_for_pool;
+    let database = Database::ready().await?;
+    let (linked, unlinked) = gitlab_targets_for_legacy_pool(&database).await?;
+    for target in &linked {
+        let mut tx = database.pool.begin().await?;
+        let decision = ensure_target_identity_for_pool(&mut tx, "legacy-pool", target).await;
+        tx.rollback().await?;
+        assert!(
+            decision.is_ok(),
+            "target {target} of the pool's own connection: {decision:?}"
+        );
+    }
+    for target in &unlinked {
+        let mut tx = database.pool.begin().await?;
+        let decision = ensure_target_identity_for_pool(&mut tx, "legacy-pool", target).await;
+        tx.rollback().await?;
+        assert!(
+            matches!(decision, Err(FleetError::Forbidden)),
+            "target {target} of a connection the pool lacks: {decision:?}"
+        );
+    }
+    // The membership is what makes it valid: removed, the target is refused.
+    sqlx::query("DELETE FROM runner_pool_gitlab_connections WHERE pool_id='legacy-pool'")
+        .execute(&database.pool)
+        .await?;
+    let mut tx = database.pool.begin().await?;
+    let decision = ensure_target_identity_for_pool(&mut tx, "legacy-pool", &linked[0]).await;
+    tx.rollback().await?;
+    assert!(
+        matches!(decision, Err(FleetError::Forbidden)),
+        "{decision:?}"
+    );
+    database.close().await
+}
+
+/// #139 D11: `link_pool_target` links a GitLab target to the pool's live
+/// platforms only when the pool is linked to the target's connection. Today
+/// it links GitHub repository targets only.
+#[tokio::test]
+async fn link_pool_target_links_a_gitlab_target_only_for_a_pool_of_its_connection() -> Result<()> {
+    use crate::fleet::targets::link_pool_target;
+    let database = Database::ready().await?;
+    let (linked, unlinked) = gitlab_targets_for_legacy_pool(&database).await?;
+    let links = |target: &str| {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM profile_ci_targets
+              WHERE profile_id=? AND target_id=? AND enabled=1 AND revoked_at IS NULL",
+        )
+        .bind(PROFILE)
+        .bind(target.to_owned())
+    };
+    for target in linked.iter().chain(&unlinked) {
+        link_pool_target(&database.pool, "legacy-pool", target).await?;
+    }
+    for target in &linked {
+        assert_eq!(
+            links(target).fetch_one(&database.pool).await?,
+            1,
+            "{target} of the pool's own connection is linked to its platform"
+        );
+    }
+    for target in &unlinked {
+        assert_eq!(
+            links(target).fetch_one(&database.pool).await?,
+            0,
+            "{target} of a connection the pool lacks is not linked"
+        );
+    }
+    // Linking again changes nothing.
+    link_pool_target(&database.pool, "legacy-pool", &linked[0]).await?;
+    assert_eq!(links(&linked[0]).fetch_one(&database.pool).await?, 1);
+    database.close().await
+}

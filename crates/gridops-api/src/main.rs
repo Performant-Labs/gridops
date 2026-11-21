@@ -20,7 +20,9 @@ use axum::{
     middleware,
     routing::{any, delete, get, patch, post, put},
 };
-use gridops_core::{BitbucketClient, Config, GitHubClient, Vault, connect_database};
+use gridops_core::{
+    BitbucketClient, Config, GitHubClient, Vault, connect_database, gitlab::GitLabClient,
+};
 use tower::ServiceBuilder;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -81,7 +83,8 @@ async fn main() -> Result<()> {
     let vault = Vault::from_config(&config)?;
     let github = GitHubClient::new(config.clone())?;
     let bitbucket = BitbucketClient::new()?;
-    let state = AppState::new(config.clone(), database, vault, github, bitbucket)?;
+    let state = AppState::new(config.clone(), database, vault, github, bitbucket)?
+        .with_gitlab(std::sync::Arc::new(GitLabClient::new()?));
     state.validate_api().await?;
     tokio::spawn({
         let state = state.clone();
@@ -203,6 +206,7 @@ fn public_routes() -> Router<AppState> {
         .route("/api/v1/auth/github", get(oauth::begin))
         .route("/api/v1/auth/github/callback", get(oauth::callback))
         .route("/api/v1/webhooks/github", post(webhooks::receive))
+        .route("/api/v1/webhooks/gitlab", post(webhooks::receive_gitlab))
         .route("/auth/github", get(oauth::begin))
         .route("/auth/github/callback", get(oauth::callback))
         .route(

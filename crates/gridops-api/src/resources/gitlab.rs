@@ -642,8 +642,13 @@ async fn stored_connection(state: &AppState, connection_id: &str) -> ApiResult<S
         })?;
     let path = row.get::<String, _>("scope_path");
     let scope = match row.get::<&str, _>("scope_kind") {
+        "project" => Scope::Project { id, path },
         "group" => Scope::Group { id, path },
-        _ => Scope::Project { id, path },
+        other => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "GitLab connection {connection_id} has an unknown scope kind {other:?}"
+            )));
+        }
     };
     Ok(StoredConnection {
         name: row.get("name"),
@@ -711,7 +716,7 @@ fn webhook_url(state: &AppState) -> String {
 /// The credentials for one call. The stored base URL has no trailing slash;
 /// the client gets one, so API paths join beneath an instance served under a
 /// path prefix.
-fn credentials(base_url: &str, access_token: String) -> ApiResult<GitLabCredentials> {
+pub(crate) fn credentials(base_url: &str, access_token: String) -> ApiResult<GitLabCredentials> {
     let base_url = Url::parse(&format!("{base_url}/")).map_err(|error| {
         ApiError::Internal(anyhow::anyhow!(
             "stored GitLab base URL is invalid: {error}"

@@ -33,7 +33,10 @@ use gridops_core::{
 use serde_json::json;
 use sqlx::Row as _;
 
-use super::{Pool, ProvisionAttempt, Reconciler, installation_token, runner_registration_url};
+use super::{
+    Pool, ProvisionAttempt, Reconciler, gitlab_lifecycle, installation_token,
+    runner_registration_url,
+};
 
 /// A queued intent that no host could take within this long is given up.
 const QUEUE_TIMEOUT_MILLIS: i64 = 10 * 60_000;
@@ -155,7 +158,15 @@ pub(super) async fn provision(
     profiles: &[Profile],
     profile: &Profile,
 ) -> Result<ProvisionAttempt> {
-    let (target_id, repository_id) = if pool.scope == "repository" {
+    // A GitLab pool's runner is placed for its selected connection's own
+    // target, never the pool's first target (#139).
+    let gitlab_connection = gitlab_lifecycle::next_connection(app, &pool.id).await?;
+    let (target_id, repository_id) = if let Some(connection) = &gitlab_connection {
+        (
+            gitlab_lifecycle::fleet_target(app, pool, profile, connection).await?,
+            None,
+        )
+    } else if pool.scope == "repository" {
         let repository = match repository_for_platform(app, pool, profiles, profile).await? {
             Some(repository) => repository,
             None => next_runner_repository(&app.database, &pool.id, pool.queue_scale_factor)
@@ -187,15 +198,25 @@ pub(super) async fn provision(
     let ephemeral = profile.input.mode == RunnerMode::Ephemeral;
     let now = now_millis();
     sqlx::query(
-        "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,os,architecture,
-           status,ephemeral,configuration_version,runtime,created_at,updated_at)
-         VALUES (?,?,?,?,?,'github',?,?,'starting',?,?,?,?,?)",
+        "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,gitlab_connection_id,
+           os,architecture,status,ephemeral,configuration_version,runtime,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,'starting',?,?,?,?,?)",
     )
     .bind(runner_id.to_string())
     .bind(&pool.id)
     .bind(repository_id)
     .bind(&name)
     .bind(if docker { "docker" } else { "tart" })
+    .bind(if gitlab_connection.is_some() {
+        "gitlab"
+    } else {
+        "github"
+    })
+    .bind(
+        gitlab_connection
+            .as_ref()
+            .map(|connection| connection.id.as_str()),
+    )
     .bind(match profile.input.execution_os {
         gridops_core::fleet::ExecutionOs::Linux => "linux",
         gridops_core::fleet::ExecutionOs::Macos => "macOS",
@@ -343,7 +364,7 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
         .await?
         .context("prepare command is missing")?;
     let runner = sqlx::query(
-        "SELECT r.id,r.name,r.status,p.installation_id AS pool_installation,inst.account_login,p.scope,
+        "SELECT r.id,r.name,r.status,r.ci_platform,p.installation_id AS pool_installation,inst.account_login,p.scope,
                 p.labels,EXISTS (SELECT 1 FROM runner_pool_exclusive_labels exclusive WHERE exclusive.pool_id=p.id) AS exclusive_labels,p.runner_group_id,repo.installation_id,repo.owner,repo.name AS repository
            FROM runners r JOIN runner_pools p ON p.id=r.pool_id
            JOIN installations inst ON inst.id=p.installation_id
@@ -363,6 +384,19 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
             &PlacementFailure::runner_removed_before_start(&status),
         )
         .await?;
+        return Ok(());
+    }
+    if runner.get::<String, _>("ci_platform") == "gitlab" {
+        // Registered with GitLab here, where GitHub's registration is made;
+        // a failed registration is rolled back and counted inside.
+        let Some(material) = gitlab_lifecycle::fleet_material(app, placement).await? else {
+            return Ok(());
+        };
+        if let Err(error) =
+            start_with_material(app, placement, prepared_environment_id, prepare, &material).await
+        {
+            gitlab_lifecycle::fleet_rollback(app, placement, &error).await?;
+        }
         return Ok(());
     }
     let name: String = runner.get("name");
@@ -445,12 +479,31 @@ async fn register_and_start(app: &Reconciler, placement: &Placement) -> Result<(
             "group": null,
         })
     };
+    start_with_material(
+        app,
+        placement,
+        prepared_environment_id,
+        prepare,
+        &material.to_string(),
+    )
+    .await
+}
+
+/// Seals the runner's bootstrap `material` for the machine and issues its
+/// start command.
+async fn start_with_material(
+    app: &Reconciler,
+    placement: &Placement,
+    prepared_environment_id: gridops_core::fleet::ids::PreparedEnvironmentId,
+    prepare: gridops_core::fleet::protocol::agent::PrepareEnvironment,
+    material: &str,
+) -> Result<()> {
     let now = now_millis();
     let reference = placement::store_bootstrap(
         &app.database,
         &app.vault,
         placement.id,
-        &material.to_string(),
+        material,
         START_WINDOW_MILLIS,
     )
     .await?;
@@ -527,11 +580,18 @@ async fn follow(app: &Reconciler, placement: &Placement) -> Result<()> {
     if deleted || exited || placement.state == "stopped" {
         if !deleted {
             // The runner exited by itself (an ephemeral runner after its job).
-            sqlx::query("UPDATE runners SET status='failed',failure_reason=NULL,updated_at=? WHERE id=? AND status NOT IN ('deleted','failed')")
+            let left = sqlx::query("UPDATE runners SET status='failed',failure_reason=NULL,updated_at=? WHERE id=? AND status NOT IN ('deleted','failed')")
                 .bind(now_millis())
                 .bind(&placement.workload_id)
                 .execute(&app.database)
-                .await?;
+                .await?
+                .rows_affected()
+                == 1;
+            // Once per runner, when it first leaves service: a GitLab
+            // runner's exit resets or counts the pool's failures (#139).
+            if left {
+                gitlab_lifecycle::fleet_runner_exited(app, placement, exited).await?;
+            }
         }
         placement::issue_command(
             &app.database,
@@ -605,13 +665,22 @@ async fn finish(app: &Reconciler, placement: &Placement) -> Result<bool> {
         )
         .await?;
     }
-    sqlx::query(
+    let left = sqlx::query(
         "UPDATE runners SET status='failed',updated_at=? WHERE id=? AND status NOT IN ('deleted','failed')",
     )
     .bind(now_millis())
     .bind(&placement.workload_id)
     .execute(&app.database)
-    .await?;
+    .await?
+    .rows_affected()
+        == 1;
+    // A GitLab runner whose placement failed counts once, when its row first
+    // leaves service: by the update above, or by its retry in this call,
+    // which retires it and happens once per placement. Revisiting the
+    // placement counts nothing more (#139).
+    if (left || retried) && placement.state == "failed" {
+        gitlab_lifecycle::fleet_start_failed(app, placement).await?;
+    }
     Ok(retried)
 }
 

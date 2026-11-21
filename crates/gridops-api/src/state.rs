@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use gridops_core::{
     BitbucketClient, Config, GitHubClient, Vault,
     fleet::ExternalId,
-    gitlab::{CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, Scope, ScopeKind},
+    gitlab::{
+        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
+        ScopeKind,
+    },
 };
 use reqwest::Url;
 use secrecy::ExposeSecret;
@@ -28,7 +31,7 @@ pub struct AppState {
     pub bitbucket: BitbucketClient,
     /// One client serves every GitLab connection: each call carries that
     /// connection's credentials. Tests swap in `FakeGitLab` with
-    /// [`AppState::with_gitlab`]; #146 wires the real client there.
+    /// [`AppState::with_gitlab`]; `main.rs` sets the real `GitLabClient` there.
     pub gitlab: Arc<dyn GitLabApi>,
     pub http: reqwest::Client,
 }
@@ -63,6 +66,14 @@ impl GitLabApi for UnconfiguredGitLab {
         _credentials: &GitLabCredentials,
         _runner_id: ExternalId,
     ) -> Result<(), GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn list_runners(
+        &self,
+        _credentials: &GitLabCredentials,
+        _scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError> {
         Self::unavailable()
     }
 
@@ -130,10 +141,9 @@ impl AppState {
         })
     }
 
-    /// Replaces the GitLab client (tests inject `FakeGitLab`; #146 the real
-    /// one). The binary calls it once #146's client lands.
+    /// Replaces the GitLab client: the binary sets #146's `GitLabClient`,
+    /// tests inject `FakeGitLab`.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_gitlab(mut self, gitlab: Arc<dyn GitLabApi>) -> Self {
         self.gitlab = gitlab;
         self

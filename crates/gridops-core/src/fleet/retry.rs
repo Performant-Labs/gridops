@@ -220,13 +220,14 @@ pub async fn retry_failed_start(
     let runner_id = Uuid::new_v4();
     let suffix = Uuid::new_v4().simple().to_string()[..8].to_owned();
     let name = format!("{}-{suffix}", row.get::<String, _>("pool_name"));
-    // The replacement is the same kind of runner for the same repository, on
-    // the pool's current configuration.
+    // The replacement is the same kind of runner for the same repository (or
+    // GitLab connection), on the pool's current configuration. A GitLab
+    // runner registers afresh, so its `gitlab_runner_id` is not copied.
     sqlx::query(
         "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,ci_platform,os,architecture,
-           status,ephemeral,configuration_version,runtime,created_at,updated_at)
+           status,ephemeral,configuration_version,runtime,gitlab_connection_id,created_at,updated_at)
          SELECT ?,pool_id,target_repository_id,?,provider,ci_platform,os,architecture,
-                'starting',ephemeral,?,runtime,?,?
+                'starting',ephemeral,?,runtime,gitlab_connection_id,?,?
            FROM runners WHERE id=?",
     )
     .bind(runner_id.to_string())

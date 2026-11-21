@@ -91,6 +91,7 @@ mod gitlab;
 mod gitlab_tests;
 mod overview_queue;
 mod tart_host;
+pub(crate) use self::gitlab::credentials as gitlab_credentials;
 pub use self::gitlab::{
     create_gitlab_connection, delete_gitlab_connection, gitlab_connections,
     rotate_gitlab_webhook_secret, update_gitlab_connection, verify_gitlab_connection,

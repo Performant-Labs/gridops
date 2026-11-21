@@ -69,6 +69,8 @@ mod tests {
             ci_platform: "github".into(),
             bitbucket_connection_id: None,
             bitbucket_runner_uuid: None,
+            gitlab_connection_id: None,
+            gitlab_runner_id: None,
             target_repository_id: None,
             repository_owner: None,
             repository_name: None,

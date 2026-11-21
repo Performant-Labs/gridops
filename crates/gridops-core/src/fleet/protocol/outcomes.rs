@@ -39,7 +39,11 @@ pub enum DiagnosticCode {
     /// Carried in `Failed { code: ResourceUnavailable, retryable: false }`.
     IdleExpired,
     /// GitLab refused the runner's `glrt-` token. Carried in
-    /// `Failed { code: Configuration, retryable: false }`.
+    /// `Failed { code: Configuration, retryable: false }` on the start
+    /// command's result, and in
+    /// `Failed { code: ResourceUnavailable, retryable: false }` on an Inspect
+    /// of a runner refused after its start (D147-2), so it is still cleaned
+    /// up.
     RegistrationRefused,
 }
 
