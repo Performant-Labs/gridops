@@ -54,6 +54,7 @@ impl RuntimeHelper for HostRuntime {
             _ => HelperResponse::Failed {
                 code: FailureCode::Unsupported,
                 retryable: false,
+                diagnostic: None,
             },
         }
     }

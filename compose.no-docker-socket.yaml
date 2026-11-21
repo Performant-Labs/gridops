@@ -7,8 +7,11 @@
 #
 # The manager still answers health and the Tart macOS provider, but starts no
 # container on its own host: runners (even with the setting on) and agent
-# sandboxes are refused with `docker_unavailable`. Needs Docker Compose 2.24.4
-# or newer, for `!reset`. See docs/fleet-agent.md.
+# sandboxes are refused with `docker_unavailable`. That is every built-in
+# runner container, GitLab runners included: they also need the runners'
+# Docker socket (GRIDOPS_RUNNER_DOCKER_SOCKET), since GitLab's Docker executor
+# runs each job on the host's daemon. Needs Docker Compose 2.24.4 or newer,
+# for `!reset`. See docs/fleet-agent.md.
 services:
   manager:
     environment:
