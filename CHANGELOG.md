@@ -30,6 +30,17 @@ Known problems in the current release are in the README's
   untagged jobs. See [GitLab runners](docs/gitlab-runners.md). (#150, #153,
   #157, #158, #160, #161, #162, #163, #164, #166)
 
+### Fixed
+
+- **A GitLab connection now needs the `manage_runner` scope.** GitLab 17.1 and
+  later refuse to delete a runner without it, so a token with only
+  `create_runner` and `read_api` left every runner registered in GitLab.
+  Saving a connection, replacing its token and **Verify** now refuse such a
+  token, and a runner deletion GitLab refuses shows as a **GitLab runner not
+  deleted** warning in the pool's events. The token help now asks for the
+  Maintainer role or higher on a project and the Owner role on a group.
+  (#171, #174)
+
 ## 0.2.0 - 2026-11-04
 
 ### Upgrading

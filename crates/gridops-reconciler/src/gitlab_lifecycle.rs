@@ -9,12 +9,16 @@
 //!   description naming this deployment and the runner row
 //!   (`gridops-runner:<instance>:<runner uuid>`).
 //! - Deregister: whenever a GitLab runner row leaves service. A failed delete
-//!   is logged and never fails a pass; the orphan sweep retries it.
+//!   is logged and never fails a pass; the orphan sweep retries it. A delete
+//!   GitLab itself refuses (other than a runner it no longer has) is also a
+//!   warning on the runner's pool (#171), so an operator sees it.
 //! - Outcomes: a runner that completed its job or idled out proves the
 //!   registration works and resets the pool's provisioning failures; one
 //!   GitLab refused counts one failure. Either happens once per runner, when
 //!   its row first leaves service.
 //! - Sweep: GitLab runners this deployment marked whose runner row is gone.
+//!   A delete GitLab refuses is a warning on each pool linked to the
+//!   connection, at most once an hour per pool, connection and reason.
 //!
 //! The `glrt-` runner token goes to the runner manager's start request or the
 //! fleet's sealed bootstrap material only: never to a row, event or log.
@@ -41,7 +45,7 @@ use sqlx::FromRow;
 
 use super::{
     Reconciler, Runner, clear_provision_failures, load_pool, record_provision_failure,
-    runtime_secret, setting_i64, system_event,
+    runner_event, runtime_secret, setting_i64, system_event,
 };
 
 /// The start of the description of every GitLab runner `GridOps` creates.
@@ -51,6 +55,14 @@ const MARKER_PREFIX: &str = "gridops-runner:";
 const SWEEP_INTERVAL_DEFAULT_SECS: i64 = 600;
 const SWEEP_INTERVAL_MIN_SECS: i64 = 60;
 const SWEEP_INTERVAL_MAX_SECS: i64 = 3_600;
+
+/// The warning a GitLab runner deletion that GitLab refused records on the
+/// pool's events (#171).
+const DELETION_REFUSED_EVENT: &str = "GitLab runner not deleted";
+
+/// How long one orphan-sweep warning stands for its pool, connection and
+/// reason, in milliseconds: the sweep writes no other in that time.
+const SWEEP_WARNING_WINDOW_MS: i64 = 3_600_000;
 
 /// A GitLab connection a pool registers runners on.
 #[derive(Debug, Clone, FromRow)]
@@ -207,10 +219,16 @@ pub(super) async fn register(
         })
 }
 
-/// Deletes GitLab runner `gitlab_runner_id` of connection `connection_id`. A
-/// runner GitLab no longer has is already gone.
+/// Deletes GitLab runner `gitlab_runner_id` of connection `connection_id`,
+/// the registration of runner row `runner_id` of pool `pool_id`. A runner
+/// GitLab no longer has is already gone. A delete GitLab refuses is also a
+/// warning on the pool, linked to the row (#171); a local failure (the
+/// connection gone, its token unreadable) is not GitLab's refusal and is only
+/// returned. Every caller logs the error and leaves the runner to the sweep.
 pub(super) async fn deregister(
     app: &Reconciler,
+    pool_id: &str,
+    runner_id: &str,
     connection_id: &str,
     gitlab_runner_id: i64,
 ) -> Result<()> {
@@ -221,23 +239,104 @@ pub(super) async fn deregister(
     let id = ExternalId::new(u64::try_from(gitlab_runner_id)?)?;
     match app.gitlab.delete_runner(&credentials, id).await {
         Ok(()) | Err(GitLabError::NotFound) => Ok(()),
-        Err(error) => Err(anyhow!(
-            "GitLab could not delete runner {gitlab_runner_id} of connection {}: {error}",
-            connection.name
-        )),
+        Err(error) => {
+            // The event's own failure is logged and never hides the
+            // deletion's error.
+            if let Err(event_error) = record_refused_deletion(
+                app,
+                pool_id,
+                Some(runner_id),
+                &connection,
+                gitlab_runner_id,
+                &error,
+            )
+            .await
+            {
+                tracing::warn!(runner_id = %runner_id, error = ?event_error, "could not record the refused GitLab runner deletion in the pool's events");
+            }
+            Err(anyhow!(
+                "GitLab could not delete runner {gitlab_runner_id} of connection {}: {error}",
+                connection.name
+            ))
+        }
     }
 }
 
-/// `delete_runner`'s GitLab arm: removes the runner's GitLab registration,
-/// if it ever got one. An error is logged; the orphan sweep retries it.
-pub(super) async fn deregister_runner(app: &Reconciler, runner: &Runner) {
+/// A stable code for why GitLab refused a request, for the sweep's
+/// deduplication: the `GitLabError` variant, with the scope for a missing
+/// one. Never the message, which names the connection and may be reworded.
+fn refusal_code(error: &GitLabError) -> String {
+    match error {
+        GitLabError::Unauthorized => "unauthorized".to_owned(),
+        GitLabError::MissingScope(scope) => format!("missing_scope:{scope}"),
+        GitLabError::MissingRole => "missing_role".to_owned(),
+        GitLabError::NotFound => "not_found".to_owned(),
+        GitLabError::RateLimited { .. } => "rate_limited".to_owned(),
+        GitLabError::Upstream(_) => "upstream".to_owned(),
+    }
+}
+
+/// What an operator is told when GitLab refused to delete one of the
+/// connection's runners: the connection, the GitLab runner, `GitLabError`'s
+/// client-safe text (it never carries a response body or a token), and,
+/// for a token problem only, what to give the connection.
+fn refused_deletion_message(
+    connection_name: &str,
+    gitlab_runner_id: i64,
+    error: &GitLabError,
+) -> String {
+    let remedy = match error {
+        GitLabError::MissingScope(scope) => format!(
+            "Give the connection a token with {scope} (or api); the orphan sweep retries it."
+        ),
+        GitLabError::Unauthorized => "Give the connection a valid token with create_runner, manage_runner and read_api (or api); the orphan sweep retries it.".to_owned(),
+        _ => "The orphan sweep retries it.".to_owned(),
+    };
+    format!(
+        "GitLab could not delete runner {gitlab_runner_id} of connection {connection_name}: {error}. {remedy}"
+    )
+}
+
+/// Records on pool `pool_id` that GitLab refused to delete GitLab runner
+/// `gitlab_runner_id` of `connection`, linked to runner row `runner_id` when
+/// there is one.
+async fn record_refused_deletion(
+    app: &Reconciler,
+    pool_id: &str,
+    runner_id: Option<&str>,
+    connection: &GitlabConnection,
+    gitlab_runner_id: i64,
+    error: &GitLabError,
+) -> Result<()> {
+    runner_event(
+        &app.database,
+        Some(pool_id),
+        runner_id,
+        "warning",
+        DELETION_REFUSED_EVENT,
+        &refused_deletion_message(&connection.name, gitlab_runner_id, error),
+        json!({
+            "connectionId": connection.id,
+            "connection": connection.name,
+            "gitlabRunnerId": gitlab_runner_id,
+            "reason": refusal_code(error),
+        }),
+    )
+    .await
+}
+
+/// `delete_runner`'s GitLab arm: removes the GitLab registration of runner
+/// `runner` of pool `pool_id`, if it ever got one. An error is logged; the
+/// orphan sweep retries it.
+pub(super) async fn deregister_runner(app: &Reconciler, pool_id: &str, runner: &Runner) {
     let (Some(connection_id), Some(gitlab_runner_id)) = (
         runner.gitlab_connection_id.as_deref(),
         runner.gitlab_runner_id,
     ) else {
         return;
     };
-    if let Err(error) = deregister(app, connection_id, gitlab_runner_id).await {
+    if let Err(error) = deregister(app, pool_id, &runner.id, connection_id, gitlab_runner_id).await
+    {
         tracing::warn!(runner_id = %runner.id, error = ?error, "could not remove the GitLab runner registration; the orphan sweep retries it");
     }
 }
@@ -449,7 +548,15 @@ pub(super) async fn fleet_material(
         runner.gitlab_connection_id.as_deref(),
         runner.gitlab_runner_id,
     ) {
-        if let Err(error) = deregister(app, connection_id, previous).await {
+        if let Err(error) = deregister(
+            app,
+            &placement.pool_id,
+            &placement.workload_id,
+            connection_id,
+            previous,
+        )
+        .await
+        {
             tracing::warn!(placement = %placement.id, error = ?error, "could not remove an earlier attempt's GitLab runner; the orphan sweep retries it");
         }
         forget_registration(app, placement).await?;
@@ -510,7 +617,15 @@ pub(super) async fn fleet_rollback(
         ..
     }) = &runner
     {
-        match deregister(app, connection_id, *gitlab_runner_id).await {
+        match deregister(
+            app,
+            &placement.pool_id,
+            &placement.workload_id,
+            connection_id,
+            *gitlab_runner_id,
+        )
+        .await
+        {
             Ok(()) => forget_registration(app, placement).await?,
             Err(error) => {
                 tracing::warn!(placement = %placement.id, error = ?error, "could not remove the GitLab runner of a failed fleet start; the orphan sweep retries it");
@@ -713,7 +828,65 @@ async fn sweep_connection(
             }
             Err(error) => {
                 tracing::warn!(connection = %connection.name, gitlab_runner_id = id, error = ?error, "could not remove an orphaned GitLab runner");
+                // The event's own failure is logged and never stops the sweep.
+                if let Err(event_error) = warn_linked_pools(app, connection, id, &error).await {
+                    tracing::warn!(connection = %connection.name, gitlab_runner_id = id, error = ?event_error, "could not record the refused GitLab runner deletion in the pools' events");
+                }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Records that GitLab refused the sweep's delete of GitLab runner
+/// `gitlab_runner_id` of `connection` on every pool linked to the connection.
+/// The runner's row, and its pool, may be gone, so every pool that may start
+/// runners on the connection is told, and no row is linked (`runner_id` stays
+/// NULL: a gone row would break the foreign key).
+///
+/// Deduplicated so a token that keeps failing does not write a row per runner
+/// per sweep: at most one per pool, connection and reason code an hour
+/// (`SWEEP_WARNING_WINDOW_MS`). What was written is read back from
+/// `runner_events` (its `created_at` and the metadata's `connectionId` and
+/// `reason`), as `record_provider_changes` does, so a reconciler restart
+/// neither repeats nor resets it. A new reason warns at once; the same reason
+/// warns again once the hour has passed. The window, not "only when the reason
+/// changes", because a delete that succeeds writes nothing: a token fixed and
+/// then broken the same way again would otherwise never warn. The per-runner
+/// warnings `deregister` writes are not deduplicated.
+async fn warn_linked_pools(
+    app: &Reconciler,
+    connection: &GitlabConnection,
+    gitlab_runner_id: u64,
+    error: &GitLabError,
+) -> Result<()> {
+    let gitlab_runner_id = i64::try_from(gitlab_runner_id)?;
+    let reason = refusal_code(error);
+    let pools: Vec<String> = sqlx::query_scalar(
+        "SELECT pool_id FROM runner_pool_gitlab_connections WHERE connection_id=? ORDER BY pool_id",
+    )
+    .bind(&connection.id)
+    .fetch_all(&app.database)
+    .await?;
+    let since = now_millis().saturating_sub(SWEEP_WARNING_WINDOW_MS);
+    for pool_id in pools {
+        let recorded = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM runner_events
+              WHERE pool_id=? AND event=? AND runner_id IS NULL AND created_at>?
+                AND json_extract(metadata,'$.connectionId')=?
+                AND json_extract(metadata,'$.reason')=?)",
+        )
+        .bind(&pool_id)
+        .bind(DELETION_REFUSED_EVENT)
+        .bind(since)
+        .bind(&connection.id)
+        .bind(&reason)
+        .fetch_one(&app.database)
+        .await?
+            != 0;
+        if !recorded {
+            record_refused_deletion(app, &pool_id, None, connection, gitlab_runner_id, error)
+                .await?;
         }
     }
     Ok(())

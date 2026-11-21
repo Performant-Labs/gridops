@@ -42,3 +42,23 @@
   - Ran `cargo test -p gridops-api --bins gitlab_tests` (64 passed).
   - `cargo fmt --check` and `npx eslint` are clean. `npm run typecheck` is clean after `vite build` generated `src/routeTree.gen.ts`.
   - `cargo +1.98.1 clippy -p gridops-core -p gridops-api -p gridops-reconciler --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` is clean. The default local clippy 0.1.99 fails on untouched files; CI pins 1.98.1 (`ci.yml:93,113`).
+
+## Phase 5 Implementation (F) - 2026-11-21T09:14:36-08:00
+- **Decided:**
+  - `verify_access` requires `create_runner`, `manage_runner` and `read_api`, in that order. `api` satisfies each.
+  - The per-runner "GitLab runner not deleted" `warning` is written inside `gitlab_lifecycle::deregister`, which now takes `pool_id` and `runner_id`. This covers all four callers. It goes through a new `runner_event` helper that `pool_event` delegates to.
+  - The sweep's warning fans out to every linked pool and leaves `runner_id` NULL. It is deduplicated per pool × `connectionId` × reason code per hour, read back from `runner_events` with `json_extract`.
+  - The reason text is `GitLabError`'s `Display`. The remedy sentence appears only for `MissingScope` and `Unauthorized`.
+  - Writing the event can fail; that failure is logged and never propagated.
+- **Assumed:**
+  - A refused delete inside `deregister` writes its event before returning the error. Callers still log their existing `tracing::warn!` lines.
+  - "Fixed" is an acceptable new subsection under Unreleased in `CHANGELOG.md`.
+- **Hedged:**
+  - The remedy wording for `Unauthorized` and for other errors is S's to judge.
+  - The dedup applies only to sweep rows, so a per-runner row does not suppress a sweep row. At most one extra row per hour results.
+- **Evidence:**
+  - `cargo test -p gridops-core --lib gitlab::` passed: 36 tests.
+  - `cargo test -p gridops-reconciler gitlab_lifecycle_tests` passed: 31 tests, all 6 RED tests now GREEN.
+  - fmt and clippy (1.98.1) are clean.
+  - `npm run lint`, `npm run typecheck` and `npm test` (603 tests) pass.
+  - Full-crate results are in handoff-F.md.
