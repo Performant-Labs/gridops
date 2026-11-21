@@ -79,3 +79,51 @@ None.
 - **Reachability:** per F, the feature is not reachable end to end until #147 (manager `validate` and the `exit_reason` relay).
 - **Mid-run revoked token:** exits 77 only after about 300 s (gitlab-runner's not-healthy sleep). Upstream behaviour, documented by F.
 - **Open NV-1 hedge:** whether `tart exec` returns the guest's status after an outside `tart stop` is unsettled; a runner stopped from outside could list "completed".
+
+## Test-only rework (S round 1)
+
+**Date:** 2026-11-20. **Trigger:** handoff-S.md verdict REWORK, test-only (Test-quality audit, finding 1). Only `crates/gridops-tart-agent/src/gitlab_tests.rs` changed; no production code, script or docs.
+
+### What changed
+
+- `the_guest_script_exits_with_the_status_each_ending_maps_to`: removed the script-text probing (`probe`, `verifies`, `reads_refusal`) and the three conditionals derived from it. Every expectation is now a fixed status, and `assert_verify_call` runs for every row.
+- The table now has 10 rows, each a different branch of `runner_script`:
+
+  | Row | Verify | `run-single` | Expected |
+  |---|---|---|---|
+  | a job that passed | 200 | job, build limit | 0 |
+  | a job that failed | 200 | job, build limit | 0 |
+  | no job before the wait timeout | 200 | idle line | 75 |
+  | another runner failure | 200 | exits 3 | 3 |
+  | a token refused by run-single | 200 | "forbidden", then idle line | 77 |
+  | a token refused by the verify call | 403 | never runs (argv record empty) | 77 |
+  | verify answered neither 200 nor 403 | 500 | never runs (argv record empty) | 69 |
+  | run-single itself exiting 75 | 200 | exits 75 | 70 |
+  | run-single itself exiting 77 | 200 | exits 77 | 70 |
+  | run-single exiting 0 without a recognised line | 200 | exits 0 silently | 70 |
+
+- `FAKE_GITLAB_RUNNER` gained three behaviours: `exit-75`, `exit-77`, `silent` (exit 0 with none of the recognised lines). `FAKE_CURL` already honoured any `verify-status`.
+
+### Mutation results (scratch copy of the tree; repo `gitlab.rs` untouched, SHA-256 checked afterwards)
+
+Each mutation applied to `runner_script` in the copy, then `cargo test -p gridops-tart-agent -- --exact gitlab::tests::the_guest_script_exits_with_the_status_each_ending_maps_to`:
+
+| Mutation | Result | Failing assertion |
+|---|---|---|
+| none (baseline) | PASS | - |
+| A. delete the verify call and its `case` | FAIL | "a job that passed: the token was not verified" |
+| B. delete the `run-single` "forbidden" -> 77 branch | FAIL | "a token refused by run-single": 75, expected 77 |
+| C. delete the `75\|77` -> 70 collision guard | FAIL | "run-single itself exiting 75": 75, expected 70 |
+| D. verify answering neither 200 nor 403 falls through instead of exiting 69 | FAIL | "a verify call answered with neither 200 nor 403": 0, expected 69 |
+| E. exit 0 instead of 70 when no line is recognised | FAIL | "run-single exiting 0 without a recognised line": 0, expected 70 |
+| control: `--max-builds 1` -> `2` | FAIL | `--max-builds` "2", expected "1" |
+
+### Suite results
+
+| Check | Result |
+|---|---|
+| `cargo test -p gridops-tart-agent`, runs 1-5 | run 1: 50 passed, 1 failed, `a_runner_waiting_for_a_slot_is_listed_as_waiting`, the pre-existing `FAKE_TART` flake from handoff-S item 8 (not #142 code). Runs 2-5: 51 passed, 0 failed |
+| `cargo fmt --all -- --check` | clean |
+| `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` | clean |
+
+S's optional item 7 (trim same-predicate rows in the 22-case refusal table) was not done: S does not gate on it, and this rework is scoped to finding 1.

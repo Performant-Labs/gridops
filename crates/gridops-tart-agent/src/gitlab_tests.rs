@@ -204,7 +204,10 @@ fn the_default_runner_binary_is_a_guest_path_the_image_script_and_docs_name() {
 /// and exits 0 both after its one job (whatever the job's result) and when
 /// the wait timeout passes with no job. A refused token is logged as
 /// "Checking for jobs... forbidden" and then also waits out the timeout.
-/// It records each invocation's arguments and its whole environment.
+/// It can also exit with a status of its own (75 or 77, colliding with the
+/// table) or exit 0 having logged none of those lines, as when it is stopped
+/// by a signal. It records each invocation's arguments and its whole
+/// environment.
 const FAKE_GITLAB_RUNNER: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 { printf '%s\n' "$@"; echo '--end--'; } >> "$dir/runner-argv"
@@ -241,6 +244,14 @@ case "$(cat "$dir/runner-behaviour" 2>/dev/null)" in
   crash)
     echo 'FATAL: the fake runner crashed' >&2
     exit 3 ;;
+  exit-75)
+    echo 'FATAL: the fake runner stopped' >&2
+    exit 75 ;;
+  exit-77)
+    echo 'FATAL: the fake runner stopped' >&2
+    exit 77 ;;
+  silent)
+    exit 0 ;;
 esac
 echo 'fake gitlab-runner: no behaviour scripted' >&2
 exit 99
@@ -484,47 +495,45 @@ async fn assert_verify_call(guest: &Guest, case: &str, url: &str) -> Result<()> 
 }
 
 /// Each way a runner ends, run through the real script under bash, exits
-/// with exactly the status `exit_reason` maps (or keeps its own). Which
-/// refused-token cases apply depends on the mechanisms the script
-/// implements: the verify call, recognising `run-single`'s "forbidden"
-/// output, or both. Each implemented mechanism gets its own case.
+/// with exactly the status `exit_reason` maps, or a status of its own outside
+/// the table. Every case verifies the token first; when the verify call does
+/// not answer 200, `run-single` never runs.
 #[tokio::test]
 async fn the_guest_script_exits_with_the_status_each_ending_maps_to() -> Result<()> {
-    let probe = runner_script(
-        "/opt/gitlab-runner/gitlab-runner",
-        &bootstrap(URL, WAIT_TIMEOUT),
-    );
-    let verifies = probe.contains("runners/verify");
-    let reads_refusal = probe.to_ascii_lowercase().contains("forbidden");
-    assert!(
-        verifies || reads_refusal,
-        "the script has no way to detect a refused token"
-    );
-
     // (case, verify answer, run-single behaviour, expected exit status)
-    let mut cases = vec![
+    let cases = [
         ("a job that passed", "200", "job-passed", 0),
         ("a job that failed", "200", "job-failed", 0),
         ("no job before the wait timeout", "200", "idle", 75),
         ("another runner failure", "200", "crash", 3),
-        // Refused during run-single, after a verify that passed. A
-        // verify-only script cannot see it: run-single waits out the timeout
-        // and it lists as idle_expired (the brief's time-of-check gap, W-1).
+        // Refused during run-single, after a verify that passed (W-1's
+        // time-of-check gap): run-single logs "forbidden" and waits out the
+        // timeout, which must not list as idle_expired.
+        ("a token refused by run-single", "200", "refused", 77),
         (
-            "a token refused by run-single",
-            "200",
-            "refused",
-            if reads_refusal { 77 } else { 75 },
-        ),
-    ];
-    if verifies {
-        cases.push((
             "a token refused by the verify call",
             "403",
             "job-passed",
             77,
-        ));
-    }
+        ),
+        (
+            "a verify call answered with neither 200 nor 403",
+            "500",
+            "job-passed",
+            69,
+        ),
+        // run-single's own status colliding with the table must leave it.
+        ("run-single itself exiting 75", "200", "exit-75", 70),
+        ("run-single itself exiting 77", "200", "exit-77", 70),
+        // Exit 0 with no job, no build limit and no timeout line (a signal
+        // stop) must not list as completed.
+        (
+            "run-single exiting 0 without a recognised line",
+            "200",
+            "silent",
+            70,
+        ),
+    ];
     for (case, verify, behaviour, expected) in cases {
         let guest = Guest::new().await?;
         guest.flag("verify-status", verify).await?;
@@ -533,11 +542,15 @@ async fn the_guest_script_exits_with_the_status_each_ending_maps_to() -> Result<
         let run = guest.run(&script).await?;
         assert_eq!(run.status, Some(expected), "{case}:\n{}", run.output);
         assert!(!run.output.contains(LEAK_MARKER), "{case}: token in output");
-        if verify != "403" {
+        assert_verify_call(&guest, case, URL).await?;
+        if verify == "200" {
             assert_runner_invocation(&guest, case, URL).await?;
-        }
-        if verifies {
-            assert_verify_call(&guest, case, URL).await?;
+        } else {
+            assert_eq!(
+                guest.invocations("runner-argv").await,
+                Vec::<Vec<String>>::new(),
+                "{case}: run-single ran after the verify call answered {verify}"
+            );
         }
     }
     Ok(())
