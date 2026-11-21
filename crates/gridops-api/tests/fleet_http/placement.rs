@@ -66,6 +66,7 @@ impl RuntimeHelper for FakeDocker {
                 return HelperResponse::Failed {
                     code: FailureCode::Dependency,
                     retryable: false,
+                    diagnostic: None,
                 };
             }
         }
@@ -89,6 +90,7 @@ impl RuntimeHelper for FakeDocker {
                     return HelperResponse::Failed {
                         code: FailureCode::Configuration,
                         retryable: false,
+                        diagnostic: None,
                     };
                 };
                 if let Ok(mut bootstraps) = self.bootstraps.lock() {
@@ -113,6 +115,7 @@ impl RuntimeHelper for FakeDocker {
                 return HelperResponse::Failed {
                     code: FailureCode::ResourceUnavailable,
                     retryable: false,
+                    diagnostic: None,
                 };
             }
             (AgentOperation::Cleanup { expected_resource }, _) => {
@@ -141,6 +144,7 @@ impl RuntimeHelper for FakeDocker {
                 return HelperResponse::Failed {
                     code: FailureCode::Unsupported,
                     retryable: false,
+                    diagnostic: None,
                 };
             }
         };

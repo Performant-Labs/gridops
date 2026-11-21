@@ -86,3 +86,33 @@
   - Core: `crates/gridops-core/src/fleet/placement.rs:150-300`, `registry/commands.rs:32`, `fleet/protocol/outcomes.rs:30-50`, `fleet/protocol/agent.rs:120-180`, `provisioning.rs` (the `GITLAB_*` items) and `admission.rs` (the `docker_socket` matching).
   - Manager: `crates/gridops-manager/src/main.rs:380-490,593-610,2655-2736,2760-2790`.
   - `grep -rn "HelperResponse::Failed" crates/` and `grep -rn GRIDOPS_REGISTRATION_URL crates/`.
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:31:00-08:00
+- **Decided:** RED is valid. F may implement against the authored tests (see `handoff-T-red.md`).
+  - New test files:
+    - `crates/gridops-core/tests/gitlab_runner_script.rs`: 11 tests. The script runs for real in bash, against a local verify server, the real curl and a stand-in gitlab-runner.
+    - `crates/gridops-host-agent/tests/docker_gitlab.rs`: 10 tests, against a stand-in docker CLI that fills in any inspect template.
+    - `crates/gridops-manager/src/gitlab_runner_tests.rs`: 3 route-level tests.
+  - Extended:
+    - `tests/dispatch.rs`: 2 tests;
+    - `main.rs` tests module: 4 tests, replacing the placeholder-refusal test;
+    - `stand_in_docker.rs`: lists and inspects given containers, and records create bodies and stdin.
+  - Mechanical `diagnostic: None` fallout in `tests/dispatch.rs`, `tests/docker_runtime.rs` and `gridops-api/tests/fleet_http/placement.rs`. These are test files, so they are mine (R2 W-2).
+  - RED is a compile error in each binary over a missing #147 item: the core constants and functions, and `HelperResponse::Failed.diagnostic`. Once core exists, the manager tests fail at runtime on the placeholder `BadRequest`, a missing `exitReason`, and 400 instead of 201.
+  - Two guards are green by design, because the placeholder refuses everything: the invalid-request refusal and the no-socket refusal. Each is paired with a RED test that requires the valid request to pass.
+- **Assumed:**
+  - Names the brief left open. Core: `GITLAB_READY_MARKER`, `GITLAB_JOB_RECEIVED_SIGNAL`, `gitlab_runner_script() -> String`, `gitlab_runner_env(&str, u32) -> Vec<String>` (A's suggested builder) and `valid_gitlab_url(&str) -> bool`. Manager: the label `io.gridops.platform=gitlab`.
+  - The script finds `curl` and `gitlab-runner` on PATH.
+  - The Prepare refusal (W-5) lives in the helper (`docker.rs`), per NIT-2.
+  - `GITLAB_EXIT_VERIFY_UNAVAILABLE` must be in 3..=125, so it isn't `set -e`'s 1, bash's 2 or a shell-reserved code. A stricter reading of "distinct" than the brief spells out.
+  - The runner image tag is `vX.Y.Z` or `ubuntu-vX.Y.Z`. Docker Hub shows both forms, alongside the alpine, alpine3.x and ubi-fips variants (checked through the registry tags API). F confirms NV-6.
+- **Hedged:**
+  - "Not in `/proc/<pid>/environ` of the main process" is shown on both paths by the container metadata never holding the token: the fleet `docker create` args and the manager create body. `/proc/1/environ` is the environment the container was created with (with `--init`, PID 1 is Docker's init). The script tier adds that the token reaches neither curl's argv nor its inherited environment, so it is never exported. There is no real-Docker test: it would need the gitlab-runner image pulled in CI.
+  - I first wrote a test for a job that outlasts `--wait-timeout` logging both exit lines. Reading `single.go` at v19.6.0 showed `postBuild` resets `lastBuild` after the job, so that can't happen, and I deleted the test.
+  - The never-ready test costs about 15 s (the real bound), run in parallel with the rest.
+  - The manager route tests need `TMPDIR=/tmp` on this workstation (`SUN_LEN`). The existing `provision_lock_tests` fail the same way, so it is environmental.
+- **Evidence:**
+  - Harness check: a throwaway draft of every production change, written into the source files, never staged, reverted to HEAD. With it, every affected suite went GREEN: script 11/11 (12/12 before the deletion), host-agent all targets, manager 111/111, and `fleet_http` compiled. 21 behaviour mutations each failed their named test; a few malformed mutation attempts were rerun until they changed only the behaviour under test.
+  - `cargo fmt --check` is clean. `cargo +1.98.1 clippy --all-targets` reports nothing in the test files.
+  - gitlab-runner `commands/single.go` (lines 76-81, 167-195) and `common/config.go:1462,1466` at v19.6.0, fetched from gitlab.com.
+  - Read: the brief (all amendments), `handoff-A.md` round 3, `decisions.md`, the #137 RED precedent, and `docker.rs`, `helper.rs`, `dispatch.rs`, `provisioning.rs`, `agent.rs` (`GitlabRunnerMaterial`), `outcomes.rs`, the manager's `main.rs` (validate, `runner_command`, `take_bootstrap_secret`, `list_runners`, `provision_runner_inner`), `stand_in_docker.rs` and `route_timeout_tests.rs`.

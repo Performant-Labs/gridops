@@ -44,6 +44,8 @@ use url::Url;
 
 mod builtin_host;
 #[cfg(test)]
+mod gitlab_runner_tests;
+#[cfg(test)]
 mod provision_lock_tests;
 #[cfg(test)]
 mod route_timeout_tests;
@@ -3258,20 +3260,156 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_runners_are_refused_by_name_until_their_owners_land() -> Result<(), serde_json::Error>
-    {
+    fn valid_gitlab_requests_pass_validation_on_both_providers() -> Result<(), serde_json::Error> {
         for provider in ["docker", "tart"] {
             let input: ProvisionRunner = serde_json::from_value(gitlab_request(provider))?;
-            let refused = input.validate();
-            assert!(
-                matches!(
-                    &refused,
-                    Err(ManagerError::BadRequest(message))
-                        if message == "GitLab runners are not supported yet: Docker is #147, Tart is #142."
-                ),
-                "{provider}: {refused:?}"
-            );
+            let validated = input.validate();
+            assert!(validated.is_ok(), "{provider}: {validated:?}");
         }
+        Ok(())
+    }
+
+    /// D10: a GitLab request needs its bootstrap and a `glrt-` token, is
+    /// ephemeral, names an http(s) GitLab and carries no GitHub or Bitbucket
+    /// secret. Every refusal is a bad request that never echoes the token.
+    #[test]
+    fn invalid_gitlab_requests_are_refused_without_echoing_the_token()
+    -> Result<(), serde_json::Error> {
+        type Change = fn(&mut serde_json::Map<String, serde_json::Value>);
+        let wrong_prefix = "glpat-should-never-be-echoed-0001";
+        let cases: [(&str, Change); 11] = [
+            ("no bootstrap", |body| {
+                body.remove("gitlab");
+            }),
+            ("no token", |body| {
+                body.remove("gitlabRunnerToken");
+            }),
+            ("a token without the glrt- prefix", |body| {
+                body.insert(
+                    "gitlabRunnerToken".into(),
+                    "glpat-should-never-be-echoed-0001".into(),
+                );
+            }),
+            ("an empty token", |body| {
+                body.insert("gitlabRunnerToken".into(), "".into());
+            }),
+            ("persistent mode", |body| {
+                body.insert("mode".into(), "persistent".into());
+            }),
+            ("an ftp URL", |body| {
+                body.insert(
+                    "gitlab".into(),
+                    serde_json::json!({"url": "ftp://gitlab.example.com", "waitTimeoutSeconds": 600}),
+                );
+            }),
+            ("a URL without a scheme", |body| {
+                body.insert(
+                    "gitlab".into(),
+                    serde_json::json!({"url": "gitlab.example.com", "waitTimeoutSeconds": 600}),
+                );
+            }),
+            ("a GitHub JIT configuration", |body| {
+                body.insert("jitConfig".into(), "fake-jit-credential-123456".into());
+            }),
+            ("a GitHub registration token", |body| {
+                body.insert(
+                    "registrationToken".into(),
+                    "fake-registration-123456".into(),
+                );
+            }),
+            ("a Bitbucket bootstrap", |body| {
+                body.insert(
+                    "bitbucket".into(),
+                    serde_json::json!({"accountUuid": "a", "runnerUuid": "r", "oauthClientId": "c"}),
+                );
+            }),
+            ("a Bitbucket OAuth secret", |body| {
+                body.insert(
+                    "bitbucketOauthClientSecret".into(),
+                    "fake-bitbucket-oauth-secret-123456".into(),
+                );
+            }),
+        ];
+        for provider in ["docker", "tart"] {
+            for (case, change) in &cases {
+                let mut body = gitlab_request(provider);
+                if let Some(object) = body.as_object_mut() {
+                    change(object);
+                }
+                let input: ProvisionRunner = serde_json::from_value(body)?;
+                let refused = input.validate();
+                assert!(
+                    matches!(
+                        &refused,
+                        Err(ManagerError::BadRequest(message))
+                            if !message.contains("glrt-manager-request-token-0001")
+                                && !message.contains(wrong_prefix)
+                    ),
+                    "{provider}, {case}: {refused:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// W-6: a GitLab start branches on the platform, not the mode: its
+    /// bootstrap secret is the GitLab token, and its command is the shared
+    /// GitLab script with the script's inputs as environment variables and
+    /// no secret in either.
+    #[test]
+    fn gitlab_runners_launch_the_shared_script_and_keep_the_token_for_stdin()
+    -> Result<(), ManagerError> {
+        let mut input: ProvisionRunner = serde_json::from_value(gitlab_request("docker"))
+            .map_err(|error| ManagerError::Internal(error.into()))?;
+        input.validate()?;
+        let secret = take_bootstrap_secret(&mut input)?;
+        assert_eq!(secret.expose_secret(), "glrt-manager-request-token-0001");
+        assert!(input.gitlab_runner_token.is_none());
+
+        let (command, environment) = runner_command(&input)?;
+        assert_eq!(
+            command.last(),
+            Some(&gridops_core::provisioning::gitlab_runner_script())
+        );
+        assert!(command.first().is_some_and(|shell| shell.ends_with("bash")));
+        for variable in
+            gridops_core::provisioning::gitlab_runner_env("https://gitlab.example.com", 600)
+        {
+            assert!(environment.contains(&variable), "missing {variable}");
+        }
+        let metadata = format!("{command:?}{environment:?}");
+        assert!(!metadata.contains(secret.expose_secret()));
+        assert!(!metadata.contains("--jitconfig"));
+        Ok(())
+    }
+
+    /// D15: a Tart agent's `exitReason` survives the manager's re-parse of
+    /// its runner list, and a runner without one gets no `exitReason` key.
+    #[test]
+    fn a_runners_exit_reason_survives_the_managers_reparse() -> Result<(), serde_json::Error> {
+        let runner = |exit_reason: Option<&str>| {
+            let mut runner = serde_json::json!({
+                "id": "tart-0123456789abcdef0123456789abcdef",
+                "names": ["mac-runner-1"],
+                "image": "gridops-macos-tahoe-base",
+                "state": "exited",
+                "status": "Exited (75)",
+                "labels": {"io.gridops.platform": "gitlab"},
+                "createdAt": "2026-11-20T00:00:00Z",
+                "provider": "tart",
+            });
+            if let Some(reason) = exit_reason {
+                runner["exitReason"] = reason.into();
+            }
+            runner
+        };
+        let relisted = serde_json::to_value(serde_json::from_value::<ManagedRunner>(runner(
+            Some("idle_expired"),
+        ))?)?;
+        assert_eq!(relisted["exitReason"], "idle_expired", "{relisted}");
+        let relisted =
+            serde_json::to_value(serde_json::from_value::<ManagedRunner>(runner(None))?)?;
+        assert!(relisted.get("exitReason").is_none(), "{relisted}");
         Ok(())
     }
 }
