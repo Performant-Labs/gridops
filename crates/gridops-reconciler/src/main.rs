@@ -4,6 +4,8 @@ mod fleet;
 mod tart_lane;
 
 #[cfg(test)]
+mod gitlab_lifecycle_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tart_outage_tests;
@@ -3841,6 +3843,8 @@ mod tests {
             ci_platform: "github".into(),
             bitbucket_connection_id: None,
             bitbucket_runner_uuid: None,
+            gitlab_connection_id: None,
+            gitlab_runner_id: None,
             target_repository_id: None,
             repository_owner: None,
             repository_name: None,
@@ -4829,6 +4833,7 @@ mod tests {
             config,
             database,
             bitbucket: BitbucketClient::new()?,
+            gitlab: Arc::new(gridops_core::gitlab::fake::FakeGitLab::default()),
             vault: Vault::new([0; 32], b"reconciler-test".to_vec()),
             http: reqwest::Client::new(),
             pass: Arc::default(),

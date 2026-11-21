@@ -130,3 +130,41 @@
     - `crates/gridops-reconciler/src/fleet.rs`: `:1-50` and `:150-619`.
     - `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`).
     - `crates/gridops-reconciler/src/start_tests.rs` (grep for the reset test).
+
+## T (Phase 4, author tests / RED): 2026-11-20T17:12:00-08:00
+- **Decided:** RED is valid. 32 new tests (see `handoff-T-red.md`):
+  - 26 reconciler tests in the new `gitlab_lifecycle_tests.rs`;
+  - 2 D11 admission unit tests;
+  - 3 D6/image integration tests in the new `crates/gridops-core/tests/gitlab_pool_fleet.rs`;
+  - 1 `list_runners` fake test.
+  - Every test fails for the right reason. The reconciler and the core lib fail at compile, on the brief's missing types only. The D11 tests fail with `Err(Forbidden)` and `0 != 1`. The D6 tests fail with "no GitLab target" and the stock-image substitution. With throwaway type stubs, each lifecycle test fails on a feature assertion.
+  - Three tests passed before code: the two "old completed does not reset again" tests (vacuously, since no reset existed yet) and the fleet probe (the pass errored before a second start). They were strengthened to assert the first reset and the probe's GitLab registration, then re-run.
+  - Item 4 is asserted in its refusal form, because `GITLAB_RUNNER_IMAGE` is absent on master (b22c451, origin c575130).
+  - Item 16 is tested through `FakeGitLab::fail_next(CreateRunner, Upstream("GitLab client not available yet"))`, the placeholder's own error.
+- **Assumed:**
+  - GitLab pools are `scope='gitlab'` with `runner_pool_gitlab_connections` rows (#138's shape).
+  - The names follow the brief:
+    - `FakeMethod::ListRunners`, `FakeGitLab::with_runner(&Url, FakeRunner)`;
+    - `RunnerSummary` re-exported at `gridops_core::gitlab`;
+    - `Reconciler.gitlab: Arc<dyn GitLabApi>`;
+    - `Runner.gitlab_connection_id: Option<String>` and `Runner.gitlab_runner_id: Option<i64>`.
+  - A readable diagnostic is any recorded text that names the connection and the outcome: `runners.failure_reason`, `runner_events.message`, `runner_pool_waits.reason`.
+  - The fleet selection picks the earliest-created connection when none has a live runner.
+  - The probe limit is one GitLab start per pass (A's round-5 warning 1); the tests check the probe pass only.
+  - The fleet tests need `min_count=1` (the `NoDemand` rule with `placement=machines` and no queued jobs).
+- **Hedged:**
+  - Brief-gate B-2(a), "no `create_runner`" at `save_pool_fleet`, is not asserted: `save_pool_fleet` takes no GitLab client, so the assertion would be vacuous.
+  - The fleet "Start fails on the host" case asserts no unreleased allocation for the placement, rather than a specific placement state, because `follow`/`finish` own that transition.
+  - `ensure_target_access` reads `bitbucket_connection_id` for any non-GitHub target. That is recorded as advisory for F, not pinned by a test (user-scoped GitLab visibility is deferred per D11).
+- **Evidence:**
+  - Commands:
+    - `cargo test -p gridops-reconciler --no-run`: 10 errors, all missing contract members;
+    - `cargo test -p gridops-core --lib --no-run`: 19 errors, all D17;
+    - `cargo test -p gridops-core --lib -- gitlab_targets_are_valid_only link_pool_target_links_a_gitlab`, run with HEAD's `fake_tests.rs` swapped in temporarily: 2 failed;
+    - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 failed;
+    - `cargo fmt --all -- --check`: clean.
+  - Throwaway-stub validation (production files restored with `git checkout` and backups, never staged):
+    - `cargo test -p gridops-reconciler gitlab_lifecycle_tests`: 26 failed, each on a behavior assertion;
+    - `cargo test -p gridops-reconciler -- --skip gitlab_lifecycle_tests`: 68 passed;
+    - `cargo clippy -p gridops-reconciler --all-targets`: only a pre-existing warning.
+  - Source read: `main.rs` (Reconciler, Runner, `reconcile`, `reconcile_pool`, `provision_on_host`, `start_admitted_runner`, `delete_runner`, `record_provision_failure`); `fleet.rs` (`provision`, `tick`, `register_and_start`, `follow`, `finish`); `fleet/service.rs` (`submit_intent_in`, `ensure_target_identity_for_pool`, `ensure_target_access`); `fleet/targets.rs`; `fleet/retry.rs`; `fleet/registry/commands.rs`; `gitlab/mod.rs`; `gitlab/fake.rs`; `fleet/protocol/agent.rs` (`GitlabRunnerMaterial`); `provisioning.rs` (GitLab constants).
