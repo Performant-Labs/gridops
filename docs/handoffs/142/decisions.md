@@ -113,3 +113,13 @@
     - the rendered guest script with the real 19.5.3 binary and real curl against a stub GitLab: verify 403 exited 77, idle exited 75, mid-run 403 exited 77, and no token appeared in any output or argv;
     - the image script with a fake `tart` (a real download plus `shasum --check`);
     - 24 full test runs, and 15 baseline runs.
+
+## T (Phase 7, GREEN + Tier 2)
+
+- **Decided:**
+  - GREEN is accepted: `gridops-tart-agent` 51/51, three consecutive runs.
+  - The two workspace failures are environmental and not F's: manager `SUN_LEN` (long worktree `TMPDIR`; 105/105 with a short one) and the api `release_preflight` test, which fails because this host is itself a macOS arm64 machine. Neither crate is in the diff.
+  - No test was repaired, and no production code was changed.
+- **Assumed:** CI uses short temp paths and a non-macOS-arm64 fleet fixture, so these two do not fail there.
+- **Hedged:** the two flaky pre-existing fixtures F named did not reproduce in my runs, so they are left as advisory.
+- **Evidence:** the commands and counts are in `handoff-T-green.md`.
