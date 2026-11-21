@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>#171 wireframe - GitLab token scopes and deletion warnings</title>
+<style>
+body{font:14px/1.45 system-ui,sans-serif;background:#f4f4f5;color:#18181b;margin:0;padding:24px;max-width:1040px}
+h1{font-size:18px;margin:0 0 4px}h2{font-size:15px;margin:32px 0 4px;border-bottom:2px solid #18181b;padding-bottom:4px}
+h3{font-size:13px;margin:18px 0 6px;color:#52525b;text-transform:uppercase;letter-spacing:.04em}
+.note{color:#52525b;font-size:12px;margin:2px 0 8px}
+.panel{background:#fff;border:1px solid #d4d4d8;border-radius:6px;padding:16px;margin:6px 0}
+.field{margin-bottom:12px}.label{font-weight:600;font-size:13px}.input{border:1px solid #a1a1aa;border-radius:4px;padding:6px 8px;color:#71717a;background:#fafafa;margin:4px 0}
+.help{font-size:12px;color:#52525b}.chg{background:#fef9c3;outline:1px dashed #ca8a04;padding:2px 4px}
+.btn{display:inline-block;border:1px solid #52525b;border-radius:4px;padding:4px 12px;font-size:13px;margin-right:6px;background:#fff}.btn.p{background:#18181b;color:#fff}.btn.dis{opacity:.45}
+.toast{border:1px solid #dc2626;background:#fef2f2;color:#991b1b;border-radius:4px;padding:8px 12px;font-size:13px;margin:6px 0}
+.toast.ok{border-color:#16a34a;background:#f0fdf4;color:#166534}
+.ann{font-size:11px;color:#1d4ed8;font-style:italic}.ann:before{content:"\2190  "}
+.grid{display:grid;grid-template-columns:14px 200px 1fr 90px 64px;gap:0 12px;align-items:center;padding:8px 16px;border-bottom:1px solid #e4e4e7;font-size:13px}
+.grid.hd{background:#f4f4f5;font-size:12px;font-weight:600;color:#52525b;height:20px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}.w{background:#d97706}.e{background:#dc2626}.s{background:#16a34a}
+.mono{font-family:ui-monospace,monospace;font-size:11px;color:#71717a}.tr{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+pre{margin:4px 16px 8px 49px;padding:8px;background:#f4f4f5;border:1px solid #d4d4d8;border-radius:4px;font-size:11px}
+.tbl{border:1px solid #d4d4d8;border-radius:6px;background:#fff;overflow:hidden}
+.legend{font-size:12px}.legend b{background:#fef9c3;outline:1px dashed #ca8a04;padding:0 3px}
+</style></head><body>
+<h1>#171 / #174 - GitLab token scopes and deletion warnings (low-fi)</h1>
+<p class="note">Two surfaces change. Everything else reuses existing components unchanged. <span class="legend"><b>Yellow dashed</b> = changed or new text. Blue italics = behavior notes.</span></p>
+
+<h2>Screen 1 - GitLab connection form (Settings &gt; Connections &gt; GitLab)</h2>
+<p class="note">Only the "Access token" help paragraph changes. Same single field definition serves Add (create) and Edit (token replacement). Fields, order, validation and the Verify action are unchanged.</p>
+
+<h3>1a. Add connection - default state</h3>
+<div class="panel">
+ <div class="field"><div class="label">Name</div><div class="input">gridops-e2e</div></div>
+ <div class="field"><div class="label">GitLab address</div><div class="input">https://gitlab.com</div></div>
+ <div class="field"><div class="label">Scope</div><div class="input">Project &#9662;</div></div>
+ <div class="field"><div class="label">Project or group path</div><div class="input">acme/platform/mobile-app</div></div>
+ <div class="field"><div class="label">Access token</div><div class="input">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull; (Paste a token)</div>
+  <div class="help chg">The token needs the <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code> scopes (or <code>api</code>), and its user needs the Maintainer role or higher on a project, or the Owner role on a group. GridOps checks both before saving.</div>
+  <div class="ann">One short paragraph, same <code>help</code> slot as today. Replaces "owner needs the Owner role on the project or group". Scope names in code style if the help slot renders inline code; otherwise plain text.</div></div>
+ <span class="btn p">Add connection</span><span class="btn">Cancel</span>
+</div>
+
+<h3>1b. Edit connection - token replacement</h3>
+<div class="panel">
+ <div class="field"><div class="label">New access token</div><div class="input">Leave blank to keep the current token</div>
+ <div class="help chg">(same paragraph as 1a)</div>
+ <div class="ann">Blank = keep current token, nothing re-verified. A pasted token is verified with all three scopes before anything changes.</div></div>
+ <span class="btn p">Save</span><span class="btn">Cancel</span>
+</div>
+
+<h3>1c. Refusal states (existing error surface, new message case)</h3>
+<div class="panel">
+ <div class="note">Add, with a token that has only create_runner + read_api: form stays open, nothing saved, no row added.</div>
+ <div class="toast chg">The GitLab access token is missing the manage_runner scope.</div>
+ <div class="note">Edit, same token pasted: form stays open, the stored token is unchanged.</div>
+ <div class="toast chg">The GitLab access token is missing the manage_runner scope.</div>
+ <div class="note">Verify action on a saved connection whose token lacks it (400, nothing changed):</div>
+ <div class="toast chg">The GitLab access token is missing the manage_runner scope.</div>
+ <div class="note">Verify success (unchanged):</div>
+ <div class="toast ok">GitLab connection verified.</div>
+ <div class="ann">Message format is fixed by the API: "The GitLab access token is missing the {scope} scope." Scope is the first missing one in order create_runner, manage_runner, read_api. Never shows the token.</div>
+</div>
+
+<h2>Screen 2 - Runner pool page, Events list (existing PoolEventTable)</h2>
+<p class="note">No new component, column or control. The reconciler writes new <code>warning</code> rows; the table already renders warning level with an amber dot and a Runner column (first 8 characters of the runner id, linking to live logs; "&mdash;" when there is none). Rows with metadata expand on click.</p>
+
+<h3>2a. Many - includes deletion warnings</h3>
+<div class="tbl">
+ <div class="grid hd"><span></span><span>Event</span><span>Details</span><span>Runner</span><span style="text-align:right">When</span></div>
+ <div class="grid"><span class="dot w"></span><b>GitLab runner not deleted</b><span class="tr" style="color:#52525b">GitLab could not delete runner 59802498 of connection gridops-e2e: the GitLab access token is missing the manage_runner scope. Give the connection a token with manage_runner (or api); the orphan sweep retries it.</span><span class="mono">a1b2c3d4</span><span style="text-align:right;font-size:12px;color:#a1a1aa">2m</span></div>
+ <div class="grid"><span class="dot w"></span><b>GitLab runner not deleted</b><span class="tr" style="color:#52525b">GitLab could not delete runner 59802511 of connection gridops-e2e: the GitLab access token is missing the manage_runner scope. Give the connection a token with ...</span><span class="mono">&mdash;</span><span style="text-align:right;font-size:12px;color:#a1a1aa">14m</span></div>
+ <div class="grid"><span class="dot s"></span><b>runner registered</b><span class="tr" style="color:#52525b">Runner registered with GitLab</span><span class="mono">e5f6a7b8</span><span style="text-align:right;font-size:12px;color:#a1a1aa">21m</span></div>
+ <div class="ann" style="padding:6px 16px">Row 1: deletion failed for a runner that has a row (per-runner, one row). Row 2: orphan sweep, no runner row, so Runner shows an em dash; written to each pool linked to the connection, at most once per pool per connection per reason per hour, so a failing sweep never floods the list. The warning dot is amber; the event name is stable.</div>
+</div>
+
+<h3>2b. One warning, expanded</h3>
+<div class="tbl">
+ <div class="grid"><span class="dot w"></span><b>GitLab runner not deleted</b><span class="tr" style="color:#52525b">GitLab could not delete runner 59802498 of connection gridops-e2e: the GitLab access token is missing the manage_runner scope. ...</span><span class="mono">a1b2c3d4</span><span style="text-align:right;font-size:12px;color:#a1a1aa">2m</span></div>
+<pre>{
+  "connection": "gridops-e2e",
+  "gitlabRunnerId": 59802498,
+  "reason": "missing_scope",
+  "scope": "manage_runner"
+}</pre>
+ <div class="ann" style="padding:6px 16px">Existing expand-for-metadata behavior. Metadata holds ids and a reason code only - never the token. Exact keys are the Feature implementor's call; the tests assert the message, not the metadata shape.</div>
+</div>
+
+<h3>2c. Narrow viewport</h3>
+<div class="tbl" style="max-width:380px">
+ <div style="padding:8px 16px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #e4e4e7"><span class="dot w"></span><b style="flex:1">GitLab runner not deleted</b><span style="font-size:12px;color:#a1a1aa">2m</span></div>
+ <div style="padding:0 16px 8px 35px;font-size:12px;color:#52525b">GitLab could not delete runner 59802498 of connection gridops-e2e: the GitLab access token is missing the manage_runner scope. Give the connection a token with manage_runner (or api); the orphan sweep retries it.</div>
+ <div class="ann" style="padding:4px 16px">Existing pattern: Details and Runner columns hide below md; the message appears when the row is expanded.</div>
+</div>
+
+<h3>2d. Empty / loading / error (existing states, unchanged)</h3>
+<div class="panel"><div class="note">Empty: the pool's existing empty-events copy. Loading: existing loading state. Error: "Pool activity could not be loaded." (existing). A deletion that succeeds or returns NotFound writes no event, so a healthy pool's list never shows this warning.</div></div>
+
+<h2>Not drawn (unchanged)</h2>
+<p class="note">Connections list, Verify button placement, pool forms (#172), macOS runners (#173), docs pages (text edits only, specified in the brief).</p>
+</body></html>
