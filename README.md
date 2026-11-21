@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/Performant-Labs/gridops/actions/workflows/ci.yml/badge.svg)](https://github.com/Performant-Labs/gridops/actions/workflows/ci.yml)
 
-GridOps is a self-hosted control plane for GitHub Actions runners. Connect a GitHub App, select repositories or organizations, and operate isolated Linux container or macOS virtual-machine runner pools from one interface.
+GridOps is a self-hosted control plane for GitHub Actions and GitLab CI runners. Connect a GitHub App, select repositories or organizations, and operate isolated Linux container or macOS virtual-machine runner pools from one interface.
 
 ## Capabilities
 
@@ -12,6 +12,7 @@ GridOps is a self-hosted control plane for GitHub Actions runners. Connect a Git
 - Multi-repository and organization-scoped pools that can share capacity across multiple runner providers
 - Ephemeral and persistent Docker runners with labels, CPU, memory, PID, and capability limits
 - Ephemeral Apple Silicon macOS runners in copy-on-write Tart virtual machines
+- GitLab CI runners for gitlab.com or self-managed GitLab projects and groups: one-job Docker and Tart runners created and deleted through the GitLab API, scaled from the Job webhook or a pending-jobs poll ([docs/gitlab-runners.md](docs/gitlab-runners.md))
 - Editable pool configuration with generation-tracked, busy-safe rolling runner replacement
 - Provision, scale, reconcile, pause, resume, stop, restart, rebuild, drain, and delete controls
 - Queue-driven autoscaling and idle scale-down
