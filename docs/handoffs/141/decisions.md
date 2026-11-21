@@ -264,3 +264,30 @@ PASS. GitLab extends the existing descriptor, registry, connections section, tar
 - **Assumed:** F's claim that the `sm`+ layout is unchanged (parent already `sm:w-auto sm:shrink-0`) is right; layout is U/S's to measure, not A's.
 - **Hedged:** The `OTHER_PLATFORM_KINDS` warn from the first pass stays as a tracked follow-up.
 - **Evidence:** `git diff e5d685f HEAD -- src crates tests migrations docs/openapi` (one file, 3 insertions, 1 deletion, zero `gitlab` matches); `git diff c0e2d58 HEAD --name-only` over the same paths lists only `connections-section.tsx`.
+
+## U (UI Walkthrough, Playwright backend, re-walk after S REWORK cycle 1) - 2026-11-20
+- **Decided:** PASS. Per S's REWORK item 2 ("re-walk 360 with per-button geometry and a hit test,
+  not only page overflow"), re-measured the GitLab connection row's action cluster
+  (`connections-section.tsx` `ConnectionRow`) at 320, 360, 390, 768 and 1280 px: each of Edit,
+  Verify, Rotate webhook secret and Remove has its own rectangle inside the card and
+  `elementFromPoint` at its centre returns that same button at every width; no page-level
+  horizontal overflow. Measured coordinates match F's own cycle-1 fix table exactly. Also
+  spot-checked the surrounding GitLab states (add-connection bad-token error and success reveal,
+  Targets picker selecting a GitLab project, Platform options "Run untagged jobs" toggle, pool
+  create submit with the captured POST body, delivery list badge) — all still match the brief and
+  the approved wireframe; nothing regressed from F's one-file CSS change.
+- **Assumed:** mocked `/api/v1/*` responses (no DB/seed path in this project) are a faithful
+  stand-in for #137/#138's real contract, same assumption the cycle-1 U pass and S/F's own tooling
+  made.
+- **Hedged:**
+  - Two defects found during this re-walk were in the walkthrough script's own mock fixtures, not
+    production: UUIDs with a non-standard variant nibble correctly tripped zod's `.uuid()`
+    ("Invalid UUID"), and a mocked pool-list item missing `labels` caused a `PoolRow` `TypeError`
+    after a successful create. Both fixed in the script; neither is a #141 defect.
+  - Carried forward from cycle 1: this session's bundled Chromium rejects the pre-existing
+    pool-name `pattern` attribute and silently blocks submit; worked around in the harness.
+  - The zero-connections empty state was not re-walked this cycle (unchanged from cycle 1's
+    flagged, non-blocking gap); F's rework does not touch it.
+- **Evidence:** `row-320.png`, `row-360.png`, `row-390.png`, `row-768.png`, `row-1280.png` and
+  `results.json` (per-button geometry table, hit-test results, captured create-payload JSON) in
+  the session scratchpad (not committed); full paths in `handoff-U.md`.

@@ -1,147 +1,121 @@
 # Handoff-U: Phase 8 - GitLab in the shared connections and targets UI (#141)
 
-**Date:** 2026-11-20
-**Branch:** claude/gitlab-141-ui-3ae7f5
+**Date:** 2026-11-20 (re-walk, cycle 2, after S REWORK → F fix → T → A re-checks)
+**Branch:** claude/gitlab-141-ui-3ae7f5 (HEAD `9441795`; F's row-action fix is `675a213`)
 **Issue:** #141 (epic #136)
-**Handoff-T-green reviewed:** docs/handoffs/141/handoff-T-green.md
-**Handoff-F reviewed:** docs/handoffs/141/handoff-F.md
+**Handoff-T-green reviewed:** docs/handoffs/141/handoff-T-green.md (cycle 2 re-verification, 2026-11-20)
+**Handoff-F reviewed:** docs/handoffs/141/handoff-F.md ("Rework after S" section)
+**Handoff-S reviewed:** docs/handoffs/141/handoff-S.md (REWORK, cycle 1)
+**Handoff-A-dup reviewed:** docs/handoffs/141/handoff-A-dup.md (PASS)
 **Approved wireframe:** docs/handoffs/141/wireframe.html (revision 3, A round 3 PASS)
+**Prior U pass:** this file's cycle-1 content (superseded below) reported PASS before S's REWORK;
+this re-walk targets exactly what S's REWORK item 2 asked of U ("re-walk 360 px using per-button
+geometry and a hit test, not only page overflow") plus a spot check of the surrounding states.
 
 ## T precondition
-Confirmed: T-green (Phase 7) returned no blockers. 548/548 Vitest tests pass, build/lint/types
-clean, `cargo test -p gridops-api gitlab`/`runner` green. T explicitly flagged "no live browser was
-run… hand off to U" — this phase.
-
-## Run environment
-GridOps has no e2e seed script and no Playwright config of its own, and its only login is GitHub
-OAuth (`/auth/github`, real GitHub redirect) — there is no email/password form and no DB fixture
-path available headlessly in this session. So the walkthrough drove the real `vite dev` server
-with every `/api/v1/*` call intercepted and mocked in-process to match the brief's own instruction
-("headless, against mocked API responses that match the spec") and the Contract section's exact
-shapes (`GitlabConnection`, `GitlabConnectionCreated`, pool wire fields, runner fields).
-
-- **Serve:** `npm run dev` (vite, `http://127.0.0.1:3000`), started and torn down by this session.
-- **Driver:** a throwaway Playwright script (`.u-walk.mjs`, removed after the run) using
-  `/Users/andreangelantoni/aftersight-srv/node_modules/playwright` (Playwright 1.63.0, bundled
-  Chromium 153.0.8010.12) in headless mode; `AFTERSIGHT_PLAYWRIGHT_PATH`/the release's `u-drive.mjs`
-  helper were not usable as-is because the helper's `login()` assumes an email/password HTMX form,
-  and GridOps is a React/TanStack-Router SPA with no HTMX — `page.route('**/api/v1/**', …)` plus
-  plain Playwright clicks/`waitForURL` were used instead, same methodology (SPA click-through,
-  console/HTTP error capture, 360px pass).
-- **Mock state:** two seeded GitLab connections (`Mobile app` / project, `Platform group` / group,
-  real-UUID ids), one seeded GitLab pool (`gitlab-pool`, targets `Platform group`), a GitHub
-  installation and a GitHub runner/pool for contrast, and stateful create/update/delete/verify/
-  rotate handlers keyed off the request body/connection id so each walkthrough step produces a
-  distinct, verifiable outcome (see "State matrix walked").
-- **Login:** `/api/v1/auth/session` mocked to an authenticated admin viewer (no real OAuth).
-- **Evidence paths:** 26 screenshots in `/tmp/u141-shots/*.png`; full per-step JSON (action,
-  expected, observed boolean, captured request bodies, console/HTTP error log) in
-  `/tmp/u141-results.json`. Both are session-scratch (not committed), per the handoff's references
-  below.
+Confirmed. T's cycle-2 re-verification (`decisions.md`, "T (Phase 7 re-verification after S
+REWORK, cycle 1)"): vitest 548/548, tsc 0, lint clean, build 0, cargo `the_runners_list_carries`
+and `gitlab` green, all at HEAD `675a213`. A's anti-duplication re-check (same HEAD) is PASS: the
+rework is 4 lines in `connections-section.tsx` (`ConnectionRow`'s action cluster), no new GitLab
+string, no parallel path.
 
 ## Wireframe conformance
-Compared the running UI against `docs/handoffs/141/wireframe.html` (revision 3, approved by A round
-3 PASS) frame by frame:
-- **Frame A (Connections list):** GitLab rows show name, `GitLab` badge, Project/Group badge, path
-  (`gitlab.com/acme/...`), "Verified {time}" aside, and Edit/Verify/Rotate webhook secret/Remove in
-  that order — matches.
-- **Frame B (Add connection form):** fields in order (name, address defaulting to
-  `https://gitlab.com`, Project/Group select, path, token), help text naming `create_runner`/
-  `read_api`/Owner, and the existing create-success toast (no wireframe "no toast" regression) —
-  matches.
-- **Frame C (post-create reveal):** secret with Copy, Webhook URL with its own Copy, and the "tick
-  Job events" instruction — matches.
-- **Frame D (row actions):** Verify toast (success and failure, server message verbatim); Rotate
-  webhook secret confirm ("Rotate secret" button) then a one-time reveal of the new secret and
-  unchanged URL — matches.
-- **Frame E (targets):** GitLab project/group options grouped under "GitLab · Project" / "GitLab ·
-  Group"; on the new-pool form the options come from `options.gitlabConnections`; on settings
-  (E5/E5b) the picker fetches every connection via `getGitlabConnections` and offers one the pool
-  doesn't yet use ("Mobile app") beside the one it does ("Platform group") — matches, including the
-  round-2 fix (no locked GitHub chip on a GitLab pool's settings, confirmed: GitHub/Bitbucket kinds
-  do not appear at all when viewing `gitlab-pool`'s settings).
-- **Frame F (Platform options / payload):** "Run untagged jobs" switch under Platform options ·
-  GitLab, collapsed by default; create payload captured verbatim carries `scope: "gitlab"`,
-  `installationId: 1`, `repositoryIds: []`, `runnerGroupId: 1`, both `gitlabConnectionIds`, and
-  `runUntagged: true` — matches F4's documented shape exactly.
-- **Frame G (runner link):** the GitLab runner's detail sheet links
-  `https://gitlab.com/acme/platform/-/runners/555` — matches.
-- **Frame H (deliveries):** GitLab badge on the list row, no destination text in the list, "—" in
-  the detail sheet (no new Platform row — H2's extra row was dropped per revision 3) — matches.
-- **Frame I (gaps):** not separately walked (it documents F's design decisions, not a UI state).
+No divergence found. This re-walk is scoped to the row-action layout S flagged (not a wireframe
+requirement itself — the wireframe does not specify a pixel layout for the action cluster), plus a
+spot check of the states the cycle-1 U pass already matched against `wireframe.html` revision 3
+frame-by-frame (connections list, add-connection form/reveal, row actions, targets, platform
+options/payload, runner link, deliveries). Those matches stand; nothing in F's one-file CSS fix
+touches wireframe-specified copy or controls.
 
-No divergence found between the running UI and the approved wireframe.
+## Run environment
+GridOps has no e2e seed script and its only login is GitHub OAuth, so (same approach as the cycle-1
+U pass and S/F's own tooling) every `/api/v1/*` call was intercepted and mocked in-process to match
+the brief's Contract section shapes.
+
+- **Serve:** `npx vite dev --host 127.0.0.1 --port 3100`, started and torn down by this session.
+- **Driver:** a throwaway Playwright script (`.u-walk.mjs`, removed after the run) using
+  `/Users/andreangelantoni/aftersight-srv/node_modules/playwright` (Playwright 1.63.0, bundled
+  Chromium 153.0.8010.12) in headless mode, plain `page.route('**/api/v1/**', …)` plus Playwright
+  clicks/role locators (same reasoning as the cycle-1 pass: `u-drive.mjs`'s `login()` assumes an
+  HTMX email/password form, and GridOps is a React/TanStack-Router SPA with no HTMX).
+- **Mock state:** two seeded GitLab connections (`Mobile app` / project, `Platform group` / group,
+  valid UUID v4 ids — a first attempt with non-variant-conformant ids tripped zod's `.uuid()` and
+  is recorded under Hedged), one seeded GitLab pool (`gitlab-pool`, targets `Platform group`), one
+  GitHub installation, and stateful create/verify/rotate handlers.
+- **Login:** `/api/v1/auth/session` mocked to an authenticated admin viewer.
+- **Environment workaround (carried from cycle 1, not a #141 defect):** this session's bundled
+  Chromium (153.0.8010.12) rejects the pre-existing pool-name `input[pattern]` attribute (present on
+  both pool routes before #141) and silently blocks submit; the script strips the attribute before
+  clicking Create pool, same workaround F used in its own verification.
+- **Evidence paths (session-scratch, not committed):** 7 screenshots (`row-320.png`, `row-360.png`,
+  `row-390.png`, `row-768.png`, `row-1280.png`, plus two debug captures of the add-connection reveal
+  and the pool-create form) and the full per-step JSON (action, expected, observed, per-button
+  geometry table, hit-test result, captured POST body) at
+  `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops--claude-worktrees-gitlab-141-ui-3ae7f5/026565be-3ca5-4937-951c-4703a5817ecc/scratchpad/u141/{results.json, row-*.png}`.
 
 ## State matrix walked
-All of the following were reached via a real click on the actual nav/UI control (SPA route change
-or in-dialog action), not a raw `page.goto`, except where noted as a deliberate hard-load/deep-link
-spot check:
 
 | # | Control / page | State | Reached via | Result |
 |---|---|---|---|---|
-| 1 | Settings → Connections | GitLab rows present (one/many) | **Hard load** (deep link, spot check) | PASS — rows render on first paint |
-| 2 | Settings → Members → Connections | round trip | **SPA** (sidebar Link, client-side route change) | PASS — no discrepancy vs the hard-load render |
-| 3 | Add connection → GitLab → Connect | error: bad token | SPA (dialog) | PASS — "GitLab rejected the access token." shown verbatim |
-| 4 | Add connection → GitLab → Connect | error: missing scope | SPA | PASS — message names `create_runner` |
-| 5 | Add connection → GitLab → Connect | error: duplicate | SPA | PASS — 409 "already exists" shown |
-| 6 | Add connection → GitLab → Connect | success (one, group kind) | SPA | PASS — 201 reveal: secret + Copy, Webhook URL + Copy, Job events note |
-| 7 | Row → Verify | success | SPA | PASS — "GitLab connection verified." toast |
-| 8 | Row → Verify | failure (another connection) | SPA | PASS — "GitLab rejected the access token." toast, server message verbatim |
-| 9 | Row → Rotate webhook secret | confirm then reveal | SPA | PASS — confirm dialog ("Rotate secret"), then "New webhook secret" one-time reveal |
-| 10 | Row → Edit | name change | SPA | PASS — saved, row reflects "Mobile app (renamed)" |
-| 11 | Row → Remove | success (unreferenced connection) | SPA | PASS — confirm ("Remove Mobile app?") then 204; row disappears from the list |
-| 11b | Row → Remove | error: 409 while a pool uses it | SPA | PASS — confirm ("Remove Platform group?") then 409; row stays, "A runner pool still uses this connection. Remove it from the pool first." toast shown |
-| 12 | New pool → Targets | many (project + group), GitHub/Bitbucket excluded | SPA | PASS — both GitLab kinds listed and selectable; GitHub and Bitbucket groups present in the same control (mixing is a server-side/schema rule per the brief, not a UI-disabled-reason display requirement here) |
-| 13 | New pool → Platform options → Run untagged jobs | toggle | SPA | PASS — `aria-checked="true"` after click |
-| 14 | New pool → Create pool | submit, many targets | SPA | PASS — POST body: `scope:"gitlab"`, both connection ids, `runUntagged:true`, `installationId:1`, `repositoryIds:[]`, `runnerGroupId:1` |
-| 15 | Pool settings → Targets | options beyond the pool's own | SPA | PASS — lists "Mobile app (renamed)" (unused) alongside "Platform group" (used) and "New GitLab Co" |
-| 16 | Pool settings → Targets → add second → Save | update | SPA | PASS — PUT body carries both connection ids |
-| 17 | New pool → Additional labels | error: 65-char tag (over the shared cap) | SPA | PASS — submit refused, cap error text (containing "64") shown in the create callout |
-| 18 | Runners → row → detail sheet | one (GitLab runner) | SPA | PASS — link `https://gitlab.com/acme/platform/-/runners/555` |
-| 19 | Webhooks list + detail sheet | one (GitLab delivery) | SPA | PASS — GitLab badge in the list row, no destination text in the list, "—" in the sheet |
-| 20 | Settings → Connections | 360px | SPA + resize | PASS — no horizontal overflow, Edit/Verify/Rotate/Remove all visible (wrap to a second line) |
-| 21 | New pool → Targets | 360px | SPA + resize | PASS — opens, searchable, no overflow |
+| 1 | Settings → Connections | GitLab rows present (one/many) | **Hard load** (deep link) | PASS — rows render on first paint |
+| 2 | Settings → Members → Connections | round trip | **SPA** (sidebar `Link`, client-side route change) | PASS — no discrepancy vs the hard-load render |
+| 3 | GitLab row action cluster (Edit/Verify/Rotate webhook secret/Remove) | **per-button geometry + `elementFromPoint` hit test, not page-level overflow** | SPA (same rendered row) | **PASS at 320, 360, 390, 768, 1280 px** — every button's own rectangle lies inside the card and `elementFromPoint` at its centre returns that same button; no page-level horizontal overflow at any width. Measured coordinates match F's own table exactly (e.g. 360 px: Edit 61–105, Verify 109–165, Rotate webhook secret 169–323, Remove 255–323). At 320/360/390 the cluster wraps (Remove drops to its own right-aligned line below `sm`); at 768/1280 it stays on one line. See screenshots `row-320.png` … `row-1280.png`. |
+| 4 | Add connection → GitLab → Connect | error: bad token | SPA (dialog) | PASS — "GitLab rejected the access token." shown verbatim |
+| 5 | Add connection → GitLab → Connect | success (one, project kind) | SPA | PASS — 201 reveal: secret + Copy, "Webhook URL" + its own Copy, "Job events" instruction, and the pre-existing create toast ("GitLab connection added.") still fires underneath (A round 2 warn 4 / S's "Create toast kept" is unaffected by F's rework) |
+| 6 | New pool → Targets | one (GitLab project) | SPA (real combobox open → search → select) | PASS — "Platform options · GitLab" section appears, collapsed by default (wireframe F) |
+| 7 | New pool → Platform options → Run untagged jobs | toggle | SPA | PASS — switch flips to the "on" state |
+| 8 | New pool → Create pool | submit | SPA | PASS — captured POST body: `scope: "gitlab"`, `gitlabConnectionIds: ["<the selected id>"]`, `runUntagged: true`, `installationId: 1`, `repositoryIds: []`, `runnerGroupId: 1` — matches the brief's Frame F shape exactly |
+| 9 | Webhooks list | one (GitLab delivery) | SPA | PASS — GitLab badge visible on the delivery row |
+| 10 | Settings → Connections | 360 px (and 320/390) | SPA + resize | PASS — see row 3; no overflow, every action reachable by its own hit box |
 
-**Zero/empty state:** the brief fixes the seed shape (at least one connection always exists once
-any is added); a true zero-connections empty state ("No GitLab projects or groups are connected
-yet.") is unit-tested (T's `gitlab-connections` suite) and visible by construction whenever the mock
-list is empty — not separately re-walked here since F's screenshots/T's jsdom assertions already
-cover the exact copy, and the walkthrough's time budget went to the states jsdom cannot see (the
-real click path, the real reveal dialog, the real combobox). This is a (small) gap, flagged rather
-than silently skipped.
+**Zero/empty state:** not re-walked this cycle; the cycle-1 pass recorded this as a flagged gap
+(zero-connections empty-state copy is unit-tested by T, not independently re-clicked), and nothing
+in F's rework touches that state. Still a (small) gap, carried forward, not newly introduced.
 
-**Console / state assertions:** no `consoleErrors` outside the walkthrough's own deliberate 400/409
-responses; no dead Alpine/React component signal (not applicable — this is a React SPA, not
-Alpine/HTMX; `collectEvidence`-equivalent checks for `[role="dialog"]`/`[aria-modal]` leftovers and
-viewport-center-hit were effectively exercised by the reveal/confirm dialogs all closing cleanly
-before the next step proceeded, and by every subsequent click succeeding).
+**Console / state assertions:** after fixing two mock-fixture bugs in the walkthrough script itself
+(invalid UUID variant nibbles causing a real "Invalid UUID" validation rejection, and a missing
+`labels` field on the mocked pool-list item causing a `PoolRow` `TypeError` on the post-create
+navigate) — both script defects, not production defects, see Hedged — the final run shows zero
+unexpected console errors outside the walkthrough's own deliberate 400 response.
 
 ## Findings
-None that are defects in #141's diff. Three environment/pre-existing notes (not #141 defects, see
-decisions.md for detail):
-1. This session's bundled Chromium (153.0.8010.12) throws on the pool-name input's pre-existing
-   `pattern="[a-z0-9][a-z0-9-]*[a-z0-9]"` attribute (present on both pool routes before this diff)
-   and silently blocks submit; worked around in the test harness, not a code change.
-2. `GET /api/v1/runner-pools/repositories` (pre-existing, GitHub-only) 404s against the mock during
-   pool-form visits; unrelated to GitLab and does not affect anything under test.
+**None — the row-action layout defect S reported in cycle 1 is confirmed fixed.** Per-button
+geometry and hit-testing at 320, 360, 390, 768 and 1280 px all pass; Edit is no longer clipped at
+320/360 px (previously 13/44 px visible at 360, 0 at 320). No new defect was found in the areas
+re-walked.
+
+Three environment/process notes, not #141 defects:
+1. **Carried from cycle 1:** this session's bundled Chromium throws on the pre-existing pool-name
+   `pattern` attribute and silently blocks submit; worked around in the harness, not a code change.
+2. **Walkthrough-script defects (mine, not production):** an early iteration of this script's mock
+   GitLab connection ids used UUID strings with a non-standard variant nibble (e.g.
+   `11111111-1111-1111-1111-111111111111`), which zod's `.uuid()` correctly rejects — the resulting
+   "Invalid UUID" callout was the schema working as designed against a bad test fixture, not a
+   product bug. Fixed by using variant-conformant UUIDs (`…-4111-8111-…`). Separately, an early
+   mock of the pools list omitted the `labels` field that `PoolRow` (`runner-pools.index.tsx:90`)
+   reads unconditionally, producing a `TypeError` after a successful create's navigate; fixed by
+   completing the fixture. Neither is a #141 defect — recorded for completeness since S's note asked
+   U to be precise about what each failure means.
 3. The pool detail Overview page still shows a GitLab pool's Account as its GitHub installation
-   login — reproduced here only as confirmation of the already-tracked #159 gap the brief marks out
-   of scope.
+   login — the already-tracked #159 gap the brief marks out of scope; not re-reproduced this cycle
+   (no new information).
 
 ## Evidence
-- Screenshots: `/tmp/u141-shots/01-connections-hardload.png` through `/tmp/u141-shots/99-final.png`
-  (26 files, desktop + 360px), plus a focused re-check of the Remove flow
-  (`13a-remove-confirm-unreferenced.png`, `13b-remove-success.png`, `13c-remove-referenced-409.png`)
-  run after the first pass's screenshot of that step turned out inconclusive (an ambiguous
-  "last `Remove` button" selector matched the wrong element) — the re-check isolates the confirm
-  dialog by `role="dialog"` and confirms both outcomes cleanly: the unreferenced connection's row
-  disappears after a 204, and the referenced connection's row stays with the 409 toast.
-- Full per-step JSON (action/expected/observed, captured POST/PUT bodies, console+HTTP error log):
-  `/tmp/u141-results.json`.
-- Both paths are session-scratch, not committed to the branch.
+- Per-button geometry table (all five widths) and the captured create-payload JSON: see
+  `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops--claude-worktrees-gitlab-141-ui-3ae7f5/026565be-3ca5-4937-951c-4703a5817ecc/scratchpad/u141/results.json`.
+- Screenshots: `row-320.png` (actions wrap to two lines, all four fully inside the card),
+  `row-360.png` (Edit/Verify/Rotate webhook secret on line one, Remove right-aligned on line two,
+  no clipping — this is the exact state S reported as broken, now fixed), `row-390.png`,
+  `row-768.png`, `row-1280.png` (one line, unchanged from cycle 1), plus
+  `debug-after-create.png` (the reveal dialog: secret, Webhook URL + Copy, Job events note, create
+  toast behind it) and `debug-after-submit.png` (post-create navigation, no error callout).
+- Both paths are session-scratch, not committed to the branch, per this role's conventions.
 
 ## Verdict
-**PASS** — every control in #141's diff behaves correctly on the real click path (SPA route
-changes, real dialogs, a real combobox), the running UI conforms to the approved wireframe with no
-divergence, the console is clean outside the walkthrough's own deliberate error-state responses,
-and the 360px pass shows no overflow or broken controls.
+**PASS** — S's REWORK item 1 (Edit clipped at 320/360 px) is confirmed fixed by direct per-button
+geometry measurement and `elementFromPoint` hit-testing (S's REWORK item 2's exact ask of U), at
+320, 360, 390, 768 and 1280 px, with no page-level overflow at any width and no regression to the
+768/1280 one-line layout. The surrounding GitLab states spot-checked this cycle (add-connection
+reveal, targets picker, Platform options toggle, pool-create payload, delivery badge) all still
+match the brief and the approved wireframe, and the console is clean outside the walkthrough's own
+deliberate error response. Ready for S.
