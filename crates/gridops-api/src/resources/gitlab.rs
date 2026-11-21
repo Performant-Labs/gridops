@@ -716,7 +716,7 @@ fn webhook_url(state: &AppState) -> String {
 /// The credentials for one call. The stored base URL has no trailing slash;
 /// the client gets one, so API paths join beneath an instance served under a
 /// path prefix.
-fn credentials(base_url: &str, access_token: String) -> ApiResult<GitLabCredentials> {
+pub(crate) fn credentials(base_url: &str, access_token: String) -> ApiResult<GitLabCredentials> {
     let base_url = Url::parse(&format!("{base_url}/")).map_err(|error| {
         ApiError::Internal(anyhow::anyhow!(
             "stored GitLab base URL is invalid: {error}"

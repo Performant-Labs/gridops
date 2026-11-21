@@ -1,0 +1,239 @@
+# Decision journal: #140 GitLab job webhook ingestion and busy tracking
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:20:11-08:00
+- **Decided:** BLOCK, with 2 block findings and 5 warn findings (see `handoff-A.md`).
+  - (1) [correctness] GitLab rows go into the shared `webhook_deliveries` table, but `retry` (`webhooks.rs:113-185`) replays every verified row through GitHub's `process`. That would mark a GitLab row `processed` and audit it as retried without doing anything. Admins are offered that retry, because a NULL `installation_id` makes `can_retry` true. The brief allows only `mod gitlab;` in `webhooks.rs`, so the fix is out of bounds. The GitLab row's `id` (the duplicate key) and its column mapping are also unpinned. `repository_id` is LEFT JOINed to `repositories` in the list.
+  - (2) [completeness] "Mark busy" doesn't name columns. The analogous `associate_runner_with_job` writes `current_job_id` and `last_job_id`. `last_job_id` has an FK to `workflow_jobs` (0047:140), and `current_job_id` is joined to `workflow_jobs.id` by six readers: the runners list, the job-log lookup, log-stream linking and the reconciler's agent context.
+  - The warnings:
+    - (3) the `AppState.gitlab` placeholder type, its home and the builder are unpinned between #138 and #140;
+    - (4) the `gridops-api` dev-dependency on `test-support` is missing from the shared-file list;
+    - (5) the delivery bookkeeping would be copied unless the brief authorizes extracting `pub(super)` helpers or accepts the copy;
+    - (6) the out-of-order guard should be a single conditional upsert, and #148's poll must be insert-only on `gitlab_jobs`;
+    - (7) connection lookup must handle several candidates and select by token, and the processing signature should stay narrow for fake injection.
+  - Accepted as consistent: the module placement (the `resources.rs` and `tart_host` precedent), the public route beside the GitHub webhook, runtime-secret reads, the `subtle` constant-time compare, the D2 `Arc<dyn GitLabApi>` seam, and the 0047 `gitlab_jobs` columns and statuses.
+- **Assumed:**
+  - #138 hasn't landed: `state.rs` has no `gitlab` field, and `gh pr list` shows no #138 PR.
+  - #140 is the only wave-1 issue that owns anything under webhooks (epic #136's ownership table), so widening its `webhooks.rs` allowance can't collide.
+  - GitLab job ids and GitHub job ids are independent integer namespaces.
+  - GitLab runner ids are unique per GitLab instance.
+- **Hedged:**
+  - **Finding 1** offers two resolutions: a GitLab dispatch arm in `retry` (recommended), or refusing GitLab retries and relying on #148's poll. The delivery-id header is left to O, because the OpenAPI declares only `X-Gitlab-Token` and `X-Gitlab-Event`, and brief-gate NV-2 already questions whether a GitLab delivery id exists. I didn't verify GitLab's webhook headers or payload fields such as `build_status_changed_at` against GitLab documentation. Those belong to the brief gate (NV-1 to NV-3).
+  - **Finding 2** is a block, not a warn. The FK and the join collisions are silent or late failures in code that other issues read, and the amendment is a single sentence.
+  - **Finding 6's #148 rule** is outside #140's code. It is reported so O can record it on #136.
+  - No Reuse map (`survey.md`) was provided, so the GitHub webhook path was the baseline.
+- **Evidence:**
+  - Read: `docs/handoffs/140-brief.md`, `docs/handoffs/140-brief-result-r1.md`, the #137 run's `handoff-A.md` and `decisions.md`, epic #136 (body and the D1-D16 deviation comments) and issue #138 (`gh issue view`).
+  - Source:
+    - `crates/gridops-api/src/webhooks.rs` (in full), `state.rs` (in full), `main.rs` (routes and state wiring) and `Cargo.toml`;
+    - `resources.rs`: the deliveries list and detail at `:2130-2230`, the runners list at `:1885`, the job logs at `:3220-3300`, and the submodules at `:41` and `:89-91`;
+    - `crates/gridops-api/tests/control_plane_contracts.rs`: the harness, which spawns the binary;
+    - `crates/gridops-core/src/gitlab/mod.rs` (in full) and the `fake.rs` surface;
+    - `crates/gridops-core/src/db.rs:150-330` and `:29`, `crypto.rs`, and `fleet/registry/output.rs:255-265`;
+    - `crates/gridops-reconciler/src/agent.rs:640-652` and `main.rs:1874-2030` and `2820-2895`;
+    - `src/routes/_app/webhooks.tsx:119-146`.
+  - Migrations: `0001_initial.sql:202-218` (`webhook_deliveries`) and `0047_gitlab.sql` (in full).
+  - Spec: `docs/openapi/gridops-v1.json` `POST /api/v1/webhooks/gitlab`, extracted with `python3 -I`.
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:44:07-08:00
+- **Decided:** BLOCK, with 3 block findings and 4 warn findings (see `handoff-A.md`).
+  - Round-1 findings 1 to 5 and 7 are resolved by the amendments. Round-1 finding 6 was applied as I suggested, but epic #136's later rule supersedes it.
+  - (1) [correctness] The `gitlab_jobs` guard orders by time first, with rank deciding only ties. That contradicts #136's "one status rule for `gitlab_jobs` writers (#140 webhook, #148 poll)": a terminal row never changes, and no writer moves a row backwards. The rule was posted 3:30:59 PM PST, 15 s after brief commit fc85722. The brief's note that #148 is insert-only is also wrong: #148 refreshes and concludes rows, writing its own observation time.
+  - (2) [correctness] `status_changed_at` in epoch seconds. Every `*_at` column in the codebase is epoch ms, and #148 reads and writes this column against `GITLAB_JOB_CHECK_AGE_MS` and its observation time.
+  - (3) [completeness] The route line fails `access::tests::the_documented_matrix_lists_exactly_the_registered_routes` without a `docs/fleet-api.md` row. The OpenAPI "Not served yet: implemented by #140" marker and its `openapi.rs` test are also left stale. #138's brief already allows the same three edits for its own routes.
+  - The warnings:
+    - (4) retry can't re-resolve the connection when several candidates exist;
+    - (5) the tier rule should be written once in Rust, with a #136 follow-up to move it to core;
+    - (6) D17's `list_runners` must be added to `UnconfiguredGitLab` by whichever of #139 and #138/#140 lands second;
+    - (7) whether to write `runner_events` on busy changes, which the GitHub analogue does.
+- **Assumed:**
+  - The #136 "#148 rules" comment is the governing cross-issue decision for `gitlab_jobs` writers, and it binds #140 although it postdates the brief.
+  - The in-flight sibling briefs, read from their worktrees, are what those issues will build: #148 at f8be658, #138 with uncommitted edits, #139 at d88acd5.
+  - GitLab does not move a job id's status backwards (a retry creates a new job id), so a rank-first guard loses no real transitions.
+- **Hedged:**
+  - I proposed the tier-0 placement of `manual`, `scheduled` and `unknown`. O should confirm it and record it on #136.
+  - I didn't verify that GitLab's Job event payload carries `build_status_changed_at` or `project.web_url`. Payload fields are the brief gate's job. The rank-first guard doesn't depend on the timestamp being present, which is part of why it is safer.
+  - I kept finding 3 as a block, not a warn, because the drift-test failure is certain the moment the route line is added, and the fix is a list edit.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (fc85722) and `140-brief-result-r1.md` / `-r2.md`;
+    - round-1 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs` (`:1-270`, `:500-760`, `:855-940`), `state.rs`, `Cargo.toml` and `main.rs:185-210`;
+    - `access.rs:184-300`, `fleet/openapi.rs:240-330` and `tests/fleet_http/token_access.rs:1140-1280`;
+    - `resources.rs:448-470`;
+    - `gridops-core/src/db.rs:180-330` and `gitlab/mod.rs` / `fake.rs`;
+    - `gridops-reconciler/src/main.rs:2036`, `:3130-3150`, and its uses of the core job helpers;
+    - `migrations/0047_gitlab.sql` and `0001_initial.sql` (`webhook_deliveries`);
+    - `docs/fleet-api.md:80-130`, and `docs/openapi/gridops-v1.json` (the path description, read with `python3 -I`).
+  - Epic #136 comments (`gh api .../issues/136/comments`, with timestamps), issues #140 and #148 (`gh issue view`), and `git log origin/master` (#138 not landed).
+  - Sibling worktrees: `148-brief.md` (A-W2, A-W3, `:69`) and `148/handoff-A.md`; `138-brief.md` (`:53`, `:113-127`); `139-brief.md` (D17, `:100-118`).
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:57:43-08:00
+- **Decided:** BLOCK, with 1 block finding and 3 warn findings (see `handoff-A.md`).
+  - Round-2 blocks 1 to 3 and warnings 4 to 7 are resolved by the round-2 amendments (a4ed945).
+    - Block 1 matches #136's comments of 23:43:53 and 23:45:29 UTC.
+    - Block 3's matrix row passes `token_access.rs:1263`'s "ignored" assertions, because `ApiError::Unauthorized` renders only `{"error": ...}`.
+  - (1) [correctness] The status guard is applied to the whole `gitlab_jobs` row, but each writer lacks one column:
+    - **`gitlab_runner_id`:** #148's poll writes `running` with no runner id (`Job` has none). The webhook's same-tier `running` event, with an older time, is then rejected, and the runner is never marked busy. The retry arm reaches this too.
+    - **`tag_list`:** the webhook inserts tier-0 rows with `[]`, which #148 reads as untagged. #148's status-only refresh moves such a row to `pending`, and the webhook's same-tier `pending` then skips the fetch.
+    - The GitHub analogue avoids this because both of its writers carry `runner_id` and `labels`, and runner identity is filled with `COALESCE`.
+  - The warnings:
+    - (2) #148's round-3 review proposes a shared `gridops-core` helper for the guarded write. Decide once for #140 and #148;
+    - (3) #148's busy clear matches on `connection_id`, while #140 matches on `base_url`. Post one match rule on #136;
+    - (4) pin `runner_events.message` (`NOT NULL`), and pin the retry arm's id split.
+- **Assumed:**
+  - #148's conclusion step writes whatever `job` reports, including `running` ("write its status", `148-brief.md:37`).
+  - Its pending refresh writes status only ("refresh the status", `:36`).
+  - GitLab sends Job events for `created` (the brief's own "`created`, then `preparing`" test requires the webhook to write tier-0 rows).
+  - #138 hasn't landed: origin/master is still b22c451.
+- **Hedged:**
+  - Finding 1(a) is reachable only through a delayed delivery or a retried failed `running` delivery. That is a narrow path, but a retry that does nothing reads as a fix.
+  - Finding 1(b) depends on #148's update not writing `tag_list`. The #140-side change, "`[]` until fetched, never overwritten by a non-fetch write", is small. The #148-side rule has to be posted on #136.
+  - I kept finding 1 as one block, because both parts share one root cause and one amendment.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (a4ed945), `140-brief-result-r1.md` / `-r2.md`, and round-2 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs:20-190` and `:556-660`, `db.rs:195-245`, `gitlab/mod.rs:115-127`, and `error.rs`;
+    - `gridops-reconciler/src/main.rs:1396-1438` and `:2000-2006`;
+    - `migrations/0047_gitlab.sql:23-82` and `0001_initial.sql:83-94`;
+    - `docs/fleet-api.md:118-132`, `token_access.rs:1195-1290`, and `fleet/openapi.rs:292-332`.
+  - Epic #136's comments (`gh api`, with timestamps), and issues #140 and #148, which have no comments.
+  - Sibling worktree `gitlab-148-scaling-71c514`: `148-brief.md` at c48f951 (`:19-37`, `:95-135`), and `148/handoff-A.md` round 3 (99c5a07).
+
+## A (Phase 3, up-front plan review, round 4): 2026-11-20T16:26:54-08:00
+- **Decided:** BLOCK, with 2 block findings and 3 warn findings (see `handoff-A.md`).
+  - The round-3 block is resolved by the round-3 amendment and D18's column rules, and so are warnings 2 to 4. D18's placement (`gridops-core/src/gitlab/jobs.rs`), its `&mut SqliteConnection` parameters and its `base_url` busy match are consistent with the codebase.
+  - (1) [correctness] "How #140 uses it" marks the runner busy only on `StatusApplied` or `FilledOnly`, so a first-seen `running` event (`Inserted`) never sets busy. The brief creates that state itself, through out-of-order delivery and a failed `pending` fetch. Also, "newly set by this call" can't be derived from `JobWriteOutcome`, which has no runner id from before the write. Fix: add `previous_gitlab_runner_id` and use one busy-set rule for every `write` variant.
+  - (2) [completeness] No transaction boundary. Busy effects are gated on the guarded write, so a failure after `record_gitlab_job` commits replays as `Ignored` on retry. A `running` event then never sets busy, and a terminal one never clears it. Fix: one `BEGIN IMMEDIATE` transaction around the write, the busy change and the `runner_events` insert, following the `fleet/` precedent. Post the same rule for #148.
+  - The warnings:
+    - (3) #146 merged (PR #153) without wiring `GitLabClient`. "#146 adds `.with_gitlab`" is false, and no issue owns the wiring;
+    - (4) D18's `u64` ids should be `ExternalId`, and its pool id `String`;
+    - (5) "one SQL statement" needs a prior read; core tests use temp-file databases, not in-memory ones.
+- **Assumed:**
+  - #148's local D18 copy constructs `JobWriteOutcome` only inside `jobs.rs`, so an added field is cheap for #148.
+  - GitLab runners are not reaped fast enough to make a lost busy clear harmless. Even if they were, a lost busy set still affects `maybe_scale_down`.
+  - Master is `e8b18bf` (#146 and #145 merged). #138, #139 and #148 have not landed.
+- **Hedged:**
+  - Finding 2 recommends `BEGIN IMMEDIATE` rather than a plain `begin()`, because `record_gitlab_job` reads and then writes. A deferred transaction fails at once on a WAL snapshot conflict. A failure is still recoverable once it's in a transaction, so either choice clears the block. `BEGIN IMMEDIATE` matches the core precedent.
+  - I kept warning 3 as a warning: production wiring isn't in #140's issue text, and #146's own review treated it as epic-level.
+  - The proposed Done-when tests use a temporary SQLite trigger to inject the partial failure. I haven't checked that the API test harness can run raw DDL. If it can't, a test can call the processing function directly against its pool.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (ba0a441, in full), `140-brief-result-r1.md` (uncommitted, post-D18) / `-r2.md`, and round-3 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs:1-270` and `:556-665`, `db.rs:17-32` and `:180-340`;
+    - `gitlab/mod.rs:1-240`, `fleet/domain.rs:1-120`, and `fleet/registry/mod.rs:1-16`;
+    - `fleet/targets.rs:536-548`, plus `grep` for `begin_with("BEGIN IMMEDIATE")`, `state.database.begin()`, `connect_database_path` and `ExternalId::try_from`;
+    - `gridops-reconciler/src/main.rs:480-520`, `:1390-1445` and `:1955-1975`;
+    - `migrations/0047_gitlab.sql:55-90` and `:119-170`, and `0001_initial.sql:83-95`;
+    - `sqlx-sqlite-0.9.0/src/types/{mod.rs,uint.rs}` (`u64` is decode-only).
+  - Epic #136's comments, with D18 at 00:15:49 UTC (`gh api`).
+  - #146: PR #153's files and merge time (`gh api`), and master's `146-brief.md`, `146/decisions.md`, `gitlab/mod.rs`, and the API and reconciler `main.rs` / `state.rs` (no GitLab wiring).
+  - Sibling worktrees: `148-brief.md` at `572f828` (`:120`, `:131`, `:155-191`), and `138-brief.md:124-127`.
+
+## A (Phase 3, up-front plan review, round 5): 2026-11-20T17:40:28-08:00
+- **Decided:** PASS, with 0 block findings and 3 warn findings (see `handoff-A.md`).
+  - Round-4 blocks 1 and 2 and warnings 3 to 5 are resolved by the round-4 amendments (`0af30ed`). The D18 amendment is on #136 (01:27:44 UTC).
+    - `previous_gitlab_runner_id` and the busy-set rule now cover every write variant.
+    - One `BEGIN IMMEDIATE` per delivery follows the `fleet/` precedent.
+    - Client wiring belongs to PR #161.
+    - The ids are `ExternalId`, and the pool id is `String` (`runners.pool_id` is NOT NULL).
+    - The writer reads, then runs one write. Its tests use temp-file databases.
+  - The warnings:
+    - (1) PR #160 (#148, `754a72b`) already has a full, gated D18 writer, plus `jobs_tests.rs` written to run against either copy. #140 should take those files byte for byte instead of writing a second implementation and suite;
+    - (2) #138's private `credentials()` helper (`resources/gitlab.rs:714`, which keeps a trailing slash that `FakeGitLab` keying depends on) isn't on #140's shared-file list. Expose it as `pub(crate)` or explicitly accept a copy;
+    - (3) the openapi test the brief names was renamed by #138 (`fleet/openapi.rs:293`).
+- **Assumed:**
+  - PR #160 will most likely merge before #140's F runs. Either way, a byte-identical copy merges cleanly.
+  - #148's `jobs.rs` at `754a72b` is the reviewed shape: its A-dup and S passed before the D18-amendment merge commit, and its own commit message says the local copy follows the round-4 amendment.
+  - GitLab 19.7 isn't released yet as of 2026-11-20 (GitLab releases on the third Thursday, so 19.6 came out on Nov 19).
+- **Hedged:**
+  - I kept W1 a warning, not a block. D18 says in writing that "whichever merges second takes master's file", so the duplicate is a deliberate decision and not drift. The cost is wasted work and divergence risk, not two copies on master.
+  - I kept W2 a warning. It matches round-1 W5 (bookkeeping copy vs. extraction), and `GitLabClient::api_url` accepts either URL form.
+  - The `build_status_changed_at` availability note is outside architecture. I reported it for the brief gate's NV-4 and NIT-1.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (`370c679`, in full), `140-brief-result-r1.md` / `-r2.md`, and round-4 `handoff-A.md` and `decisions.md`;
+    - `state.rs` (`:1-165`), `webhooks.rs` (`:1-192`, `:562-660`, `:889-938`), and `resources/gitlab.rs` (`:1-100`, `:560-730`, `:295-318`);
+    - `resources.rs:85-97`, `agent.rs:30-40`, `fleet/openapi.rs:247-315` and `access.rs:281-296`;
+    - `main.rs:195-215`, and the `gridops-api` and `gridops-core` `Cargo.toml` files;
+    - `gitlab/http.rs:395-415`, `gitlab/mod.rs:15-22`, `fleet/domain.rs:1-120`, and `db.rs:17-32`;
+    - `migrations/0047_gitlab.sql:20-170`.
+  - `grep` for `begin_with("BEGIN IMMEDIATE")`, `runner_events` inserts, `GitLabCredentials {`, `GitlabConnectionId` and `runtime_secret`.
+  - `git show --stat 0086aa9` (#138).
+  - `gh pr list`, plus `gh pr view 160` / `161` (files, body, head, mergeable).
+  - Epic #136's comments since 00:10 UTC (`gh api`).
+  - Sibling worktree `gitlab-148-scaling-71c514` at `754a72b`: `crates/gridops-core/src/gitlab/jobs.rs` (in full), `jobs_tests.rs` (test list), `gitlab/mod.rs:21-27`, and `148-brief.md` (`grep`).
+  - GitLab `doc/user/project/integrations/webhook_events.md` (Job events section, raw from gitlab.com master, read in the session scratchpad).
+
+## T (Phase 4, author tests / RED): 2026-11-20T18:02:10-08:00
+- **Decided:** RED is valid. 41 tests were authored, changed or adopted (see `handoff-T-red.md`):
+  - 30 in-crate HTTP tests in `crates/gridops-api/src/webhooks/gitlab_tests.rs`, one per Done-when item of the brief and its amendments. They run through `crate::public_routes()` and `crate::session_routes()` with `FakeGitLab`, and use `openapi_schema::check_response` for the 202, 400 and 401 shapes;
+  - 1 renamed unit test in `fleet/openapi.rs` (A round-5 W3): `the_gitlab_operations_are_specified_and_all_are_served`;
+  - 10 D18 tests: `crates/gridops-core/src/gitlab/jobs_tests.rs`, taken **byte for byte** from #148 at `754a72b` (blob `0d7ccf4b`), with #148's mount block in `gitlab/mod.rs`. This follows A's round-5 W1 rather than authoring a second D18 suite. The suite covers every rule in the brief's D18 "Tests" list. PR #160 is still open.
+  - **Wiring:** `#[cfg(test)] mod gitlab_tests;` in `webhooks.rs`, plus the `jobs_tests` mount. No production code was written.
+- **Assumed:** these are pins the brief leaves open. F implements against them; O may overrule any of them.
+  - The 202 has **no body**. The spec's 202 declares no content, and the shared checker enforces that, so `receive`'s `{"accepted": true}` body is not copied.
+  - A missing `X-Gitlab-Token` is a 401. The spec's only 400 is "payload is not a JSON object".
+  - A non-`build` event is tested as a real Pipeline Hook, so the candidate lookup must read the project from `project.id` and `project.path_with_namespace` when `project_id` is absent.
+  - The `runner_events.metadata` ids are JSON numbers, as in the GitHub path. Rows are compared with the metadata parsed, so key order is free.
+  - The `build_status_changed_at` fallback is checked as falling between `now_millis()` before and after the request, not as equal to `webhook_deliveries.received_at`. A's round-5 note about that NIT is left to O.
+  - `retry` answers 200 for a reprocessed GitLab row, as it does for GitHub rows.
+- **Hedged:**
+  - Every webhook test's RED is the same first failure: the route isn't served (405 from the GET-only `/api/v1/webhooks/{delivery_id}`). The downstream assertions can't fail individually until the route exists. To show the 405 hides no setup defect, T ran a throwaway harness-sanity test once and deleted it. It confirmed the seeding, secrets, admin `retry` access, the abort trigger, `FakeGitLab` and the helpers, and that a `gitlab:` row retried today goes through GitHub's `process` without writing a job.
+  - The brief's "a unit test covers a key containing `:`" is met by a retry-route test (`gl:retry:1`) rather than a unit test of the split helper, whose name and signature the brief doesn't pin.
+  - The D18 core suite's RED is a compile error (`E0432 unresolved import crate::gitlab::jobs`), the same way #138's seam RED was. T showed it can be satisfied by temporarily placing #148's `jobs.rs` on the branch: 10 passed. T then reverted it.
+  - Connections use host-only base URLs, so A's W2 (the trailing slash in `credentials`) is not constrained by any test.
+  - The delivery-id comment, the constant-time compare and log hygiene have no test. S should review them in the diff.
+- **Evidence:**
+  - `cargo test -p gridops-api --bin gridops-api`: 90 passed, 31 failed. The failures are the 30 new tests plus the renamed OpenAPI test, each failing at "405" or with the "Not served yet: implemented by #140" description.
+  - `cargo test -p gridops-core --lib --no-run`: one error, `E0432` at `jobs_tests.rs:34`.
+  - Satisfiability check: `cargo test -p gridops-core --lib -- gitlab::jobs_tests` with `754a72b`'s `jobs.rs` placed temporarily gave 10 passed.
+  - `cargo fmt --all -- --check` is clean. `cargo clippy -p gridops-api --bin gridops-api --tests` reports nothing in T's files.
+  - Read:
+    - `140-brief.md` (`370c679`), round-5 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs`, `state.rs`, `main.rs` (the router functions), `resources/gitlab_tests.rs` (the harness), and `tests/support/openapi_schema.rs`;
+    - `gitlab/mod.rs`, `gitlab/fake.rs`, and `migrations/0047_gitlab.sql` / `0001_initial.sql` (`webhook_deliveries`, `runner_events`);
+    - `fleet/openapi.rs:240-360`, `access.rs:281-296`, and the OpenAPI path entry;
+    - `754a72b`'s `gitlab/jobs.rs`, `jobs_tests.rs` and `mod.rs`.
+  - GitLab's `webhook_events.md` "Job events" section, fetched 2026-11-20: the payload shape, and `build_status_changed_at` in RFC 3339 with milliseconds, introduced in 19.7.
+
+## F (Phase 6, implement against RED): 2026-11-20T18:13:14-08:00
+- **Decided:**
+  - **The route.** `POST /api/v1/webhooks/gitlab` is served by `webhooks/gitlab.rs` (`receive_gitlab`), registered with one line in `public_routes()`.
+  - **D18's writer** is `754a72b`'s `jobs.rs`, byte for byte. It is also master's, since #160 has merged. `gitlab/mod.rs` now equals master's.
+  - **The credentials** come from #138's `credentials` helper, made `pub(crate)` and re-exported as `resources::gitlab_credentials`. This is A round-5 W2's primary option.
+  - **Delivery bookkeeping** was extracted from `receive` into four helpers that `receive`, `retry` and the GitLab receiver share. `receive` behaves as before.
+  - **`retry`** gets one GitLab arm, keyed on the `gitlab:` prefix and split once at the first `:` after it.
+  - **The runner id** is passed to the writer only for `running` events. A conclusion clears the runner recorded on the job.
+  - **The fallback status time** is the delivery's `received_at`, on the live path and on retry.
+- **Assumed:**
+  - A missing `X-Gitlab-Event` is a 400 through `required_header`, as `receive` treats its required headers. No test pins this, and GitLab always sends the header.
+  - A `build` event without a usable `build_id`, `project_id` or `pipeline_id` is processed with no effect, like `process_workflow_job`.
+  - A redelivered unmatched id still answers 401, not 202.
+- **Hedged:**
+  - The `resources.rs` and `resources/gitlab.rs` visibility edit is outside the brief's shared-file list. It is A's suggested fix, and the brief was not amended after round 5. If O prefers the local-copy option, it is a two-line revert plus a copy of `credentials` into `gitlab.rs`.
+  - Master has not been merged into the branch. The driver owns commits. The D18 files are byte-identical, so the merge is clean.
+- **Evidence:**
+  - `cargo test -p gridops-api --bin gridops-api`: 121 passed, 0 failed (was 90 passed, 31 failed).
+  - `cargo test -p gridops-core --lib`: 291 passed.
+  - `control_plane_contracts`: 36 passed.
+  - `fleet_http`: 143 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`, which depends on the host OS (this Mac). Nothing in the diff touches it.
+  - `cargo fmt --all -- --check` is clean. clippy reports nothing in the touched files.
+  - `git hash-object`: `jobs.rs` is `c51247dd` and `mod.rs` is `96be8825`, both equal to `origin/master`.
+
+## T (Phase 7, GREEN + Tier 2)
+
+- **Decided:**
+  - Verdict PASS. The suite is GREEN (121 bin, 291 core, 36 contracts) and no test was changed.
+  - The one `fleet_http` failure (`release_preflight::...without_a_macos_arm64_machine`) is not blocking. It depends on the host OS, and the diff touches nothing it exercises.
+- **Assumed:** the failure passes on Linux CI. T did not run it on base.
+- **Hedged:** the constant-time compare, the header-order comment and no-token-in-logs have no test and are left to S.
+- **Evidence:**
+  - A mutation of the busy-clear arm (`gitlab.rs:367`) failed four tests. The file was restored with `git checkout`; the 60 `gitlab_tests` pass again.
+  - `cargo fmt --check` is clean, and clippy shows no warning in touched files.
+
+## A (Phase 7, anti-duplication gate)
+
+- **Decided:** verdict PASS. F extended `receive`/`retry` in `webhooks.rs` and used D18's `gridops-core::gitlab::jobs` writer unchanged (blobs equal to `origin/master`); no parallel path.
+- **Assumed:** the `credentials` visibility change outside the brief's list is acceptable, as it follows A's round-5 W2 option and changes visibility only.
+- **Hedged:** two `warn`s, no action. The private `external_id` helper in `gitlab.rs` has a different input from the one in `jobs.rs`. The inline `runner_events` insert matches existing writers.
+- **Evidence:** `docs/handoffs/140/handoff-A-dup.md`.

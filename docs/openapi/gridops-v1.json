@@ -1403,7 +1403,7 @@
       "post": {
         "tags": ["webhooks"],
         "summary": "Receive a GitLab webhook delivery",
-        "description": "Not served yet: implemented by #140. The delivery is matched to a connection by its `X-Gitlab-Token`.",
+        "description": "The delivery is matched to a connection by its `X-Gitlab-Token`.",
         "security": [],
         "parameters": [
           { "name": "X-Gitlab-Token", "in": "header", "required": true, "description": "The connection's webhook secret.", "schema": { "type": "string" } },
