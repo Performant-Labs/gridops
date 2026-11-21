@@ -243,3 +243,12 @@ PASS. GitLab extends the existing descriptor, registry, connections section, tar
   request bodies captured for the two POST/PUT assertions, console/HTTP error log). No console
   error, dead component, or blocking overlay was observed outside the deliberate 400/409 test
   responses.
+
+## F (Feature Implementor, Phase 6 rework after S REWORK) - 2026-11-20T19:12:01-08:00
+- **Decided:** Fixed the clipped Edit button on narrow GitLab rows generically. In `ConnectionRow` (`connections-section.tsx:269`) the action cluster goes from `flex shrink-0 items-center gap-1` to `flex min-w-0 flex-wrap items-center justify-end gap-1`, so the actions wrap right-aligned below `sm`. The `sm`+ layout is unchanged because the parent is `sm:w-auto sm:shrink-0`. No GitLab string was added. S's cosmetic note (Project/Group badge wrapping at 768/1280) is left as is: S's acceptance requires 768/1280 to stay unchanged.
+- **Assumed:** S's pre-fix HEAD captures in `screenshots/cycle-1/` are a valid baseline for "unchanged" (same mock, same tooling).
+- **Hedged:** Below 320 px the page still overflows because the app shell has a 320 px minimum width. This predates #141 and is unrelated to this row.
+- **Evidence:**
+  - Headless Playwright measurement at 320/360/390/414/480/560/639/640/768/1280: all four actions inside the card and hit-testable, no page overflow from 320 up.
+  - Pixel diff against `cycle-1` live captures, excluding the version bar: GitHub/Bitbucket rows 1-3 px at 360/768/1280; GitLab rows 4-5 px at 768/1280; only GitLab at 360 changed, as intended.
+  - tsc clean, lint clean, vitest 548/548.

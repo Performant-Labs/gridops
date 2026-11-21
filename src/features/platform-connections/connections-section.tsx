@@ -263,8 +263,10 @@ function ConnectionRow({ descriptor, item, canManage, onReveal }: { descriptor: 
         {view.aside || showActions ? (
           <div className="flex w-full items-center justify-end gap-3 sm:w-auto sm:shrink-0">
             {view.aside}
+            {/* The actions wrap, right-aligned, when a narrow row cannot hold them all on one line
+                (a descriptor may contribute several); from `sm` up the row sizes this group to fit. */}
             {showActions ? (
-              <div className="flex shrink-0 items-center gap-1">
+              <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
                 {update && editable.length ? <Button disabled={busy} onClick={startEditing} size="sm" variant="ghost">Edit</Button> : null}
                 {actions.map((action) => (
                   <Button disabled={busy} key={action.label} onClick={() => void runAction(action)} size="sm" variant="ghost">{action.label}</Button>

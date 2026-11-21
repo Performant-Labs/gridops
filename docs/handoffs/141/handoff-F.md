@@ -139,3 +139,84 @@ docs/handoffs/141/evidence.md
 - src/routes/_app/webhooks.tsx
 
 Docs (not production): docs/handoffs/141/handoff-F.md, docs/handoffs/141/evidence.md, docs/handoffs/141/decisions.md (F entry appended).
+
+---
+
+# Handoff-F: Rework after S (Spec Audit REWORK, cycle 1) - clipped Edit on narrow GitLab rows
+
+**Date:** 2026-11-20
+**Branch:** claude/gitlab-141-ui-3ae7f5
+**Issue:** #141
+
+## What was done
+- `src/features/platform-connections/connections-section.tsx` (`ConnectionRow`, action cluster at :267-269).
+  - The cluster's classes change from `flex shrink-0 items-center gap-1` to `flex min-w-0 flex-wrap items-center justify-end gap-1`, and a two-line comment explains why.
+  - Below `sm`, the cluster now wraps, right-aligned, inside the full-width actions line. Before, it overflowed off the left edge and the card's `overflow-hidden` clipped it.
+  - No GitLab string is added; the fix is generic for any descriptor with several row actions.
+
+## Design decisions
+- **Wrap, not shrink or a menu.** Wrapping right-aligned is the fix S suggested. It keeps every action a visible ghost button with the same labels, order and hit target.
+  - An overflow "More" menu was rejected: it would change the row's interaction model and the wireframe.
+  - Shortening the labels was rejected: it would need GitLab-specific copy.
+- **`min-w-0`** lets the cluster shrink below its one-line width inside the `w-full` actions line, so the wrap happens instead of overflowing.
+- **`sm` and up is untouched by construction.** There the parent is `sm:w-auto sm:shrink-0`, so it takes the cluster's one-line width and the cluster never needs to wrap. The pixel diff below confirms this.
+
+## Reuse / extend-vs-new
+This extends the existing shared `ConnectionRow`. No new object.
+
+## Architecture notes for A
+None. This is a class change in one shared component: no new module, interface or dependency.
+
+## Deviations from spec / wireframe
+None. At widths where the actions don't fit on one line, they now take a second line, right-aligned, under the row. This is how the row already stacks its actions below `sm`.
+
+## Verification (headless; no window opened)
+I served the worktree with `vite dev` on port 3150, then stopped it. I measured with S's scratchpad Playwright 1.63 tooling (`measure.mjs`, `mock.mjs`, with the GitLab mock). For each of Edit, Verify, Rotate webhook secret and Remove I recorded the left and right edges and ran `elementFromPoint` at the button's centre.
+
+The table shows the "Mobile app" row; the "Platform group" row gives identical numbers. The card starts at x=20.
+
+| Width | Edit L-R | Verify L-R | Rotate R | Remove L-R | All hit-testable | Page overflow |
+|---|---|---|---|---|---|---|
+| 320 | 179-223 | 227-283 | 211 | 215-283 | yes | no |
+| 360 | 61-105 | 109-165 | 323 | 255-323 | yes | no |
+| 390 | 91-135 | 139-195 | 353 | 285-353 | yes | no |
+| 414 | 43-87 | 91-147 | 305 | 309-377 | yes (one line) | no |
+| 480 / 560 / 639 / 640 | in card | in card | in card | in card | yes | no |
+| 768 | 361-405 | 409-465 | 623 | 627-695 | yes | no |
+| 1280 | 735-779 | 783-839 | 997 | 1001-1069 | yes | no |
+
+- **300 px (below the acceptance range).** The page overflows because the app shell has a 320 px minimum width. Shell elements end at x=320 with or without GitLab rows. This predates #141 and is not caused by this row.
+- **Before/after pixel diff of `/settings/connections`.** I compared against S's pre-fix HEAD captures in `screenshots/cycle-1/`, with `compare -fuzz 10%` and the 24 px version bar excluded (it shows the commit hash):
+
+  | Surface | 360 | 768 | 1280 |
+  |---|---|---|---|
+  | GitHub + Bitbucket rows | 1 px | 3 px | 3 px |
+  | GitLab rows | changed (intended: actions wrap to a second line) | 5 px | 4 px |
+
+  - The 1-5 px counts are anti-aliasing inside one 10x10 icon box, so all of those renders are unchanged.
+  - The GitLab 360 crop shows Edit, Verify and Rotate webhook secret on the first line and Remove right-aligned on the second line, all inside the card. The crop is at `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops--claude-worktrees-gitlab-141-ui-3ae7f5/026565be-3ca5-4937-951c-4703a5817ecc/scratchpad/shots/f-fix/gitlab-row-360-crop.png`.
+
+## Tier 1 self-check (incl. tests now GREEN)
+```
+$ npx tsc --noEmit            # exit 0 (TSC_OK)
+$ npm run lint                # eslint --max-warnings=0, clean
+$ npx vitest run
+ Test Files  51 passed (51)
+      Tests  548 passed (548)   # includes tests/platform-neutral-source.test.ts
+```
+No backend file was touched, so cargo was not re-run.
+
+## Evidence appendix
+None: no behavior outside the diff is relied on.
+
+## Tests that look wrong (for T)
+None. No test change is needed: layout does not exist under jsdom.
+
+## Known issues
+- **Not fixed: S's cosmetic note.** At 768 and 1280 px the Project/Group badge wraps to its own line and the path is truncated. S marked this non-blocking and its acceptance requires 768/1280 to stay unchanged. Fixing it would mean narrowing the action cluster at `sm`+, which changes the row on every platform. It needs its own design call and is out of this rework's scope.
+- **For U, per S:** re-walk 360 px using per-button geometry, not page-level overflow.
+
+## Files changed
+- src/features/platform-connections/connections-section.tsx
+
+Docs (not production): docs/handoffs/141/handoff-F.md (this section), docs/handoffs/141/decisions.md (entry appended).
