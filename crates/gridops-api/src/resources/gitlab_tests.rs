@@ -1860,3 +1860,165 @@ async fn deleting_a_gitlab_pool_completes_while_gitlab_fails() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_base_url_with_credentials_a_query_or_a_fragment_is_refused_and_a_default_port_dropped()
+-> Result<()> {
+    let h = harness().await?;
+    let calls_before = h.gitlab.calls().len();
+    for refused in [
+        "https://user:pw@gitlab.example.com",
+        "https://user@gitlab.example.com",
+        "https://gitlab.example.com/?token=abc",
+        "https://gitlab.example.com/#frag",
+    ] {
+        let (status, body) = h
+            .as_admin(
+                Method::POST,
+                CONNECTIONS,
+                Some(json!({
+                    "name": "refused",
+                    "baseUrl": refused,
+                    "scopeKind": "project",
+                    "scopePath": "acme/app",
+                    "accessToken": TOKEN,
+                })),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}: {body}");
+        assert!(
+            !body.to_string().contains("pw"),
+            "{refused}: the refusal does not echo the credentials: {body}"
+        );
+    }
+    assert_eq!(h.gitlab.calls().len(), calls_before);
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gitlab_connections")
+        .fetch_one(&h.database)
+        .await?;
+    assert_eq!(
+        stored, 0,
+        "no connection with a secret-bearing URL is stored"
+    );
+
+    h.gitlab.with_scope(&url(GITLAB)?, project(42, "acme/app")?);
+    h.gitlab
+        .with_scope(&url(&format!("{GITLAB}/"))?, project(42, "acme/app")?);
+    let (status, body) = h
+        .as_admin(
+            Method::POST,
+            CONNECTIONS,
+            Some(json!({
+                "name": "default port",
+                "baseUrl": "https://gitlab.example.com:443/",
+                "scopeKind": "project",
+                "scopePath": "acme/app",
+                "accessToken": TOKEN,
+            })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["connection"]["baseUrl"], GITLAB);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_connection_name_longer_than_80_characters_is_refused_but_80_is_allowed() -> Result<()> {
+    let h = harness().await?;
+    h.gitlab.with_scope(&url(GITLAB)?, project(42, "acme/app")?);
+    h.gitlab
+        .with_scope(&url(&format!("{GITLAB}/"))?, project(42, "acme/app")?);
+    let (status, body) = h
+        .as_admin(
+            Method::POST,
+            CONNECTIONS,
+            Some(json!({
+                "name": "n".repeat(81),
+                "baseUrl": GITLAB,
+                "scopeKind": "project",
+                "scopePath": "acme/app",
+                "accessToken": TOKEN,
+            })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    openapi_schema::check_response(CONNECTIONS, "post", 400, &body)?;
+    let (status, body) = h
+        .as_admin(
+            Method::POST,
+            CONNECTIONS,
+            Some(json!({
+                "name": "n".repeat(80),
+                "baseUrl": GITLAB,
+                "scopeKind": "project",
+                "scopePath": "acme/app",
+                "accessToken": TOKEN,
+            })),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_empty_patch_returns_the_connection_unchanged_with_no_call_and_no_audit_event()
+-> Result<()> {
+    let h = harness().await?;
+    let created = h
+        .create(GITLAB, project(42, "acme/app")?, "Acme app")
+        .await?;
+    let id = connection_id(&created)?;
+    let calls_before = h.gitlab.calls().len();
+    let audits_before = h.audit_count(&id).await?;
+    let (status, body) = h
+        .as_admin(Method::PATCH, &path(CONNECTION, &id), Some(json!({})))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    openapi_schema::check_response(CONNECTION, "patch", 200, &body)?;
+    assert_eq!(body["name"], "Acme app");
+    assert_eq!(body["id"], id.as_str());
+    assert_eq!(h.gitlab.calls().len(), calls_before, "no GitLab call");
+    assert_eq!(h.audit_count(&id).await?, audits_before, "no audit event");
+    let (token_key, _) = h.secret_keys(&id).await?;
+    assert_eq!(h.secret(&token_key).await?.as_deref(), Some(TOKEN));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_gitlab_runner_delete_records_whether_the_gitlab_cleanup_completed_or_was_deferred()
+-> Result<()> {
+    let h = harness().await?;
+    let scope = project(42, "acme/app")?;
+    h.seed_connection(CONNECTION_1, GITLAB, scope.clone())
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[CONNECTION_1])
+        .await?;
+    let registered = h.gitlab_runner(GITLAB, &scope).await?;
+    h.seed_runner(
+        "runner-done",
+        GITLAB_POOL,
+        Some(CONNECTION_1),
+        Some(registered),
+    )
+    .await?;
+    h.seed_runner("runner-deferred", GITLAB_POOL, Some(CONNECTION_1), Some(5))
+        .await?;
+    h.gitlab.fail_next(
+        &url(GITLAB)?,
+        FakeMethod::DeleteRunner,
+        GitLabError::Upstream("timed out".into()),
+    );
+    // The deferred runner is deleted first so that the queued failure is its.
+    delete_runner_and_check_bookkeeping(&h, "runner-deferred").await?;
+    delete_runner_and_check_bookkeeping(&h, "runner-done").await?;
+    for (runner, expected) in [("runner-done", "complete"), ("runner-deferred", "deferred")] {
+        let metadata: String = sqlx::query_scalar(
+            "SELECT metadata FROM runner_events WHERE runner_id=? AND event='Runner deleted'",
+        )
+        .bind(runner)
+        .fetch_one(&h.database)
+        .await?;
+        let metadata: Value = serde_json::from_str(&metadata)?;
+        assert_eq!(metadata["gitlabCleanup"], expected, "{runner}: {metadata}");
+    }
+    Ok(())
+}

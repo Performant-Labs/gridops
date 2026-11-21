@@ -145,3 +145,9 @@
   - `cargo test -p gridops-reconciler`: 68/68.
   - `cargo fmt --check` is clean, and `cargo clippy --workspace --all-targets` reports nothing in F's files.
   - Source facts are in `docs/handoffs/138/evidence.md`.
+
+## T (Phase 7, verify GREEN + Tier 2): 2026-11-20
+- **Decided:** the suite is GREEN with no blocking Tier 2 issue; returned PASS. Added 4 tests for behaviors F flagged as untested (base-URL credential/query/fragment refusal and default port, 80-character name boundary, empty PATCH, `gitlabCleanup` metadata).
+- **Assumed:** `release_preflight` fails only because this host is a ready macOS ARM64 machine, so it is environmental. It failed identically at RED, before F's code.
+- **Hedged:** the four added tests were not RED-first; they pin behavior that already existed. Two were confirmed by temporary mutation of production code (restored byte-for-byte). The other two were not mutation-checked.
+- **Evidence:** `cargo test -p gridops-api` bin 91/91 (87 + 4), `control_plane_contracts` 36/36, `fleet_http` 143/144 (environmental); `cargo test -p gridops-core --tests` all ok; `gridops-reconciler` 68/68; fmt clean; clippy clean in changed files. Mutation run: 28 passed, 2 failed, as expected.
