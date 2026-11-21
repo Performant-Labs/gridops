@@ -62,3 +62,9 @@
 - **Assumed:** The `fleet_http` release-preflight failure and the two rustc-1.99.1 clippy lints are environmental and pre-existing, so they are not blockers for #172.
 - **Hedged:** No Playwright suite was run in this phase, and the live UI behaviour is not covered by anything I ran; U must walk the GitLab-empty-image create, the settings save and the GitHub-unchanged form.
 - **Evidence:** Verbatim-checked all 7 `evidence.md` entries against source at the cited lines. See `handoff-T-green.md`.
+
+## Phase 7 Architecture Reviewer (A, anti-duplication gate) — 2026-11-21
+- **Decided:** PASS. F extended `validate_pool_configuration`, `PlatformDescriptor`, `validateProvider`, the `targets.ts` helper family and the existing handler normalisation; no parallel object or module was created. A's round-2 placement warns (pure `targets.ts` helpers, validate before `assert_pool_admin`, `dockerImageOptional` beside `poolId`) are all honoured.
+- **Assumed:** With no survey.md, the amended brief's Scope section is the Reuse map.
+- **Hedged:** The `updateRunnerPoolSchemaFor` factory builds a relaxed schema per call; I judged this extension of one schema, not a second one.
+- **Evidence:** Read the full `7afb7c5..80ba004` source diff; grep for platform comparisons in the neutral files was clean. See `handoff-A-dup.md`.

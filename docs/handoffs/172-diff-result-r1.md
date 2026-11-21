@@ -1,0 +1,23 @@
+## Implementation Review (Round 1)
+
+### BLOCK findings
+None.
+
+### Needs-verification findings
+- **[NV-1]** crates/gridops-api/src/resources/gitlab_tests.rs (new test `a_github_pool_keeps_the_docker_image_and_runner_group_400s_on_create_and_update`) — the test asserts the seeded repo/org pools have stored `("runner:latest", "runner:latest", 1)` after refused updates, which assumes `h.seed_pool` seeds that image; neither `seed_pool` nor `pool_update_body` is shown in this prompt. The exact definitions of those helpers in `gitlab_tests.rs` would settle it.
+- **[NV-2]** crates/gridops-api/src/resources/gitlab_tests.rs (`an_invalid_update_is_a_404...`) — the test relies on `h.sign_in("reader-1", 3, "member")`, `h.send`, and a `user_installations.permission` update producing a read-only-but-visible pool. The harness definitions (sign_in/send semantics, the installation id `3` matching the seeded org pool's installation) are not shown here and would settle it.
+- **[NV-3]** crates/gridops-api/src/resources/gitlab_tests.rs:40 `error_message` — assumes error responses render as `{"error": "<message>"}` for `ApiError::BadRequest`/`NotFound`. An excerpt of the ApiError response-body serialization would settle it.
+- **[NV-4]** crates/gridops-core/src/models.rs / crates/gridops-api/src/resources.rs:1603 — the claim that the API update handler is the only production caller of `UpdateRunnerPool::validate` after the signature change (handoff "Architecture notes"). A workspace-wide search for `.validate(` on `UpdateRunnerPool` would settle it.
+- **[NV-5]** Handoff Tier-1 — claims that the only clippy failures on `cargo clippy --all-targets -- -D warnings` are pre-existing rustc-1.99.1 lints in untouched files, and that the one failing `fleet_http` test fails on the unmodified baseline. Neither the lint output nor the baseline run is in this prompt; a baseline `cargo clippy`/`cargo test` run on a clean checkout would settle it. Note this is a Done-when item ("clippy passes") that is reported as not met on this host.
+- **[NV-6]** Handoff — the headless UI walkthrough Done-when item was not run (deferred to U/Phase 9). Confirmation that Phase 9 covers it (the phase plan / U's handoff) would settle it.
+
+### WARN findings
+- **[W-1]** crates/gridops-core/src/models.rs (`#[serde(default)]` on both structs) — the brief both says "GitHub and Bitbucket pools validate exactly as before: every existing error string, status code and stored value unchanged" and accepts the 422→400 change only for "a GitHub body with no runnerGroupId". The serde default necessarily applies to Bitbucket too: a Bitbucket create/update body with no `runnerGroupId` now gets the 400 "Runner group ID must be positive." instead of serde's 422. The diff's test covers only `repository`/`organization`, and the CHANGELOG bullet names only GitHub organization pools. Recommendation: either pin the Bitbucket behaviour with a test and widen the CHANGELOG wording ("a pool without one" → name Bitbucket), or get O to accept the Bitbucket 422→400 explicitly.
+- **[W-2]** src/routes/_app/runner-pools.new.tsx:103 — the "restores today's behaviour (required, GitHub default prefilled)" rule holds only while `typedDockerImage` is `null`; once the user has typed anything (including clearing to `""`), switching to GitHub keeps the field empty and merely marks it required, so submit fails validation until something is typed. This satisfies "without clobbering an image the user typed" literally but is a subtle edge the brief doesn't pin. Recommendation: confirm this UX is intended (or prefill on switch only when the typed value is a non-empty string).
+
+### NIT findings
+- **[NIT-1]** tests/gitlab-pool-default-image.test.ts — the local helper `function dockerImageHelp()` shadows the imported `dockerImageHelp` from `targets.ts`; the import list at the top of the diff's new test doesn't import it, so no conflict, but the name collision invites confusion.
+- **[NIT-2]** tests/gitlab-pool-default-image.test.ts — the vitest pins `GITLAB_RUNNER_IMAGE` via regex `/pub const GITLAB_RUNNER_IMAGE: &str = "([^"]+)";/` against `provisioning.rs`; if the constant is ever reformatted (e.g. `pub const GITLAB_RUNNER_IMAGE: &str =\n    "..."`), the pin silently fails with a confusing "expected undefined". Anchoring on `GITLAB_RUNNER_IMAGE` and capturing the next quoted literal would be more robust.
+
+### Verdict
+PASS — no BLOCK findings; testing may proceed.
