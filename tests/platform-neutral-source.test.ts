@@ -54,6 +54,9 @@ describe("shared rows do not branch on a platform", () => {
   const SHARED = [
     "src/routes/_app/runner-pools.new.tsx",
     "src/routes/_app/runner-pools.$poolId.settings.tsx",
+    // #159: the pool list and the pool detail take each pool's destination from the registry.
+    "src/routes/_app/runner-pools.index.tsx",
+    "src/routes/_app/runner-pools.$poolId.index.tsx",
   ];
   const BRANCHING = [
     /["'](github|bitbucket|gitlab)(\.[a-z-]+)?["']/, // a platform or kind id
@@ -61,11 +64,19 @@ describe("shared rows do not branch on a platform", () => {
     /\bscope\s*[!=]==/,
     /bitbucketConnectionIds\.length/,
     /runUntagged|gitlabConnectionIds/, // GitLab pool fields travel inside the descriptor's partials only
+    /\b(githubAvatar|repositoryCount|bitbucketConnections|gitlabConnections)\b/, // #159: a GitHub avatar helper or a platform-named pool field
   ];
 
   it.each(SHARED)("%s compares against no platform id, kind id, scope or platform-named field", (path) => {
     const lines = read(path).split("\n").flatMap((line, index) => BRANCHING.some((pattern) => pattern.test(line)) ? [`${index + 1}: ${line.trim()}`] : []);
     expect(lines).toEqual([]);
+  });
+
+  it.each([
+    "src/routes/_app/runner-pools.index.tsx",
+    "src/routes/_app/runner-pools.$poolId.index.tsx",
+  ])("%s works out the pool's destination through the registry (#159)", (path) => {
+    expect(read(path)).toMatch(/from "~\/features\/platform-connections\/registry"/);
   });
 
   it("the Tart base VM row and the plan preview carry no platform text or prop", () => {

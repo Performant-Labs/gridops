@@ -2082,3 +2082,105 @@ async fn the_runners_list_carries_a_gitlab_runners_link_fields_and_nulls_for_a_g
     }
     Ok(())
 }
+
+/// #159: the pool list carries each pool's GitLab connections, so the list
+/// row can show a GitLab pool's destination without fetching each detail.
+/// They are the detail's projection in the detail's order
+/// (`membership.created_at, connection.id`), grouped per pool from one load
+/// over the page's pool ids, and `[]` for a pool with none.
+#[tokio::test]
+async fn the_pool_list_carries_each_pools_gitlab_connections_in_detail_order_and_none_for_a_github_pool()
+-> Result<()> {
+    const SECOND_GITLAB_POOL: &str = "c1000000-0000-4000-8000-000000000003";
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, project(42, "acme/app")?)
+        .await?;
+    h.seed_connection(CONNECTION_2, OTHER_GITLAB, group(7, "acme/platform")?)
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[])
+        .await?;
+    h.seed_pool(SECOND_GITLAB_POOL, "gitlab-second", "gitlab", &[])
+        .await?;
+    h.seed_pool(ORG_POOL, "org-pool", "organization", &[])
+        .await?;
+    // Added second, so the detail lists CONNECTION_2 first: the order is the
+    // membership's, not the connection id's.
+    for (pool_id, connection_id, created_at) in [
+        (GITLAB_POOL, CONNECTION_1, 20_i64),
+        (GITLAB_POOL, CONNECTION_2, 10),
+        (SECOND_GITLAB_POOL, CONNECTION_1, 10),
+    ] {
+        sqlx::query("INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,?,?)")
+            .bind(pool_id)
+            .bind(connection_id)
+            .bind(created_at)
+            .execute(&h.database)
+            .await?;
+    }
+
+    let (status, body) = h
+        .as_admin(Method::GET, "/api/v1/runner-pools", None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"]
+        .as_array()
+        .context("the pool list has items")?;
+    let listed = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .cloned()
+            .with_context(|| format!("{id} is listed: {body}"))
+    };
+
+    let connection = |id: &str, name: String, base_url: &str, kind: &str, path: &str| json!({ "id": id, "name": name, "baseUrl": base_url, "scopeKind": kind, "scopePath": path });
+    let first = connection(
+        CONNECTION_1,
+        format!("seeded {CONNECTION_1}"),
+        GITLAB,
+        "project",
+        "acme/app",
+    );
+    let second = connection(
+        CONNECTION_2,
+        format!("seeded {CONNECTION_2}"),
+        OTHER_GITLAB,
+        "group",
+        "acme/platform",
+    );
+
+    let gitlab = listed(GITLAB_POOL)?;
+    assert_eq!(
+        gitlab.get("gitlabConnections"),
+        Some(&json!([second, first])),
+        "{gitlab}"
+    );
+    let (status, detail) = h
+        .as_admin(
+            Method::GET,
+            &format!("/api/v1/runner-pools/{GITLAB_POOL}"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        gitlab.get("gitlabConnections"),
+        detail.get("gitlabConnections"),
+        "the list and the detail agree on names and order"
+    );
+
+    let second_pool = listed(SECOND_GITLAB_POOL)?;
+    assert_eq!(
+        second_pool.get("gitlabConnections"),
+        Some(&json!([first])),
+        "each pool gets only its own connections: {second_pool}"
+    );
+
+    let github = listed(ORG_POOL)?;
+    assert_eq!(
+        github.get("gitlabConnections"),
+        Some(&json!([])),
+        "a pool with no GitLab connection lists an empty array: {github}"
+    );
+    Ok(())
+}
