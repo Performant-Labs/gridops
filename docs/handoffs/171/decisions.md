@@ -62,3 +62,14 @@
   - fmt and clippy (1.98.1) are clean.
   - `npm run lint`, `npm run typecheck` and `npm test` (603 tests) pass.
   - Full-crate results are in handoff-F.md.
+
+## Phase 7 Verify GREEN + Tier 2 (T) - 2026-11-21
+- **Decided:**
+  - GREEN confirmed; verdict PASS. No test edits, no production edits.
+  - The `fleet_http` release-preflight failure is treated as a pre-existing, host-dependent, unrelated failure (not blocking).
+- **Assumed:**
+  - F's baseline check (reverting `http.rs` and re-running the one failing test) is sufficient evidence that the failure predates this change, since the test is fleet code the diff does not touch.
+- **Hedged:**
+  - I did not mutate production code to re-prove each test; I relied on the Phase-4 RED run plus the exact-count assertions in the sweep test.
+- **Evidence:**
+  - reconciler 119 passed; core gitlab:: 36 passed; vitest 603 passed; clippy 1.98.1 and fmt clean; gridops-api all targets ok except the one named test.

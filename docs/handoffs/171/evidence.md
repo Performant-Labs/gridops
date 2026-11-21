@@ -54,3 +54,10 @@
   **Verbatim excerpt:**
   > CREATE INDEX `runner_pool_gitlab_connections_connection_idx`
   >   ON `runner_pool_gitlab_connections` (`connection_id`,`pool_id`);
+
+## T (Phase 7)
+
+- **Fact:** The dedup's one-hour window compares `created_at` in milliseconds, the unit the event insert writes (so the sweep's read-back and the insert agree).
+  **Source:** `crates/gridops-reconciler/src/main.rs:3988`
+  **Verbatim excerpt:**
+  > .bind(now_millis())
