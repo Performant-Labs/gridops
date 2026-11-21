@@ -78,3 +78,37 @@
 - **Assumed:** (1) The GitLab connection list is readable by any signed-in user and the settings editor renders only for managers (as in A round 2). (2) The empty-fetch status on settings is the shared "No {kind} options" text; only its wording comes from the existing picker, so it is not drawn as final copy. (3) The create toast copy is the shared default `{name} connection added.` ("GitLab connection added."). (4) Revision 1-2 assumptions stand (toast-only Verify outcome; GitLab delivery rows with no destination text).
 - **Hedged:** The brief's walkthrough item "tag validation error on a comma" is still unreachable through the comma-split labels field (open question 1). The real lucide `Gitlab` icon was not rendered (no `node_modules`); badges use Unicode stand-ins. New copy remains a proposal. Dark theme and narrow widths were not drawn.
 - **Evidence:** Read the amended brief, handoff-A.md (round 2), decisions.md, handoff-D.md and the full wireframe frames B, E, G, H, I; checked `targets-row.tsx:100-140` (load, loading, error/Retry and `No {kind} options` states, and `offered` handling), `webhooks.tsx:132-158` (the detail sheet's rows and heading), `connections-section.tsx:325-345` (the create toast). Rendered headlessly (chrome-headless-shell, no window) and looked at frames E (E4-E6) and H.
+
+## A (Architecture review, up front, round 3) - 2026-11-20T17:30:05-08:00
+- **Decided:** PASS, with 0 block findings and 3 warns (docs/handoffs/141/handoff-A.md, rewritten for round 3).
+  - **Round-2 block resolved.** The brief's Target kinds section now has:
+    - `offered`: create, or a GitLab pool.
+    - `available`: create, the kind's scope has a connection; update, a GitLab pool.
+    - `load`: create, from the pool options; update, `getGitlabConnections(signal)`, through the lazy-load seam `github.tsx:93-105` uses.
+    - No `TargetContext` or route change.
+    - Wireframe E5, E5b and E6 match.
+  - **All five round-2 warns are taken up:** the split refinement, `SearchableSelect`, `PlatformBadge` with the runner-row-style assertion, the create toast with no H2 row, and the master baseline.
+  - **New backend edit (the runners list JSON) is consistent.**
+    - The list already joins display-only fields (`repository`, `accountLogin`, `machine`).
+    - `/api/v1/runners` is not in the OpenAPI.
+    - The GitHub descriptor builds its link from raw fields too.
+    - No parallel worktree touches that function.
+  - **Warns:**
+    1. Name `resources/gitlab_tests.rs` as the test home. No runners-list test exists, so "or the existing runners-list test" invites a second harness.
+    2. `runner-row.tsx:46, :109, :127` falls back to `accountLogin`, so a GitLab runner shows its installation's GitHub login. This is a #159 sibling that #159 does not list. Add it to #159, and do not fix it here with a platform branch.
+    3. The Hard-limits line puts `registry.tsx` under "no gitlab string", while gap 6 must register GitLab there. Allow the import and the array entry. Fall back to `githubPlatform` by reference.
+- **Assumed:**
+  - The #145 survey and the brief stand in for a #141 Reuse map, which does not exist.
+  - The workflow doc numbers this gate Phase 4.
+  - The wireframe is treated as the design under approval; its approval line is not filled in.
+- **Hedged:**
+  - Finding 2 is a warn, not a block. The brief's hard limits and the neutral-source test already stop the drifting fixes. The remaining question is where to track the gap, which is O's call.
+  - D's open question 1 (the comma tag error cannot be reached from the comma-split field) is a spec/walkthrough matter for O and S, not architecture, so A does not rule on it.
+- **Evidence:**
+  - Read the amended brief and its diff from round 2 (0d01dfa..9b9f6ff), 141-brief-result-r1.md, handoff-D.md (revision 3), decisions.md, the round-2 handoff-A.md, and the wireframe text (frames B, E5-E6, G, H, I).
+  - Read: `resources.rs:1916-1998` (runners list), `resources/gitlab.rs:80-101` (the list handler takes any `AuthUser`), `resources/gitlab_tests.rs:1-80, :241-306`, `migrations/0047_gitlab.sql:1-80`, `types.ts`, `registry.tsx`, `platform-connections.functions.ts`, `github.tsx:80-130, :205-207`, `runner-row.tsx` (grep), `webhooks.tsx` (grep), `operations.functions.ts:40-60`, `tests/platform-neutral-source.test.ts`.
+  - Checked the OpenAPI paths for runners: only runner-pool paths exist.
+  - Checked `token_access.rs:1072`, the only test that touches `/api/v1/runners`.
+  - Checked `gh issue view 159`: it covers the pool list and the pool detail only.
+  - Coexistence: ran `git diff origin/master...<branch>` for every GitLab branch and `git status` in the #138-followup, #139, #140, #142, #147 and #148 worktrees. #140's brief agrees on the `gitlab:<connection_id>:<key>` id.
+  - Confirmed `git diff 0086aa9 HEAD -- src tests crates` is empty.
