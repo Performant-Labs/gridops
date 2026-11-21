@@ -2883,8 +2883,14 @@ async fn start_admitted_runner(
         }
         if let (Some(connection), Some(gitlab_runner_id)) = (&gitlab_connection, gitlab_runner_id)
             && gridops_core::failure_cleanup(true, true, false).remove_provider_runner
-            && let Err(cleanup_error) =
-                gitlab_lifecycle::deregister(app, &connection.id, gitlab_runner_id).await
+            && let Err(cleanup_error) = gitlab_lifecycle::deregister(
+                app,
+                &pool.id,
+                &runner_id,
+                &connection.id,
+                gitlab_runner_id,
+            )
+            .await
         {
             // The orphan sweep removes it later.
             tracing::warn!(runner_id = %runner_id, error = ?cleanup_error, "could not remove the GitLab runner of a failed start");
@@ -2986,7 +2992,7 @@ async fn delete_runner(
     } else if runner.ci_platform == "gitlab" {
         // A failed GitLab delete is logged and left to the orphan sweep: it
         // never keeps the runner in service or fails the pass (#139).
-        gitlab_lifecycle::deregister_runner(app, runner).await;
+        gitlab_lifecycle::deregister_runner(app, &pool.id, runner).await;
     } else {
         let target = match (&runner.repository_owner, &runner.repository_name) {
             (Some(owner), Some(repository)) => RunnerTarget::Repository { owner, repository },
@@ -3958,9 +3964,24 @@ async fn pool_event(
     message: &str,
     metadata: Value,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO runner_events (id,pool_id,level,event,message,metadata,created_at) VALUES (?,?,?,?,?,?,?)")
+    runner_event(database, pool_id, None, level, event, message, metadata).await
+}
+
+/// An event of the pool, linked to runner row `runner_id` when there is one,
+/// so the pool's Events list shows it in the runner's column.
+async fn runner_event(
+    database: &SqlitePool,
+    pool_id: Option<&str>,
+    runner_id: Option<&str>,
+    level: &str,
+    event: &str,
+    message: &str,
+    metadata: Value,
+) -> Result<()> {
+    sqlx::query("INSERT INTO runner_events (id,pool_id,runner_id,level,event,message,metadata,created_at) VALUES (?,?,?,?,?,?,?,?)")
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(pool_id)
+        .bind(runner_id)
         .bind(level)
         .bind(event)
         .bind(message)

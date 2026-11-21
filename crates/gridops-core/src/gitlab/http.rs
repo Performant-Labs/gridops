@@ -301,7 +301,10 @@ impl GitLabApi for GitLabClient {
         credentials: &GitLabCredentials,
         scope: &Scope,
     ) -> Result<(), GitLabError> {
-        // 1. The token's scopes: `api` grants both that GridOps needs.
+        // 1. The token's scopes. GridOps creates runners (`create_runner`),
+        // deletes them (`manage_runner`: GitLab 17.1+ refuses
+        // `DELETE /runners/:id` without it, #171) and reads the project,
+        // group and jobs (`read_api`). `api` grants all three.
         let url = api_url(&credentials.base_url, &["personal_access_tokens", "self"])?;
         let token: TokenResponse = self.get_json(credentials, url, "access token").await?;
         let has = |wanted: &str| {
@@ -310,7 +313,7 @@ impl GitLabApi for GitLabClient {
                 .iter()
                 .any(|held| held == wanted || held == "api")
         };
-        for needed in ["create_runner", "read_api"] {
+        for needed in ["create_runner", "manage_runner", "read_api"] {
             if !has(needed) {
                 return Err(GitLabError::MissingScope(needed.to_owned()));
             }

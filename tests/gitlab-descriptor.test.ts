@@ -103,11 +103,21 @@ describe("GitLab connection form", () => {
     expect(field("Access token").type).toBe("secret");
   });
 
-  it("names the create_runner and read_api scopes and the Owner role in the token help", () => {
+  // #171 / #174: GitLab 17.1+ needs manage_runner to delete runners, and
+  // GridOps accepts Maintainer or higher on a project but Owner on a group.
+  it("names the create_runner, manage_runner and read_api (or api) scopes in the token help", () => {
     const help = String(field("Access token").help);
     expect(help).toContain("create_runner");
+    expect(help).toContain("manage_runner");
     expect(help).toContain("read_api");
-    expect(help).toContain("Owner");
+    expect(help).toMatch(/(?<![\w-])api(?![\w-])/);
+  });
+
+  it("asks for Maintainer or higher on a project and Owner on a group, never Owner on a project", () => {
+    const help = String(field("Access token").help);
+    expect(help).toMatch(/Maintainer[^.]*project/);
+    expect(help).toMatch(/Owner[^.]*group/);
+    expect(help).not.toMatch(/Owner[^.,;]*project/);
   });
 
   it("edits only the name and the token: address, kind and path are fixed at create", () => {
