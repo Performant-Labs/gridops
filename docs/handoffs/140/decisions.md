@@ -219,3 +219,14 @@
   - `fleet_http`: 143 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`, which depends on the host OS (this Mac). Nothing in the diff touches it.
   - `cargo fmt --all -- --check` is clean. clippy reports nothing in the touched files.
   - `git hash-object`: `jobs.rs` is `c51247dd` and `mod.rs` is `96be8825`, both equal to `origin/master`.
+
+## T (Phase 7, GREEN + Tier 2)
+
+- **Decided:**
+  - Verdict PASS. The suite is GREEN (121 bin, 291 core, 36 contracts) and no test was changed.
+  - The one `fleet_http` failure (`release_preflight::...without_a_macos_arm64_machine`) is not blocking. It depends on the host OS, and the diff touches nothing it exercises.
+- **Assumed:** the failure passes on Linux CI. T did not run it on base.
+- **Hedged:** the constant-time compare, the header-order comment and no-token-in-logs have no test and are left to S.
+- **Evidence:**
+  - A mutation of the busy-clear arm (`gitlab.rs:367`) failed four tests. The file was restored with `git checkout`; the 60 `gitlab_tests` pass again.
+  - `cargo fmt --check` is clean, and clippy shows no warning in touched files.
