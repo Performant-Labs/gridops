@@ -1,8 +1,13 @@
 mod agent;
 mod builtin_host;
 mod fleet;
+mod gitlab_poll;
 mod tart_lane;
 
+#[cfg(test)]
+mod gitlab_poll_tests;
+#[cfg(test)]
+mod jit_conflict_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]
@@ -19,6 +24,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
+use gridops_core::gitlab::{GitLabApi, GitLabCredentials};
 use gridops_core::{
     BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowJob,
     GitHubWorkflowRun, JitRequest, ProviderCapacity, RepositoryCapacity, RunnerTarget, Vault,
@@ -44,6 +50,9 @@ struct Reconciler {
     database: SqlitePool,
     github: GitHubClient,
     bitbucket: BitbucketClient,
+    /// One GitLab client for every connection; each call takes that
+    /// connection's credentials ([`gitlab_credentials`]).
+    gitlab: Arc<dyn GitLabApi>,
     vault: Vault,
     http: reqwest::Client,
     /// The round of the Mac's VM slot line under way, sent with admissions
@@ -372,6 +381,7 @@ async fn main() -> Result<()> {
         database,
         github,
         bitbucket,
+        gitlab: Arc::new(gridops_core::gitlab::GitLabClient::new()?),
         vault,
         http: reqwest::Client::builder()
             .user_agent("GridOps reconciler/0.1")
@@ -390,6 +400,9 @@ async fn main() -> Result<()> {
     // Syncing every repository from GitHub takes over a minute; inside the
     // pass it held up every runner waiting to be told to start.
     tokio::spawn(github_sync_worker(reconciler.clone()));
+    // Polling GitLab for pending jobs a webhook may have missed; its own
+    // schedule, for the same reason.
+    tokio::spawn(gitlab_poll::worker(reconciler.clone()));
     tokio::spawn(watch_vm_slots(reconciler.clone()));
     run_passes(reconciler).await;
     Ok(())
@@ -3710,6 +3723,34 @@ async fn installation_token(app: &Reconciler, installation_id: i64) -> Result<Op
         .map(Some)
 }
 
+/// The credentials GitLab connection `connection_id` calls GitLab with: its
+/// `base_url`, and its access token unsealed from `access_token_key` as a
+/// Bitbucket connection's is. `None` when the connection or its token is
+/// gone.
+async fn gitlab_credentials(
+    app: &Reconciler,
+    connection_id: &str,
+) -> Result<Option<GitLabCredentials>> {
+    let Some((base_url, access_token_key)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT base_url,access_token_key FROM gitlab_connections WHERE id=?",
+    )
+    .bind(connection_id)
+    .fetch_optional(&app.database)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(access_token) = runtime_secret(app, &access_token_key).await? else {
+        return Ok(None);
+    };
+    Ok(Some(GitLabCredentials {
+        base_url: reqwest::Url::parse(&base_url).with_context(|| {
+            format!("GitLab connection {connection_id} has an invalid base URL")
+        })?,
+        access_token: secrecy::SecretString::from(access_token),
+    }))
+}
+
 async fn runtime_secret(app: &Reconciler, key: &str) -> Result<Option<String>> {
     let sealed = sqlx::query_scalar::<_, String>("SELECT value FROM runtime_secrets WHERE key=?")
         .bind(key)
@@ -4829,6 +4870,7 @@ mod tests {
             config,
             database,
             bitbucket: BitbucketClient::new()?,
+            gitlab: Arc::new(gitlab_poll::UnavailableGitLab),
             vault: Vault::new([0; 32], b"reconciler-test".to_vec()),
             http: reqwest::Client::new(),
             pass: Arc::default(),

@@ -177,9 +177,15 @@ function validateBitbucketConnections(
   if (connections.length > value.maxCount) {
     context.addIssue({ code: "custom", path: ["bitbucketConnectionIds"], message: "Bitbucket workspace count cannot exceed maximum runner capacity." });
   }
-  if (value.labels.some((label) => !/^[a-z0-9.]+$/.test(label))) {
-    context.addIssue({ code: "custom", path: ["labels"], message: "Bitbucket-compatible labels use lowercase letters, numbers, and dots." });
-  }
+  const labelError = bitbucketLabelError(value.labels);
+  if (labelError) context.addIssue({ code: "custom", path: ["labels"], message: labelError });
+}
+
+/** The Bitbucket label rule, shared by the submit-time schema and the Bitbucket platform descriptor. */
+export function bitbucketLabelError(labels: readonly string[]): string | null {
+  return labels.some((label) => !/^[a-z0-9.]+$/.test(label))
+    ? "Bitbucket-compatible labels use lowercase letters, numbers, and dots."
+    : null;
 }
 
 export function parseUpdateRunnerPoolInput(input: unknown) {

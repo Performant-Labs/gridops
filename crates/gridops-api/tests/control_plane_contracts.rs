@@ -31,6 +31,9 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[path = "support/openapi_schema.rs"]
+mod openapi_schema;
+
 const SESSION_SECRET: &str = "integration-session-secret";
 const WEBHOOK_SECRET: &str = "integration-webhook-secret";
 const ENCRYPTION_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -701,6 +704,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         repository_id: None,
         repository_ids: vec![7],
         bitbucket_connection_ids: vec![],
+        gitlab_connection_ids: vec![],
+        run_untagged: false,
         name: "fixture-pool".into(),
         scope: "repository".into(),
         mode: "ephemeral".into(),
@@ -2175,5 +2180,342 @@ async fn a_rerun_job_arriving_before_its_run_event_reopens_the_completed_run() -
     assert_eq!((run.0, run.1.as_str(), run.2), (2, "queued", None));
     let body = overview_of(&fixture).await?;
     assert_eq!(body["metrics"]["queuedJobs"], 1, "{}", body["metrics"]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #138: the GitLab platform-connection routes, at the binary level. The
+// binary wires no GitLab client yet (#146 does), so `AppState` holds the
+// placeholder whose every call fails with `Upstream`: these cases need no
+// answer from GitLab. The handler behaviour behind a working client is pinned
+// by the in-crate tests in `src/resources/gitlab_tests.rs`; a bearer token on
+// these routes is checked by `tests/fleet_http/token_access.rs` from the
+// documented matrix.
+// ---------------------------------------------------------------------------
+
+const GITLAB_CONNECTIONS: &str = "/api/v1/platform-connections/gitlab";
+const GITLAB_CONNECTION: &str = "/api/v1/platform-connections/gitlab/{connection_id}";
+const GITLAB_VERIFY: &str = "/api/v1/platform-connections/gitlab/{connection_id}/verify";
+const GITLAB_ROTATE: &str =
+    "/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate";
+const SEEDED_GITLAB_CONNECTION: &str = "d1000000-0000-4000-8000-000000000001";
+
+impl ApiFixture {
+    async fn gitlab_request(
+        &self,
+        method: reqwest::Method,
+        template: &str,
+        connection_id: &str,
+        body: Option<Value>,
+        signed_in: bool,
+    ) -> Result<(StatusCode, Value)> {
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            template.replace("{connection_id}", connection_id)
+        );
+        let mut request = self
+            .client
+            .request(method, url)
+            .header(header::ORIGIN, &self.base_url);
+        if signed_in {
+            request = request.header(header::COOKIE, Self::session_cookie()?);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        };
+        Ok((status, body))
+    }
+
+    async fn make_admin(&self) -> Result<()> {
+        sqlx::query("UPDATE users SET role='admin' WHERE id='user-1'")
+            .execute(&self.database().await?)
+            .await?;
+        Ok(())
+    }
+}
+
+/// Seeds a GitLab connection row (and its two sealed secrets) directly.
+async fn seed_gitlab_connection(
+    database: &SqlitePool,
+    id: &str,
+    name: &str,
+    base_url: &str,
+    scope_kind: &str,
+    scope_id: i64,
+    scope_path: &str,
+) -> Result<()> {
+    for key in [
+        format!("test.gitlab.{id}.token"),
+        format!("test.gitlab.{id}.webhook"),
+    ] {
+        sqlx::query("INSERT INTO runtime_secrets (key,value,updated_by,updated_at) VALUES (?,'sealed-fixture',NULL,1)")
+            .bind(key)
+            .execute(database)
+            .await?;
+    }
+    sqlx::query("INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,NULL,1000,2000)")
+        .bind(id)
+        .bind(name)
+        .bind(base_url)
+        .bind(scope_kind)
+        .bind(scope_id)
+        .bind(scope_path)
+        .bind(format!("test.gitlab.{id}.token"))
+        .bind(format!("test.gitlab.{id}.webhook"))
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+fn gitlab_create_body(base_url: &str) -> Value {
+    json!({
+        "name": "Acme app",
+        "baseUrl": base_url,
+        "scopeKind": "project",
+        "scopePath": "acme/app",
+        "accessToken": "glpat-binary-level-0123456789",
+    })
+}
+
+#[tokio::test]
+async fn gitlab_connection_routes_are_served_to_admins_only_with_spec_shaped_refusals() -> Result<()>
+{
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    let id = SEEDED_GITLAB_CONNECTION;
+    let operations: [(Method, &str, &str, Option<Value>); 6] = [
+        (Method::GET, GITLAB_CONNECTIONS, "get", None),
+        (
+            Method::POST,
+            GITLAB_CONNECTIONS,
+            "post",
+            Some(gitlab_create_body("https://gitlab.example.com")),
+        ),
+        (
+            Method::PATCH,
+            GITLAB_CONNECTION,
+            "patch",
+            Some(json!({"name": "renamed"})),
+        ),
+        (Method::DELETE, GITLAB_CONNECTION, "delete", None),
+        (Method::POST, GITLAB_VERIFY, "post", None),
+        (Method::POST, GITLAB_ROTATE, "post", None),
+    ];
+    for (method, template, verb, body) in &operations {
+        let (status, response) = fixture
+            .gitlab_request(method.clone(), template, id, body.clone(), false)
+            .await?;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "signed out {verb} {template}: {response}"
+        );
+        openapi_schema::check_response(template, verb, 401, &response)?;
+        // The fixture's user is a member, not a system administrator.
+        let (status, response) = fixture
+            .gitlab_request(method.clone(), template, id, body.clone(), true)
+            .await?;
+        if *method == Method::GET {
+            assert_eq!(status, StatusCode::OK, "member list: {response}");
+            openapi_schema::check_response(template, verb, 200, &response)?;
+            assert_eq!(response["canManage"], false);
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "member {verb} {template}: {response}"
+            );
+            openapi_schema::check_response(template, verb, 403, &response)?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn gitlab_connection_list_shows_seeded_connections_and_delete_answers_404_and_409()
+-> Result<()> {
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    fixture.make_admin().await?;
+    let database = fixture.database().await?;
+    seed_gitlab_connection(
+        &database,
+        SEEDED_GITLAB_CONNECTION,
+        "Acme app",
+        "https://gitlab.example.com",
+        "project",
+        42,
+        "acme/app",
+    )
+    .await?;
+    let group = "d1000000-0000-4000-8000-000000000002";
+    seed_gitlab_connection(
+        &database,
+        group,
+        "Acme group",
+        "https://gitlab.com",
+        "group",
+        7,
+        "acme",
+    )
+    .await?;
+
+    let (status, list) = fixture
+        .gitlab_request(Method::GET, GITLAB_CONNECTIONS, "", None, true)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    openapi_schema::check_response(GITLAB_CONNECTIONS, "get", 200, &list)?;
+    assert_eq!(list["canManage"], true);
+    let items = list["items"].as_array().context("items")?;
+    assert_eq!(items.len(), 2, "{list}");
+    let project = items
+        .iter()
+        .find(|item| item["id"] == SEEDED_GITLAB_CONNECTION)
+        .context("the project connection")?;
+    assert_eq!(
+        (
+            &project["provider"],
+            &project["name"],
+            &project["baseUrl"],
+            &project["scopeKind"],
+            &project["scopeId"],
+            &project["scopePath"],
+            &project["canManage"]
+        ),
+        (
+            &json!("gitlab"),
+            &json!("Acme app"),
+            &json!("https://gitlab.example.com"),
+            &json!("project"),
+            &json!(42),
+            &json!("acme/app"),
+            &json!(true)
+        ),
+    );
+    for (field, millis) in [("createdAt", 1000), ("updatedAt", 2000)] {
+        let stamp = project[field].as_str().context(field)?;
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(stamp)?.timestamp_millis(),
+            millis,
+            "{field}"
+        );
+    }
+
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::DELETE,
+            GITLAB_CONNECTION,
+            "d1000000-0000-4000-8000-0000000000ff",
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 404, &body)?;
+
+    seed(&database, &[
+        org_pool("gitlab-target-pool", "[]", ""),
+        format!("INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('gitlab-target-pool','{group}',1);"),
+    ]).await?;
+    let (status, body) = fixture
+        .gitlab_request(Method::DELETE, GITLAB_CONNECTION, group, None, true)
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 409, &body)?;
+
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::DELETE,
+            GITLAB_CONNECTION,
+            SEEDED_GITLAB_CONNECTION,
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 204, &body)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_a_gitlab_client_a_create_is_a_400_and_invalid_input_never_gets_that_far()
+-> Result<()> {
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    fixture.make_admin().await?;
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::POST,
+            GITLAB_CONNECTIONS,
+            "",
+            Some(gitlab_create_body("https://gitlab.example.com")),
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTIONS, "post", 400, &body)?;
+    assert_eq!(body["error"], "GitLab request failed", "{body}");
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::POST,
+            GITLAB_CONNECTIONS,
+            "",
+            Some(gitlab_create_body("ftp://gitlab.example.com")),
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTIONS, "post", 400, &body)?;
+    assert_ne!(
+        body["error"], "GitLab request failed",
+        "refused before GitLab: {body}"
+    );
+    let database = fixture.database().await?;
+    let stored: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM gitlab_connections),(SELECT COUNT(*) FROM runtime_secrets WHERE key LIKE '%gitlab%')",
+    )
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(stored, (0, 0), "nothing is stored");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cors_preflight_from_the_app_allows_patch() -> Result<()> {
+    let fixture = ApiFixture::start().await?;
+    let response = fixture
+        .client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!(
+                "{}/api/v1/platform-connections/gitlab/{SEEDED_GITLAB_CONNECTION}",
+                fixture.base_url
+            ),
+        )
+        .header(header::ORIGIN, &fixture.base_url)
+        .header("access-control-request-method", "PATCH")
+        .header("access-control-request-headers", "content-type")
+        .send()
+        .await?;
+    let allowed = response
+        .headers()
+        .get("access-control-allow-methods")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        allowed.split(',').any(|method| method.trim() == "PATCH"),
+        "access-control-allow-methods: {allowed:?}"
+    );
     Ok(())
 }

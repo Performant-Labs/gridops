@@ -1,0 +1,24 @@
+import { chromium } from "playwright";
+import { createHmac } from "node:crypto";
+const SECRET = "audit-session-secret-for-s-walk";
+const b64u = (b) => Buffer.from(b).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const cookieFor = (t) => t + "." + b64u(createHmac("sha256", SECRET).update(t).digest());
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ viewport: { width: 360, height: 2600 } });
+await ctx.addCookies([{ name: "gridops_session", value: cookieFor("audit-admin-token-0001"), url: "http://127.0.0.1:18098" }]);
+const page = await ctx.newPage();
+await page.goto("http://127.0.0.1:18098/settings/connections", { waitUntil: "networkidle" });
+await page.waitForTimeout(600);
+const r = await page.evaluate(() => {
+  const out = {};
+  const rect = (el) => { const b = el.getBoundingClientRect(); return { left: Math.round(b.left), right: Math.round(b.right), width: Math.round(b.width), height: Math.round(b.height) }; };
+  const names = ["acme-labs", "ada-admin", "Acme Bitbucket", "Platform Team"];
+  out.names = names.map((n) => { const el = [...document.querySelectorAll("span,p,div,a")].find((e) => e.children.length === 0 && e.textContent.trim() === n); return el ? { n, ...rect(el), scrollWidth: el.scrollWidth, clientWidth: el.clientWidth } : { n, found: false }; });
+  const manage = [...document.querySelectorAll("a,button")].find((e) => /Manage App/.test(e.textContent));
+  out.manageApp = manage ? rect(manage) : null;
+  const h = [...document.querySelectorAll("h2,h3")].find((e) => e.textContent.trim() === "GitHub App");
+  out.appHeading = h ? rect(h) : null;
+  return out;
+});
+console.log(JSON.stringify(r, null, 1));
+await browser.close();

@@ -1315,7 +1315,7 @@
       "get": {
         "tags": ["platform-connections"],
         "summary": "The GitLab connections the caller may see",
-        "description": "Not served yet: implemented by #138.",
+        "description": "Any signed-in user may list the connections; `canManage` says whether the caller may manage them.",
         "security": [{ "cookieAuth": [] }],
         "responses": {
           "200": { "description": "The connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitlabConnectionList" } } } },
@@ -1325,7 +1325,7 @@
       "post": {
         "tags": ["platform-connections"],
         "summary": "Connect a GitLab project or group",
-        "description": "Not served yet: implemented by #138. Resolves `scopePath` at GitLab and checks the token's access before storing anything.",
+        "description": "Resolves `scopePath` at GitLab and checks the token's access before storing anything.",
         "security": [{ "cookieAuth": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateGitlabConnectionRequest" } } } },
         "responses": {
@@ -1341,7 +1341,7 @@
       "patch": {
         "tags": ["platform-connections"],
         "summary": "Rename a GitLab connection or replace its access token",
-        "description": "Not served yet: implemented by #138.",
+        "description": "A partial update. A new access token is checked against the connection's stored scope at GitLab before it is stored.",
         "security": [{ "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateGitlabConnectionRequest" } } } },
@@ -1356,7 +1356,7 @@
       "delete": {
         "tags": ["platform-connections"],
         "summary": "Remove a GitLab connection",
-        "description": "Not served yet: implemented by #138.",
+        "description": "Refused with 409 while a pool, a fleet target or a live runner references the connection. Removes the stored access token and webhook secret.",
         "security": [{ "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
         "responses": {
@@ -1372,7 +1372,7 @@
       "post": {
         "tags": ["platform-connections"],
         "summary": "Check that the connection's token can still manage runners for its scope",
-        "description": "Not served yet: implemented by #138.",
+        "description": "Checks the stored access token against the connection's scope at GitLab.",
         "security": [{ "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
         "responses": {
@@ -1388,7 +1388,7 @@
       "post": {
         "tags": ["platform-connections"],
         "summary": "Issue a new webhook secret",
-        "description": "Not served yet: implemented by #138.",
+        "description": "Stores a new webhook secret under the same key; the previous secret stops working at once.",
         "security": [{ "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
         "responses": {
