@@ -157,6 +157,7 @@ The original "Done when" list stands. Tests must **also** cover each behaviour t
 - `migrations/0001_initial.sql` (`:200-218`, `webhook_deliveries`)
 - `docs/fleet-api.md` (webhook rows, `:128-177`)
 - `gitlab-148-scaling-71c514/docs/handoffs/148-brief.md` (sibling worktree, `:1-60`)
+- Brief review round 1 (after architecture review round 4), B-1: names no repository path; `docs/handoffs/140-brief.md` re-read in full for the fix.
 
 ## Orchestrator decisions (brief gate round 2 warnings)
 
@@ -287,7 +288,11 @@ A `pending` delivery whose tag fetch fails leaves no `gitlab_jobs` row, and a la
 
 ### Outside #140 (added, NIT-2)
 
-When one delivery matches two candidate connections, it produces two `webhook_deliveries` rows (`gitlab:<connection_a>:<key>` and `gitlab:<connection_b>:<key>`) as well as the two `gitlab_jobs` rows recorded above. The deliveries list then shows that delivery twice. That is by design under W-4 option (a), and #140 does not deduplicate it.
+(Corrected in brief review round 1 after round 4, B-1: the earlier text said "one delivery" here, which misstated the mechanism.)
+
+One incoming HTTP delivery always resolves to exactly **one** connection and writes exactly **one** `webhook_deliveries` row: under W-4 option (a) its id is `gitlab:<connection_id>:<key>` for the single connection whose secret matched the token, with the project-scoped-then-oldest preference when several match (or `gitlab:unmatched:<key>` when none does). The handler never writes a second row for the same request.
+
+Two rows arise only from **two separate deliveries** of the same GitLab job event: for example a project webhook and its parent group's webhook, each configured on GridOps as its own connection with its own secret, each send the event in their own HTTP request. Each request matches its own connection, so the pair produces two `webhook_deliveries` rows (`gitlab:<connection_a>:<key>` and `gitlab:<connection_b>:<key>`) as well as the two `gitlab_jobs` rows recorded in the earlier "Outside #140" note. The deliveries list then shows that event twice. That is by design under W-4 option (a), and #140 does not deduplicate it.
 
 ## Amendments (contract decision D18: one shared `gitlab_jobs` writer)
 

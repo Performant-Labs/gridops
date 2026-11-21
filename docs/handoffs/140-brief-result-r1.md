@@ -1,25 +1,43 @@
 ## Brief Review (Round 1)
 
 ### BLOCK findings
-None.
+
+**[B-1]** Internal contradiction on how many `webhook_deliveries` rows one delivery produces. Round-2 amendment "Warnings settled (W-4): option (a)" fixes the delivery id as `gitlab:<connection_id>:<key>` where `<connection_id>` is the **single** connection whose secret matched the token (with a deterministic preference when several match), so one incoming delivery resolves to exactly one id and one row. But the round-3 gate addition "Outside #140 (added, NIT-2)" states: "When one delivery matches two candidate connections, it produces two `webhook_deliveries` rows (`gitlab:<connection_a>:<key>` and `gitlab:<connection_b>:<key>`)". Under W-4(a) as written, a single HTTP delivery cannot produce two rows — only one candidate's secret matches, and the preference rule picks one when several do. Two rows arise from two *separate deliveries* (GitLab sending the event to a project hook and a group hook), which is the mechanism described in the earlier "Outside #140" note about duplicate `gitlab_jobs` rows. NIT-2 misstates the mechanism and, read alone, invites an implementer to write both rows. Fix NIT-2 to describe two deliveries, not one.
 
 ### Needs-verification findings
-- **[NV-1]** The GitLab Job event payload is assumed to carry `project.path_with_namespace` (group prefix matching), `project.id`, `build_status_changed_at`, `build_name`, `retries_count`, `runner.id`, and `pipeline_id` as the brief's processing and `JobObservation` (which requires a non-optional `pipeline_id: u64`) require. — GitLab webhook events documentation (`https://docs.gitlab.com/user/project/integrations/webhook_events/`, Job events section) listing the exact payload fields; settle whether `pipeline_id` and `path_with_namespace` are always present or need fallbacks.
-- **[NV-2]** Constant-time token comparison "with `subtle`" is assumed available and idiomatic on raw header bytes. — `subtle` crate documentation (`ConstantTimeEq` / `ct_eq`) and how `webhooks.rs` already uses the dependency (excerpt of its existing compare code) to confirm the same pattern applies to an `X-Gitlab-Token` header value.
-- **[NV-3]** The `fleet-api.md` matrix edit ("one `— | — | — | ignored` row after the GitHub webhook rows makes `access::tests::the_documented_matrix_lists_exactly_the_registered_routes` pass") assumes the test parses the doc that way. — `crates/gridops-api/src/fleet/openapi.rs` (`access::tests`, matrix parsing) and `docs/fleet-api.md` rows around the GitHub webhook entries.
-- **[NV-4]** `#148`'s brief is claimed to insert "any job missing from `gitlab_jobs`" with `tag_list` from `Job.tag_list` (cited as `gitlab-148-scaling-71c514/docs/handoffs/148-brief.md:36`), which the W-4 recovery argument depends on. — The actual text at that file:line; the excerpt is not shown in this prompt, only cited.
-- **[NV-5]** GitLab is claimed to redeliver with the same `Idempotency-Key` (the premise of duplicate detection by id). — GitLab webhooks documentation header table (already partially quoted in NV-2); confirm the "constant across retries" wording and that `webhook-id`/`X-Gitlab-Event-UUID` semantics are as the fallback order assumes.
+
+**[NV-1]** Claim: `Idempotency-Key` is constant across GitLab retries and `webhook-id` is preferred (NV-2, header-order decision) — the GitLab webhook documentation header table (fetched page) would settle it; the excerpt is not reproduced in this prompt, only paraphrased.
+
+**[NV-2]** Claim: `AppState.gitlab`, `UnconfiguredGitLab` and `with_gitlab` exist on master "in exactly the shape pinned" (#138 merged as `0086aa9`) — `crates/gridops-api/src/state.rs` at that commit would settle it; the file is listed as read but not excerpted.
+
+**[NV-3]** Claim: `retry`'s unverified-row branch runs before dispatch and refuses `gitlab:unmatched:` rows (NV-4 cites `webhooks.rs:134-138`) — the shown source excerpt of `webhooks.rs` does not include those lines; the file text at `:113-185` would settle it.
+
+**[NV-4]** Claim: `receive`'s bookkeeping behaves as NV-5 describes (insert `ON CONFLICT DO NOTHING`, duplicate 202, rejected-then-401, error truncated to 2,000 chars) — `crates/gridops-api/src/webhooks.rs:25-111` excerpt would settle it.
+
+**[NV-5]** Claim: the GitLab Job webhook payload carries `project.path_with_namespace`, `build_status_changed_at`, `build_name` and `retries_count` in the shapes the brief assumes (group prefix matching and timestamp parsing depend on these) — GitLab's "Job events" payload documentation, or a captured payload, would settle it.
+
+**[NV-6]** Claim: the contract's `ExternalId` "already fits SQLite" (no raw `u64` bound) — `crates/gridops-core/src/fleet/mod.rs`'s `ExternalId` definition and its sqlx `Encode`/`Type` impls would settle it.
+
+**[NV-7]** Claim: `set_gitlab_runner_busy` returns `(String, String)` for `(runner id, pool id)` — `runners.pool_id` nullability in the migrations would settle it; if `pool_id` is nullable the round-3 `Option<String>` shape was right and the round-4 change loses information.
+
+**[NV-8]** Claim: #148's poll "inserts any job missing from `gitlab_jobs` that GitLab still lists as pending, with `tag_list` from `Job.tag_list`" (cited `gitlab-148-brief.md:36` at `c48f951`) — that file's line 36 would settle it; the W-4 failed-fetch recovery path depends on it.
 
 ### WARN findings
-- **[W-1]** Retry "re-runs the GitLab processing from the stored payload," but no section ever states that the raw request body is persisted into `webhook_deliveries.payload` (the schema shows the column, the behavior is only implied). — State explicitly that the GitLab arm stores the raw body in `payload` at receipt and re-parses it on retry, and add it to the Done-when (a retry test that only works if the payload was stored would catch it, but the requirement should be named).
-- **[W-2]** The W-1 duplicate rule ("any existing id is a duplicate, acknowledged 202, whatever its status") means a redelivery of a **rejected** delivery (`gitlab:unmatched:<key>`) is answered 202 `duplicate` rather than re-evaluated, and a redelivery of a **failed** delivery is silently acknowledged with no recovery until #148's poll or a manual retry. — This is consistent with `receive`'s rule per NV-5, but the brief should acknowledge the rejected-redelivery-202 interaction explicitly (a client probing a misconfigured token gets a 401 once, then 202s).
-- **[W-3]** The malformed-body (400) test says "writes nothing to `gitlab_jobs` or `runners`" but is silent on `webhook_deliveries`: should a 400 be recorded (as the GitHub 400 path presumably does or does not)? The delivery id for a malformed body would be a body-hash id, creating rows that can never be retried. — Specify whether a 400 delivery is recorded, and if so with what `signature_valid`.
-- **[W-4]** The D18 shared-writer function takes `&mut SqliteConnection` and "callers own transactions," but the round-1 amendment fixes the processing function's signature as taking `&SqlitePool` and the two signatures coexist without stating the connection-acquisition/transaction boundary (e.g. whether delivery-status updates and the `gitlab_jobs` write share a transaction). — One sentence on the transaction boundary would prevent the two crates diverging in the diff.
+
+**[W-1]** Missing edge case: behavior when `X-Gitlab-Event` is absent. The OpenAPI (NV-3) marks it `required: true`, `webhook_deliveries.event` is `NOT NULL`, and the id/event columns both consume it — but the brief never says what to do with a request lacking the header (400? default value?). Add a criterion.
+
+**[W-2]** Missing edge case: non-JSON / non-object body handling is specified (400 with `ApiErrorBody`), but the interaction with the delivery id (SHA-256 of raw body) and whether a rejected-for-parse delivery is *recorded* is left implicit — the 401 path records a row, the 400 path says only "writes nothing to gitlab_jobs or runners". State whether a 400 body is recorded in `webhook_deliveries` (GitHub's `receive` precedent would settle it).
+
+**[W-3]** D18 makes #140 and #148 share exact signatures across two parallel worktrees ("#148 may stub against these exact signatures; whichever merges second removes its local copy"). This is a live merge-conflict risk with no acceptance criterion covering the reconciliation; recommend recording on #136 who owns the final signature diff.
+
+**[W-4]** The tie/terminal status rule now spans four revision layers (rounds 1–4 plus D18), and several earlier rounds are only partially superseded ("replace the corresponding D18 lines", "replaces the running bullet's condition"). An implementer reading linearly can follow stale rules (e.g., round-1 tie rule, round-2 epoch-seconds, round-3 `Option` pool id). Recommend the brief be re-published as a single consolidated rule set before the diff gate.
 
 ### NIT findings
-- **[NIT-1]** `X-Gitlab-Event` is `required: true` in the OpenAPI, yet the delivery-id row uses its `event` value and the handler is specified to reject on token mismatch first; the brief never says what happens if `X-Gitlab-Event` is absent (400 vs treating as unmatchable). Cheap to pin down.
-- **[NIT-2]** The `action` column is set to the payload's `build_status`, which may be a string outside `JobStatus` (e.g. `unknown`-tiered raw values); harmless but worth a note that `action` stores the raw value even when the status rule ignores it.
-- **[NIT-3]** NV-1 round-1 verified `webhooks.tsx:119`/`:146` quotes but the excerpt shows only `:119`; `:146` is cited without being shown. Trivial, but the round-3 "Verified excerpts" practice should include it.
+
+**[NIT-1]** "Timestamp fallback equals the receive time (`now_millis()`)" makes the fallback non-deterministic across retries: a retried failed delivery would parse a *different* fallback timestamp than the original receipt, potentially changing whether the status write applies. Consider pinning the fallback to the stored `webhook_deliveries.received_at`.
+
+**[NIT-2]** The "keep it to the added lines" instruction in the issue text is long since overtaken by D18 (a new `gridops-core` module) — delete or annotate the original "Owns" paragraph to avoid a stale ownership claim.
 
 ### Verdict
-PASS — no BLOCK findings; implementation may proceed.
+
+BLOCK — 1 blocking finding (B-1); must resolve before implementation starts.
