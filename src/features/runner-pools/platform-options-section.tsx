@@ -1,16 +1,24 @@
 /**
  * The Platform options section of the runner pool forms (#145): collapsed by default, rendered only
- * for the platforms the pool targets, and filled from each descriptor's `platformOptions`.
+ * for the platforms the pool targets, and filled from each descriptor's `platformOptions`. A
+ * descriptor's component edits its own entry of the form's option values, which the form hands to
+ * the payload partials at submit.
  */
 import { ChevronRight } from "lucide-react";
 import { useId, useState } from "react";
 
 import { platforms } from "~/features/platform-connections/registry";
-import type { PlatformDescriptor, ResolvedSelection } from "~/features/platform-connections/types";
+import type { PlatformDescriptor, PlatformOptionValues, ResolvedSelection } from "~/features/platform-connections/types";
 import { targetedPlatforms } from "~/features/runner-pools/targets";
 import { cn } from "~/lib/utils";
 
-export function PlatformOptionsSection({ descriptors = platforms, selection }: { descriptors?: readonly PlatformDescriptor[]; selection: ResolvedSelection }) {
+export function PlatformOptionsSection({ descriptors = platforms, selection, values = {}, onChange }: {
+  descriptors?: readonly PlatformDescriptor[];
+  selection: ResolvedSelection;
+  /** The form's option values per platform id. */
+  values?: PlatformOptionValues;
+  onChange?: (values: PlatformOptionValues) => void;
+}) {
   const [open, setOpen] = useState(false);
   const contentId = useId();
   const targeted = targetedPlatforms(descriptors, selection).filter((platform) => platform.platformOptions);
@@ -45,7 +53,7 @@ export function PlatformOptionsSection({ descriptors = platforms, selection }: {
                       {options.help.map((item, index) => <li key={index}>{item}</li>)}
                     </ul>
                   ) : null}
-                  {Extra ? <Extra /> : null}
+                  {Extra ? <Extra onChange={(next) => onChange?.({ ...values, [platform.id]: next })} values={values[platform.id]} /> : null}
                 </div>
               );
             })}

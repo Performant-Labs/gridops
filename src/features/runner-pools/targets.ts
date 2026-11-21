@@ -6,9 +6,11 @@
 import type {
   PayloadPartial,
   PlatformDescriptor,
+  PlatformOptionValues,
   PrerequisiteEmptyState,
   ResolvedSelection,
   TargetContext,
+  TargetCreateValues,
   TargetKind,
   TargetLimits,
   TargetOption,
@@ -125,6 +127,17 @@ export function initialSelection(descriptors: Descriptors, pool: RunnerPoolDetai
   return Object.assign({}, ...descriptors.map((platform) => platform.initialSelection?.(pool) ?? {}));
 }
 
+/**
+ * The Platform options values a pool form starts from, one entry per platform that declares
+ * `platformOptions.initialValues`: the pool's own on settings, the defaults on a new pool.
+ */
+export function initialPlatformOptionValues(descriptors: Descriptors, pool?: RunnerPoolDetail): PlatformOptionValues {
+  return Object.fromEntries(descriptors.flatMap((platform) => {
+    const initialValues = platform.platformOptions?.initialValues;
+    return initialValues ? [[platform.id, initialValues(pool)]] : [];
+  }));
+}
+
 export function initialPriorityKeys(descriptors: Descriptors, pool: RunnerPoolDetail): string[] {
   return descriptors.flatMap((platform) => platform.initialPriorityKeys?.(pool) ?? []);
 }
@@ -141,8 +154,8 @@ export function readOnlySummaries(descriptors: Descriptors, pool: RunnerPoolDeta
  * The target fields of a create payload. Every descriptor's partial is merged, whether or not its
  * platform has a selected target, because today's payload always carries each platform's defaults.
  */
-export function buildCreatePayload(descriptors: Descriptors, selection: ResolvedSelection, context: TargetContext): PayloadPartial {
-  return Object.assign({}, ...descriptors.map((platform) => platform.toCreatePayload(selection, context)));
+export function buildCreatePayload(descriptors: Descriptors, selection: ResolvedSelection, context: TargetContext, values: TargetCreateValues = {}): PayloadPartial {
+  return Object.assign({}, ...descriptors.map((platform) => platform.toCreatePayload(selection, context, values)));
 }
 
 /** The target fields of an update payload (no `poolId`: the settings form adds it). */

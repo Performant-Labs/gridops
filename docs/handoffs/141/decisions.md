@@ -145,3 +145,32 @@
   - Baseline: 46 files and 461 tests green after `npm ci`.
   - Read the brief, handoff-A (round 3), handoff-D, the wireframe text, and these files in full or in the parts the tests touch: `types.ts`, `registry.tsx`, `github.tsx`, `bitbucket.tsx`, `platform-connections.functions.ts`, `connections-section.tsx`, `targets.ts`, `schemas.ts`, `runner-pools.functions.ts`, `platform-options-section.tsx`, `targets-row.tsx` (load on mount), `webhooks.tsx`, `runner-row.tsx`, `use-action.ts`, `confirm-dialog.tsx` (the `window.confirm` fallback), `secret-reveal-dialog.tsx`, `copy-button.tsx`, the `searchable-select` trigger ARIA, `settings-ui` `Switch` (Radix), the OpenAPI GitLab schemas, `resources.rs` `runners` (:1916-1998) and migration 0047.
   - Ran: `npx vitest run`, `cargo test -p gridops-api the_runners_list_carries`, `rustfmt --check`, `eslint tests`, `tsc --noEmit` (test files) and `cargo clippy -p gridops-api --all-targets`. Clippy found nothing in the new test; its pre-existing lints in other files are outside #141.
+
+## F (Feature Implementor, Phase 5) - 2026-11-20T18:06:03-08:00
+- **Decided:** Implemented against T's RED. Handoff: docs/handoffs/141/handoff-F.md. The GitLab descriptor is `gitlab.tsx`, registered last. Each descriptor-contract gap is closed generically, with no GitLab string in a shared file:
+  - **Gap 1 (row actions):** `ConnectionBindings.actions?(item)` returns `ConnectionRowAction[]` (`label`, `run(item)`, `confirm?`, `confirmOptions?`, `success?`). The row runs each action through `useAction`, between Edit and Remove. The row's buttons are disabled while an action or Remove runs. A returned `SecretReveal` (renamed from `PostCreateReveal`) reaches the section's one `SecretRevealDialog` through `onReveal`.
+  - **Gap 2 (option values):** `platformOptions.initialValues?(pool?)` and `Component: ComponentType<{ values, onChange }>`. `initialPlatformOptionValues` in `targets.ts` seeds the forms' `Record<platformId, unknown>`. The values travel as `platformOptions` inside `TargetUpdateValues` and inside a new optional fourth `TargetCreateValues` argument to `toCreatePayload` / `buildCreatePayload`. Both routes hold the record and pass it on. Neither route names a platform.
+  - **Gap 3 (reveal):** no component change. The secret is the main copy box. The webhook URL, its own `CopyButton` and the Job events steps go in `details`.
+  - **Gap 4 (`github.tsx`):** `toUpdatePayload`, `initialSelection` and `readOnlySummary` branch on `repository` and `organization` explicitly, and return `{}` / `{}` / `null` for any other scope. `initialPriorityKeys` already returned `[]`.
+  - **Gap 5 (fields):** `ConnectionField` gains `type: "select"`, `options`, `defaultValue` and `validate`. The select is the shared `SearchableSelect` (`searchable={false}`, `ariaLabel` = the field label). `defaultValue` seeds the create values when a platform is chosen. A `validate` problem shows `aria-invalid` and a `text-danger` line once the value is non-empty (or after a refused submit), and blocks the request.
+  - **Gap 6 (order):** GitLab is registered last, with a comment that order matters.
+  - **Gap 7 (deliveries):** `platformForDeliveryId(id)` in `registry.tsx` falls back to `githubPlatform` by reference. The new descriptor value `deliveryDestinationFallback` is "GitHub App" for GitHub only. `webhooks.tsx` shows `PlatformBadge` in the row and beside the sheet heading. The sheet's Destination shows "—" when there is no destination. The list shows no destination text.
+  - **Backend:** the runners list selects `r.gitlab_runner_id` and LEFT JOINs `gitlab_connections gc` for `gitlab_base_url` and `gitlab_scope_path`, emitted as `gitlabRunnerId`, `gitlabBaseUrl` and `gitlabScopePath` (null otherwise).
+- **Assumed:**
+  - **runUntagged on settings:** settings sends `runUntagged` only when it differs from the pool's stored value (wireframe F1). A form that holds no GitLab option value keeps the stored one, so a caller without `platformOptions` never flips it.
+  - **Create schema rules:** the create schema rejects GitLab ids on a non-GitLab scope, a GitLab scope with no ids, and GitLab with repositories or Bitbucket workspaces. Both schemas check unique ids, at most `maxCount`, and the GitLab tag rule when ids are present (Bitbucket pattern).
+  - **Target kinds:** the GitLab kinds `raisesMinMaxCount`, because each connection registers its own runner and the server caps ids at `maxCount`.
+- **Hedged:**
+  - The plan sentence and `notConnected` copy differ from the wireframe; see the handoff's Deviations.
+  - Two pre-existing `tests/connections-page.test.ts` member tests fail. T's GitLab stub (`:83`) always reports `canManage: true`, so a member is offered Add connection. That is a test-only rework for T. Production follows the server's `canManage`.
+  - The headless Playwright walkthrough is T's Tier 2 job and was not run here.
+- **Evidence:**
+  - `npx vitest run`: 546 passed, 2 failed (the two stub tests above).
+  - `npm run build`: vite build plus `tsc --noEmit`, exit 0.
+  - `npm run lint`: exit 0.
+  - `cargo test -p gridops-api the_runners_list_carries`: passed.
+  - `cargo test -p gridops-api gitlab`: 34 + 3 passed.
+  - `cargo test -p gridops-api runner`: 11 + 2 + 19 passed.
+  - `cargo fmt --check -p gridops-api`: exit 0.
+  - `cargo clippy -p gridops-api -- -D warnings` (with `-A clippy::unused_async_trait_impl`): clean.
+  - Source facts are in docs/handoffs/141/evidence.md.

@@ -46,11 +46,13 @@ export type RunPlatform = {
 };
 
 export type Runner = {
-  id: string; name: string; provider: "docker" | "tart"; platform: "github" | "bitbucket"; status: string; busy: boolean; ephemeral: boolean; os: string;
+  id: string; name: string; provider: "docker" | "tart"; platform: "github" | "bitbucket" | "gitlab"; status: string; busy: boolean; ephemeral: boolean; os: string;
   architecture: string; containerId: string | null; githubRunnerId: number | null; bitbucketRunnerUuid: string | null;
   failureReason: string | null; registeredAt: string | null; lastHeartbeatAt: string | null;
   createdAt: string; poolId: string; poolName: string; poolPaused: boolean; accountLogin: string;
   repository: string | null; currentJobName: string | null; currentRunId: number | null; machine: RunnerMachine | null; canManage: boolean;
+  /** A GitLab runner's id and its connection's address and path (the runner link); null otherwise, absent from an older server. */
+  gitlabRunnerId?: number | null; gitlabBaseUrl?: string | null; gitlabScopePath?: string | null;
 };
 
 export type WorkflowRun = {

@@ -32,6 +32,7 @@ const configurationShape = {
 
 const repositoryIds = z.array(z.number().int().positive()).max(1_000);
 const bitbucketConnectionIds = z.array(z.string().uuid()).max(100);
+const gitlabConnectionIds = z.array(z.string().uuid()).max(100);
 
 function validateCapacity(
   value: { desiredCount: number; minCount: number; maxCount: number },
@@ -100,6 +101,9 @@ export const updateRunnerPoolSchema = z
     priorityRepositoryIds: repositoryIds.optional(),
     priorityWaitMinutes: z.number().int().min(1).max(1_440).optional(),
     bitbucketConnectionIds: bitbucketConnectionIds.optional(),
+    // Replaces a GitLab pool's connection set; never sent for another pool.
+    gitlabConnectionIds: gitlabConnectionIds.optional(),
+    runUntagged: z.boolean().optional(),
     ...configurationShape,
   })
   .superRefine((value, context) => {
@@ -118,6 +122,7 @@ export const updateRunnerPoolSchema = z
       });
     }
     validateBitbucketConnections(value, context);
+    validateGitlabConnections(value, context);
     validateCapacity(value, context);
     validateProvider(value, context);
   });
@@ -127,7 +132,10 @@ export const createRunnerPoolSchema = z
     installationId: z.number().int().positive(),
     repositoryIds: repositoryIds.default([]),
     bitbucketConnectionIds: bitbucketConnectionIds.default([]),
-    scope: z.enum(["repository", "organization"]),
+    gitlabConnectionIds: gitlabConnectionIds.default([]),
+    // Whether a GitLab pool's runners also take jobs with no tags.
+    runUntagged: z.boolean().default(false),
+    scope: z.enum(["repository", "organization", "gitlab"]),
     ...configurationShape,
   })
   .superRefine((value, context) => {
@@ -153,6 +161,8 @@ export const createRunnerPoolSchema = z
       });
     }
     validateBitbucketConnections(value, context);
+    validateGitlabTargets(value, context);
+    validateGitlabConnections(value, context);
     validateCapacity(value, context);
     validateProvider(value, context);
   });
@@ -179,6 +189,62 @@ function validateBitbucketConnections(
   }
   const labelError = bitbucketLabelError(value.labels);
   if (labelError) context.addIssue({ code: "custom", path: ["labels"], message: labelError });
+}
+
+/**
+ * The create-only GitLab scope rule (the server's `validate_gitlab_targets`): a pool is GitLab-scoped
+ * exactly when it has a GitLab connection, and a GitLab pool has no GitHub repositories and no
+ * Bitbucket workspaces. The update schema has no scope, so it cannot apply this rule.
+ */
+function validateGitlabTargets(
+  value: { scope: "repository" | "organization" | "gitlab"; repositoryIds: number[]; bitbucketConnectionIds: string[]; gitlabConnectionIds: string[] },
+  context: z.RefinementCtx,
+) {
+  if (value.scope !== "gitlab") {
+    if (value.gitlabConnectionIds.length > 0) {
+      context.addIssue({ code: "custom", path: ["gitlabConnectionIds"], message: "Only a GitLab pool can use GitLab projects or groups." });
+    }
+    return;
+  }
+  if (value.gitlabConnectionIds.length === 0) {
+    context.addIssue({ code: "custom", path: ["gitlabConnectionIds"], message: "Choose at least one GitLab project or group for a GitLab pool." });
+  }
+  if (value.repositoryIds.length > 0) {
+    context.addIssue({ code: "custom", path: ["repositoryIds"], message: "A GitLab pool cannot also use GitHub repositories." });
+  }
+  if (value.bitbucketConnectionIds.length > 0) {
+    context.addIssue({ code: "custom", path: ["bitbucketConnectionIds"], message: "A GitLab pool cannot also use Bitbucket workspaces." });
+  }
+}
+
+/**
+ * The GitLab connection bounds shared by create and update (the server's `validate_gitlab_connections`):
+ * unique, and no more than the maximum runner count. Their labels are the runners' GitLab tags.
+ */
+function validateGitlabConnections(
+  value: { gitlabConnectionIds?: string[]; labels: string[]; maxCount: number },
+  context: z.RefinementCtx,
+) {
+  const connections = value.gitlabConnectionIds;
+  if (!connections?.length) return;
+  if (new Set(connections).size !== connections.length) {
+    context.addIssue({ code: "custom", path: ["gitlabConnectionIds"], message: "Choose each GitLab project or group once." });
+  }
+  if (connections.length > value.maxCount) {
+    context.addIssue({ code: "custom", path: ["gitlabConnectionIds"], message: "GitLab project and group count cannot exceed maximum runner capacity." });
+  }
+  const labelError = gitlabLabelError(value.labels);
+  if (labelError) context.addIssue({ code: "custom", path: ["labels"], message: labelError });
+}
+
+/**
+ * The GitLab tag rule, shared by the submit-time schema and the GitLab platform descriptor: any
+ * character but a comma, and not blank. The shared label schema above caps every label at 64.
+ */
+export function gitlabLabelError(labels: readonly string[]): string | null {
+  return labels.some((label) => !label.trim() || label.includes(","))
+    ? "GitLab tags cannot be blank or contain a comma."
+    : null;
 }
 
 /** The Bitbucket label rule, shared by the submit-time schema and the Bitbucket platform descriptor. */

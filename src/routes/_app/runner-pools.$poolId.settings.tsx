@@ -23,7 +23,8 @@ import type { UpdateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import { type RunnerPoolDetail, updateRunnerPoolAction } from "~/features/runner-pools/runner-pools.functions";
 import {
-  buildUpdatePayload, initialPriorityKeys, initialSelection, minMaxCount, priorityCandidates, prioritySupported, readOnlySummaries, targetPlanCheck,
+  buildUpdatePayload, initialPlatformOptionValues, initialPriorityKeys, initialSelection, minMaxCount, priorityCandidates, prioritySupported, readOnlySummaries,
+  targetPlanCheck,
 } from "~/features/runner-pools/targets";
 import { TargetsRow } from "~/features/runner-pools/targets-row";
 
@@ -54,6 +55,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   const context = useMemo<TargetContext>(() => ({ form: "update", pool }), [pool]);
   const [selection, setSelection] = useState<ResolvedSelection>(() => initialSelection(platforms, pool));
   const [priorityKeys, setPriorityKeys] = useState(() => initialPriorityKeys(platforms, pool));
+  // Each platform's Platform options values, started from the pool and read by its update partial.
+  const [platformOptions, setPlatformOptions] = useState(() => initialPlatformOptionValues(platforms, pool));
   const [maxCount, setMaxCount] = useState(pool.maxCount);
   const [desiredCount, setDesiredCount] = useState(pool.desiredCount);
   const [cpuLimit, setCpuLimit] = useState(pool.cpuLimit);
@@ -87,6 +90,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           ...(buildUpdatePayload(platforms, selection, pool, {
             priorityKeys,
             priorityWaitMinutes: showPriority ? Number(form.get("priorityWaitMinutes")) : undefined,
+            platformOptions,
           }) as Partial<UpdateRunnerPoolInput>),
           name: poolName,
           mode,
@@ -125,7 +129,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           </SettingsRow>
         </SettingsSection>
 
-        <PlatformOptionsSection descriptors={platforms} selection={selection} />
+        <PlatformOptionsSection descriptors={platforms} onChange={setPlatformOptions} selection={selection} values={platformOptions} />
 
         <SettingsSection description="What each runner is and how jobs find it." title="Runner definition">
           <SettingsRow description="Also registered as a runner label." htmlFor="pool-name" label="Pool name">
