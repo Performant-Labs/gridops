@@ -151,3 +151,9 @@
 - **Assumed:** `release_preflight` fails only because this host is a ready macOS ARM64 machine, so it is environmental. It failed identically at RED, before F's code.
 - **Hedged:** the four added tests were not RED-first; they pin behavior that already existed. Two were confirmed by temporary mutation of production code (restored byte-for-byte). The other two were not mutation-checked.
 - **Evidence:** `cargo test -p gridops-api` bin 91/91 (87 + 4), `control_plane_contracts` 36/36, `fleet_http` 143/144 (environmental); `cargo test -p gridops-core --tests` all ok; `gridops-reconciler` 68/68; fmt clean; clippy clean in changed files. Mutation run: 28 passed, 2 failed, as expected.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20
+- **Decided:** PASS. F extended the named analogous objects in place (pool create/update/detail/options, `delete_runner_resources`, the URL helper, fleet access functions); the only new object is the brief-mandated `resources/gitlab.rs`.
+- **Assumed:** the repeated `runtime_secrets` upsert and the unique-violation helper have no shared seam to extend, so local copies are not parallel paths.
+- **Hedged:** four `warn` findings (secret-upsert duplication, local `is_unique_violation`, update-time no-mixing check, repeated link-row loop), none blocking.
+- **Evidence:** read the full diff of `resources.rs`, `state.rs`, `main.rs`, `models.rs`, `fleet/service.rs`, `fleet/targets.rs`, `Cargo.toml`, and `resources/gitlab.rs` in full; see `handoff-A-dup.md`.
