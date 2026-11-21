@@ -1,18 +1,20 @@
 /** The GitHub platform descriptor (#145): App installations, repositories and organization runner groups. */
-import { ExternalLink, Github } from "lucide-react";
+import { ChevronDown, ExternalLink, Github } from "lucide-react";
+import { useState } from "react";
 
-import { Avatar } from "~/components/ui/avatar";
+import { PropertyRow } from "~/components/page";
+import { Avatar, githubAvatar } from "~/components/ui/avatar";
 import { Badge } from "~/components/ui/badge";
 import { buttonVariants } from "~/components/ui/button";
-import type { SettingsPage } from "~/features/operations/operations.functions";
+import type { RunnerPool, SettingsPage } from "~/features/operations/operations.functions";
 import {
   type RunnerPoolDetail,
   getInstallationRunnerGroups,
   getRunnerPoolRepositories,
 } from "~/features/runner-pools/runner-pools.functions";
-import { formatRelativeTime } from "~/lib/utils";
+import { cn, formatRelativeTime } from "~/lib/utils";
 
-import type { PlatformDescriptor, ResolvedSelection, TargetContext, TargetKind, TargetOption } from "./types";
+import type { PlatformDescriptor, PoolDestinationView, ResolvedSelection, TargetContext, TargetKind, TargetOption } from "./types";
 
 type Installation = NonNullable<SettingsPage["data"]>["installations"][number];
 
@@ -160,6 +162,55 @@ function InstallationAside({ installation }: { installation: Installation }) {
   ) : <span className="text-xs text-faint">Owner approval required</span>;
 }
 
+// ---- Pool destination --------------------------------------------------------------------------
+
+/** The list cell, as before #159: the repository count, the repository, or the account, with the account's avatar. */
+function poolDestination(pool: RunnerPool): PoolDestinationView {
+  const text = pool.scope === "repository" && pool.repositoryCount > 1 ? `${pool.repositoryCount} repositories` : pool.repository ?? pool.accountLogin;
+  return { text, title: text, leading: <Avatar name={pool.accountLogin} size={16} square src={githubAvatar(pool.accountLogin)} /> };
+}
+
+const COLLAPSED_REPOSITORIES = 6;
+
+function RepositoryList({ repositories }: { repositories: RunnerPoolDetail["repositories"] }) {
+  const [expanded, setExpanded] = useState(false);
+  const hidden = repositories.length - COLLAPSED_REPOSITORIES;
+  const visible = expanded ? repositories : repositories.slice(0, COLLAPSED_REPOSITORIES);
+  return (
+    <div className="space-y-1 pt-1">
+      {visible.map((repository) => (
+        <div className="truncate rounded-md bg-panel-subtle px-2 py-1 text-xs text-secondary-foreground" key={repository.id} title={repository.fullName}>{repository.fullName}</div>
+      ))}
+      {hidden > 0 ? (
+        <button
+          aria-expanded={expanded}
+          className="flex h-6 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-hover hover:text-foreground"
+          onClick={() => setExpanded((current) => !current)}
+          type="button"
+        >
+          <ChevronDown className={cn("size-3 transition-transform duration-200 ease-out-strong", expanded && "rotate-180")} />
+          {expanded ? "Show fewer" : `Show ${hidden} more`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** The pool detail's Destination rows: the scope, the account, then the repositories or the runner group. */
+function PoolDestination({ pool }: { pool: RunnerPoolDetail }) {
+  return (
+    <>
+      <PropertyRow label="Scope"><span className="capitalize">{pool.scope}</span></PropertyRow>
+      <PropertyRow label="Account"><Avatar name={pool.accountLogin} size={16} square src={githubAvatar(pool.accountLogin)} />{pool.accountLogin}</PropertyRow>
+      {pool.scope === "repository" ? (
+        <RepositoryList repositories={pool.repositories} />
+      ) : <PropertyRow label="Runner group"><span className="tabular">#{pool.runnerGroupId}</span></PropertyRow>}
+    </>
+  );
+}
+
+// ---- Descriptor --------------------------------------------------------------------------------
+
 export const githubPlatform: PlatformDescriptor = {
   id: "github",
   name: "GitHub",
@@ -260,6 +311,8 @@ export const githubPlatform: PlatformDescriptor = {
     },
   initialPriorityKeys: (pool) => pool.scope === "repository" ? pool.priorityRepositoryIds.map(repositoryKey) : [],
   readOnlySummary: (pool) => pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.scope === "organization" ? pool.accountLogin : null,
+  // A Bitbucket workspace rides on a GitHub repository or runner-group pool, so that pool's destination is GitHub's.
+  pool: { scopes: ["repository", "organization"], destination: poolDestination, Destination: PoolDestination },
   prerequisiteEmptyState(context) {
     if (context.form !== "create") return null;
     const { options } = context;

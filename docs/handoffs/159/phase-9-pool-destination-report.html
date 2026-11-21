@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#159 spec audit: pool destination from the registry</title>
+<style>
+:root{color-scheme:light dark;--bg:#fafafa;--fg:#161616;--mut:#5b5b5b;--card:#fff;--bd:#d9d9d9;--ok:#14803c;--warn:#b45309}
+@media(prefers-color-scheme:dark){:root{--bg:#121214;--fg:#ececec;--mut:#a0a0a0;--card:#1a1a1d;--bd:#33333a;--ok:#4ade80;--warn:#fbbf24}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header.top{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--bd);padding:8px 24px;z-index:5;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+header.top a{color:var(--fg);text-decoration:none;font-size:13px;padding:2px 8px;border:1px solid var(--bd);border-radius:6px}
+main{max-width:1180px;margin:0 auto;padding:24px}
+.banner{border:2px solid var(--ok);border-radius:12px;padding:20px 24px;background:var(--card)}
+.banner .v{font-size:44px;font-weight:800;color:var(--ok);letter-spacing:.02em}
+.banner .sub{color:var(--mut)}
+.nums{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+.nums div{border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-size:13px}
+.nums b{display:block;font-size:15px}
+h1{margin:0 0 6px;font-size:22px}h2{margin-top:36px;border-bottom:1px solid var(--bd);padding-bottom:6px}h3{margin:18px 0 6px;font-size:14px;color:var(--mut)}
+table{border-collapse:collapse;width:100%;background:var(--card);font-size:13px}th,td{border:1px solid var(--bd);padding:6px 8px;text-align:left;vertical-align:top}
+td.st{font-weight:700;white-space:nowrap}td.m{color:var(--ok)}td.d{color:var(--warn)}
+.crop{width:300px;max-width:100%;border:1px solid var(--bd);display:block}
+.full{width:100%;border:1px solid var(--bd);display:block;background:#888}
+.wipe{position:relative;width:100%;max-width:1180px;border:1px solid var(--bd);overflow:hidden;background:#000}
+.wipe img{display:block;width:100%}
+.wipe .size{visibility:hidden}
+.wipe .bottom,.wipe .top{position:absolute;inset:0 auto auto 0;height:100%;object-fit:fill}
+.wipe .top{clip-path:inset(0 50% 0 0)}
+.wipe .line{position:absolute;top:0;bottom:0;left:50%;width:2px;background:#f0f;pointer-events:none}
+.range{width:100%;max-width:1180px;margin:8px 0}
+.hint{color:var(--mut);font-size:13px;margin:4px 0 8px}
+select{font:inherit;padding:4px 6px;max-width:100%}
+ul li{margin:4px 0}code{background:var(--card);border:1px solid var(--bd);border-radius:4px;padding:0 4px}
+@media(max-width:800px){.nums{grid-template-columns:1fr}}
+</style></head><body>
+<header class="top"><strong>#159 audit</strong><a href="#verdict">Verdict</a><a href="#different">What I see different</a><a href="#vp-360">360</a><a href="#vp-768">768</a><a href="#vp-1280">1280</a><a href="#sections">Per-section table</a><a href="#follow">Follow-ups</a><a href="#method">Method</a></header>
+<main>
+<section id="verdict" class="banner">
+  <h1>Pool list and pool detail: destination from the platform registry (#159)</h1>
+  <div class="v">PASS</div>
+  <div class="sub">Compared the build after this change (branch head) with the build before it (master tip), same data, same fixed clock, headless Chromium, 2026-11-21.</div>
+  <div class="nums">
+    <div><b>360 px</b>GitHub and Bitbucket pools: 0 px different<br>GitLab and unknown-scope pools: up to 2.377% of the screen differs (the destination area, plus the side effects listed below)</div>
+    <div><b>768 px</b>GitHub and Bitbucket pools: 0 px different<br>GitLab and unknown-scope pools: up to 1.334% of the screen differs (the destination area, plus the side effects listed below)</div>
+    <div><b>1280 px</b>GitHub and Bitbucket pools: no whole pixel differs<br>GitLab and unknown-scope pools: up to 0.231% of the screen differs (the destination area, plus the side effects listed below)</div>
+  </div>
+</section>
+
+<h2 id="different">What I see different</h2>
+<ul>
+<li><b>GitHub and Bitbucket pools: nothing.</b> At 360, 768 and 1280 wide, the pool list rows, the detail page's Destination group, the nine-repository list and its "Show 3 more" / "Show fewer" toggle are identical to the build before the change. Two of the 1280 captures differ by one shade on a 2 by 2 pixel rounded corner, which is rendering noise.</li>
+<li><b>Pool list, GitLab pools (1280):</b> the destination column no longer shows the installation's GitHub avatar and "acme-labs". It shows the GitLab icon with "Acme / web" (one connection), "2 connections" (hover shows both names) or "GitLab" (no connections).</li>
+<li><b>Pool list, unknown scope (1280):</b> an empty dashed square and a dash instead of the GitHub avatar and account name; the hover text reads "Unknown destination".</li>
+<li><b>Pool detail, GitLab pools (360, 768, 1280):</b> Scope now reads "GitLab" (it read "Gitlab"). The Account row with the GitHub avatar and the "Runner group #1" row are gone. Each connection appears as a small two-line item: its name, then its address. With no connections the group says "No connections listed".</li>
+<li><b>Pool detail, unknown scope:</b> a single row, "Scope: Unknown". The raw scope text is no longer echoed.</li>
+<li><b>Side effects of the above:</b> where the Destination group gets taller or shorter, the Configuration group below it moves with it. Where it gets shorter (GitLab with one or no connection, unknown scope) the page no longer needs to scroll by 6 px, so the browser draws the text on the rest of the page with slightly different edge smoothing at 1280 wide; no element outside the Destination group moves or changes size (measured, element by element). In the detail captures taken with the group scrolled into view, the page also sits at a slightly different scroll position for the same reason.</li>
+<li>The pool list's destination column is still hidden below 1280 wide. That is an existing rule and is not changed here.</li>
+</ul>
+
+
+<section class="vp" id="vp-360" data-vp="360">
+  <h2>360 x 800</h2>
+  <label>Show: <select class="pick"><option value="t3-list-360">Pool list, all nine pools</option><option value="t3-gh-org-360">Pool detail (top of page): GitHub organization pool</option><option value="t3-gl-two-360">Pool detail (top of page): GitLab pool, 2 connections</option><option value="t3-gh-many-dest-360">Destination group: GitHub repository pool, 3 repositories</option><option value="t3-gh-nine-dest-360">Destination group: GitHub repository pool, 9 repositories (collapsed)</option><option value="t3-gh-nine-expanded-dest-360">Destination group: GitHub repository pool, 9 repositories (expanded)</option><option value="t3-gh-org-dest-360">Destination group: GitHub organization pool</option><option value="t3-bb-dest-360">Destination group: Bitbucket (GitHub-scoped) pool</option><option value="t3-gl-one-dest-360">Destination group: GitLab pool, 1 connection</option><option value="t3-gl-two-dest-360">Destination group: GitLab pool, 2 connections</option><option value="t3-gl-zero-dest-360">Destination group: GitLab pool, no connections</option><option value="t3-unknown-dest-360">Destination group: unknown scope</option></select></label>
+  <p class="hint">Drag the slider. Left of the line is the build after this change; right of the line is the build before it.</p>
+  <div class="wipe" style="--aspect:360/800">
+    <img class="size" alt="" src="screenshots/cycle-1/t3-list-360-reference-20261121.png">
+    <img class="bottom" alt="Before this change" src="screenshots/cycle-1/t3-list-360-reference-20261121.png">
+    <img class="top" alt="After this change" src="screenshots/cycle-1/t3-list-360-live-20261121.png">
+    <div class="line"></div>
+  </div>
+  <input class="range" type="range" min="0" max="100" value="50" aria-label="Wipe between before and after at 360 pixels wide">
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="diff full" alt="Difference image" src="screenshots/cycle-1/t3-list-360-diff-20261121.png">
+  <h3>Side by side (before, then after)</h3>
+  <img class="comp full" alt="Side-by-side" src="screenshots/cycle-1/t3-list-360-composite-20261121.png">
+  <h3>Numbers at 360 px</h3>
+  <table><thead><tr><th>Page state</th><th>Pixels different</th><th>Status</th></tr></thead><tbody><tr><td>Pool list, all nine pools</td><td>0 px (0.000%)</td><td class="st d">MATCH + DELTA (intended)</td></tr><tr><td>Pool detail (top of page): GitHub organization pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Pool detail (top of page): GitLab pool, 2 connections</td><td>0 px (0.000%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitHub repository pool, 3 repositories</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (collapsed)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (expanded)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub organization pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: Bitbucket (GitHub-scoped) pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitLab pool, 1 connection</td><td>6,847 px (2.377%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, 2 connections</td><td>6,513 px (2.261%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, no connections</td><td>6,650 px (2.309%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: unknown scope</td><td>5,826 px (2.023%)</td><td class="st d">DELTA (intended)</td></tr></tbody></table>
+</section>
+
+<section class="vp" id="vp-768" data-vp="768">
+  <h2>768 x 1024</h2>
+  <label>Show: <select class="pick"><option value="t3-list-768">Pool list, all nine pools</option><option value="t3-gh-org-768">Pool detail (top of page): GitHub organization pool</option><option value="t3-gl-two-768">Pool detail (top of page): GitLab pool, 2 connections</option><option value="t3-gh-many-dest-768">Destination group: GitHub repository pool, 3 repositories</option><option value="t3-gh-nine-dest-768">Destination group: GitHub repository pool, 9 repositories (collapsed)</option><option value="t3-gh-nine-expanded-dest-768">Destination group: GitHub repository pool, 9 repositories (expanded)</option><option value="t3-gh-org-dest-768">Destination group: GitHub organization pool</option><option value="t3-bb-dest-768">Destination group: Bitbucket (GitHub-scoped) pool</option><option value="t3-gl-one-dest-768">Destination group: GitLab pool, 1 connection</option><option value="t3-gl-two-dest-768">Destination group: GitLab pool, 2 connections</option><option value="t3-gl-zero-dest-768">Destination group: GitLab pool, no connections</option><option value="t3-unknown-dest-768">Destination group: unknown scope</option></select></label>
+  <p class="hint">Drag the slider. Left of the line is the build after this change; right of the line is the build before it.</p>
+  <div class="wipe" style="--aspect:768/1024">
+    <img class="size" alt="" src="screenshots/cycle-1/t3-list-768-reference-20261121.png">
+    <img class="bottom" alt="Before this change" src="screenshots/cycle-1/t3-list-768-reference-20261121.png">
+    <img class="top" alt="After this change" src="screenshots/cycle-1/t3-list-768-live-20261121.png">
+    <div class="line"></div>
+  </div>
+  <input class="range" type="range" min="0" max="100" value="50" aria-label="Wipe between before and after at 768 pixels wide">
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="diff full" alt="Difference image" src="screenshots/cycle-1/t3-list-768-diff-20261121.png">
+  <h3>Side by side (before, then after)</h3>
+  <img class="comp full" alt="Side-by-side" src="screenshots/cycle-1/t3-list-768-composite-20261121.png">
+  <h3>Numbers at 768 px</h3>
+  <table><thead><tr><th>Page state</th><th>Pixels different</th><th>Status</th></tr></thead><tbody><tr><td>Pool list, all nine pools</td><td>0 px (0.000%)</td><td class="st d">MATCH + DELTA (intended)</td></tr><tr><td>Pool detail (top of page): GitHub organization pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Pool detail (top of page): GitLab pool, 2 connections</td><td>2,330 px (0.296%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitHub repository pool, 3 repositories</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (collapsed)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (expanded)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub organization pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: Bitbucket (GitHub-scoped) pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitLab pool, 1 connection</td><td>10,243 px (1.302%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, 2 connections</td><td>10,488 px (1.334%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, no connections</td><td>9,866 px (1.255%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: unknown scope</td><td>10,117 px (1.286%)</td><td class="st d">DELTA (intended)</td></tr></tbody></table>
+</section>
+
+<section class="vp" id="vp-1280" data-vp="1280">
+  <h2>1280 x 800</h2>
+  <label>Show: <select class="pick"><option value="t3-list-1280">Pool list, all nine pools</option><option value="t3-gh-org-1280">Pool detail (top of page): GitHub organization pool</option><option value="t3-gl-two-1280">Pool detail (top of page): GitLab pool, 2 connections</option><option value="t3-gh-many-dest-1280">Destination group: GitHub repository pool, 3 repositories</option><option value="t3-gh-nine-dest-1280">Destination group: GitHub repository pool, 9 repositories (collapsed)</option><option value="t3-gh-nine-expanded-dest-1280">Destination group: GitHub repository pool, 9 repositories (expanded)</option><option value="t3-gh-org-dest-1280">Destination group: GitHub organization pool</option><option value="t3-bb-dest-1280">Destination group: Bitbucket (GitHub-scoped) pool</option><option value="t3-gl-one-dest-1280">Destination group: GitLab pool, 1 connection</option><option value="t3-gl-two-dest-1280">Destination group: GitLab pool, 2 connections</option><option value="t3-gl-zero-dest-1280">Destination group: GitLab pool, no connections</option><option value="t3-unknown-dest-1280">Destination group: unknown scope</option></select></label>
+  <p class="hint">Drag the slider. Left of the line is the build after this change; right of the line is the build before it.</p>
+  <div class="wipe" style="--aspect:1280/800">
+    <img class="size" alt="" src="screenshots/cycle-1/t3-list-1280-reference-20261121.png">
+    <img class="bottom" alt="Before this change" src="screenshots/cycle-1/t3-list-1280-reference-20261121.png">
+    <img class="top" alt="After this change" src="screenshots/cycle-1/t3-list-1280-live-20261121.png">
+    <div class="line"></div>
+  </div>
+  <input class="range" type="range" min="0" max="100" value="50" aria-label="Wipe between before and after at 1280 pixels wide">
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="diff full" alt="Difference image" src="screenshots/cycle-1/t3-list-1280-diff-20261121.png">
+  <h3>Side by side (before, then after)</h3>
+  <img class="comp full" alt="Side-by-side" src="screenshots/cycle-1/t3-list-1280-composite-20261121.png">
+  <h3>Numbers at 1280 px</h3>
+  <table><thead><tr><th>Page state</th><th>Pixels different</th><th>Status</th></tr></thead><tbody><tr><td>Pool list, all nine pools</td><td>769 px (0.075%)</td><td class="st d">MATCH + DELTA (intended)</td></tr><tr><td>Pool detail (top of page): GitHub organization pool</td><td><1 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Pool detail (top of page): GitLab pool, 2 connections</td><td>2,368 px (0.231%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitHub repository pool, 3 repositories</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (collapsed)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub repository pool, 9 repositories (expanded)</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitHub organization pool</td><td>0 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: Bitbucket (GitHub-scoped) pool</td><td><1 px (0.000%)</td><td class="st m">MATCH</td></tr><tr><td>Destination group: GitLab pool, 1 connection</td><td>2,129 px (0.208%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, 2 connections</td><td>2,368 px (0.231%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: GitLab pool, no connections</td><td>1,645 px (0.161%)</td><td class="st d">DELTA (intended)</td></tr><tr><td>Destination group: unknown scope</td><td>1,862 px (0.182%)</td><td class="st d">DELTA (intended)</td></tr></tbody></table>
+</section>
+
+<h2 id="sections">Per-section delta table</h2>
+<table><thead><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop of the difference image</th></tr></thead><tbody>
+<tr><td>Pool list: destination cells of the five GitHub and Bitbucket pools</td><td>1280</td><td class="st m">MATCH</td><td>No pixel differs from the build before the change: same avatar, same text, same spacing.</td><td><a href="screenshots/cycle-1/t3-list-github-rows-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-list-github-rows-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool list: destination cells of the GitLab pools and the unknown-scope pool</td><td>1280</td><td class="st d">DELTA (intended)</td><td>Before: each showed the installation's GitHub avatar and "acme-labs". Now: the GitLab icon with "Acme / web", "2 connections" or "GitLab"; a dash with an empty square for the unknown scope.</td><td><a href="screenshots/cycle-1/t3-list-gitlab-and-unknown-rows-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-list-gitlab-and-unknown-rows-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool list at 360 and 768</td><td>360, 768</td><td class="st m">MATCH</td><td>The destination column is hidden below 1280 by an existing rule that this change does not touch, so the page is identical.</td><td>-</td></tr>
+<tr><td>Pool detail, Destination group: GitHub organization pool</td><td>1280</td><td class="st m">MATCH</td><td>Scope, Account with avatar and Runner group #id are unchanged.</td><td><a href="screenshots/cycle-1/t3-gh-org-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gh-org-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitHub organization pool</td><td>360</td><td class="st m">MATCH</td><td>Same at mobile width.</td><td><a href="screenshots/cycle-1/t3-gh-org-destination-360-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gh-org-destination-360-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: Bitbucket pool (GitHub-scoped)</td><td>1280</td><td class="st m">MATCH</td><td>Looks exactly like a GitHub organization pool, as before.</td><td><a href="screenshots/cycle-1/t3-bb-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-bb-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitHub repository pool, 9 repositories, expanded</td><td>1280</td><td class="st m">MATCH</td><td>The list of nine, the "Show fewer" toggle and the spacing are unchanged. The collapsed state ("Show 3 more") also matches at all three widths.</td><td><a href="screenshots/cycle-1/t3-gh-nine-expanded-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gh-nine-expanded-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitLab pool, 1 connection</td><td>1280</td><td class="st d">DELTA (intended)</td><td>Scope reads "GitLab" (was "Gitlab"); one two-line connection item; the Account row and Runner group row are gone.</td><td><a href="screenshots/cycle-1/t3-gl-one-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gl-one-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitLab pool, 2 connections</td><td>1280</td><td class="st d">DELTA (intended)</td><td>Scope "GitLab" and two connection items in the server's order. The group is a little taller, so the Configuration group below it moves down.</td><td><a href="screenshots/cycle-1/t3-gl-two-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gl-two-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitLab pool, 2 connections</td><td>360</td><td class="st d">DELTA (intended)</td><td>Same change on a phone; both items fit without clipping or sideways scrolling.</td><td><a href="screenshots/cycle-1/t3-gl-two-destination-360-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gl-two-destination-360-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: GitLab pool, no connections</td><td>1280</td><td class="st d">DELTA (intended)</td><td>Scope "GitLab" then a muted "No connections listed"; the installation's GitHub account no longer shows.</td><td><a href="screenshots/cycle-1/t3-gl-zero-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-gl-zero-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Pool detail, Destination group: unknown scope</td><td>1280</td><td class="st d">DELTA (intended)</td><td>Only "Scope: Unknown"; the raw scope text, the GitHub account and the Runner group row are not shown.</td><td><a href="screenshots/cycle-1/t3-unknown-destination-1280-crop-20261121.png"><img class="crop" loading="lazy" src="screenshots/cycle-1/t3-unknown-destination-1280-crop-20261121.png" alt=""></a></td></tr>
+<tr><td>Everything else on every page (sidebar, header, status, runtime, configuration)</td><td>360, 768, 1280</td><td class="st m">MATCH</td><td>Every element above the Destination group has the same position and size in both builds (measured). Only the group's own containers and the content below it change with its height, and some text edges look slightly different at 1280 for the shorter groups (GitLab one or no connection, unknown scope) because the page no longer scrolls.</td><td>-</td></tr>
+</tbody></table>
+
+<h2 id="follow">Sub-issue recommendations</h2>
+<p>None required: the verdict is PASS. One carried item for the operator (not part of this audit's verdict): the runner rows and the dashboard pool row still show a GitLab pool under the installation's GitHub login or as "Gitlab". They are outside #159's scope and this change leaves them as they were; a follow-up in epic #136 should take them through the same registry (<code>runner-row.tsx</code> lines 46, 109, 127 and <code>routes/_app/index.tsx</code> line 279).</p>
+
+<h2 id="method">Method</h2>
+<ul>
+<li>Both builds are <code>vite build</code> outputs of committed trees (<code>git archive</code>): before = <code>e022a5d</code> (identical source to master tip), after = the branch head. Both served by the same API binary against identically seeded throwaway databases, with the build number and commit pinned so the version bar matches.</li>
+<li>Captured with headless Playwright Chromium at 360x800, 768x1024 and 1280x800; clock fixed; GitHub avatar requests answered with one fixed image so avatars are comparable. The app scrolls inside its own container, so detail pages were captured with the Destination group scrolled into view.</li>
+<li>Differences counted with ImageMagick <code>compare -metric AE</code>, diff images from the same command, composites with <code>+append</code>. The reference for GitHub and Bitbucket is the build before the change; for the new GitLab and unknown-scope states the wireframe (<code>wireframe.html</code>, low fidelity) cannot be a pixel reference, so copy and layout were checked against it by eye. The pixel diff against the before build shows the destination area changing, and an element-by-element geometry comparison shows nothing above the Destination group changing position or size.</li>
+</ul>
+</main>
+<script>
+document.querySelectorAll("section.vp").forEach(function(sec){
+  var pick=sec.querySelector(".pick"),range=sec.querySelector(".range"),top=sec.querySelector(".top");
+  function wipe(){top.style.clipPath="inset(0 "+(100-range.value)+"% 0 0)";sec.querySelector(".line").style.left=range.value+"%";}
+  range.addEventListener("input",wipe);wipe();
+  pick.addEventListener("change",function(){
+    var s=pick.value,base="screenshots/cycle-1/"+s+"-";
+    sec.querySelector(".size").src=base+"reference-20261121.png";
+    sec.querySelector(".bottom").src=base+"reference-20261121.png";
+    top.src=base+"live-20261121.png";
+    sec.querySelector(".diff").src=base+"diff-20261121.png";
+    sec.querySelector(".comp").src=base+"composite-20261121.png";
+  });
+});
+</script>
+</body></html>

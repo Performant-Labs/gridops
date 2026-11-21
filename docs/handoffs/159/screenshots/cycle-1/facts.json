@@ -1,0 +1,1133 @@
+{
+ "facts": {
+  "list@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": false,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": false,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": false,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": false,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    }
+   ]
+  },
+  "gh-many@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-two@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-zero@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "unknown@360-baseline": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: azure-devops",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeazure-devopsAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "list@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": false,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": false,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": false,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": false,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    }
+   ]
+  },
+  "gh-many@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-two@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-zero@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "unknown@768-baseline": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: azure-devops",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeazure-devopsAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "list@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": true,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": true,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": true,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": true,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    }
+   ]
+  },
+  "gh-many@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-two@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-zero@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: gitlab",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopegitlabAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "unknown@1280-baseline": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: azure-devops",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeazure-devopsAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "list@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": false,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": false,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": false,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": false,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": false,
+     "text": "Acme / web",
+     "title": "Acme / web",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": false,
+     "text": "2 connections",
+     "title": "Acme / web, Acme / mobile",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": false,
+     "text": "GitLab",
+     "title": "GitLab",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": false,
+     "text": "—",
+     "title": "Unknown destination",
+     "img": null,
+     "svg": null,
+     "placeholder": true
+    }
+   ]
+  },
+  "gh-many@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/web",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-two@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/webAcme / mobilehttps://gitlab.com/acme/mobile",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-zero@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabNo connections listed",
+   "imgs": [],
+   "btn": null
+  },
+  "unknown@360-live": {
+   "scrollW": 360,
+   "clientW": 360,
+   "rows": [
+    "Scope: Unknown"
+   ],
+   "text": "DestinationScopeUnknown",
+   "imgs": [],
+   "btn": null
+  },
+  "list@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": false,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": false,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": false,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": false,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": false,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": false,
+     "text": "Acme / web",
+     "title": "Acme / web",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": false,
+     "text": "2 connections",
+     "title": "Acme / web, Acme / mobile",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": false,
+     "text": "GitLab",
+     "title": "GitLab",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": false,
+     "text": "—",
+     "title": "Unknown destination",
+     "img": null,
+     "svg": null,
+     "placeholder": true
+    }
+   ]
+  },
+  "gh-many@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/web",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-two@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/webAcme / mobilehttps://gitlab.com/acme/mobile",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-zero@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabNo connections listed",
+   "imgs": [],
+   "btn": null
+  },
+  "unknown@768-live": {
+   "scrollW": 768,
+   "clientW": 768,
+   "rows": [
+    "Scope: Unknown"
+   ],
+   "text": "DestinationScopeUnknown",
+   "imgs": [],
+   "btn": null
+  },
+  "list@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    {
+     "pool": "Open gh-one",
+     "shown": true,
+     "text": "acme-labs/web-app",
+     "title": "acme-labs/web-app",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-many",
+     "shown": true,
+     "text": "3 repositories",
+     "title": "3 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-nine",
+     "shown": true,
+     "text": "9 repositories",
+     "title": "9 repositories",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gh-org",
+     "shown": true,
+     "text": "acme-labs",
+     "title": "acme-labs",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open bb-pool",
+     "shown": true,
+     "text": "acme-labs/ios-client",
+     "title": "acme-labs/ios-client",
+     "img": "https://github.com/acme-labs.png?size=40",
+     "svg": null,
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-one",
+     "shown": true,
+     "text": "Acme / web",
+     "title": "Acme / web",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-two",
+     "shown": true,
+     "text": "2 connections",
+     "title": "Acme / web, Acme / mobile",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open gl-zero",
+     "shown": true,
+     "text": "GitLab",
+     "title": "GitLab",
+     "img": null,
+     "svg": "lucide-gitlab",
+     "placeholder": false
+    },
+    {
+     "pool": "Open unknown-scope",
+     "shown": true,
+     "text": "—",
+     "title": "Unknown destination",
+     "img": null,
+     "svg": null,
+     "placeholder": true
+    }
+   ]
+  },
+  "gh-many@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gh-nine@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/web-appacme-labs/api-serviceacme-labs/ios-clientacme-labs/docsacme-labs/infraacme-labs/toolsShow 3 more",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": "Show 3 more"
+  },
+  "gh-org@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: organization",
+    "Account: acme-labs",
+    "Runner group: #1"
+   ],
+   "text": "DestinationScopeorganizationAccountacme-labsRunner group#1",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "bb@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: repository",
+    "Account: acme-labs"
+   ],
+   "text": "DestinationScoperepositoryAccountacme-labsacme-labs/ios-client",
+   "imgs": [
+    "https://github.com/acme-labs.png?size=40"
+   ],
+   "btn": null
+  },
+  "gl-one@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/web",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-two@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabAcme / webhttps://gitlab.com/acme/webAcme / mobilehttps://gitlab.com/acme/mobile",
+   "imgs": [],
+   "btn": null
+  },
+  "gl-zero@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: GitLab"
+   ],
+   "text": "DestinationScopeGitLabNo connections listed",
+   "imgs": [],
+   "btn": null
+  },
+  "unknown@1280-live": {
+   "scrollW": 1280,
+   "clientW": 1280,
+   "rows": [
+    "Scope: Unknown"
+   ],
+   "text": "DestinationScopeUnknown",
+   "imgs": [],
+   "btn": null
+  }
+ },
+ "problems": []
+}

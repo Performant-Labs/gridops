@@ -7,12 +7,12 @@ import { ListPagination } from "~/components/list-pagination";
 import { EmptyState, ListGroup, PageBody, PageHeader, listRowClassName } from "~/components/page";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { StatusDot, statusLabel } from "~/components/status-icon";
-import { Avatar, githubAvatar } from "~/components/ui/avatar";
 import { Badge } from "~/components/ui/badge";
 import { buttonVariants } from "~/components/ui/button";
 import { Tooltip } from "~/components/ui/tooltip";
 import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type RunnerPool, getRunnerPoolsPage } from "~/features/operations/operations.functions";
+import { platformForPool } from "~/features/platform-connections/registry";
 import { PoolActionsMenu, providerLabel } from "~/features/runner-pools/pool-actions";
 import { poolGroup } from "~/features/runner-pools/pool-group";
 import { validatePageSearch } from "~/lib/pagination";
@@ -78,7 +78,7 @@ function RunnerPoolsPage() {
 
 function PoolRow({ pool }: { pool: RunnerPool }) {
   const providers = pool.providers?.length ? pool.providers : [pool.provider];
-  const destination = pool.scope === "repository" && pool.repositoryCount > 1 ? `${pool.repositoryCount} repositories` : pool.repository ?? pool.accountLogin;
+  const destination = platformForPool(pool).pool.destination(pool);
   const state = pool.paused ? "paused" : isBuiltinHostOff(pool) ? BUILTIN_HOST_OFF_STATE : pool.state;
   return (
     <div className={cn(listRowClassName, "relative pr-2")}>
@@ -94,9 +94,9 @@ function PoolRow({ pool }: { pool: RunnerPool }) {
       {pool.provisionCircuitOpen ? <Badge className="hidden lg:inline-flex" variant="destructive">Paused after {pool.provisionFailureCount} failures</Badge> : null}
       {pool.outdatedRunners > 0 ? <Badge className="hidden lg:inline-flex" dot="bg-warning">{pool.outdatedRunners} updating</Badge> : null}
       <span className="flex-1" />
-      <span className="hidden w-40 shrink-0 items-center gap-1.5 truncate text-xs text-muted-foreground xl:flex" title={destination}>
-        <Avatar name={pool.accountLogin} size={16} square src={githubAvatar(pool.accountLogin)} />
-        <span className="truncate">{destination}</span>
+      <span className="hidden w-40 shrink-0 items-center gap-1.5 truncate text-xs text-muted-foreground xl:flex" title={destination.title}>
+        {destination.leading}
+        <span className="truncate">{destination.text}</span>
       </span>
       <span className="tabular hidden w-24 shrink-0 text-right text-xs text-muted-foreground lg:block">{formatRunnerShape(pool.cpuLimit, pool.memoryLimitMb)}</span>
       <CapacityMeter busy={pool.busyRunners} desired={pool.desiredCount} online={pool.onlineRunners} />

@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>#159 Pool list and detail destination from the platform registry - low-fi wireframe</title>
+<style>
+  :root { --bg:#f4f4f6; --panel:#fff; --sub:#f3f3f6; --fg:#1b1c1f; --mut:#6b6f76; --faint:#9b9ea4; --bd:#e7e7ea; --bd2:#d9d9dd; --ok:#3da873; --warn:#d99a18; --info:#3b8fe8; --note:#fff7d6; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 32px 80px; background:#e9eaee; color:var(--fg); font:13px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .lede { color:var(--mut); max-width:980px; margin:0 0 18px; }
+  .frame { margin:0 0 40px; }
+  .frame > h2 { font-size:15px; margin:0 0 8px; padding-bottom:4px; border-bottom:2px solid #c9cad1; }
+  .frame > h2 small { color:var(--mut); font-weight:400; margin-left:8px; }
+  .cols { display:grid; grid-template-columns:minmax(0,880px) minmax(260px,1fr); gap:20px; align-items:start; }
+  .screens { display:flex; flex-direction:column; gap:14px; }
+  .sub-h { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:0 0 4px; font-weight:600; }
+  .notes { margin:0; padding:0; list-style:none; font-size:12px; color:#333; }
+  .notes li { position:relative; padding:0 0 8px 28px; }
+  .notes li > .n { position:absolute; left:0; top:0; }
+  .n { display:inline-flex; align-items:center; justify-content:center; width:17px; height:17px; border-radius:50%; background:#c2410c; color:#fff; font-size:10px; font-weight:700; flex:none; vertical-align:middle; }
+  .copy { background:var(--note); box-shadow:0 0 0 1px #ecd98a; border-radius:2px; }
+  /* list rows */
+  .list { background:var(--panel); border:1px solid var(--bd); border-radius:8px; overflow:visible; }
+  .lrow { display:flex; align-items:center; gap:10px; padding:0 12px; height:36px; border-top:1px solid var(--bd); font-size:13px; }
+  .lrow:first-child { border-top:0; }
+  .lrow .nm { font-weight:500; min-width:0; flex:0 1 150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lrow .sp { flex:1; }
+  .dest { width:190px; flex:none; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--mut); white-space:nowrap; position:relative; }
+  .dest .tx { overflow:hidden; text-overflow:ellipsis; }
+  .av { width:16px; height:16px; background:#c9cbd1; border-radius:3px; flex:none; display:inline-flex; align-items:center; justify-content:center; font-size:9px; color:#555; }
+  .ico { width:16px; height:16px; border:1px solid #f3c39a; background:#fff1e6; color:#b45309; border-radius:3px; flex:none; display:inline-flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; }
+  .ico.fb { border-color:var(--bd2); background:#f0f0f3; color:#777; }
+  .badge { display:inline-flex; align-items:center; gap:4px; border:1px solid var(--bd2); border-radius:10px; padding:0 7px; font-size:11px; background:#fff; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--ok); display:inline-block; }
+  .cap { color:var(--mut); font-size:12px; width:70px; text-align:right; }
+  .case { font-size:10px; color:#fff; background:#555; border-radius:3px; padding:0 5px; margin-right:2px; flex:none; width:104px; text-align:center; }
+  .tip { position:absolute; top:-2px; right:100%; margin-right:10px; background:#222; color:#fff; padding:2px 7px; border-radius:4px; font-size:11px; z-index:2; }
+  /* detail */
+  .detailgrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+  .props { background:var(--panel); border:1px solid var(--bd); border-radius:8px; padding:10px 12px; width:100%; }
+  .props .cs { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:#fff; background:#555; border-radius:3px; padding:1px 6px; display:inline-block; margin-bottom:6px; }
+  .grp-t { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); font-weight:600; margin:2px 0 4px; }
+  .prow { display:flex; align-items:center; gap:8px; min-height:26px; font-size:12.5px; }
+  .prow .lb { width:84px; color:var(--mut); flex:none; }
+  .prow .vl { display:flex; align-items:center; gap:6px; min-width:0; }
+  .chips { padding:2px 0 2px 0; display:flex; flex-direction:column; gap:4px; }
+  .chip { background:var(--sub); border-radius:6px; padding:3px 8px; font-size:12px; color:#333; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .chip.two { padding:4px 8px; }
+  .chip.two .a { font-size:12px; color:#222; } .chip.two .b { font-size:11px; color:var(--mut); overflow:hidden; text-overflow:ellipsis; }
+  .more { font-size:12px; color:var(--mut); padding:2px 6px; }
+  .none { color:var(--faint); font-size:12px; padding:2px 0; }
+  .faint { color:var(--faint); }
+  .ghost { position:relative; }
+  .cut { margin:6px 0 2px; border-top:1px dashed var(--bd2); color:var(--faint); font-size:10px; padding-top:2px; }
+  table { border-collapse:collapse; background:#fff; font-size:12px; width:100%; }
+  th, td { border:1px solid var(--bd2); padding:5px 8px; text-align:left; vertical-align:top; }
+  th { background:#f0f0f3; font-weight:600; }
+  code { background:#eeeef2; padding:0 3px; border-radius:3px; font-size:11.5px; }
+  .x { color:#b42318; font-weight:600; }
+</style>
+</head>
+<body>
+<h1>#159 Pool list and pool detail: the destination comes from the platform registry</h1>
+<p class="lede">No new page, nav item or control. Two existing surfaces change how they work out a pool's <b>destination</b>: the destination cell of a pool-list row (<code>PoolRow</code>) and the <b>Destination</b> group of the pool detail's properties panel. GitHub and Bitbucket pools must look <b>exactly as today</b> (frames A and C are the unchanged baseline, drawn from the current source). A GitLab pool stops showing the installation's GitHub account and shows its GitLab connections instead (frames B and D). Exact copy is highlighted <span class="copy">yellow</span>. Icons are Unicode stand-ins (&#9670; for the GitHub avatar square, <b>GL</b> for the GitLab platform icon, which in the build is the registry descriptor's <code>icon</code>, lucide <code>Gitlab</code> as in <code>gitlab.tsx</code>); nothing here is final visuals.</p>
+
+<!-- ============ A -->
+<section class="frame" id="A">
+<h2>A. Pool list: destination cell, GitHub and Bitbucket pools <small>UNCHANGED baseline</small></h2>
+<div class="cols">
+<div class="screens">
+  <div>
+    <div class="sub-h">A1 Rows (destination cell is the 190px column visible at xl and wider)</div>
+    <div class="list">
+      <div class="lrow"><span class="case">repo, 1</span><span class="dot"></span><span class="nm">web-builders</span><span class="badge">Docker</span><span class="sp"></span>
+        <span class="dest"><span class="av">&#9670;</span><span class="tx copy">acme/web</span></span><span class="cap">2 vCPU</span></div>
+      <div class="lrow"><span class="case">repo, many</span><span class="dot"></span><span class="nm">mono-builders</span><span class="badge">Docker</span><span class="sp"></span>
+        <span class="dest"><span class="av">&#9670;</span><span class="tx copy">5 repositories</span></span><span class="cap">4 vCPU</span></div>
+      <div class="lrow"><span class="case">organization</span><span class="dot"></span><span class="nm">org-builders</span><span class="badge">Docker</span><span class="sp"></span>
+        <span class="dest"><span class="av">&#9670;</span><span class="tx copy">acme</span></span><span class="cap">2 vCPU</span></div>
+      <div class="lrow"><span class="case">Bitbucket pool</span><span class="dot"></span><span class="nm">bb-builders</span><span class="badge">Docker</span><span class="badge">Bitbucket</span><span class="sp"></span>
+        <span class="dest"><span class="av">&#9670;</span><span class="tx copy">acme</span></span><span class="cap">2 vCPU</span></div>
+    </div>
+  </div>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Unchanged.</b> Text, the 16px square GitHub avatar, the <code>title</code> (same as the text) and the truncate behavior are today's, byte for byte.</li>
+  <li><span class="n">2</span>Text rule kept: more than one repository gives <span class="copy">N repositories</span>; else the repository full name; else the account login. The GitHub descriptor produces it; the route no longer computes it.</li>
+  <li><span class="n">3</span>A Bitbucket pool is GitHub-scoped (<code>repository</code> or <code>organization</code>), so the registry resolves it to the GitHub descriptor and it keeps the GitHub account destination. The Bitbucket descriptor owns no pool scope.</li>
+  <li><span class="n">4</span>Truncated text stays full in the cell's <code>title</code> tooltip.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============ B -->
+<section class="frame" id="B">
+<h2>B. Pool list: destination cell, GitLab pools and fallbacks <small>CHANGED</small></h2>
+<div class="cols">
+<div class="screens">
+  <div>
+    <div class="sub-h">B1 GitLab rows and fallbacks</div>
+    <div class="list">
+      <div class="lrow"><span class="case">GitLab, 1 conn.</span><span class="dot"></span><span class="nm">gl-builders</span><span class="badge">Docker</span><span class="badge">GitLab</span><span class="sp"></span>
+        <span class="dest"><span class="ico">GL</span><span class="tx copy">Acme / web</span></span><span class="cap">2 vCPU</span></div>
+      <div class="lrow"><span class="case">GitLab, 2 conn.</span><span class="dot"></span><span class="nm">gl-multi</span><span class="badge">Docker</span><span class="badge">GitLab</span><span class="sp"></span>
+        <span class="dest ghost"><span class="tip copy">Acme / web, Docs site</span><span class="ico">GL</span><span class="tx copy">2 connections</span></span><span class="cap">2 vCPU</span></div>
+      <div class="lrow"><span class="case">GitLab, none</span><span class="dot"></span><span class="nm">gl-old</span><span class="badge">Docker</span><span class="badge">GitLab</span><span class="sp"></span>
+        <span class="dest"><span class="ico">GL</span><span class="tx copy">GitLab</span></span><span class="cap">2 vCPU</span></div>
+      <div class="lrow"><span class="case">unknown scope</span><span class="dot"></span><span class="nm">future-pool</span><span class="badge">Docker</span><span class="sp"></span>
+        <span class="dest"><span class="ico fb">&#8211;</span><span class="tx copy faint">&mdash;</span></span><span class="cap">2 vCPU</span></div>
+    </div>
+    <div class="cut">The "GitLab" badge in the middle cluster is the existing provider/label badge area and is drawn only to identify the case; this change does not add it.</div>
+  </div>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>One connection:</b> its name, exactly as stored (<span class="copy">Acme / web</span>). <b>Two or more:</b> <span class="copy">N connections</span> in the cell and <b>all names joined with ", "</b> in the cell's <code>title</code> (hover shows it; drawn as the dark tooltip).</li>
+  <li><span class="n">2</span><b>Leading mark is the GitLab platform icon</b> (the descriptor's <code>icon</code>), 16px, in the avatar's slot. <b>No GitHub avatar</b> for any GitLab row; <code>githubAvatar</code> is no longer referenced by the route.</li>
+  <li><span class="n">3</span><b>Empty or absent <code>gitlabConnections</code></b> (a pool with none, or an older server that omits the field): neutral <span class="copy">GitLab</span> with the same icon, <code>title</code> "GitLab". Never the installation's GitHub account.</li>
+  <li><span class="n">4</span><b>Connection with an empty name</b> (partial data): the cell uses <code>baseUrl/scopePath</code> in its place; if both are missing too, a single such connection falls to the neutral <span class="copy">GitLab</span> (with several connections the count is unaffected).</li>
+  <li><span class="n">5</span><b>Unknown scope</b> (a scope no descriptor owns): the registry's neutral fallback, never throws. Cell is a dash <span class="copy">&mdash;</span> with a neutral placeholder square (no GitHub avatar, no platform icon), <code>title</code> "Unknown destination".</li>
+  <li><span class="n">6</span>Cell width, truncation and the <code>hidden xl:flex</code> responsive rule are unchanged. The API now sends <code>gitlabConnections</code> on each list item (one batched query), which is what feeds notes 1 to 4.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============ C -->
+<section class="frame" id="C">
+<h2>C. Pool detail: Destination group, GitHub and Bitbucket pools <small>UNCHANGED baseline</small></h2>
+<div class="cols">
+<div class="screens">
+  <div class="detailgrid">
+    <div class="props"><span class="cs">GitHub repository pool, 2 repos</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl copy">Repository</span></div>
+      <div class="prow"><span class="lb">Account</span><span class="vl"><span class="av">&#9670;</span><span class="copy">acme</span></span></div>
+      <div class="chips"><div class="chip copy">acme/web</div><div class="chip copy">acme/api</div></div>
+    </div>
+    <div class="props"><span class="cs">GitHub repository pool, 9 repos</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl">Repository</span></div>
+      <div class="prow"><span class="lb">Account</span><span class="vl"><span class="av">&#9670;</span>acme</span></div>
+      <div class="chips"><div class="chip">acme/repo-1</div><div class="chip">acme/repo-2</div><div class="chip">acme/repo-3</div><div class="chip">acme/repo-4</div><div class="chip">acme/repo-5</div><div class="chip">acme/repo-6</div>
+        <div class="more">&#9662; <span class="copy">Show 3 more</span></div></div>
+    </div>
+    <div class="props"><span class="cs">GitHub organization pool</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl copy">Organization</span></div>
+      <div class="prow"><span class="lb">Account</span><span class="vl"><span class="av">&#9670;</span>acme</span></div>
+      <div class="prow"><span class="lb">Runner group</span><span class="vl copy">#1</span></div>
+    </div>
+    <div class="props"><span class="cs">Bitbucket pool (GitHub-scoped)</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl">Organization</span></div>
+      <div class="prow"><span class="lb">Account</span><span class="vl"><span class="av">&#9670;</span>acme</span></div>
+      <div class="prow"><span class="lb">Runner group</span><span class="vl">#1</span></div>
+    </div>
+  </div>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Unchanged:</b> same rows, same order (Scope, Account with the GitHub avatar, then either the repository list or the Runner group row), same text. Scope is the stored scope, capitalised.</li>
+  <li><span class="n">2</span>The <b>repository list moves with the GitHub descriptor</b> (<code>RepositoryList</code> and its expand state go to <code>github.tsx</code>). It still shows 6 and a <span class="copy">Show N more</span> / <span class="copy">Show fewer</span> toggle (<code>aria-expanded</code>) beyond 6; one or two repositories show no toggle.</li>
+  <li><span class="n">3</span>Bitbucket pools resolve to the GitHub destination (GitHub-scoped), so frame C's last column looks the same as a GitHub organization pool.</li>
+  <li><span class="n">4</span>The rest of the panel (Status, Runtime, Configuration) is untouched; only the rows inside the Destination group are supplied by the descriptor, the group title stays in the route.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============ D -->
+<section class="frame" id="D">
+<h2>D. Pool detail: Destination group, GitLab pools and fallbacks <small>CHANGED</small></h2>
+<div class="cols">
+<div class="screens">
+  <div class="detailgrid">
+    <div class="props"><span class="cs">GitLab pool, 1 connection</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl copy">GitLab</span></div>
+      <div class="chips"><div class="chip two" title="https://gitlab.com/acme/web"><div class="a copy">Acme / web</div><div class="b copy">https://gitlab.com/acme/web</div></div></div>
+    </div>
+    <div class="props"><span class="cs">GitLab pool, 2 connections</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl">GitLab</span></div>
+      <div class="chips">
+        <div class="chip two"><div class="a">Acme / web</div><div class="b">https://gitlab.com/acme/web</div></div>
+        <div class="chip two"><div class="a">Docs site</div><div class="b">https://git.example.com/acme/docs</div></div>
+      </div>
+    </div>
+    <div class="props"><span class="cs">GitLab pool, no connections</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl">GitLab</span></div>
+      <div class="none copy">No connections listed</div>
+    </div>
+    <div class="props"><span class="cs">Unknown scope</span>
+      <div class="grp-t">Destination</div>
+      <div class="prow"><span class="lb">Scope</span><span class="vl copy">Unknown</span></div>
+      <div class="none">No account or runner group row</div>
+    </div>
+  </div>
+  <div class="cut">Not present on any GitLab frame: the Account row, the GitHub avatar, the repository list, the Runner group row.</div>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Scope row:</b> <span class="copy">GitLab</span> (the platform's proper label, not the capitalised raw value "Gitlab" seen today).</li>
+  <li><span class="n">2</span><b>Connections</b> from <code>RunnerPoolDetail.gitlabConnections</code>, in the server's order, one two-line item per connection in the same chip style as the repository list: line 1 the <b>name</b>, line 2 <span class="copy">baseUrl/scopePath</span> as the detail (muted, truncates; the whole item's <code>title</code> carries the full text). No label row above them, as the repository list has none.</li>
+  <li><span class="n">3</span><b>No Account row, no GitHub avatar, no Runner group row</b> for a GitLab pool (that "#1" was the installation's meaningless runner group).</li>
+  <li><span class="n">4</span><b>No connections / field absent</b> (older server): Scope <span class="copy">GitLab</span> then a muted <span class="copy">No connections listed</span> line. Never the installation's GitHub account.</li>
+  <li><span class="n">5</span><b>Partial connection data:</b> an absent <code>baseUrl</code> or <code>scopePath</code> shows only the part present (no stray "/"); if both are absent line 2 is omitted. An empty name shows the second line's text as the name and omits line 2.</li>
+  <li><span class="n">6</span><b>Unknown scope:</b> Scope row <span class="copy">Unknown</span> and nothing else in the group. Never throws, no GitHub avatar. The raw scope string is not echoed.</li>
+  <li><span class="n">7</span>All connections are listed (no "Show N more" toggle); the pool form's Targets picker already limits how many a pool can have in practice. Display only: nothing here is editable or links out.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============ E -->
+<section class="frame" id="E">
+<h2>E. Descriptor contract the wireframe implies <small>for the Tester and Feature implementor</small></h2>
+<div class="cols">
+<div class="screens">
+<table>
+<tr><th>Case</th><th>Owner (registry)</th><th>List cell</th><th>Detail Destination rows</th></tr>
+<tr><td>GitHub repository, 1 repo</td><td>GitHub (owns <code>repository</code>, <code>organization</code>)</td><td>GitHub avatar + repository full name</td><td>Scope, Account (avatar), repository list</td></tr>
+<tr><td>GitHub repository, several</td><td>GitHub</td><td>GitHub avatar + "N repositories"</td><td>Scope, Account, list + "Show N more" past 6</td></tr>
+<tr><td>GitHub organization</td><td>GitHub</td><td>GitHub avatar + account login</td><td>Scope, Account, Runner group #id</td></tr>
+<tr><td>Bitbucket (GitHub-scoped, with workspaces)</td><td>GitHub (Bitbucket descriptor owns no scope)</td><td>same as GitHub</td><td>same as GitHub</td></tr>
+<tr><td>GitLab, 1 connection</td><td>GitLab (owns <code>gitlab</code>)</td><td>GitLab icon + connection name, no avatar</td><td>Scope "GitLab" + 1 connection item; no Account, no Runner group</td></tr>
+<tr><td>GitLab, 2 connections</td><td>GitLab</td><td>GitLab icon + "2 connections", title lists both names</td><td>Scope "GitLab" + 2 items</td></tr>
+<tr><td>GitLab, none / field absent</td><td>GitLab</td><td>GitLab icon + "GitLab"</td><td>Scope "GitLab" + "No connections listed"</td></tr>
+<tr><td>Unknown scope</td><td>registry fallback (no descriptor)</td><td>placeholder square + "&mdash;", no avatar, no throw</td><td>Scope "Unknown", nothing else, no throw</td></tr>
+</table>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span>Scope ownership is a declaration on each descriptor, resolved by a registry function; the routes compare nothing and name no platform, scope or avatar helper (the source-guard test checks this).</li>
+  <li><span class="n">2</span>The list cell hook yields: text, title, optional leading avatar <i>or</i> icon. The detail hook is a component taking the <code>RunnerPoolDetail</code> that renders the group's rows.</li>
+</ol>
+</div>
+</section>
+
+</body>
+</html>

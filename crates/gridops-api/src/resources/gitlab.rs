@@ -12,6 +12,8 @@
 //! webhook secret, and no response, log line or audit event carries the
 //! token.
 
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -501,23 +503,57 @@ pub(super) async fn pool_gitlab_connection_ids(
     .await?)
 }
 
+/// A pool's GitLab connections as [`pool_connection_json`] reads them, with
+/// the membership's pool id. The pool detail and the pool list both select
+/// through this and order by [`POOL_CONNECTION_ORDER`], so the two show the
+/// same connections in the same order.
+const POOL_CONNECTIONS: &str = "SELECT membership.pool_id,connection.id,connection.name,connection.base_url,connection.scope_kind,connection.scope_path
+   FROM runner_pool_gitlab_connections membership
+   JOIN gitlab_connections connection ON connection.id=membership.connection_id";
+/// The order a pool's connections were added in.
+const POOL_CONNECTION_ORDER: &str = "membership.created_at,connection.id";
+
 /// The GitLab connections a pool targets, as the pool detail shows them.
 pub(super) async fn pool_gitlab_connections(
     state: &AppState,
     pool_id: &str,
 ) -> ApiResult<Vec<Value>> {
-    Ok(sqlx::query(
-        r#"SELECT connection.id,connection.name,connection.base_url,connection.scope_kind,connection.scope_path
-           FROM runner_pool_gitlab_connections membership
-           JOIN gitlab_connections connection ON connection.id=membership.connection_id
-           WHERE membership.pool_id=? ORDER BY membership.created_at,connection.id"#,
-    )
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{POOL_CONNECTIONS} WHERE membership.pool_id=? ORDER BY {POOL_CONNECTION_ORDER}"
+    )))
     .bind(pool_id)
     .fetch_all(&state.database)
     .await?
     .iter()
     .map(pool_connection_json)
     .collect())
+}
+
+/// The GitLab connections of each pool in `pool_ids`, by pool id, as the pool
+/// detail shows them: one query for a whole page of the pool list. A pool
+/// with none has no entry.
+pub(super) async fn pools_gitlab_connections(
+    state: &AppState,
+    pool_ids: &[String],
+) -> ApiResult<HashMap<String, Vec<Value>>> {
+    let mut connections = HashMap::<String, Vec<Value>>::new();
+    if pool_ids.is_empty() {
+        return Ok(connections);
+    }
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{POOL_CONNECTIONS} WHERE membership.pool_id IN (SELECT value FROM json_each(?))
+         ORDER BY membership.pool_id,{POOL_CONNECTION_ORDER}"
+    )))
+    .bind(json!(pool_ids).to_string())
+    .fetch_all(&state.database)
+    .await?;
+    for row in &rows {
+        connections
+            .entry(row.get("pool_id"))
+            .or_default()
+            .push(pool_connection_json(row));
+    }
+    Ok(connections)
 }
 
 /// Every GitLab connection, as the pool form offers them.

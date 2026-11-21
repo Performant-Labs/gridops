@@ -1,5 +1,6 @@
 import type { JobAgentState } from "~/features/agent/agent.functions";
 import type { BudgetSource, BuiltinHostBudget } from "~/features/runner-pools/builtin-host";
+import type { GitlabPoolConnection } from "~/features/runner-pools/runner-pools.functions";
 import { api } from "~/lib/api";
 
 type Page<T> = { authenticated: boolean; items: T[] };
@@ -34,6 +35,8 @@ export type RunnerPool = {
   outdatedRunners: number; createdAt: string; canManage: boolean;
   /** Set while the built-in runner host is off and the pool has no fleet execution to run on instead. */
   cannotRun?: { code: string; message: string } | null;
+  /** The GitLab connections the pool uses, in the pool detail's order; absent from a server before #159. */
+  gitlabConnections?: GitlabPoolConnection[];
 };
 
 /** The enrolled machine a fleet runner was placed on. */

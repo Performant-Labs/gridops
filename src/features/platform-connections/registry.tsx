@@ -4,10 +4,12 @@
  */
 import { CircleHelp } from "lucide-react";
 
+import { PropertyRow } from "~/components/page";
+
 import { bitbucketPlatform } from "./bitbucket";
 import { githubPlatform } from "./github";
 import { gitlabPlatform } from "./gitlab";
-import type { PlatformDescriptor } from "./types";
+import type { PlatformDescriptor, PoolBindings } from "./types";
 
 // Order matters: `buildCreatePayload` merges the create partials in this order, and GitHub's always
 // carries its scope, installation, repositories and runner group. A platform whose own pool scope
@@ -44,4 +46,39 @@ export function getPlatform(id: string): PlatformDescriptor {
  */
 export function platformForDeliveryId(deliveryId: string): PlatformDescriptor {
   return platforms.find((platform) => deliveryId.startsWith(`${platform.id}:`)) ?? githubPlatform;
+}
+
+/** A platform that owns a pool scope: its pool bindings are always there. */
+export type PoolPlatform = PlatformDescriptor & { pool: PoolBindings };
+
+/**
+ * The pool destination of a scope no registered platform owns (e.g. one a newer server reports):
+ * neutral, with no account, avatar or platform icon. It never shows the raw scope.
+ */
+function UnknownPoolDestination() {
+  return <PropertyRow label="Scope">Unknown</PropertyRow>;
+}
+
+const unknownPoolPlatform: PoolPlatform = {
+  ...unknownPlatform("unknown"),
+  pool: {
+    scopes: [],
+    destination: () => ({
+      text: "—",
+      title: "Unknown destination",
+      leading: <span aria-hidden="true" className="size-4 shrink-0 rounded-[5px] border border-dashed border-border-strong" />,
+    }),
+    Destination: UnknownPoolDestination,
+  },
+};
+
+const ownsPoolScope = (platform: PlatformDescriptor, scope: string): platform is PoolPlatform => platform.pool?.scopes.includes(scope) ?? false;
+
+/**
+ * The platform that owns a pool's scope, which says where the pool registers its runners. A
+ * platform whose pools ride on another's scope (a Bitbucket workspace on a GitHub pool) owns
+ * none, so those pools resolve to the scope's owner. An unknown scope gets a neutral fallback.
+ */
+export function platformForPool(pool: { scope: string }): PoolPlatform {
+  return platforms.find((platform): platform is PoolPlatform => ownsPoolScope(platform, pool.scope)) ?? unknownPoolPlatform;
 }

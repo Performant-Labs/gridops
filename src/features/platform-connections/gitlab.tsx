@@ -6,8 +6,10 @@ import { Gitlab } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { CopyButton } from "~/components/copy-button";
+import { PropertyRow } from "~/components/page";
 import { Switch } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
+import type { RunnerPool } from "~/features/operations/operations.functions";
 import {
   type GitlabPoolConnection,
   type RunnerPoolDetail,
@@ -29,6 +31,7 @@ import {
 import type {
   PlatformDescriptor,
   PlatformOptionsProps,
+  PoolDestinationView,
   ResolvedSelection,
   SecretReveal,
   TargetCreateValues,
@@ -224,6 +227,48 @@ function RunUntaggedOption({ values, onChange }: PlatformOptionsProps) {
   );
 }
 
+// ---- Pool destination --------------------------------------------------------------------------
+
+/** A connection's `baseUrl/scopePath`, with only the parts that are present. */
+function connectionAddress(connection: GitlabPoolConnection) {
+  return [connection.baseUrl.replace(/\/+$/, ""), connection.scopePath].filter(Boolean).join("/");
+}
+
+/** A connection's name, or its address when it has none. */
+const connectionLabel = (connection: GitlabPoolConnection) => connection.name || connectionAddress(connection);
+
+/** The list cell: the one connection's name, or how many there are with every name in the title. */
+function poolDestination(pool: RunnerPool): PoolDestinationView {
+  const labels = (pool.gitlabConnections ?? []).map(connectionLabel);
+  const leading = <Gitlab aria-hidden="true" className="size-4 shrink-0" />;
+  // No connections listed (none, or a server before #159): the platform, never the pool's installation.
+  if (!labels.length) return { text: "GitLab", title: "GitLab", leading };
+  return { text: labels.length === 1 ? labels[0] ?? "" : `${labels.length} connections`, title: labels.join(", "), leading };
+}
+
+/** The pool detail's Destination rows: the scope, then each connection (name, then address) in the server's order. */
+function PoolDestination({ pool }: { pool: RunnerPoolDetail }) {
+  const connections = pool.gitlabConnections ?? [];
+  return (
+    <>
+      <PropertyRow label="Scope">GitLab</PropertyRow>
+      {connections.length ? (
+        <div className="space-y-1 pt-1">
+          {connections.map((connection) => {
+            const address = connectionAddress(connection);
+            return (
+              <div className="rounded-md bg-panel-subtle px-2 py-1 text-xs" key={connection.id} title={[connection.name, address].filter(Boolean).join("\n")}>
+                <div className="truncate text-secondary-foreground">{connectionLabel(connection)}</div>
+                {connection.name && address ? <div className="truncate text-muted-foreground">{address}</div> : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : <div className="pt-1 text-xs text-faint">No connections listed</div>}
+    </>
+  );
+}
+
 // ---- Descriptor --------------------------------------------------------------------------------
 
 export const gitlabPlatform: PlatformDescriptor = {
@@ -370,4 +415,5 @@ export const gitlabPlatform: PlatformDescriptor = {
   },
   initialSelection: poolSelection,
   readOnlySummary: (pool) => pool.gitlabConnections?.length ? pool.gitlabConnections.map((connection) => connection.name).join(", ") : null,
+  pool: { scopes: [GITLAB], destination: poolDestination, Destination: PoolDestination },
 };
