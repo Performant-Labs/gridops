@@ -1,129 +1,134 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>#145 spec audit: visual report</title>
+<title>#145 spec audit (round 5): visual report</title>
 <style>
 :root{color-scheme:dark}body{margin:0;background:#0f1013;color:#e7e7ea;font:15px/1.55 system-ui,sans-serif}
-header.banner{padding:28px 32px;background:#3b1d1d;border-bottom:1px solid #7a2e2e}
-header.banner h1{margin:0 0 6px;font-size:40px;letter-spacing:.5px}
+header.banner{padding:28px 32px;background:#14301d;border-bottom:1px solid #2e7a4a}
+header.banner h1{margin:0 0 6px;font-size:44px;letter-spacing:.5px;color:#7ee0a0}
 nav{position:sticky;top:0;background:#16171b;padding:10px 32px;border-bottom:1px solid #2a2c33;z-index:5;display:flex;gap:16px;flex-wrap:wrap}
 nav a{color:#9db4ff;text-decoration:none}main{max-width:1500px;margin:0 auto;padding:8px 32px 80px}
-h2{margin-top:44px;border-bottom:1px solid #2a2c33;padding-bottom:6px}table{border-collapse:collapse;margin:12px 0}td,th{border:1px solid #2e3038;padding:6px 10px;text-align:left;vertical-align:top}
+h2{margin-top:44px;border-bottom:1px solid #2a2c33;padding-bottom:6px}h4{margin:18px 0 6px;color:#b9bbc6;font-weight:600}
+table{border-collapse:collapse;margin:12px 0}td,th{border:1px solid #2e3038;padding:6px 10px;text-align:left;vertical-align:top}
 th{background:#1b1d23}.pill{font-size:12px;padding:2px 8px;border-radius:99px;margin-left:8px;vertical-align:middle}.ok{background:#16351f;color:#7ee0a0}.warn{background:#3b3216;color:#f0c969}.bad{background:#451c1c;color:#ff8f8f}
-.row{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}figure{margin:0}figure img{display:block;border:1px solid #2e3038;max-width:100%;height:auto}
-.row figure:nth-child(1) img{width:240px}.row figure:nth-child(2) img{width:420px}.row figure:nth-child(3) img{width:560px}
-figcaption{font-size:12px;color:#9a9ca8;margin-bottom:4px}code{background:#1b1d23;padding:1px 5px;border-radius:4px}
+.mono,code{font-family:ui-monospace,monospace}code{background:#1b1d23;padding:1px 5px;border-radius:4px}
 .cmp{max-width:900px}.stack{position:relative;border:1px solid #2e3038}.stack img{display:block;width:100%;height:auto}.stack img.top{position:absolute;inset:0;clip-path:inset(0 50% 0 0)}
 .cmp input[type=range]{width:100%}.lbl{display:flex;justify-content:space-between;font-size:12px;color:#9a9ca8}
+img.full{display:block;border:1px solid #2e3038;height:auto}
 .crop{display:flex;gap:14px;flex-wrap:wrap}.crop img{max-width:100%;border:1px solid #2e3038}
+.row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}.row img{border:1px solid #2e3038;max-width:100%;height:auto}figure{margin:0}figcaption{font-size:12px;color:#9a9ca8;margin-bottom:4px}
 </style></head><body>
-<header class="banner"><h1>REWORK</h1>
-<div>Issue #145, spec audit. Pixel diff waived by the operator (brief, round-4 decision): there is no comparable reference. What I measured instead is below.</div>
-<table><tr><th>Viewport</th><th>Pixel diff</th><th>Horizontal overflow</th><th>Defects introduced by this story</th><th>Console errors</th></tr>
-<tr><td>360 x 800</td><td>waived</td><td>none (page 360 / 360)</td><td><b>2</b> (connection names collapse, "Manage App" off-screen)</td><td>none</td></tr>
-<tr><td>768 x 1024</td><td>waived</td><td>none</td><td>0</td><td>none</td></tr>
-<tr><td>1280 x 800</td><td>waived</td><td>none</td><td>0</td><td>none</td></tr></table></header>
-<nav><a href="#diff">What I see different</a><a href="#vp360">360</a><a href="#vp768">768</a><a href="#vp1280">1280</a><a href="#table">Section table</a><a href="#gallery">All screenshots</a><a href="#recs">Rework items</a></nav>
+<header class="banner"><h1>PASS</h1>
+<div>Issue #145, spec audit, round 5 (after the 360 px rework). The operator waived the pixel diff against the wireframe (brief, round-4 decision), so the comparison below is <b>before the fix against after the fix</b>, rendered headless in Chromium from the real app and API.</div>
+<table><tr><th>Viewport</th><th>Pixels different (administrator / member)</th><th>Whole-page delta</th><th>What the difference is</th></tr>
+<tr><td>360 x 2300</td><td>27,992 / 25,131</td><td>3.38% / 3.04%</td><td>The intended fix: connection names, row controls and the GitHub App header are laid out differently (all of it on the Connections page).</td></tr>
+<tr><td>768 x 1500</td><td>398 / 398</td><td>0.035%</td><td>Only the build text in the footer and the port number inside the two Endpoints URLs.</td></tr>
+<tr><td>1280 x 1500</td><td>398 / 398</td><td>0.021%</td><td>Same: footer build text and the port in the URLs.</td></tr></table>
+<div>No horizontal overflow, no console error and no off-screen button at any width (the one "off-screen" item is the hidden Skip to content link).</div></header>
+<nav><a href="#diff">What I see different</a><a href="#vp360admin">360</a><a href="#vp768admin">768</a><a href="#vp1280admin">1280</a><a href="#table">Section table</a><a href="#other">Other pages</a><a href="#after">Other rendered checks</a><a href="#follow">Follow-ups</a></nav>
 <main>
 <h2 id="diff">What I see different</h2>
 <ul>
-<li><b>On a phone-width screen (360), the Connections list no longer shows connection names.</b> The GitHub row for "acme-labs" shows only its avatar, a "GitHub" badge and the word "Organization": the name has shrunk to zero width. "ada-admin" shows as "a...", "Acme Bitbucket" as "Acm...", "Platform Team" as "Platf...". Before this story the same names were readable on the old pages.</li>
-<li><b>At 360 a read-only member sees text on top of text</b> in the GitHub row: "Owner approval required" is drawn over "Organization".</li>
-<li><b>At 360 the "GitHub App" section header is squeezed.</b> The title and its paragraph sit in a column about 70 px wide (the title wraps to two lines, the paragraph runs about twenty lines), because the three buttons beside it (Refresh access, Install, Manage App) take the rest. "Manage App" runs off the right edge of the screen (it spans 327 to 442 px on a 360 px screen), so an administrator cannot reach it without a sideways scroll that the page does not offer.</li>
-<li><b>The Targets dropdown is cut off by its card</b> in the new-pool form and in pool settings, at every width: you see the search box, not the options or the group headings. The old repository dropdown was cut off in the same way (one option showed at 768 and 1280, none at 360, none in the old settings form), so this is not new, but it hides the grouped options and disabled reasons that are the point of this story.</li>
-<li>Everything else I looked at matches the brief at all three widths: the empty states for an administrator and a member, the Add connection chooser, the GitHub step (enabled and disabled), the Bitbucket form, Back, the new-pool form, pool settings and the Platform options section. No horizontal overflow and no console error at any width.</li>
+<li><b>360, Connections list:</b> every connection name is now readable ("acme-labs", "ada-admin", "Acme Bitbucket", "Platform Team"). Before the fix the first was invisible and the others were cut to "a...", "Acm...", "Platf...". The Configure, Edit and Remove buttons moved to their own right-aligned line under each row's text.</li>
+<li><b>360, read-only member:</b> "Owner approval required" now sits on its own line under "Organization" instead of being drawn on top of it.</li>
+<li><b>360, GitHub App section:</b> the title and its paragraph use the full width instead of a column about 70 px wide, and the three buttons (Refresh access, Install, Manage App) sit on lines below it. "Manage App" is fully on screen (before it ran off the right edge).</li>
+<li><b>360, Connections header:</b> the "Add connection" button now sits under the description instead of squeezing it into a 178 px column.</li>
+<li><b>360, a small side effect:</b> for a read-only member, each Bitbucket row has about 8 px of blank space under its text (the "Verified ... ago" label is hidden on phones but its container still takes a line gap). Cosmetic, left as is by F.</li>
+<li><b>768 and 1280:</b> no visible differences from the pre-fix build. The only changed pixels are the footer build text and the port inside the Endpoints URLs (different test servers).</li>
+<li><b>Every other settings page and both pool forms</b> (General, AI, Members, Preferences, Runner host, API tokens, new pool, pool settings) are pixel-identical to the pre-fix build at 360, 768 and 1280 apart from the footer text. The shared header change did not move anything on them.</li>
+<li><b>One thing I only saw with test data I added (an 80-character connection name):</b> at 1280, a name that long is cut with an ellipsis and its "Bitbucket" badge wraps under it instead of sitting beside it. Realistic names are unaffected. Not blocking.</li>
+<li><b>Still there, not from this story:</b> the Targets dropdown is cut off by its card in the new-pool form and pool settings (see Follow-ups).</li>
 </ul>
-<h2>Per-viewport comparators</h2>
+<h2>Per-viewport comparators (Connections page, populated)</h2>
 
-<section class="vp" id="vp360"><h3>360px: old GitHub settings page (left side of the slider) against the new Connections page</h3>
-<p>The two pages are different layouts by design, so this is for eyeballing, not a pixel match. Drag the slider to wipe from the old page (before this story) to the new one.</p>
+<section class="vp" id="vp360admin"><h3>360px wide, administrator: <span class="mono">27,992</span> pixels different (3.381%)</h3>
+<p>The intended changes: rows, App header and Add connection button reflow. Drag the handle to wipe between the broken layout (left) and the fixed one (right).</p>
 
-<div class="cmp" style="max-width:360px"><div class="lbl"><span>Before (old GitHub page)</span><span>After (new Connections page)</span></div>
-<div class="stack" id="cmp360"><img src="screenshots/s-connections-populated-admin-full-360.png" alt="After (new Connections page)"><img class="top" src="screenshots/base-github-page-full-360.png" alt="Before (old GitHub page)"></div>
-<input type="range" min="0" max="100" value="50" aria-label="Wipe between Before (old GitHub page) and After (new Connections page)" oninput="document.getElementById('cmp360').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+<div class="cmp" style="max-width:360px"><div class="lbl"><span>Before the fix (left of the handle)</span><span>After the fix (right)</span></div>
+<div class="stack" id="cmp360admin"><img src="screenshots/s5-connections-populated-admin-360-after.png" alt="After the fix"><img class="top" src="screenshots/s5-connections-populated-admin-360-before.png" alt="Before the fix"></div>
+<input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after" oninput="document.getElementById('cmp360admin').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
 </div>
+<h4>Difference map (red = changed pixels, picture dimmed)</h4>
+<img class="full" style="max-width:360px" src="screenshots/s5-connections-populated-admin-360-diff.png" alt="Difference map at 360">
+<h4>Side by side (before on the left, after on the right)</h4>
+<img class="full" style="max-width:100%" src="screenshots/s5-connections-populated-admin-360-composite.png" alt="Side by side at 360">
 </section>
 
-<section class="vp" id="vp768"><h3>768px: old GitHub settings page (left side of the slider) against the new Connections page</h3>
-<p>The two pages are different layouts by design, so this is for eyeballing, not a pixel match. Drag the slider to wipe from the old page (before this story) to the new one.</p>
+<section class="vp" id="vp360member"><h3>360px wide, read-only member: <span class="mono">25,131</span> pixels different (3.035%)</h3>
+<p>Read-only member: the GitHub row's name is back and the status line no longer overlaps.</p>
 
-<div class="cmp" style="max-width:768px"><div class="lbl"><span>Before (old GitHub page)</span><span>After (new Connections page)</span></div>
-<div class="stack" id="cmp768"><img src="screenshots/s-connections-populated-admin-full-768.png" alt="After (new Connections page)"><img class="top" src="screenshots/base-github-page-full-768.png" alt="Before (old GitHub page)"></div>
-<input type="range" min="0" max="100" value="50" aria-label="Wipe between Before (old GitHub page) and After (new Connections page)" oninput="document.getElementById('cmp768').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+<div class="cmp" style="max-width:360px"><div class="lbl"><span>Before the fix (left of the handle)</span><span>After the fix (right)</span></div>
+<div class="stack" id="cmp360member"><img src="screenshots/s5-connections-populated-member-360-after.png" alt="After the fix"><img class="top" src="screenshots/s5-connections-populated-member-360-before.png" alt="Before the fix"></div>
+<input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after" oninput="document.getElementById('cmp360member').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
 </div>
+<h4>Difference map (red = changed pixels, picture dimmed)</h4>
+<img class="full" style="max-width:360px" src="screenshots/s5-connections-populated-member-360-diff.png" alt="Difference map at 360">
+<h4>Side by side (before on the left, after on the right)</h4>
+<img class="full" style="max-width:100%" src="screenshots/s5-connections-populated-member-360-composite.png" alt="Side by side at 360">
 </section>
 
-<section class="vp" id="vp1280"><h3>1280px: old GitHub settings page (left side of the slider) against the new Connections page</h3>
-<p>The two pages are different layouts by design, so this is for eyeballing, not a pixel match. Drag the slider to wipe from the old page (before this story) to the new one.</p>
+<section class="vp" id="vp768admin"><h3>768px wide, administrator: <span class="mono">398</span> pixels different (0.035%)</h3>
+<p>Identical apart from the footer text and the URL port.</p>
 
-<div class="cmp" style="max-width:1000px"><div class="lbl"><span>Before (old GitHub page)</span><span>After (new Connections page)</span></div>
-<div class="stack" id="cmp1280"><img src="screenshots/s-connections-populated-admin-full-1280.png" alt="After (new Connections page)"><img class="top" src="screenshots/base-github-page-full-1280.png" alt="Before (old GitHub page)"></div>
-<input type="range" min="0" max="100" value="50" aria-label="Wipe between Before (old GitHub page) and After (new Connections page)" oninput="document.getElementById('cmp1280').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+<div class="cmp" style="max-width:768px"><div class="lbl"><span>Before the fix (left of the handle)</span><span>After the fix (right)</span></div>
+<div class="stack" id="cmp768admin"><img src="screenshots/s5-connections-populated-admin-768-after.png" alt="After the fix"><img class="top" src="screenshots/s5-connections-populated-admin-768-before.png" alt="Before the fix"></div>
+<input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after" oninput="document.getElementById('cmp768admin').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
 </div>
+<h4>Difference map (red = changed pixels, picture dimmed)</h4>
+<img class="full" style="max-width:700px" src="screenshots/s5-connections-populated-admin-768-diff.png" alt="Difference map at 768">
+<h4>Side by side (before on the left, after on the right)</h4>
+<img class="full" style="max-width:100%" src="screenshots/s5-connections-populated-admin-768-composite.png" alt="Side by side at 768">
 </section>
-<h3>Close-ups of the 360 problems (before on the left, after on the right)</h3>
-<div class="crop"><div><p>Rows: old Bitbucket page, old GitHub installations, new Connections list</p><img src="screenshots/s-composite-D1-baseline-vs-head-360.png" alt="Rows before and after at 360"></div>
-<div><p>Header actions: old Installations section, new GitHub App section</p><img src="screenshots/s-composite-D2-baseline-vs-head-360.png" alt="GitHub App header before and after at 360"></div>
-<div><p>Read-only member at 360</p><img src="screenshots/s-crop-D1-rows-member-head-360.png" alt="Member rows at 360"></div></div>
-<h3>Targets dropdown, before (old repository picker, 1280)</h3><div class="crop"><img src="screenshots/base-new-pool-repo-picker-open-1280.png" alt="Old repository picker open at 1280" style="width:640px"></div>
+
+<section class="vp" id="vp1280admin"><h3>1280px wide, administrator: <span class="mono">398</span> pixels different (0.021%)</h3>
+<p>Identical apart from the footer text and the URL port.</p>
+
+<div class="cmp" style="max-width:900px"><div class="lbl"><span>Before the fix (left of the handle)</span><span>After the fix (right)</span></div>
+<div class="stack" id="cmp1280admin"><img src="screenshots/s5-connections-populated-admin-1280-after.png" alt="After the fix"><img class="top" src="screenshots/s5-connections-populated-admin-1280-before.png" alt="Before the fix"></div>
+<input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after" oninput="document.getElementById('cmp1280admin').querySelector('.top').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+</div>
+<h4>Difference map (red = changed pixels, picture dimmed)</h4>
+<img class="full" style="max-width:700px" src="screenshots/s5-connections-populated-admin-1280-diff.png" alt="Difference map at 1280">
+<h4>Side by side (before on the left, after on the right)</h4>
+<img class="full" style="max-width:100%" src="screenshots/s5-connections-populated-admin-1280-composite.png" alt="Side by side at 1280">
+</section>
+<section class="vp"><h3>768 and 1280 as a member</h3><p>Also 398 pixels at both widths (same footer and port). Files: <a href="screenshots/s5-connections-populated-member-768-composite.png">768 composite</a>, <a href="screenshots/s5-connections-populated-member-1280-composite.png">1280 composite</a>.</p></section>
+<h3>Close-ups of the three 360 fixes (before on the left, after on the right)</h3>
+<div class="crop"><div><p>Rows, administrator</p><img src="screenshots/s5-closeup-rows-admin-360-before-after.png" alt="Rows before and after"></div>
+<div><p>Rows, read-only member</p><img src="screenshots/s5-closeup-rows-member-360-before-after.png" alt="Member rows before and after"></div>
+<div><p>GitHub App header, administrator</p><img src="screenshots/s5-closeup-app-header-admin-360-before-after.png" alt="App header before and after"></div></div>
 <h2 id="table">Per-section delta table</h2>
-<table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop</th></tr>
-<tr><td>Connections list rows</td><td>360</td><td><span class="pill bad">REWORK</span></td><td>Names collapse to 0 to 45 px; the organization name is invisible.</td><td><img src="screenshots/s-crop-D1-rows-head-360.png" width="300" alt=""></td></tr>
-<tr><td>Connections list rows (member)</td><td>360</td><td><span class="pill bad">REWORK</span></td><td>Status text overlaps the kind label.</td><td><img src="screenshots/s-crop-D1-rows-member-head-360.png" width="300" alt=""></td></tr>
-<tr><td>GitHub App section header</td><td>360</td><td><span class="pill bad">REWORK</span></td><td>Heading squeezed to 73 px; Manage App off-screen.</td><td><img src="screenshots/s-crop-D2-github-app-header-head-360.png" width="300" alt=""></td></tr>
-<tr><td>Targets dropdown</td><td>360, 768, 1280</td><td><span class="pill warn">DELTA</span></td><td>Cut off by its card; pre-existing, not introduced here.</td><td><img src="screenshots/s-new-pool-targets-open-1280.png" width="300" alt=""></td></tr>
-<tr><td>All other sections</td><td>360, 768, 1280</td><td><span class="pill ok">MATCH</span></td><td>See the gallery.</td><td></td></tr></table>
-<h2 id="gallery">All screenshots</h2>
-
-<section class="surf" id="s0"><h3>Connections, nothing connected (administrator, GitHub App not configured) <span class="pill ok">MATCH</span></h3><p>One 'No connections yet' state with a single Add connection button. No per-platform empty rows underneath.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-connections-empty-admin-full-360.png"><img loading="lazy" src="screenshots/s-connections-empty-admin-full-360.png" alt="Connections, nothing connected (administrator, GitHub App not configured) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-connections-empty-admin-full-768.png"><img loading="lazy" src="screenshots/s-connections-empty-admin-full-768.png" alt="Connections, nothing connected (administrator, GitHub App not configured) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-connections-empty-admin-full-1280.png"><img loading="lazy" src="screenshots/s-connections-empty-admin-full-1280.png" alt="Connections, nothing connected (administrator, GitHub App not configured) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s1"><h3>Connections, nothing connected (read-only member) <span class="pill ok">MATCH</span></h3><p>Read-only note, 'No connections yet', administrator copy, no button.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-connections-empty-member-360.png"><img loading="lazy" src="screenshots/s-connections-empty-member-360.png" alt="Connections, nothing connected (read-only member) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-connections-empty-member-768.png"><img loading="lazy" src="screenshots/s-connections-empty-member-768.png" alt="Connections, nothing connected (read-only member) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-connections-empty-member-1280.png"><img loading="lazy" src="screenshots/s-connections-empty-member-1280.png" alt="Connections, nothing connected (read-only member) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s2"><h3>Connections, populated (administrator) <span class="pill bad">REWORK at 360</span></h3><p>At 768 and 1280 the rows and App section are fine. At 360 the connection names collapse and 'Manage App' is pushed off-screen.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-connections-populated-admin-full-360.png"><img loading="lazy" src="screenshots/s-connections-populated-admin-full-360.png" alt="Connections, populated (administrator) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-connections-populated-admin-full-768.png"><img loading="lazy" src="screenshots/s-connections-populated-admin-full-768.png" alt="Connections, populated (administrator) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-connections-populated-admin-full-1280.png"><img loading="lazy" src="screenshots/s-connections-populated-admin-full-1280.png" alt="Connections, populated (administrator) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s3"><h3>Connections, populated (read-only member) <span class="pill bad">REWORK at 360</span></h3><p>At 360 the GitHub row has no visible name and 'Owner approval required' overlaps 'Organization'.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-connections-populated-member-full-360.png"><img loading="lazy" src="screenshots/s-connections-populated-member-full-360.png" alt="Connections, populated (read-only member) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-connections-populated-member-full-768.png"><img loading="lazy" src="screenshots/s-connections-populated-member-full-768.png" alt="Connections, populated (read-only member) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-connections-populated-member-full-1280.png"><img loading="lazy" src="screenshots/s-connections-populated-member-full-1280.png" alt="Connections, populated (read-only member) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s4"><h3>Add connection: chooser (nothing connected) <span class="pill ok">MATCH</span></h3><p>GitHub and Bitbucket listed, each with its one-line description.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-add-chooser-empty-360.png"><img loading="lazy" src="screenshots/s-add-chooser-empty-360.png" alt="Add connection: chooser (nothing connected) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-add-chooser-empty-768.png"><img loading="lazy" src="screenshots/s-add-chooser-empty-768.png" alt="Add connection: chooser (nothing connected) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-add-chooser-empty-1280.png"><img loading="lazy" src="screenshots/s-add-chooser-empty-1280.png" alt="Add connection: chooser (nothing connected) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s5"><h3>Add connection: chooser (populated) <span class="pill ok">MATCH</span></h3><p>Same chooser.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-add-chooser-populated-360.png"><img loading="lazy" src="screenshots/s-add-chooser-populated-360.png" alt="Add connection: chooser (populated) at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-add-chooser-populated-768.png"><img loading="lazy" src="screenshots/s-add-chooser-populated-768.png" alt="Add connection: chooser (populated) at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-add-chooser-populated-1280.png"><img loading="lazy" src="screenshots/s-add-chooser-populated-1280.png" alt="Add connection: chooser (populated) at 1280"></a></figure></div></section>
-
-<section class="surf" id="s6"><h3>Add connection: GitHub step, App not configured <span class="pill ok">MATCH</span></h3><p>Install button disabled, warning says to create the App first, Back works.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-add-github-linkout-unconfigured-360.png"><img loading="lazy" src="screenshots/s-add-github-linkout-unconfigured-360.png" alt="Add connection: GitHub step, App not configured at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-add-github-linkout-unconfigured-768.png"><img loading="lazy" src="screenshots/s-add-github-linkout-unconfigured-768.png" alt="Add connection: GitHub step, App not configured at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-add-github-linkout-unconfigured-1280.png"><img loading="lazy" src="screenshots/s-add-github-linkout-unconfigured-1280.png" alt="Add connection: GitHub step, App not configured at 1280"></a></figure></div></section>
-
-<section class="surf" id="s7"><h3>Add connection: GitHub step, App configured <span class="pill ok">MATCH</span></h3><p>Primary 'Install GitHub App' link with external-link icon, Back.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-add-github-linkout-configured-360.png"><img loading="lazy" src="screenshots/s-add-github-linkout-configured-360.png" alt="Add connection: GitHub step, App configured at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-add-github-linkout-configured-768.png"><img loading="lazy" src="screenshots/s-add-github-linkout-configured-768.png" alt="Add connection: GitHub step, App configured at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-add-github-linkout-configured-1280.png"><img loading="lazy" src="screenshots/s-add-github-linkout-configured-1280.png" alt="Add connection: GitHub step, App configured at 1280"></a></figure></div></section>
-
-<section class="surf" id="s8"><h3>Add connection: Bitbucket form <span class="pill ok">MATCH</span></h3><p>Three fields, scopes help, Back and Connect workspace.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-add-bitbucket-form-360.png"><img loading="lazy" src="screenshots/s-add-bitbucket-form-360.png" alt="Add connection: Bitbucket form at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-add-bitbucket-form-768.png"><img loading="lazy" src="screenshots/s-add-bitbucket-form-768.png" alt="Add connection: Bitbucket form at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-add-bitbucket-form-1280.png"><img loading="lazy" src="screenshots/s-add-bitbucket-form-1280.png" alt="Add connection: Bitbucket form at 1280"></a></figure></div></section>
-
-<section class="surf" id="s9"><h3>New pool: full form <span class="pill ok">MATCH</span></h3><p>One Targets row; no scope, installation or Bitbucket rows.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-new-pool-form-full-360.png"><img loading="lazy" src="screenshots/s-new-pool-form-full-360.png" alt="New pool: full form at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-new-pool-form-full-768.png"><img loading="lazy" src="screenshots/s-new-pool-form-full-768.png" alt="New pool: full form at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-new-pool-form-full-1280.png"><img loading="lazy" src="screenshots/s-new-pool-form-full-1280.png" alt="New pool: full form at 1280"></a></figure></div></section>
-
-<section class="surf" id="s10"><h3>New pool: Targets picker open <span class="pill warn">DELTA (pre-existing)</span></h3><p>The dropdown is cut off by its card: only the search box shows. The old repository picker was cut off in the same way (see the notes).</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-new-pool-targets-open-360.png"><img loading="lazy" src="screenshots/s-new-pool-targets-open-360.png" alt="New pool: Targets picker open at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-new-pool-targets-open-768.png"><img loading="lazy" src="screenshots/s-new-pool-targets-open-768.png" alt="New pool: Targets picker open at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-new-pool-targets-open-1280.png"><img loading="lazy" src="screenshots/s-new-pool-targets-open-1280.png" alt="New pool: Targets picker open at 1280"></a></figure></div></section>
-
-<section class="surf" id="s11"><h3>New pool: picker open after picking a repository <span class="pill warn">DELTA (pre-existing)</span></h3><p>The card scrolled inside itself to reveal the option; the heading and trigger moved out of view.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-new-pool-targets-repo-picked-open-360.png"><img loading="lazy" src="screenshots/s-new-pool-targets-repo-picked-open-360.png" alt="New pool: picker open after picking a repository at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-new-pool-targets-repo-picked-open-768.png"><img loading="lazy" src="screenshots/s-new-pool-targets-repo-picked-open-768.png" alt="New pool: picker open after picking a repository at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-new-pool-targets-repo-picked-open-1280.png"><img loading="lazy" src="screenshots/s-new-pool-targets-repo-picked-open-1280.png" alt="New pool: picker open after picking a repository at 1280"></a></figure></div></section>
-
-<section class="surf" id="s12"><h3>New pool: repository and Bitbucket picked, Platform options open <span class="pill ok">MATCH</span></h3><p>Collapsed section opens to the Bitbucket notes; labels row help is Bitbucket-aware.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-new-pool-mixed-platform-options-full-360.png"><img loading="lazy" src="screenshots/s-new-pool-mixed-platform-options-full-360.png" alt="New pool: repository and Bitbucket picked, Platform options open at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-new-pool-mixed-platform-options-full-768.png"><img loading="lazy" src="screenshots/s-new-pool-mixed-platform-options-full-768.png" alt="New pool: repository and Bitbucket picked, Platform options open at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-new-pool-mixed-platform-options-full-1280.png"><img loading="lazy" src="screenshots/s-new-pool-mixed-platform-options-full-1280.png" alt="New pool: repository and Bitbucket picked, Platform options open at 1280"></a></figure></div></section>
-
-<section class="surf" id="s13"><h3>Pool settings: repository pool with a Bitbucket workspace, Platform options open <span class="pill ok">MATCH</span></h3><p>Removable GitHub chips, locked Bitbucket chip, Platform options section.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-pool-settings-mixed-full-360.png"><img loading="lazy" src="screenshots/s-pool-settings-mixed-full-360.png" alt="Pool settings: repository pool with a Bitbucket workspace, Platform options open at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-pool-settings-mixed-full-768.png"><img loading="lazy" src="screenshots/s-pool-settings-mixed-full-768.png" alt="Pool settings: repository pool with a Bitbucket workspace, Platform options open at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-pool-settings-mixed-full-1280.png"><img loading="lazy" src="screenshots/s-pool-settings-mixed-full-1280.png" alt="Pool settings: repository pool with a Bitbucket workspace, Platform options open at 1280"></a></figure></div></section>
-
-<section class="surf" id="s14"><h3>Pool settings: Targets picker open <span class="pill warn">DELTA (pre-existing)</span></h3><p>Same cut-off dropdown as the new-pool form.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-pool-settings-targets-open-360.png"><img loading="lazy" src="screenshots/s-pool-settings-targets-open-360.png" alt="Pool settings: Targets picker open at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-pool-settings-targets-open-768.png"><img loading="lazy" src="screenshots/s-pool-settings-targets-open-768.png" alt="Pool settings: Targets picker open at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-pool-settings-targets-open-1280.png"><img loading="lazy" src="screenshots/s-pool-settings-targets-open-1280.png" alt="Pool settings: Targets picker open at 1280"></a></figure></div></section>
-
-<section class="surf" id="s15"><h3>Pool settings: organization pool <span class="pill ok">MATCH</span></h3><p>Single runner-group target.</p>
-<div class="row"><figure><figcaption>360px wide</figcaption><a href="screenshots/s-pool-settings-org-full-360.png"><img loading="lazy" src="screenshots/s-pool-settings-org-full-360.png" alt="Pool settings: organization pool at 360"></a></figure><figure><figcaption>768px wide</figcaption><a href="screenshots/s-pool-settings-org-full-768.png"><img loading="lazy" src="screenshots/s-pool-settings-org-full-768.png" alt="Pool settings: organization pool at 768"></a></figure><figure><figcaption>1280px wide</figcaption><a href="screenshots/s-pool-settings-org-full-1280.png"><img loading="lazy" src="screenshots/s-pool-settings-org-full-1280.png" alt="Pool settings: organization pool at 1280"></a></figure></div></section>
-<h2 id="recs">Rework items for F (one pass)</h2>
+<table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop of the difference map</th></tr>
+<tr><td>Connections rows (administrator)</td><td>360</td><td><span class="pill ok">MATCH to the brief, intended DELTA from before</span></td><td>Names readable; row controls on their own line.</td><td><img src="screenshots/t3-connections-rows-admin-360-crop-20261120.png" width="300" alt=""></td></tr>
+<tr><td>Connections rows (member)</td><td>360</td><td><span class="pill ok">MATCH, intended DELTA</span></td><td>No overlap; name visible.</td><td><img src="screenshots/t3-connections-rows-member-360-crop-20261120.png" width="300" alt=""></td></tr>
+<tr><td>GitHub App header</td><td>360</td><td><span class="pill ok">MATCH, intended DELTA</span></td><td>Title full width; all three buttons on screen.</td><td><img src="screenshots/t3-connections-app-header-admin-360-crop-20261120.png" width="300" alt=""></td></tr>
+<tr><td>Top of the page and rows</td><td>768</td><td><span class="pill ok">MATCH</span></td><td>Only the footer text differs.</td><td><img src="screenshots/t3-connections-top-admin-768-crop-20261120.png" width="300" alt=""></td></tr>
+<tr><td>Top of the page and rows</td><td>1280</td><td><span class="pill ok">MATCH</span></td><td>Only the footer text differs.</td><td><img src="screenshots/t3-connections-top-admin-1280-crop-20261120.png" width="300" alt=""></td></tr>
+<tr><td>Targets dropdown (new pool, pool settings)</td><td>360, 768, 1280</td><td><span class="pill warn">DELTA, pre-existing</span></td><td>Cut off by its card; options cannot be hit with a mouse at rest. Same shared widget as the old form. See Follow-ups.</td><td><img src="screenshots/u-targets-dropdown-open-360.png" width="150" alt=""></td></tr>
+<tr><td>Member Bitbucket rows (extra blank space)</td><td>360</td><td><span class="pill warn">DELTA, cosmetic</span></td><td>About 8 px of empty space under each row's text.</td><td></td></tr></table>
+<h2 id="other">Every other surface, pre-fix build against fixed build (pixels different)</h2>
+<table><tr><th>Surface</th><th>360 x 4200</th><th>768 x 3400</th><th>1280 x 3000</th><th>Cause of the difference</th></tr>
+<tr><td>Connections, empty (admin / member)</td><td>398</td><td>398</td><td>398</td><td>footer text and the port in the Endpoints URLs</td></tr>
+<tr><td>Settings: General (fleet profile Save header)</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Settings: AI</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Settings: Members</td><td>359</td><td>359</td><td>500</td><td>footer text; one 'last signed in 1m / 2m ago' label at 1280</td></tr>
+<tr><td>Settings: Preferences</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Settings: Runner host</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Settings: API tokens</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>New pool</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Pool settings, repository pool</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+<tr><td>Pool settings, organization pool</td><td>359</td><td>359</td><td>359</td><td>footer text</td></tr>
+</table>
+<p>Whole-page numbers over the full captured page (tall viewports, because the app scrolls inside its own container). Each is under 0.03%. For the empty Connections page the 398 px also holds at 360, which shows its layout did not change.</p>
+<h2 id="after">Other rendered checks on the fixed build</h2>
+<div class="row">
+<figure><figcaption>Empty, administrator, 360</figcaption><img src="screenshots/s5-connections-empty-admin-360-after.png" width="240" alt=""></figure>
+<figure><figcaption>Empty, member, 360</figcaption><img src="screenshots/s5-connections-empty-member-360-after.png" width="240" alt=""></figure>
+<figure><figcaption>Editing a Bitbucket row, 360</figcaption><img src="screenshots/s5-connections-edit-row-360-after.png" width="240" alt=""></figure>
+<figure><figcaption>Populated, 480 (below the sm breakpoint)</figcaption><img src="screenshots/s5-connections-populated-admin-480-after.png" width="300" alt=""></figure>
+<figure><figcaption>Populated, 640 (at the sm breakpoint)</figcaption><img src="screenshots/s5-connections-populated-admin-640-after.png" width="360" alt=""></figure></div>
+<p>Widths 320, 360, 480, 639, 640, 768, 1024 and 1280 were measured for both roles (<a href="screenshots/s5-geometry-after.json">s5-geometry-after.json</a>): no horizontal overflow, no overlap, names 66, 67, 98 and 90 px and unclipped at every width, "Manage App" inside the screen at every width. The full set of round-4 screenshots for the other surfaces (Add connection steps, new-pool form, pool settings, Platform options) is still valid for them, because their pixels did not change (table above); they are in <code>screenshots/s-*.png</code>.</p>
+<h2 id="follow">Follow-ups (non-blocking; this verdict is PASS)</h2>
 <ol>
-<li><b>Branch:</b> the current branch (<code>claude/ui-145-platform-neutral-cf5832</code>). <b>Problem:</b> at 360 the Connections list rows lose the connection name and the member's status text overlaps the kind label. <b>Needs from the operator:</b> nothing; the old pages showed the name, so the new row must too.</li>
-<li><b>Branch:</b> same. <b>Problem:</b> at 360 the GitHub App section's header squeezes its title and paragraph and pushes "Manage App" off-screen. <b>Needs from the operator:</b> nothing.</li>
-<li><b>Optional, operator's call:</b> the Targets dropdown clipping (pre-existing). Fold into this pass or raise a separate issue.</li>
+<li><b>Targets dropdown clipped by its card (pre-existing, all widths).</b> Proposed branch: <code>fix/searchable-multi-select-clipped-listbox</code>. In the new-pool form and pool settings only the search box and one group heading show when it opens, so a mouse user cannot reach an option until the card is scrolled. The old repository picker had the same fault. Fix is in the shared <code>SearchableMultiSelect</code> / <code>SearchableSelect</code> (portal the list, or stop the card clipping). Operator decision needed: file it as its own issue (recommended) or accept as is.</li>
+<li><b>Tidy-ups, optional:</b> the empty trailing wrapper on member Bitbucket rows at 360 (about 8 px); and the <code>3rem</code> in the row's text basis is a stand-in for the width of the leading avatar or dot.</li>
 </ol>
 </main></body></html>
