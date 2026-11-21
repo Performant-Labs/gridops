@@ -147,3 +147,36 @@
     - the stub run of `cargo test -p gridops-reconciler gitlab_poll_tests` (14 failed / 2 passed);
     - `cargo fmt --all -- --check`;
     - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (clean).
+
+## A (Phase 3, up-front plan review, round 4): 2026-11-20T16:24:05-08:00
+- **Decided:** PASS, with 0 block findings and 6 warn findings (see `handoff-A.md`, round 4). The brief was reviewed at `572f828`, and the diff since T-red is `git diff 1a4c512 572f828`: the round-3 D18 section and the Constraints line.
+  - D18 resolves round-3 warn 1 in the right layer. One `gridops-core` writer (`gitlab/jobs.rs`) is called by both crates, and the poll has no SQL merge of its own. It mirrors the GitHub split: `set_gitlab_runner_busy` returns `(runner id, pool id)` like `associate_runner_with_job`, and callers write `runner_events`. It shares more than GitHub does, whose `workflow_jobs` upsert is still two copies (`webhooks.rs:584`, `main.rs:1994`).
+  - Round-3 warn 2 is decided in writing by D18's equal-tier rule. Round-3 warn 4's column name is superseded by D18's `base_url` match.
+  - Warns:
+    - (1) The dedupe on `(base_url, job_id)` makes the instance the job key. A-B2's key, the Scope sentence and "the demand scan" (which leaves out the display tier) weren't amended. Recommended: a `Gitlab { base_url, job_id }` key, with the dedupe inside the GitLab arm of `queued_job_candidates`.
+    - (2) Two rows of one job can disagree (one `running`, one `pending`), and no status rule covers that. Recommended: the highest tier decides, with a test.
+    - (3) The parallel `jobs.rs` copies conflict at the second merge, and "drops its own" drops one unit-test set. Recommended: put the tests in `jobs_tests.rs` and keep the union of both sets.
+    - (4) The re-check mark can stamp a row a webhook just concluded. Recommended: guard the `UPDATE` with the D8 statuses.
+    - (5) The poll's `runner_events` row: the reconciler's helpers take no `runner_id`, the message is unspecified, and a duplicate row means a duplicate event.
+    - (6) Two round-3 points are carried forward: a failed `group_projects` skips the conclusion step, and the interval should be pinned to `setting_i64`.
+- **Assumed:**
+  - #140 builds D18 as `140-brief.md:292-372` (at `ba0a441`) states it, and it writes both rows from one delivery (`140-brief.md:58,290`). The #140 worktree has no `jobs.rs` yet, so #148 will most likely merge first.
+  - GitLab job ids are unique per instance, so `(base_url, job_id)` is a job's identity. This is from GitLab's data model, and it is what D18's `base_url` busy match also relies on.
+- **Hedged:**
+  - Warn 2 is a warning, not a block. The double count is transient: it is bounded by the backoff plus `GITLAB_JOB_CHECK_AGE_MS`, which matches GitHub's missed-webhook window (`JOB_CHECK_AGE_MS`). Also, #140 writes both rows from one delivery. The brief-gate result r1 raises the same point (W-5).
+  - Warn 3 is a warning, not a block. The local copy is planned and written in both briefs and on #136. It is not a drive-by under `parallel-agent-coexistence.md`.
+  - I did not re-review the round 1 to 3 amendments, which rounds 1 to 3 passed, beyond where round 3 changes them.
+- **Evidence:**
+  - Read: the brief (all 271 lines) and `git diff 1a4c512 572f828`; the working-tree brief-gate result `148-brief-result-r1.md` and its `git diff`; `148-brief-result-r2.md`; the round-3 `handoff-A.md`, `handoff-T-red.md` and `decisions.md`; and `gitlab-140-webhooks-a9fae5/docs/handoffs/140-brief.md:280-372`, plus lines 42, 58 and 242 by search.
+  - Source:
+    - `crates/gridops-core/src/db.rs:185-320` and `lib.rs:1-60`;
+    - `crates/gridops-core/src/autoscaling.rs:213-300,436-593`;
+    - `crates/gridops-core/src/gitlab/mod.rs:1-20`, with an item outline;
+    - `migrations/0047_gitlab.sql:1-45`;
+    - `crates/gridops-reconciler/src/main.rs:488-512,2150-2215,3735-3760`;
+    - `crates/gridops-api/src/webhooks.rs:625-650`;
+    - the fixture connections in `autoscaling_gitlab_tests.rs` and `gitlab_poll_tests.rs`.
+  - Commands:
+    - a grep for every `sqlx` user in `gridops-core/src` (the platform modules `github.rs`, `bitbucket.rs` and `gitlab/mod.rs` have none);
+    - a grep for every `INSERT INTO runner_events`;
+    - `git worktree list`, and the #140 worktree's `git log` and `ls crates/gridops-core/src/gitlab/`.
