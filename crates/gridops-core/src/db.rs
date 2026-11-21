@@ -2,12 +2,12 @@ use std::{
     fs,
     path::Path,
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use sqlx::{
-    Row as _, SqlitePool,
+    ConnectOptions as _, Row as _, SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
@@ -15,6 +15,9 @@ use sqlx::{
 use crate::Config;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
+
+/// A statement that runs longer than this is logged at WARN (#179).
+const SLOW_STATEMENT: Duration = Duration::from_millis(100);
 
 pub async fn connect_database(config: &Config) -> Result<SqlitePool> {
     connect_database_path(config.database_path()).await
@@ -29,7 +32,12 @@ pub async fn connect_database_path(path: &Path) -> Result<SqlitePool> {
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(std::time::Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        // sqlx warns about a statement only after 1 s by default. A writer
+        // that holds the lock for a few hundred milliseconds already makes
+        // every other writer wait, so name anything over 100 ms. The event is
+        // on the `sqlx::query` target, which each process's log filter admits.
+        .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(options)

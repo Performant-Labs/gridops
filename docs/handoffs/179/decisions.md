@@ -105,3 +105,31 @@
   - Behaviour-guard mutations (cursor order DESC; the dropped epoch branch) each fail the guard.
   - `cargo +1.98.1 clippy … --all-targets -D warnings` is clean with the stubs, and `cargo fmt --check` is clean.
   - Every stub was reverted with `git checkout` and none was staged.
+
+## Phase 5 Feature (F) - 2026-11-21T16:05:00-08:00
+- **Decided:** Implemented against T's RED (docs/handoffs/179/handoff-F.md). T's #179 tests are GREEN, and `cargo fmt --check` and CI-toolchain clippy are clean.
+  - **Part 1:**
+    - `NEXT_DELIVERY` and `UNDELIVERABLE` get one top-level `c.state IN ('pending','delivered')` conjunct each, over their unchanged disjunctions. Both original disjunctions already required one of those states, so the rows and the order are the same by construction.
+    - `UNRECEIVED` only moved into a const.
+    - Sweep finding: `retry.rs` `LAST_FAILURE` (in lock, reconciler fleet pass) was `SCAN fleet_events`. Adding `host_id=?` lets it use `fleet_events_host_cursor_idx`, and the composite FK makes the result identical.
+    - No migration.
+  - **Part 2:**
+    - `log_slow_statements(Warn, 100 ms)` in `connect_database_path`, with `log` declared through `[workspace.dependencies]`.
+    - `default_log_filter()` in the api and the reconciler admits `sqlx::query=warn`.
+    - CHANGELOG notes added.
+  - **Part 3:**
+    - `resend_while_leased` next to `backoff()` wraps only the heartbeat and inventory-refresh client calls, and resends the identical request.
+    - The deadline is fixed when the request is first sent, and the last wait is cut short at it.
+    - `lease_expires_at` is a local in the heartbeat loop (A R3 warn 1), not an `Authority` field. This deviates from the brief's wording; the behaviour matches.
+    - Poll, result, handshake, first inventory, rotation and `internal()` errors end the session as before.
+- **Assumed:**
+  - The agent's and the server's wall clocks are close enough to compare against the lease. If they are not, the in-session resend window shrinks or grows, but it cannot loop forever: a server-side lease expiry answers `Refused`.
+  - The scratch-DB plans (sqlite3 3.54) for the statements outside T's plan test match the bundled SQLite. T's test checks the three `host_commands` consts with the bundled SQLite.
+- **Hedged:**
+  - After the change, `LAST_FAILURE` is bounded to one machine's events, newest first with `LIMIT 1`, not to a single row. That is enough, because the lock-free pre-check only lets through placements whose runner is still `starting`.
+  - `delete_pool`'s `DELETE FROM fleet_events` (whole-table scan) is admin-only and was left unchanged.
+- **Evidence:**
+  - Runtime statement capture: the `fleet_http` agent, placement, recovery, inventory, busy_database and start_retry modules (52 tests) with `RUST_LOG=sqlx::query=debug`. `EXPLAIN QUERY PLAN` of all 44 distinct history-table statements found.
+  - The brief's grep: 25 hits, each in the sweep table.
+  - Full run: 33 binaries, 887 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`: the agent's OS is `cfg!(target_os)`, so the test fails on macOS dev machines only.
+  - Facts outside the diff are in docs/handoffs/179/evidence.md.

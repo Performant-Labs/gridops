@@ -18,6 +18,11 @@ Known problems in the current release are in the README's
 - GitLab runners on the built-in runner host need the runner manager's
   `GRIDOPS_RUNNER_DOCKER_SOCKET`; on an enrolled machine, the agent's
   `GRIDOPS_AGENT_DOCKER_SOCKET` and a profile that shares the socket. (#158)
+- The API and the reconciler now log any database statement that runs for
+  100 ms or more as a WARN on the `sqlx::query` target. If you set `RUST_LOG`,
+  include `sqlx::query=warn` to see them. Expect a few at startup while
+  migrations run, and from the reconciler's retention deletes; during normal
+  agent traffic there should be none. (#179)
 
 ### Added
 
@@ -61,6 +66,16 @@ Known problems in the current release are in the README's
   deleted** warning in the pool's events. The token help now asks for the
   Maintainer role or higher on a project and the Owner role on a group.
   (#171, #174)
+- **A busy database no longer drives agents into a reconnect storm.** An
+  agent's command poll, and every heartbeat, read every command the machine
+  was ever sent while holding the database's write lock. As the command
+  history grew this took several hundred milliseconds per request, the lock
+  was never free, other writers timed out and the API answered agents 503.
+  These reads now see only a machine's open commands, and the reconciler's
+  start retry reads only its machine's events. An agent whose heartbeat or
+  inventory refresh gets a 5xx, a 429 or no answer now resends it, unchanged,
+  until its observation lease runs out, instead of starting a new session on
+  the first failure. (#179)
 
 ## 0.2.0 - 2026-11-04
 
