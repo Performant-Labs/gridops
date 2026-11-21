@@ -1,0 +1,280 @@
+# Decision journal: #148 GitLab demand matching, scale-down and a pending-jobs poll
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:26:47-08:00
+- **Decided:** BLOCK, with 4 block findings and 4 warn findings (see `handoff-A.md`).
+  - (1) The poll is planned inside the reconcile pass with unbounded `job` calls. The GitHub analogue (`github_sync_worker`, `maybe_sync_github`, `confirm_jobs`) runs in its own task, for the reason `main()` documents, and bounds its job checks with `JOB_CHECK_AGE_MS` and `JOB_CHECK_LIMIT`. Recommended fix: a `gitlab_poll::worker` spawned from `main()`.
+  - (2) Public autoscaling types carry two GitHub id spaces:
+    - the job id, joined to `workflow_jobs.id` by three `gridops-api` views;
+    - `QueuedJob.repository_id`, matched against `runners.target_repository_id` by fleet placement.
+
+    The brief wants GitLab jobs in all of them, with no collision and a stable API, while the diff stays in `autoscaling.rs`. Recommended fix: a private key enum, with GitLab jobs counted but not emitted by the GitHub-shaped outputs.
+  - (3) The GitLab statuses aren't mapped onto the two tiers of `queued_job_candidates`. Counting `running` as demand double-counts against `runners.busy`, which #140 sets.
+  - (4) The tag-matching "decide and document" choice must equal #139's registration (the pool's labels as tags). The "either way" test allows a demand/registration mismatch.
+  - Accepted as consistent with the code:
+    - the GitLab branch in `autoscaling.rs`;
+    - `gitlab_poll.rs` as a sibling of `fleet.rs` and `tart_lane.rs`;
+    - leaving the Bitbucket scale-down guard alone;
+    - routing a group-polled job by `connection_id`.
+- **Assumed:**
+  - #139 is not on master: `origin/master` is `b22c451` and has no `gitlab_lifecycle.rs`, so #148 adds the `gitlab` field.
+  - In GitLab's job state machine, `created`, `waiting_for_resource` and `preparing` come before `pending`, and no runner can take them yet. This is from GitLab's documented job lifecycle and wasn't checked against a live instance.
+  - The text of issues #139 and #140, read with `gh issue view`, is what those sessions build: runner tags are the pool's labels, and #140 sets busy on `running` and orders events by `build_status_changed_at`.
+- **Hedged:**
+  - Finding 1 offers O two resolutions: (a) the worker, recommended, or (b) keeping the poll in the pass with a written justification and bounds. The issue text says "Every pass" and "delays scaling by one pass". Option (a) keeps that latency by looping on `reconcileIntervalSeconds`, so it doesn't change what the issue asks for.
+  - Finding 2 offers (a), recommended and inside the Constraints, or (b), which widens the public types and needs sign-off from the #138 and #141 owners.
+  - Finding 4 asks O to confirm GitLab's own tag case rule. I didn't verify whether GitLab compares tags case-insensitively.
+  - Findings 2 and 3 go beyond the round-1 and round-2 brief-gate warnings (W-1, W-2 and W-3), which raised the open key and the open decisions only as warnings. They are blocks here because the code already determines the answer: the repository-id consumers, the busy-signal double count and the ready-only tier.
+- **Evidence:**
+  - Read: the brief (all 138 lines), the brief-gate results r1 and r2, `docs/handoffs/137-brief.md` (R2-W3, D8, D13, D14 and the #148 mentions) and `docs/handoffs/137/handoff-A.md`, plus issues #148, #139 and #140 via `gh issue view`.
+  - Source:
+    - `crates/gridops-core/src/autoscaling.rs`, lines 1-850;
+    - `crates/gridops-core/src/gitlab/mod.rs`, in full;
+    - `crates/gridops-core/src/fleet/targets.rs:1195-1340` and `crates/gridops-core/src/lib.rs:1-40`;
+    - `crates/gridops-reconciler/src/main.rs`: `Reconciler`, `main()`, `run_pass`, `reconcile`, `github_sync_worker`, `retry_when_busy`, `maybe_scale_up`, `evict_surplus_runner`, `surplus_runner`, `maybe_scale_down`, `maybe_sync_github`, `sync_run_jobs`, `upsert_workflow_job`, `unconfirmed_jobs`, `confirm_jobs`, `next_bitbucket_connection`, `deregister_bitbucket_runner`, `runtime_secret` and the test constructor at `:4825`;
+    - `crates/gridops-reconciler/src/start_tests.rs:418-440`;
+    - `crates/gridops-api/src/resources.rs:720-760,2065-2100` and `crates/gridops-api/src/resources/overview_queue.rs:292-330`.
+  - Migrations: `0001_initial.sql` (`runner_pools`), `0046_runner_pool_exclusive_labels.sql` and `0047_gitlab.sql`.
+  - Commands: a grep for every caller of the public autoscaling API across `crates/`, and `git fetch` plus `git ls-tree origin/master crates/gridops-reconciler/src/`.
+
+## A (Phase 3, up-front plan review, round 2): 2026-11-20T15:40:53-08:00
+- **Decided:** BLOCK, with 1 block finding and 6 warn findings (see `handoff-A.md`, round 2). The brief was reviewed at `f8be658`.
+  - Round-1 blocks 1 to 4 are resolved by A-B1 to A-B4:
+    - the poll is its own worker, with `retry_when_busy`, a worker-local backoff map and `poll_once`;
+    - a private key enum, with every public output GitHub-only;
+    - the status tiers, with `running` not demand;
+    - tag matching on the configured labels.
+  - Round-1 warns 5 to 8 are addressed by A-W1 to A-W4, with residue noted in the round-2 warns.
+  - New block (1). The conclusion-step bound in A-B1 copies two of the three properties of `unconfirmed_jobs`/`confirm_jobs`. It lacks the re-check interval (`workflow_job_sync.checked_at`, written before each request) and waiting-before-running ordering. Unchanged `running` rows older than 5 minutes are asked about again every poll and, oldest first, fill `GITLAB_JOB_CHECK_LIMIT`. Stale `pending` rows, the only scaler demand, then wait behind them, starting runners and holding scale-down off.
+  - Recommended fix: stamp `updated_at` before each `job` request and select on it, or use a worker-local last-checked map; order `pending` first and `running` last; add two tests.
+  - Warns:
+    - (2) A-W3's order omits `manual`, `scheduled` and `unknown`, which D13 and `137-brief.md:500` leave to #148.
+    - (3) The poll's local-clock `status_changed_at` against #140's GitLab-clock ordering; make the status order decide.
+    - (4) The conclusion step doesn't clear runner busy, as `confirm_jobs` does through `associate_runner_with_job`.
+    - (5) Excluding `pool_platforms!()` entirely also drops the "pool has a platform" gate.
+    - (6) The 60 s per-connection budget cuts the same tail of a large group every poll and cancels its conclusion step.
+    - (7) Where `gitlab_credentials` lives (shared helpers live in `main.rs`), and that `UnavailableGitLab` must be `pub(crate)` for `main()` to construct it.
+- **Assumed:**
+  - GitLab moves a played manual job `manual → pending` and a due scheduled job `scheduled → pending` under the same job id. This is from GitLab's documented job lifecycle and wasn't checked against a live instance.
+  - Issue #140's text is what #140 builds: it writes `pending`, `running` and terminal statuses, and ignores events older than the stored status by `build_status_changed_at`.
+  - Every `gitlab_jobs` writer sets `updated_at` on each write. The contract doesn't state this; it is the convention of every other table here.
+- **Hedged:**
+  - Finding 1 comes partly from my own round-1 wording, which named only `status_changed_at` as the age. The handoff says so.
+  - How long starvation lasts depends on the data. It is bounded by the longest-running older job in the common case, and has no bound when older rows have answers A-W3 can't write. It is a block because the phantom demand drives scale-up and blocks scale-down, and the Done-when test can't tell either way.
+  - Warn 2 is a warning, not a block, because, per #140's issue, no writer creates `manual` or `scheduled` rows today.
+  - I didn't verify GitLab's tag case rule. A-B4 defers it to #143, which is acceptable.
+- **Evidence:**
+  - Read: the amended brief (all 192 lines), `git diff f76a8bd f8be658`, the working-tree brief-gate result `148-brief-result-r1.md`, the round-1 `handoff-A.md` and `decisions.md`, `docs/handoffs/137-brief.md` (by search for `pool_id`, `updated_at`, `status_changed_at` and #148, and lines 494-502 and 787), and issue #140 via `gh issue view`.
+  - Source:
+    - `crates/gridops-core/src/autoscaling.rs:1-850`, plus the test list and lines 1120-1220;
+    - `crates/gridops-core/src/gitlab/mod.rs:115-222`;
+    - `migrations/0047_gitlab.sql`, in full;
+    - `crates/gridops-reconciler/src/main.rs:30-140,340-520,1145-1230,1396-1445,1555-1600,1975-2260,3650-3730`;
+    - `crates/gridops-core/src/db.rs:195-240`.
+  - Commands: a grep for every `Reconciler {` literal (three sites, all listed in A-W1).
+
+## A (Phase 3, up-front plan review, round 3): 2026-11-20T15:51:03-08:00
+- **Decided:** PASS, with 0 block findings and 4 warn findings (see `handoff-A.md`, round 3). The brief was reviewed at `c48f951`.
+  - The round-2 block is resolved by A2-B1. Rows are selected on `gitlab_jobs.updated_at`, which the poll stamps before each `job` request through `retry_when_busy`, so there is one named mechanism and no map. Rows are ordered `pending` first and `running` last, oldest first in each group, and capped at `GITLAB_JOB_CHECK_LIMIT`. Two Done-when tests pin this.
+  - Round-2 warns 2 to 7 are addressed:
+    - A2-W2/W3: the rank order includes `manual`/`scheduled`, the poll never writes `unknown`, and the rank decides over timestamps;
+    - A2-W4: the busy flag is cleared on conclusion, with a test;
+    - A2-W5: the bare platform `EXISTS` is kept;
+    - A2-W6: time limits are per request, and a failed project is not concluded;
+    - A2-W7: `gitlab_credentials` is in `main.rs` beside `runtime_secret`, and `UnavailableGitLab` is `pub(crate)`.
+  - Warns:
+    - (1) The `gitlab_jobs` write rule and the busy clear live in `gitlab_poll.rs`, with #140 given the same rule as prose on #136. For GitHub, both writers share `gridops-core` helpers (`associate_runner_with_job`, `record_job_report`, `finish_earlier_attempts`). Recommended: one core helper, added by whichever of #140 and #148 lands first; otherwise record why there are two copies.
+    - (2) An identical status counts as a same-rank write, so the poll rewrites `status_changed_at` on every pending row each poll.
+    - (3) A failed `group_projects` isn't covered by A2-W6.
+    - (4) Pin the interval to `setting_i64`. A2-W4 says "the row's `gitlab_connection_id`", but the `gitlab_jobs` column is `connection_id`.
+- **Assumed:**
+  - GitLab runners run one job and exit. This is from D9 and `137-brief.md:246,678` (`mode: "ephemeral"`, `gitlab-runner run-single --wait-timeout`). It makes A2-W4's busy clear by `gitlab_runner_id` safe: the runner can't have taken another job since, which is the case `confirm_jobs` guards against for closed GitHub jobs.
+  - `Job` has no runner id (`gitlab/mod.rs:118-125`), so the poll can't mirror the busy-set half of `associate_runner_with_job` without a contract change. Leaving that to #140 is therefore correct and is not a finding.
+- **Hedged:**
+  - Warn 1 is a warning, not a block:
+    - #148 alone implements the rule once;
+    - the brief records the coordination decision in writing (#136);
+    - rounds 1 and 2 accepted a prose rule;
+    - no GitLab write helper exists on master to extend.
+
+    A block on it now would move the goalposts in a third round.
+  - Warn 3 duplicates the brief gate's NV-5/W-5 on this same brief. It is kept so the stop result carries it if O doesn't act on the gate's copy.
+- **Evidence:**
+  - Read:
+    - the amended brief (all 233 lines) and `git diff f8be658 c48f951`;
+    - the working-tree brief-gate result `148-brief-result-r1.md`, on this brief;
+    - the round-2 `handoff-A.md` and `decisions.md`;
+    - `docs/handoffs/137-brief.md`, by search for `ephemeral`, `IdleExpired` and `wait_timeout`;
+    - issues #139 and #140 via `gh issue view`.
+  - Source:
+    - `migrations/0047_gitlab.sql`, in full;
+    - `crates/gridops-core/src/db.rs:180-300`;
+    - `crates/gridops-core/src/gitlab/mod.rs:110-200`;
+    - `crates/gridops-core/src/autoscaling.rs:40-80,213-300,436-520,595-660`;
+    - `crates/gridops-reconciler/src/main.rs:370-520,1296-1460,2026-2225,3685-3730`.
+  - Commands:
+    - a grep across `crates` for every caller of `associate_runner_with_job`, `record_job_report` and `finish_earlier_attempts`, in `gridops-api/src/webhooks.rs` and `gridops-reconciler/src/main.rs`;
+    - a grep for `access_token_key` and `runtime_secret` in the reconciler.
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:09:12-08:00
+- **Decided:** RED is valid; F may implement (see `handoff-T-red.md`). 26 tests authored.
+  - `crates/gridops-core/src/autoscaling_gitlab_tests.rs` (10, mounted from `autoscaling.rs`). Real SQLite through the public queue API: tag matching, connection linkage, untagged, A-B4 configured-labels-only (exclusive included), A2-W5 platform gate, A-B3 tiers, the display tier using up room, A-W4 one ordered list, the A-B2 key with no collision, and the saturated-pool handoff. Runtime RED: 10 failed and 24 existing passed, every failure on a feature assertion.
+  - `crates/gridops-reconciler/src/gitlab_poll_tests.rs` (16, mounted from `main.rs`). Real SQLite plus `FakeGitLab` through `poll_once`: record, group, conclude (terminal and `NotFound`→`canceled`), rate-limit backoff, A2-B1 limit, age and order, the re-check stamp, no backwards move, no resurrection, manual→pending, the A2-W4 busy clear, the A2-W6 failed-project rule, `gitlab_credentials`, `UnavailableGitLab` and `maybe_scale_down`. Compile RED (E0432 `gitlab_poll`, E0560 `gitlab`, E0425 `gitlab_credentials`). Runtime RED was proven behind it with a throwaway no-behaviour stub (14 failed for the feature, and the 2 contract-item tests passed), which was then removed.
+  - The test wiring adds a `gridops-core` dev-dependency with `test-support` to the reconciler, because `FakeGitLab` is behind that feature.
+- **Assumed:**
+  - Where the brief leaves a choice open, the tests take one reading. Each is listed in the handoff's "Ready for F":
+    - `poll_once(&Reconciler, &mut HashMap<_, std::time::Instant>, std::time::Instant) -> Result<()>`;
+    - both constants are `i64`;
+    - `UnavailableGitLab` is a unit struct;
+    - `NotFound` concludes as `canceled`;
+    - a `None` retry-after backs off for more than 1 s.
+  - A-B2 and A-B3 together mean that, in `waiting_job_pools`, a GitLab job in the display tier (`created`/`waiting_for_resource`/`preparing`) uses up room before it is filtered out. A test pins this.
+- **Hedged:**
+  - The poll tests pass when a correct implementation exists; I checked this by reasoning, not by running one. The no-behaviour stub proves they type-check against the pinned signatures and fail for the right reason, but no throwaway implementation was run to green.
+  - The timeout path (A2-W6, `GITLAB_REQUEST_TIMEOUT`) is a coverage hole. `FakeGitLab` has no delay, and tokio `test-util` is off. The same rule is pinned through an `Upstream` failure instead.
+  - A's round-3 warnings 1 to 3 were not folded into the brief, so they are not pinned either way.
+- **Evidence:**
+  - Read: the brief (233 lines), `handoff-A.md` (round 3), `decisions.md`, and `docs/handoffs/137/handoff-T-red.md` (precedent).
+  - Source:
+    - `crates/gridops-core/src/autoscaling.rs`, in full;
+    - `crates/gridops-core/src/gitlab/mod.rs` and `fake.rs`, in full;
+    - `migrations/0047_gitlab.sql` and `0046`;
+    - `crates/gridops-reconciler/src/main.rs`: lines 1-140, 355-522, 760-900, 1290-1460, 2026-2230, 3640-3800 and 4400-4880;
+    - `start_tests.rs:400-450`;
+    - the workspace and reconciler `Cargo.toml`.
+  - Commands:
+    - `cargo test -p gridops-core --lib autoscaling` (10 failed / 24 passed);
+    - `cargo test -p gridops-reconciler --no-run` (8 compile errors, all naming missing #148 items);
+    - the stub run of `cargo test -p gridops-reconciler gitlab_poll_tests` (14 failed / 2 passed);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (clean).
+
+## A (Phase 3, up-front plan review, round 4): 2026-11-20T16:24:05-08:00
+- **Decided:** PASS, with 0 block findings and 6 warn findings (see `handoff-A.md`, round 4). The brief was reviewed at `572f828`, and the diff since T-red is `git diff 1a4c512 572f828`: the round-3 D18 section and the Constraints line.
+  - D18 resolves round-3 warn 1 in the right layer. One `gridops-core` writer (`gitlab/jobs.rs`) is called by both crates, and the poll has no SQL merge of its own. It mirrors the GitHub split: `set_gitlab_runner_busy` returns `(runner id, pool id)` like `associate_runner_with_job`, and callers write `runner_events`. It shares more than GitHub does, whose `workflow_jobs` upsert is still two copies (`webhooks.rs:584`, `main.rs:1994`).
+  - Round-3 warn 2 is decided in writing by D18's equal-tier rule. Round-3 warn 4's column name is superseded by D18's `base_url` match.
+  - Warns:
+    - (1) The dedupe on `(base_url, job_id)` makes the instance the job key. A-B2's key, the Scope sentence and "the demand scan" (which leaves out the display tier) weren't amended. Recommended: a `Gitlab { base_url, job_id }` key, with the dedupe inside the GitLab arm of `queued_job_candidates`.
+    - (2) Two rows of one job can disagree (one `running`, one `pending`), and no status rule covers that. Recommended: the highest tier decides, with a test.
+    - (3) The parallel `jobs.rs` copies conflict at the second merge, and "drops its own" drops one unit-test set. Recommended: put the tests in `jobs_tests.rs` and keep the union of both sets.
+    - (4) The re-check mark can stamp a row a webhook just concluded. Recommended: guard the `UPDATE` with the D8 statuses.
+    - (5) The poll's `runner_events` row: the reconciler's helpers take no `runner_id`, the message is unspecified, and a duplicate row means a duplicate event.
+    - (6) Two round-3 points are carried forward: a failed `group_projects` skips the conclusion step, and the interval should be pinned to `setting_i64`.
+- **Assumed:**
+  - #140 builds D18 as `140-brief.md:292-372` (at `ba0a441`) states it, and it writes both rows from one delivery (`140-brief.md:58,290`). The #140 worktree has no `jobs.rs` yet, so #148 will most likely merge first.
+  - GitLab job ids are unique per instance, so `(base_url, job_id)` is a job's identity. This is from GitLab's data model, and it is what D18's `base_url` busy match also relies on.
+- **Hedged:**
+  - Warn 2 is a warning, not a block. The double count is transient: it is bounded by the backoff plus `GITLAB_JOB_CHECK_AGE_MS`, which matches GitHub's missed-webhook window (`JOB_CHECK_AGE_MS`). Also, #140 writes both rows from one delivery. The brief-gate result r1 raises the same point (W-5).
+  - Warn 3 is a warning, not a block. The local copy is planned and written in both briefs and on #136. It is not a drive-by under `parallel-agent-coexistence.md`.
+  - I did not re-review the round 1 to 3 amendments, which rounds 1 to 3 passed, beyond where round 3 changes them.
+- **Evidence:**
+  - Read: the brief (all 271 lines) and `git diff 1a4c512 572f828`; the working-tree brief-gate result `148-brief-result-r1.md` and its `git diff`; `148-brief-result-r2.md`; the round-3 `handoff-A.md`, `handoff-T-red.md` and `decisions.md`; and `gitlab-140-webhooks-a9fae5/docs/handoffs/140-brief.md:280-372`, plus lines 42, 58 and 242 by search.
+  - Source:
+    - `crates/gridops-core/src/db.rs:185-320` and `lib.rs:1-60`;
+    - `crates/gridops-core/src/autoscaling.rs:213-300,436-593`;
+    - `crates/gridops-core/src/gitlab/mod.rs:1-20`, with an item outline;
+    - `migrations/0047_gitlab.sql:1-45`;
+    - `crates/gridops-reconciler/src/main.rs:488-512,2150-2215,3735-3760`;
+    - `crates/gridops-api/src/webhooks.rs:625-650`;
+    - the fixture connections in `autoscaling_gitlab_tests.rs` and `gitlab_poll_tests.rs`.
+  - Commands:
+    - a grep for every `sqlx` user in `gridops-core/src` (the platform modules `github.rs`, `bitbucket.rs` and `gitlab/mod.rs` have none);
+    - a grep for every `INSERT INTO runner_events`;
+    - `git worktree list`, and the #140 worktree's `git log` and `ls crates/gridops-core/src/gitlab/`.
+
+## T (Phase 4, author tests / RED, round 2: D18): 2026-11-20T16:35:50-08:00
+- **Decided:** RED is valid; F may implement (see `handoff-T-red.md`, round 2). This round adds 10 tests and changes 1, for 36 tests in total, covering the three Done-when items A's round 4 handed to T.
+  - `crates/gridops-core/src/gitlab/jobs_tests.rs` (new, 9 tests). The D18 unit tests run on real SQLite through the public `gitlab::jobs` API:
+    - the tier table;
+    - all 363 stored × incoming × time cases of the status rule, through both `status_write_applies` and `record_gitlab_job`;
+    - the defaults on insert;
+    - `unknown` → `Ignored`;
+    - a terminal row freezes in every column;
+    - the runner fill and no overwrite, the tag fill and no empty overwrite, and retries and the pipeline moving only with the status;
+    - `set_gitlab_runner_busy` matching on `base_url` across a sibling connection.
+  - `autoscaling_gitlab_tests.rs` (+1 test). One job recorded under a project connection and under its group's connection (same `base_url`) is demand 1, with candidate pools from either connection.
+  - `gitlab_poll_tests.rs` (1 test changed, and renamed). Concluding a `running` row with a known runner writes exactly one `runner_events` row (#140's fields) and sets the runner `online`. A `running` row with no runner writes none.
+  - Wiring: a `#[cfg(test)] mod jobs_tests` mount in `gitlab/mod.rs`.
+  - RED results:
+    - Compile RED: E0432 `crate::gitlab::jobs`, plus round 1's 8 reconciler errors.
+    - Runtime RED with a no-behaviour D18 stub: 20 failed / 24 existing passed, every failure on a feature assertion.
+    - With the round-1 reconciler stub: 14 failed / 2 passed, unchanged.
+- **Assumed:**
+  - I mounted the D18 tests from `gitlab/mod.rs`, not from `jobs.rs` as A's warning 3 suggested, so they survive whichever copy of `jobs.rs` (#140's or #148's) lands. They use only public items, and `JobWrite` is matched exhaustively, so no derives are needed.
+  - A rejected write that fills nothing returns `Ignored`, the only one of D18's four variants left. `previous_status`/`status` follow `140-brief.md` ("stored before" / "stored after").
+  - The `runner_events` metadata ids may be JSON numbers or strings; neither brief fixes the type.
+- **Hedged:**
+  - Two invariant-only D18 tests first passed against the do-nothing stub. I added a live-writer control to each, as the round-1 poll invariant tests have, and both now fail on the stub.
+  - The D18 tests were also run to **green** against a throwaway reference implementation written from the brief (9/9), then removed. The poll tests are still checked against a stub only (round 1's hedge).
+  - A's round-4 warnings 2, 4, 5 (the message and duplicate events) and 6 aren't in the brief, so no test pins them either way. A different later reading would need a test change, not just an F change.
+- **Evidence:**
+  - Read:
+    - the brief (271 lines) and `git diff 1a4c512 572f828`;
+    - `handoff-A.md` (round 4), `decisions.md`, and the round-1 `handoff-T-red.md`;
+    - `gitlab-140-webhooks-a9fae5/docs/handoffs/140-brief.md:280-372` and its `runner_events` lines (202, 227-242).
+  - Source:
+    - `migrations/0047_gitlab.sql`, in full, and `0001_initial.sql:83-94`;
+    - `crates/gridops-core/src/gitlab/mod.rs:1-300`, `fake.rs:300-303` and `fake_tests.rs:1-30`;
+    - `crates/gridops-core/src/db.rs:23-43` and the workspace `[workspace.lints]`;
+    - `crates/gridops-reconciler/src/main.rs:1-60` and the `Reconciler` literal sites;
+    - `crates/gridops-api/src/webhooks.rs:625-650`;
+    - both existing #148 test files, in full.
+  - Commands:
+    - `cargo test -p gridops-core --lib --no-run` and `cargo test -p gridops-reconciler --no-run`;
+    - stub runs of `cargo test -p gridops-core --lib -- gitlab::jobs_tests autoscaling` (20 failed / 24 passed) and `cargo test -p gridops-reconciler gitlab_poll_tests` (14 failed / 2 passed);
+    - the reference run of `cargo test -p gridops-core --lib -- gitlab::jobs_tests` (9 passed);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (exit 0).
+
+## F (Phase 6, implement against the RED): 2026-11-20T16:56:39-08:00
+- **Decided:**
+  - D18 local copy at `gitlab/jobs.rs` with the brief's exact API.
+    - Every rule lives in one guarded `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING`.
+    - A read beforehand works out the outcome (`previous_status`), and the upsert's `WHERE` also requires the status that was read to be unchanged. If it changed, the function reads and decides again (at most 5 attempts).
+    - `set_gitlab_runner_busy` matches on `base_url` through the runner's connection.
+  - Demand: a private `QueuedJobKey { Github(i64), Gitlab { base_url, job_id } }`.
+    - The GitLab arm dedupes D8-active rows on `(base_url, job_id)` in a CTE. The job's status is its highest-tier row, it is queued at `MIN(created_at)`, and its pools are those of any of its connections, each listed once.
+    - It merges into the GitHub list by a stable Rust sort on `(queued_at, key)`.
+    - `assigned_queued_jobs` counts both platforms. Every other public output is GitHub-only.
+  - Poll:
+    - `worker`, plus `poll_once(app, &mut HashMap<String, Instant>, now)`.
+    - The interval is the pass's `reconcileIntervalSeconds` read.
+    - Every GitLab call runs under a 30 s timeout. A rate limit stops the connection until `retry_after` (default 60 s, capped at 1 h).
+    - A failed `group_projects` skips the conclusion step, and a failed project's rows are not checked.
+    - The check mark is a one-column `UPDATE` guarded to D8 statuses.
+    - `NotFound` is written as `canceled`.
+    - The busy clear and the `runner_events` row are written in the same transaction as the conclusion.
+- **Assumed:**
+  - Writing a non-terminal `job` answer through D18 (for example `pending` → `running`) is intended ("write its status").
+  - `created_at` of a row the poll inserts is the write time (`now_ms`). T left this unpinned.
+  - Event metadata ids as JSON numbers.
+- **Hedged:**
+  - Four choices go beyond the brief's text, all following A's round-4 suggestions: the highest-tier status for a duplicated job (warning 2), the status guard on the check mark (warning 4), skipping the conclusion step on a failed `group_projects` (warning 6a), and the `Job · pipeline <id>` message (warning 5).
+  - Not fixed: a duplicate `runner_events` row per duplicated running row (warning 5, part 4). Fixing it would change #140's D18 semantics.
+  - The workspace run shows 12 failures. All are host-environment failures that reproduce on the untouched base `b22c451`: `gridops-manager` has 11 `SUN_LEN` socket-path failures, and `gridops-api` `fleet_http::release_preflight::..._without_a_macos_arm64_machine` fails because this host is macOS ARM64. Linux CI is expected to pass them; that was not run here.
+- **Evidence:**
+  - Read: the brief (271 lines), `handoff-A.md` (round 4), `handoff-T-red.md` (round 2), `140-brief.md:280-372` at `ba0a441`, `migrations/0047_gitlab.sql` in full, `autoscaling.rs:1-860`, `main.rs` (header, `main`, workers, `retry_when_busy`, the job check `2030-2225`, `runtime_secret`, event helpers, test literal), `webhooks.rs:620-655`, and all three test files in full.
+  - Commands:
+    - `cargo test -p gridops-core --lib -- gitlab::jobs_tests` (9/9);
+    - `-- autoscaling gitlab` (53/53);
+    - `cargo test -p gridops-reconciler gitlab_poll_tests` (16/16);
+    - `cargo fmt --all -- --check` (0);
+    - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (0);
+    - `cargo test --workspace --locked --no-fail-fast` (882 passed, 12 failed; all 12 fail identically on base `b22c451`).
+
+## T (Phase 7, GREEN)
+- **Decided:**
+  - GREEN with no blocking Tier 2 issue, so no production change is required of F.
+  - Changed no tests: none was wrong.
+- **Assumed:** The 12 workspace failures (11 `SUN_LEN` in `gridops-manager`, 1 macOS-ARM64 preflight in `gridops-api`) are host-environment failures. My signatures match those F recorded against base `b22c451`; I did not run base myself.
+- **Hedged:** The 30 s request-timeout path stays undriven (declared hole since T-red). I checked it by reading the code.
+- **Evidence:**
+  - Ran `gitlab::jobs_tests` (9/9), `autoscaling gitlab` (53/53), gridops-core lib (281), gridops-reconciler (84), fmt, and CI clippy: all exit 0.
+  - Ran `gridops-api` and `gridops-manager` and got the same failures F reported.
+  - Two mutations were caught, then reverted: the same-tier/newer rule in `status_write_applies`, and the poll's busy-clear flag.
+  - Read `jobs.rs` in full and grepped the poll for direct `gitlab_jobs` SQL (only the check mark, line 269).
+
+## A (Phase 7, anti-duplication gate)
+- **Decided:** PASS. F extended `queued_job_candidates` / `assign_queued_jobs` / `queued_job_owners` / `waiting_job_pools` with a GitLab arm and shared `pool_room!()`, `PoolStanding::of` and `pool_platforms!()`. The new poll module and D18's `jobs.rs` are the brief's own named new objects, and each follows its GitHub analogue.
+- **Assumed:** No survey.md was provided, so the brief's Scope and amendments serve as the Reuse map.
+- **Hedged:** The poll's `runner_events` `INSERT` is a third copy of that shape (warn, follow-up helper once #140 lands). The add/add conflict on `jobs.rs` is a planned merge-order matter.
+- **Evidence:** Diffed `572f828..f873139` for the 9 non-doc files; read `gitlab_poll.rs` in full and the `jobs.rs` header and API; grepped `gitlab_jobs` and `INSERT INTO runner_events` across `crates/` and `src/`. The only non-test `gitlab_jobs` writers are `jobs.rs` and the guarded re-check mark.
