@@ -258,3 +258,9 @@ PASS. GitLab extends the existing descriptor, registry, connections section, tar
 - **Assumed:** F's Playwright geometry table (320-1280) is accurate; I did not re-measure because T runs headless Tier 1/2 only and U/S own the live layout.
 - **Hedged:** none.
 - **Evidence:** vitest 548/548, tsc 0, lint clean, build 0, cargo `the_runners_list_carries` 1 passed, `gitlab` 34 + 3 passed (all run at HEAD 675a213).
+
+## A (Architecture Reviewer, Phase 7 anti-duplication re-check after S REWORK) - 2026-11-20
+- **Decided:** PASS. The rework (4 lines in `connections-section.tsx` `ConnectionRow`) extends the existing action cluster generically and adds no GitLab string, file or parallel component. No other src/crates/tests change since c0e2d58, so the earlier PASS stands.
+- **Assumed:** F's claim that the `sm`+ layout is unchanged (parent already `sm:w-auto sm:shrink-0`) is right; layout is U/S's to measure, not A's.
+- **Hedged:** The `OTHER_PLATFORM_KINDS` warn from the first pass stays as a tracked follow-up.
+- **Evidence:** `git diff e5d685f HEAD -- src crates tests migrations docs/openapi` (one file, 3 insertions, 1 deletion, zero `gitlab` matches); `git diff c0e2d58 HEAD --name-only` over the same paths lists only `connections-section.tsx`.
