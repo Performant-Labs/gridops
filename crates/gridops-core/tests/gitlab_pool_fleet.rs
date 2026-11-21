@@ -5,17 +5,14 @@
 //! rows (#138's shape). Its fleet targets come from its connections: one
 //! `gitlab_project` or `gitlab_group` target per connection, linked to the
 //! pool's platforms. A Docker platform saved without an image gets the pool's
-//! Docker image; a GitLab pool without one is refused, since the GitHub stock
-//! image cannot run GitLab jobs (until #147's `GITLAB_RUNNER_IMAGE` exists;
-//! it is not on master at the time of writing, b22c451 / origin c575130).
+//! Docker image; a GitLab pool without one gets #147's pinned
+//! `GITLAB_RUNNER_IMAGE` (D147-1), since the GitHub stock image cannot run
+//! GitLab jobs.
 
 use anyhow::{Context as _, Result};
 use gridops_core::{
     connect_database_path,
-    fleet::{
-        FleetError,
-        targets::{self, FleetSettingsInput},
-    },
+    fleet::targets::{self, FleetSettingsInput},
 };
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -204,11 +201,11 @@ async fn the_target_list_for_granting_machines_includes_gitlab_connections() -> 
 /// Round-2 block 2 and brief-gate B-2 (a), (c): a Docker platform saved
 /// without an image takes the pool's Docker image. A GitLab pool with no
 /// Docker image of its own (here a Tart pool, whose `docker_image` is empty)
-/// is refused with a readable error and nothing is saved, where a GitHub pool
-/// in the same position still gets the stock runner image. A GitLab pool's
-/// own Docker image is used as given.
+/// gets the pinned gitlab-runner image (D147-1), where a GitHub pool in the
+/// same position still gets the stock runner image. A GitLab pool's own
+/// Docker image is used as given.
 #[tokio::test]
-async fn a_gitlab_pool_without_a_docker_image_cannot_save_a_docker_platform() -> Result<()> {
+async fn a_gitlab_pool_without_a_docker_image_gets_the_gitlab_runner_image() -> Result<()> {
     let database = Database::new().await?;
     sqlx::raw_sql(
         r#"
@@ -229,21 +226,10 @@ async fn a_gitlab_pool_without_a_docker_image_cannot_save_a_docker_platform() ->
         .bind(pool_id)
     };
 
-    let refused = targets::save_pool_fleet(&database.pool, "gl-mac", &docker_platform("")?).await;
-
-    assert!(
-        matches!(
-            refused,
-            Err(FleetError::InvalidRequest(
-                "GitLab pool has no runner image"
-            ))
-        ),
-        "{refused:?}"
-    );
+    targets::save_pool_fleet(&database.pool, "gl-mac", &docker_platform("")?).await?;
     assert_eq!(
         profiles("gl-mac").fetch_all(&database.pool).await?,
-        [],
-        "nothing is saved"
+        [(gridops_core::provisioning::GITLAB_RUNNER_IMAGE.to_owned(),)]
     );
     // A GitHub pool in the same position keeps today's fallback.
     targets::save_pool_fleet(&database.pool, "gh-mac", &docker_platform("")?).await?;

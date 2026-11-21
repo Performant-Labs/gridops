@@ -2554,18 +2554,10 @@ async fn provision_on_host(
         &pool.tart_image,
     );
     // A GitLab Docker runner needs a gitlab-runner image; the stock GitHub
-    // runner image cannot run it. Refused before anything is registered or
-    // reserved, and counted, so a pool missing its image backs off. A Tart
-    // start keeps the pool's Tart image.
-    if let Some(connection) = &gitlab_connection
-        && provider == "docker"
-    {
-        let Ok(image) = gridops_core::fleet::targets::docker_runner_image(&pool.docker_image, true)
-        else {
-            record_provision_failure(&app.database, pool).await?;
-            bail!(gitlab_lifecycle::missing_image_reason(connection));
-        };
-        plan.image = image;
+    // runner image cannot run it. A pool with no Docker image of its own gets
+    // the pinned one (D147-1). A Tart start keeps the pool's Tart image.
+    if gitlab_connection.is_some() && provider == "docker" {
+        plan.image = gridops_core::fleet::targets::docker_runner_image(&pool.docker_image, true);
     }
     let platform = plan.platform;
     let runner_ephemeral = plan.ephemeral;

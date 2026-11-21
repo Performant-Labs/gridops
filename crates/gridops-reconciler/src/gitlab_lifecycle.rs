@@ -242,16 +242,6 @@ pub(super) async fn deregister_runner(app: &Reconciler, runner: &Runner) {
     }
 }
 
-/// The refusal of a manager-path GitLab Docker start on a pool with no Docker
-/// image of its own.
-pub(super) fn missing_image_reason(connection: &GitlabConnection) -> String {
-    format!(
-        "{}: set the pool's Docker image to a gitlab-runner image to start GitLab runners for connection {}.",
-        gridops_core::fleet::targets::GITLAB_NO_RUNNER_IMAGE,
-        connection.name
-    )
-}
-
 /// How a GitLab runner left service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Exit {

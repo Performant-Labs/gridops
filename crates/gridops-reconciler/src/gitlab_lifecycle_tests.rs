@@ -543,27 +543,24 @@ async fn a_tart_start_registers_a_gitlab_runner_and_sends_the_tart_image() -> Re
     setup.finish().await
 }
 
-/// Done-when 4 (manager path; `GITLAB_RUNNER_IMAGE` is not on master): a
-/// Docker start for a GitLab pool with no Docker image is refused before
-/// anything is registered, with a readable reason, and leaves no runner
-/// starting.
+/// Done-when 4 (manager path, D147-1): a Docker start for a GitLab pool with
+/// no Docker image of its own runs the pinned gitlab-runner image, never the
+/// GitHub stock image.
 #[tokio::test]
-async fn a_docker_start_without_a_runner_image_is_refused_before_registering() -> Result<()> {
+async fn a_docker_start_without_a_pool_image_runs_the_pinned_gitlab_runner_image() -> Result<()> {
     let setup = gitlab_setup(&gitlab_pool("pool-gl", "docker", "", "", 1)).await?;
     ACME.add(&setup, &["pool-gl"]).await?;
 
     pass(&setup).await?;
 
-    assert_eq!(gitlab_calls(&setup, FakeMethod::CreateRunner), []);
-    assert_eq!(manager_bodies(&setup, "pool-gl"), Vec::<Value>::new());
-    assert!(
-        rows(&setup, "pool-gl")
-            .await?
-            .iter()
-            .all(|row| row.status != "starting"),
-        "no runner is left starting"
+    assert_eq!(gitlab_calls(&setup, FakeMethod::CreateRunner).len(), 1);
+    let bodies = manager_bodies(&setup, "pool-gl");
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    assert_eq!(
+        bodies[0]["image"],
+        gridops_core::provisioning::GITLAB_RUNNER_IMAGE
     );
-    assert_readable(&setup, "pool-gl", "no runner image").await?;
+    assert_eq!(bodies[0]["platform"], "gitlab");
     setup.finish().await
 }
 

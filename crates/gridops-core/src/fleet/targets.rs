@@ -494,20 +494,17 @@ async fn pinned_hosts(pool: &SqlitePool, host_ids: &[String]) -> Result<Vec<Stri
 /// The image a Docker platform runs when the pool has no Docker image of its own.
 const STOCK_DOCKER_IMAGE: &str = "ghcr.io/actions/actions-runner:latest";
 
-/// Why a GitLab pool's Docker start or Docker platform is refused while it has
-/// no image of its own (#139, until #147's GitLab runner image exists).
-pub const GITLAB_NO_RUNNER_IMAGE: &str = "GitLab pool has no runner image";
-
 /// The one place a Docker runner's image is chosen when the pool has none of
-/// its own (#139 round-2 block 2): a GitHub or Bitbucket pool gets the stock
-/// runner image; a GitLab pool (one with `runner_pool_gitlab_connections`
-/// rows) is refused, since the stock image cannot run GitLab jobs. A
-/// non-empty `pool_image` is used as given.
-pub fn docker_runner_image(pool_image: &str, gitlab: bool) -> Result<String, FleetError> {
+/// its own (#139 round-2 block 2, D147-1): a GitHub or Bitbucket pool gets the
+/// stock runner image; a GitLab pool (one with
+/// `runner_pool_gitlab_connections` rows) gets the pinned gitlab-runner image
+/// (#147), since the stock image cannot run GitLab jobs. A non-empty
+/// `pool_image` is used as given.
+pub fn docker_runner_image(pool_image: &str, gitlab: bool) -> String {
     match pool_image.trim() {
-        "" if gitlab => Err(FleetError::InvalidRequest(GITLAB_NO_RUNNER_IMAGE)),
-        "" => Ok(STOCK_DOCKER_IMAGE.to_owned()),
-        image => Ok(image.to_owned()),
+        "" if gitlab => crate::provisioning::GITLAB_RUNNER_IMAGE.to_owned(),
+        "" => STOCK_DOCKER_IMAGE.to_owned(),
+        image => image.to_owned(),
     }
 }
 
@@ -539,7 +536,10 @@ async fn pool_docker_image(pool: &SqlitePool, pool_id: &str) -> Result<String, F
             }
         })
         .unwrap_or_default();
-    docker_runner_image(&image, is_gitlab_pool(pool, pool_id).await?)
+    Ok(docker_runner_image(
+        &image,
+        is_gitlab_pool(pool, pool_id).await?,
+    ))
 }
 
 /// Saves the pool's fleet settings: updates the platforms that are kept,
