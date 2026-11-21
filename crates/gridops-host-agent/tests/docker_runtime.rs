@@ -75,7 +75,13 @@ async fn a_runner_is_reported_gone_only_when_docker_says_so() -> Result<()> {
         bootstrap: None,
         operation,
     };
-    let failed = |code, retryable| Some(HelperResponse::Failed { code, retryable });
+    let failed = |code, retryable| {
+        Some(HelperResponse::Failed {
+            code,
+            retryable,
+            diagnostic: None,
+        })
+    };
     for (state, inspect, cleanup) in [
         ("running", None, None),
         (

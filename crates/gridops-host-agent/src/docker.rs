@@ -1,21 +1,25 @@
 //! Linux Docker execution through the local Docker CLI.
 //!
-//! Runs GitHub Actions runner containers for fleet placements. Containers are
-//! named and labelled after their prepared environment, so every later
-//! operation targets exactly the object this agent created. `GridOps` chooses
-//! the image: each platform names it. The runner's registration material is
-//! written to the container's stdin and never appears in its environment,
-//! arguments or `docker inspect`.
+//! Runs GitHub Actions and GitLab runner containers for fleet placements.
+//! Containers are named and labelled after their prepared environment, so
+//! every later operation targets exactly the object this agent created.
+//! `GridOps` chooses the image: each platform names it. The runner's
+//! registration material is written to the container's stdin and never
+//! appears in its environment, arguments or `docker inspect`.
 
-use std::{process::Stdio, time::Duration};
+use std::{
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use gridops_core::{
     fleet::{
         domain::{Architecture, RuntimeKind},
-        ids::{DiagnosticId, UpstreamText},
+        ids::{DiagnosticId, PreparedEnvironmentId, UpstreamText},
         protocol::{
             agent::{
-                AgentOperation, LocalResourceIdentity, PrepareEnvironment, RunnerMode, StopMode,
+                AgentOperation, GitlabRunnerMaterial, LocalResourceIdentity, PrepareEnvironment,
+                RunnerMode, StartRunner, StopMode,
             },
             inventory::ObservedBackend,
             outcomes::{
@@ -25,7 +29,11 @@ use gridops_core::{
             primitives::WireTimestamp,
         },
     },
-    provisioning::instrumented_runner_script,
+    provisioning::{
+        GITLAB_EXIT_IDLE_EXPIRED, GITLAB_EXIT_REGISTRATION_REFUSED, GITLAB_READY_MARKER,
+        GITLAB_START_READY_TIMEOUT_SECS, gitlab_runner_env, gitlab_runner_script,
+        instrumented_runner_script, valid_gitlab_url,
+    },
 };
 use serde::Deserialize;
 use tokio::{io::AsyncWriteExt as _, process::Command};
@@ -85,6 +93,11 @@ impl DockerRuntime {
         if prepare.runtime_kind != RuntimeKind::Docker {
             return failed(FailureCode::Unsupported, false);
         }
+        // GitLab's Docker executor runs every job on the host's daemon, so a
+        // GitLab profile that doesn't share the Docker socket can run none.
+        if prepare.target.is_gitlab() && !prepare.configuration.requires_docker_socket {
+            return failed(FailureCode::Configuration, false);
+        }
         let image = String::from(prepare.image.clone());
         // Pull every time, so a tag that moved (`latest`, a rebuilt CI image)
         // is picked up. The copy already here serves if the registry can't be
@@ -114,6 +127,11 @@ impl DockerRuntime {
         else {
             return failed(FailureCode::Configuration, false);
         };
+        if prepared.target.is_gitlab() {
+            return self
+                .start_gitlab(request, environment, prepared, material, start)
+                .await;
+        }
         let Ok(material) = serde_json::from_str::<Material>(material) else {
             return failed(FailureCode::Configuration, false);
         };
@@ -158,60 +176,7 @@ impl DockerRuntime {
         // We bypass the runner image's own entrypoint below (which otherwise exports
         // this itself) because we run its registration/run scripts as root.
         env.push("RUNNER_ALLOW_RUNASROOT=1".into());
-        let resources = &prepared.resource_request;
-        let mut args = vec![
-            "create".to_owned(),
-            "-i".into(),
-            "--name".into(),
-            name.clone(),
-            "--label".into(),
-            format!("{LABEL}={environment}"),
-            "--cpus".into(),
-            format!("{:.3}", f64::from(resources.cpu_millis()) / 1000.0),
-            "--memory".into(),
-            format!("{}m", resources.memory_mib()),
-            "--pids-limit".into(),
-            "4096".into(),
-            "--cap-drop".into(),
-            "ALL".into(),
-            // Dropping ALL also strips root's usual exemption from capability checks, so
-            // chown/chmod calls the runner's own setup actions make (e.g. actions/setup-node)
-            // fail even as uid 0 without these restored explicitly.
-            "--cap-add".into(),
-            "CHOWN".into(),
-            "--cap-add".into(),
-            "DAC_OVERRIDE".into(),
-            "--cap-add".into(),
-            "FOWNER".into(),
-            "--cap-add".into(),
-            "SETUID".into(),
-            "--cap-add".into(),
-            "SETGID".into(),
-            "--security-opt".into(),
-            "no-new-privileges:true".into(),
-            "--log-opt".into(),
-            "max-size=20m".into(),
-            // An empty entrypoint runs the Cmd below as given. myoung34/github-runner's
-            // `/entrypoint.sh` would otherwise take it as arguments and first run a
-            // registration from env vars GridOps never sets (bootstrap secrets are piped
-            // over stdin instead), which fails before our Cmd runs. GitHub's own image has
-            // no entrypoint, so this changes nothing there.
-            "--entrypoint".into(),
-            String::new(),
-            // Docker's own init reaps the job's orphaned processes, whatever the image
-            // ships. dumb-init would do the same job, but GitHub's own image doesn't carry
-            // that binary, so PID 1 duty falls to Docker's --init instead.
-            "--init".into(),
-        ];
-        if let Some(network) = prepared
-            .configuration
-            .network
-            .as_ref()
-            .map(|network| network.as_str().to_owned())
-            .or_else(|| self.network.clone())
-        {
-            args.extend(["--network".into(), network]);
-        }
+        let mut args = self.create_args(&name, environment, prepared);
         if request.docker_socket {
             let Some(socket) = &self.socket else {
                 return failed(FailureCode::Permission, false);
@@ -249,6 +214,144 @@ impl DockerRuntime {
             return failed(FailureCode::Runtime, true);
         }
         started(start, id)
+    }
+
+    /// `docker create` up to the volumes, environment and command: what every
+    /// runner container gets, whatever its platform.
+    fn create_args(
+        &self,
+        name: &str,
+        environment: PreparedEnvironmentId,
+        prepared: &PrepareEnvironment,
+    ) -> Vec<String> {
+        let resources = &prepared.resource_request;
+        let mut args = vec![
+            "create".to_owned(),
+            "-i".into(),
+            "--name".into(),
+            name.to_owned(),
+            "--label".into(),
+            format!("{LABEL}={environment}"),
+            "--cpus".into(),
+            format!("{:.3}", f64::from(resources.cpu_millis()) / 1000.0),
+            "--memory".into(),
+            format!("{}m", resources.memory_mib()),
+            "--pids-limit".into(),
+            "4096".into(),
+            "--cap-drop".into(),
+            "ALL".into(),
+            // Dropping ALL also strips root's usual exemption from capability checks, so
+            // chown/chmod calls the runner's own setup actions make (e.g. actions/setup-node)
+            // fail even as uid 0 without these restored explicitly.
+            "--cap-add".into(),
+            "CHOWN".into(),
+            "--cap-add".into(),
+            "DAC_OVERRIDE".into(),
+            "--cap-add".into(),
+            "FOWNER".into(),
+            "--cap-add".into(),
+            "SETUID".into(),
+            "--cap-add".into(),
+            "SETGID".into(),
+            "--security-opt".into(),
+            "no-new-privileges:true".into(),
+            "--log-opt".into(),
+            "max-size=20m".into(),
+            // An empty entrypoint runs the Cmd below as given. myoung34/github-runner's
+            // `/entrypoint.sh` would otherwise take it as arguments and first run a
+            // registration from env vars GridOps never sets (bootstrap secrets are piped
+            // over stdin instead), which fails before our Cmd runs. GitHub's own image has
+            // no entrypoint, so this changes nothing there. gitlab/gitlab-runner's
+            // `/entrypoint` would likewise hand the Cmd to gitlab-runner as its arguments.
+            "--entrypoint".into(),
+            String::new(),
+            // Docker's own init reaps the job's orphaned processes, whatever the image
+            // ships. dumb-init would do the same job, but GitHub's own image doesn't carry
+            // that binary, so PID 1 duty falls to Docker's --init instead.
+            "--init".into(),
+        ];
+        if let Some(network) = prepared
+            .configuration
+            .network
+            .as_ref()
+            .map(|network| network.as_str().to_owned())
+            .or_else(|| self.network.clone())
+        {
+            args.extend(["--network".into(), network]);
+        }
+        args
+    }
+
+    /// The GitLab branch of Start: `gitlab-runner` with the shared GitLab
+    /// runner script, the token on its stdin, then a bounded wait until the
+    /// script says GitLab accepted the token or the container ends.
+    async fn start_gitlab(
+        &self,
+        request: &HelperRequest,
+        environment: PreparedEnvironmentId,
+        prepared: &PrepareEnvironment,
+        material: &str,
+        start: &StartRunner,
+    ) -> HelperResponse {
+        let Ok(GitlabRunnerMaterial::GitlabRunner {
+            token,
+            url,
+            wait_timeout_seconds,
+        }) = serde_json::from_str::<GitlabRunnerMaterial>(material)
+        else {
+            return failed(FailureCode::Configuration, false);
+        };
+        // A GitLab runner takes one job; the URL is checked here as the
+        // manager checks it, so a bad one never reaches the verify call.
+        if prepared.mode != RunnerMode::Ephemeral || !valid_gitlab_url(&url) {
+            return failed(FailureCode::Configuration, false);
+        }
+        // The Docker executor needs the host's daemon (Prepare refuses a
+        // GitLab profile without the socket).
+        if !request.docker_socket {
+            return failed(FailureCode::Configuration, false);
+        }
+        let Some(socket) = &self.socket else {
+            return failed(FailureCode::Permission, false);
+        };
+        let name = format!("gridops-{environment}");
+        // A retried start finds the container it already created.
+        if let Ok(id) = docker(&["inspect", "-f", "{{.Id}}", &name]).await {
+            return started(start, id);
+        }
+        let mut args = self.create_args(&name, environment, prepared);
+        // The Docker executor keeps each job's files in its own containers and
+        // volumes on the host's daemon, so unlike GitHub's runner this one
+        // needs no shared work folder.
+        args.extend(["-v".into(), format!("{socket}:/var/run/docker.sock")]);
+        for variable in gitlab_runner_env(&url, wait_timeout_seconds) {
+            args.extend(["-e".into(), variable]);
+        }
+        args.extend([
+            String::from(prepared.image.clone()),
+            "/bin/bash".into(),
+            "-c".into(),
+            gitlab_runner_script(),
+        ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let Ok(id) = docker(&args).await else {
+            return failed(FailureCode::Runtime, true);
+        };
+        let ending = start_gitlab_runner(&id, &token).await;
+        if ending == GitlabStart::Ready {
+            return started(start, id);
+        }
+        // Only a successful Start binds the container to its environment, so
+        // nothing later could remove it: remove it now.
+        let _ = docker(&["rm", "-f", &id]).await;
+        match ending {
+            GitlabStart::Exited(GITLAB_EXIT_REGISTRATION_REFUSED) => failed_because(
+                FailureCode::Configuration,
+                false,
+                diagnostic(DiagnosticCode::RegistrationRefused),
+            ),
+            _ => failed(FailureCode::Runtime, true),
+        }
     }
 
     async fn owned(&self, resource: &LocalResourceIdentity) -> Option<String> {
@@ -309,7 +412,18 @@ impl RuntimeHelper for DockerRuntime {
                             local_identity: Some(expected_resource.clone()),
                         })
                     }
-                    Ok(_) => failed(FailureCode::ResourceUnavailable, false),
+                    // An exited GitLab runner says why it ended when the
+                    // reason is its own: idle expiry or a refused token.
+                    Ok(_) => failed_because(
+                        FailureCode::ResourceUnavailable,
+                        false,
+                        match &request.prepared {
+                            Some(prepared) if prepared.target.is_gitlab() => {
+                                gitlab_exit_diagnostic(object_id.as_str()).await
+                            }
+                            _ => None,
+                        },
+                    ),
                     Err(error) if missing(&error) => {
                         failed(FailureCode::ResourceUnavailable, false)
                     }
@@ -476,7 +590,10 @@ async fn docker_backend(runtime: &DockerRuntime) -> anyhow::Result<ObservedBacke
                 {"target_kind": "github_repository", "mode": "ephemeral"},
                 {"target_kind": "github_repository", "mode": "persistent"},
                 {"target_kind": "github_organization", "mode": "ephemeral"},
-                {"target_kind": "github_organization", "mode": "persistent"}
+                {"target_kind": "github_organization", "mode": "persistent"},
+                // GitLab runners take one job each (D6).
+                {"target_kind": "gitlab_project", "mode": "ephemeral"},
+                {"target_kind": "gitlab_group", "mode": "ephemeral"}
             ],
             "environments": [],
             // Preparing pulls whatever image the platform names.
@@ -525,6 +642,96 @@ async fn feed_secret(id: &str, secret: &str) -> anyhow::Result<()> {
         "runner container failed to start"
     );
     Ok(())
+}
+
+/// How a GitLab runner's Start ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitlabStart {
+    /// The script printed `GITLAB_READY_MARKER`: GitLab accepted the token.
+    Ready,
+    /// The container exited before that, with this status.
+    Exited(i32),
+    /// Neither within `GITLAB_START_READY_TIMEOUT_SECS`.
+    NotReady,
+}
+
+/// Starts the created GitLab runner container with its stdin attached,
+/// writes the token line, and waits, at most
+/// `GITLAB_START_READY_TIMEOUT_SECS`, until the script says it is ready or
+/// the container exits. Stdin stays attached until then, so the script has
+/// read the token whatever the outcome. A refusal can end the container
+/// before the token is even written: its exit status is read all the same.
+async fn start_gitlab_runner(id: &str, token: &str) -> GitlabStart {
+    let deadline = Instant::now() + Duration::from_secs(GITLAB_START_READY_TIMEOUT_SECS);
+    let Ok(mut child) = Command::new("docker")
+        .args(["start", "--interactive", id])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    else {
+        return GitlabStart::NotReady;
+    };
+    let mut stdin = child.stdin.take();
+    if let Some(input) = stdin.as_mut() {
+        // A write that fails (the container already ended) is told apart by
+        // the exit status below.
+        let _ = input.write_all(format!("{token}\n").as_bytes()).await;
+        let _ = input.flush().await;
+    }
+    let ending = loop {
+        let state = docker(&["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", id]).await;
+        let ready = docker(&["logs", id]).await.is_ok_and(|output| {
+            output
+                .lines()
+                .any(|line| line.trim_end() == GITLAB_READY_MARKER)
+        });
+        if ready {
+            break GitlabStart::Ready;
+        }
+        if let Ok(state) = state {
+            if let Some(("exited" | "dead", code)) = state.split_once(' ') {
+                break GitlabStart::Exited(code.trim().parse().unwrap_or(-1));
+            }
+        }
+        if Instant::now() >= deadline {
+            break GitlabStart::NotReady;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    drop(stdin);
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    ending
+}
+
+/// Why an exited GitLab runner ended, when the reason is the runner's own:
+/// idle expiry, or a token GitLab refused after the Start (D147-2).
+async fn gitlab_exit_diagnostic(id: &str) -> Option<DiagnosticReference> {
+    let state = docker(&[
+        "inspect",
+        "-f",
+        "{{.State.Running}} {{.State.ExitCode}}",
+        id,
+    ])
+    .await
+    .ok()?;
+    let ("false", code) = state.split_once(' ')? else {
+        return None;
+    };
+    match code.trim().parse::<i32>().ok()? {
+        GITLAB_EXIT_IDLE_EXPIRED => diagnostic(DiagnosticCode::IdleExpired),
+        GITLAB_EXIT_REGISTRATION_REFUSED => diagnostic(DiagnosticCode::RegistrationRefused),
+        _ => None,
+    }
+}
+
+/// A diagnostic of `code`, with a fresh id as `cleaned` makes its own.
+fn diagnostic(code: DiagnosticCode) -> Option<DiagnosticReference> {
+    DiagnosticId::try_new(Uuid::new_v4())
+        .ok()
+        .map(|id| DiagnosticReference { id, code })
 }
 
 /// Create a runner's shared work folder under `root`.
@@ -644,10 +851,7 @@ fn missing(error: &anyhow::Error) -> bool {
     message.contains("no such object") || message.contains("no such container")
 }
 
-fn started(
-    start: &gridops_core::fleet::protocol::agent::StartRunner,
-    id: String,
-) -> HelperResponse {
+fn started(start: &StartRunner, id: String) -> HelperResponse {
     let Ok(object_id) = UpstreamText::new(id) else {
         return failed(FailureCode::Runtime, false);
     };
@@ -695,7 +899,19 @@ fn succeeded(evidence: SuccessEvidence) -> HelperResponse {
 }
 
 const fn failed(code: FailureCode, retryable: bool) -> HelperResponse {
-    HelperResponse::Failed { code, retryable }
+    failed_because(code, retryable, None)
+}
+
+const fn failed_because(
+    code: FailureCode,
+    retryable: bool,
+    diagnostic: Option<DiagnosticReference>,
+) -> HelperResponse {
+    HelperResponse::Failed {
+        code,
+        retryable,
+        diagnostic,
+    }
 }
 
 #[cfg(test)]

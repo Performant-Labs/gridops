@@ -6,13 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use gridops_core::fleet::{
-    ids::{Generation, PreparedEnvironmentId},
+    ids::{DiagnosticId, Generation, PreparedEnvironmentId},
     protocol::{
         agent::{
             AgentCommandEnvelope, AgentOperation, CommandScope, ExpectedAgentSession,
             LocalResourceIdentity,
         },
-        outcomes::{CommandOutcome, FailureCode, SuccessEvidence, UncertainCode},
+        outcomes::{
+            CommandOutcome, DiagnosticCode, DiagnosticReference, FailureCode, SuccessEvidence,
+            UncertainCode,
+        },
         primitives::WireTimestamp,
     },
 };
@@ -74,6 +77,8 @@ struct Recorder {
     remains: Mutex<Option<StartRemains>>,
     /// Whether each look at an interrupted start was told the host rebooted.
     rebooted: Mutex<Vec<bool>>,
+    /// What a start answers instead of starting a runner, when set.
+    start_failure: Mutex<Option<HelperResponse>>,
 }
 
 impl Recorder {
@@ -97,6 +102,16 @@ impl RuntimeHelper for Recorder {
     async fn call(&self, request: HelperRequest) -> HelperResponse {
         if let Ok(mut requests) = self.requests.lock() {
             requests.push(request.clone());
+        }
+        if matches!(request.operation, AgentOperation::StartRunner(_)) {
+            if let Some(failure) = self
+                .start_failure
+                .lock()
+                .ok()
+                .and_then(|failure| failure.clone())
+            {
+                return failure;
+            }
         }
         let evidence = match (&request.operation, request.environment_id) {
             (AgentOperation::PrepareEnvironment(_), Some(prepared_environment_id)) => {
@@ -129,6 +144,7 @@ impl RuntimeHelper for Recorder {
                 return HelperResponse::Failed {
                     code: FailureCode::Unsupported,
                     retryable: false,
+                    diagnostic: None,
                 };
             }
         };
@@ -524,7 +540,8 @@ async fn helper_socket_refuses_requests_outside_the_protocol() -> Result<()> {
             response,
             HelperResponse::Failed {
                 code: FailureCode::Configuration,
-                retryable: false
+                retryable: false,
+                diagnostic: None,
             }
         );
     }
@@ -537,9 +554,91 @@ async fn helper_socket_refuses_requests_outside_the_protocol() -> Result<()> {
         response,
         HelperResponse::Failed {
             code: FailureCode::Unsupported,
-            retryable: false
+            retryable: false,
+            diagnostic: None,
         }
     );
     assert_eq!(recorder.calls(), 1);
+    Ok(())
+}
+
+/// B-3: a helper failure may carry a diagnostic. The field is optional and
+/// left out when absent, so every failure without one keeps its wire form
+/// byte for byte, and the helper still refuses anything else.
+#[test]
+fn helper_failures_keep_their_wire_form_and_may_carry_a_diagnostic() -> Result<()> {
+    let plain = HelperResponse::Failed {
+        code: FailureCode::Runtime,
+        retryable: true,
+        diagnostic: None,
+    };
+    let wire = r#"{"kind":"failed","code":"runtime","retryable":true}"#;
+    assert_eq!(serde_json::to_string(&plain)?, wire);
+    assert_eq!(serde_json::from_str::<HelperResponse>(wire)?, plain);
+
+    let refused = HelperResponse::Failed {
+        code: FailureCode::Configuration,
+        retryable: false,
+        diagnostic: Some(DiagnosticReference {
+            id: DiagnosticId::try_new(uuid::Uuid::new_v4())?,
+            code: DiagnosticCode::RegistrationRefused,
+        }),
+    };
+    let line = serde_json::to_string(&refused)?;
+    assert!(line.contains(r#""code":"registration_refused""#), "{line}");
+    assert_eq!(serde_json::from_str::<HelperResponse>(&line)?, refused);
+
+    assert!(
+        serde_json::from_str::<HelperResponse>(
+            r#"{"kind":"failed","code":"runtime","retryable":true,"extra":1}"#
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+/// B-3: the diagnostic a helper reports reaches the command's outcome, which
+/// is what the reconciler (#139) branches on.
+#[tokio::test]
+async fn a_helper_diagnostic_reaches_the_command_outcome() -> Result<()> {
+    let h = Harness::new(Trust::default()).await?;
+    let CommandOutcome::Succeeded { evidence } = h
+        .send(&sealed(command(1, prepare("ci_runner", false)))?)
+        .await?
+    else {
+        anyhow::bail!("prepare failed");
+    };
+    let SuccessEvidence::PreparedEnvironment {
+        prepared_environment_id,
+    } = *evidence
+    else {
+        anyhow::bail!("unexpected prepare evidence");
+    };
+    let diagnostic = DiagnosticReference {
+        id: DiagnosticId::try_new(uuid::Uuid::new_v4())?,
+        code: DiagnosticCode::RegistrationRefused,
+    };
+    *h.recorder
+        .start_failure
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(HelperResponse::Failed {
+        code: FailureCode::Configuration,
+        retryable: false,
+        diagnostic: Some(diagnostic.clone()),
+    });
+    let outcome = h
+        .send(&sealed(command(
+            2,
+            start(&prepared_environment_id.to_string()),
+        ))?)
+        .await?;
+    assert_eq!(
+        outcome,
+        CommandOutcome::Failed {
+            code: FailureCode::Configuration,
+            retryable: false,
+            diagnostic: Some(diagnostic),
+        }
+    );
     Ok(())
 }

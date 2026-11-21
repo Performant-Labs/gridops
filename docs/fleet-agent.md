@@ -160,7 +160,8 @@ It sets `GRIDOPS_MANAGER_DOCKER=off` and removes the mount (Docker Compose
 2.24.4 or newer). The manager then still serves health and the Tart provider,
 reports that it has no Docker access under Settings → Runner host, and refuses
 anything that would start a container on its host (`docker_unavailable`), even
-if the setting is on. To go back, start the stack without the override.
+if the setting is on. That includes every built-in runner, GitLab runners too.
+To go back, start the stack without the override.
 
 ## Install the agent
 
@@ -299,6 +300,41 @@ sudo systemctl daemon-reload && sudo systemctl restart gridops-host-agent
 
 Once the agent reconnects, the queued placements should clear on the next
 admission pass.
+
+## GitLab runners
+
+GitLab runners run the official `gitlab-runner` image with its Docker
+executor: `gitlab-runner run-single` takes one job, then the container exits.
+The pool's Docker image is the **runner** image, such as the official
+`gitlab/gitlab-runner:ubuntu-v19.6.0`; use an Ubuntu-based tag, since the
+container's start script needs `bash` and `curl`. Each job runs in the image
+its `.gitlab-ci.yml` names, or a pinned Alpine image when it names none. The runner token is written to the container's stdin, never to its
+environment, arguments or `docker inspect`.
+
+The Docker executor starts each job's containers on the host's Docker daemon,
+so a GitLab runner needs the host's Docker socket:
+
+- **On an enrolled machine** (fleet), the agent needs
+  `GRIDOPS_AGENT_DOCKER_SOCKET`, the machine's grant must allow the Docker
+  socket, and the GitLab profile must share it (see Docker-in-job profiles
+  above). The agent refuses a GitLab placement whose profile doesn't share
+  the socket with a configuration error.
+- **On the built-in runner host** (runner manager), the manager needs
+  `GRIDOPS_RUNNER_DOCKER_SOCKET`; without it, it refuses GitLab runners. A
+  manager started with `compose.no-docker-socket.yaml` starts no runner
+  container at all, GitLab runners included.
+
+Before it starts `gitlab-runner`, the container asks GitLab whether it
+accepts the token. A refused token is reported as `registration_refused` and
+is not retried as is; a GitLab that can't be reached fails the start as a
+retryable error. A runner that waits its whole wait timeout without a job
+exits and is reported as `idle_expired`; one that ran its job, as
+`completed`.
+
+Each runner runs with the Docker executor's cache volumes turned off, so it
+leaves none behind, and `gitlab-runner` removes its job containers after each
+job. A runner stopped or cleaned up **in the middle of a job** can leave that
+job's containers on the host: GridOps does not remove them yet.
 
 ## Docker actions and container jobs
 
