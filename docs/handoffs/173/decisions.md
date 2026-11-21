@@ -28,3 +28,27 @@
   - the #171 and #172 briefs on their branches, whose diffs touch only `docs/handoffs`.
 
   `git diff origin/master HEAD -- crates scripts src tests .github` is empty.
+
+## Phase 3 Architecture (A, up-front plan review, re-review r2) - 2026-11-21T09:00:23-08:00
+- **Decided:** PASS, with 0 block and 5 warn findings (docs/handoffs/173/handoff-A.md, which replaces the r1 BLOCK handoff from 7bcd0b2).
+  - The r1 block is resolved. The amended brief (2d6e458) extends both collision guards to 78: Tart `runner_script` `75|77|78) … exit 70`, and core `GITLAB_RUNNER_SCRIPT` gets a placeholder in the `finish 1` list. Done-when pins both, using hooks that already exist (`FAKE_GITLAB_RUNNER` `exit-NN`, `Scenario::verified(_, 78)` with `is_reported`).
+  - All seven r1 warns are adopted.
+  - The new warns:
+    - (1) do not copy the zsh `trap cleanup EXIT INT TERM` into the bash scripts. A returning INT trap resumes bash, so an interrupt during the clone check would run the delete-target branch and exit 0. Keep `trap cleanup EXIT`. Delete the target only in the explicit check-failed branch, never in `cleanup`;
+    - (2) #171 also has uncommitted edits to `gitlab_lifecycle_tests.rs` (helpers `refusals`, `RefusalEvent`, `assert_refusal` and others; tests at ~:787). Place #173's assertion and test elsewhere and avoid those names;
+    - (3) the driver name `test-prepare-tart-runner-images.sh` reads as the GitHub script's test. Follow the `test-install-tart-agent.sh` shape and run the scripts as `/bin/bash`;
+    - (4) the two shared-code bullets set opposite defaults. Prefer self-contained scripts; the `include_str!` test pins the GitLab defaults in the entry script;
+    - (5) core's doc for the new constant should say only the Tart guest script exits 78.
+- **Assumed:** the working-tree `173-brief-result-r1.md` is the brief gate's result on the amended brief (PASS). #171's uncommitted worktree edits show where that branch is heading, though they may still change.
+- **Hedged:** finding 1 is a pitfall the brief invites, not an error in the brief. The brief's contract (keep the target on interrupt) is correct and testable, so the finding is a warn, not a block.
+- **Evidence:**
+  - the brief diff 5e986d8..2d6e458 and the r1 handoff and decisions;
+  - all three prep scripts, `tart-installer.yml` and `test-install-tart-agent.sh`;
+  - Tart `gitlab.rs:95-185`, `gitlab_tests.rs:190-218` and `:515-597`, and `main.rs:300-321`, `:765-787` and `:1875-1915`;
+  - core `provisioning.rs:1-80` and `:120-210`, and `tests/gitlab_runner_script.rs`;
+  - reconciler `gitlab_lifecycle.rs:1-40`, `:180-375` and `:580-640`, and the `gitlab_lifecycle_tests.rs` layout;
+  - the #171 and #172 branches and worktrees (status, and the test-file hunk list);
+  - the actions/runner-images macOS 14/15 arm64 readmes (Bash 3.2.57 only);
+  - a scratchpad reproduction of INT-trap resume under `/bin/bash` 3.2.57 and `/bin/zsh`.
+
+  `git diff origin/master HEAD -- crates scripts src tests .github` is empty.
