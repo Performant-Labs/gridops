@@ -149,3 +149,9 @@
 - **Assumed:** the `release_preflight` failure is environmental. The native backend reports the OS from `cfg!(target_os)` (`native.rs:199-206`), and #147 changes `native.rs` only to add `diagnostic: None`. I did not run that test on a pre-#147 build.
 - **Hedged:** the real `gitlab-runner` image, a real GitLab and a real daemon were not exercised. That is the manual check deferred to #143, and the PR must say so.
 - **Evidence:** the run outputs in `handoff-T-green.md`; `evidence.md` already lists the unchanged-code facts the tests rely on.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20
+- **Decided:** PASS (`handoff-A-dup.md`). F extended the analogous objects: `HelperResponse::Failed`, `dispatch::outcome`, `DockerRuntime` Prepare/Start/Inspect, and the manager's `validate`, `runner_command`, `take_bootstrap_secret`, `list_runners` and `ManagedRunner`. The shared create flags were folded into `create_args` instead of being copied. The URL check and script live once in core, and both paths use them.
+- **Assumed:** the brief's W-8 and B-2 justify the separate GitLab script and the `start_gitlab_runner` readiness wait. `valid_registration_url` in the manager is GitHub-host specific, so it is not a duplicate of `valid_gitlab_url`.
+- **Hedged:** 2 warnings, neither blocking. `start_gitlab` repeats the shape of the GitHub create-and-feed sequence. A second stdin-feeding routine sits beside `feed_secret`.
+- **Evidence:** the diff `7db0f88..ec7ffda`, `docker.rs`, `provisioning.rs` and the manager `main.rs` read in full.
