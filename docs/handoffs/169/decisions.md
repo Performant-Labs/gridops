@@ -1,0 +1,6 @@
+
+## Phase 2 Design (D) - 2026-11-21
+- **Decided:** wireframe at docs/handoffs/169/wireframe.html covers runner rows (right-hand column with title, narrow line, details-sheet row) for GitHub repository, GitHub organization, Bitbucket on a GitHub pool, older server with no `poolScope`, GitLab (name, address, one address part, neither) and unknown scope; and the dashboard pool row scope text for repository, organization, gitlab and unknown. GitHub, Bitbucket and older-server frames are the unchanged baseline. `totalRunners` is API only and has no drawn UI.
+- **Assumed:** the details-sheet label stays "Repository" for every platform (the hook returns only text and title, and GitHub output must not change); unknown scope shows "—" / "Unknown destination" / "Unknown"; a GitLab address with one part shows that part alone.
+- **Hedged:** the label choice is open question 1 in handoff-D.md; renaming it is a copy decision that does not block tests or code.
+- **Evidence:** headless chrome-headless-shell render, full page and two zoomed crops inspected; one unreadable tag in the dashboard frame was fixed and re-rendered. No survey.md exists for this run; the brief and the source files (`runner-row.tsx`, `index.tsx` PoolsSection, `registry.tsx`, `types.ts`) stood in for it.
