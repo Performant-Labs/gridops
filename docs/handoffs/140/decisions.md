@@ -98,3 +98,33 @@
     - `docs/fleet-api.md:118-132`, `token_access.rs:1195-1290`, and `fleet/openapi.rs:292-332`.
   - Epic #136's comments (`gh api`, with timestamps), and issues #140 and #148, which have no comments.
   - Sibling worktree `gitlab-148-scaling-71c514`: `148-brief.md` at c48f951 (`:19-37`, `:95-135`), and `148/handoff-A.md` round 3 (99c5a07).
+
+## A (Phase 3, up-front plan review, round 4): 2026-11-20T16:26:54-08:00
+- **Decided:** BLOCK, with 2 block findings and 3 warn findings (see `handoff-A.md`).
+  - The round-3 block is resolved by the round-3 amendment and D18's column rules, and so are warnings 2 to 4. D18's placement (`gridops-core/src/gitlab/jobs.rs`), its `&mut SqliteConnection` parameters and its `base_url` busy match are consistent with the codebase.
+  - (1) [correctness] "How #140 uses it" marks the runner busy only on `StatusApplied` or `FilledOnly`, so a first-seen `running` event (`Inserted`) never sets busy. The brief creates that state itself, through out-of-order delivery and a failed `pending` fetch. Also, "newly set by this call" can't be derived from `JobWriteOutcome`, which has no runner id from before the write. Fix: add `previous_gitlab_runner_id` and use one busy-set rule for every `write` variant.
+  - (2) [completeness] No transaction boundary. Busy effects are gated on the guarded write, so a failure after `record_gitlab_job` commits replays as `Ignored` on retry. A `running` event then never sets busy, and a terminal one never clears it. Fix: one `BEGIN IMMEDIATE` transaction around the write, the busy change and the `runner_events` insert, following the `fleet/` precedent. Post the same rule for #148.
+  - The warnings:
+    - (3) #146 merged (PR #153) without wiring `GitLabClient`. "#146 adds `.with_gitlab`" is false, and no issue owns the wiring;
+    - (4) D18's `u64` ids should be `ExternalId`, and its pool id `String`;
+    - (5) "one SQL statement" needs a prior read; core tests use temp-file databases, not in-memory ones.
+- **Assumed:**
+  - #148's local D18 copy constructs `JobWriteOutcome` only inside `jobs.rs`, so an added field is cheap for #148.
+  - GitLab runners are not reaped fast enough to make a lost busy clear harmless. Even if they were, a lost busy set still affects `maybe_scale_down`.
+  - Master is `e8b18bf` (#146 and #145 merged). #138, #139 and #148 have not landed.
+- **Hedged:**
+  - Finding 2 recommends `BEGIN IMMEDIATE` rather than a plain `begin()`, because `record_gitlab_job` reads and then writes. A deferred transaction fails at once on a WAL snapshot conflict. A failure is still recoverable once it's in a transaction, so either choice clears the block. `BEGIN IMMEDIATE` matches the core precedent.
+  - I kept warning 3 as a warning: production wiring isn't in #140's issue text, and #146's own review treated it as epic-level.
+  - The proposed Done-when tests use a temporary SQLite trigger to inject the partial failure. I haven't checked that the API test harness can run raw DDL. If it can't, a test can call the processing function directly against its pool.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (ba0a441, in full), `140-brief-result-r1.md` (uncommitted, post-D18) / `-r2.md`, and round-3 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs:1-270` and `:556-665`, `db.rs:17-32` and `:180-340`;
+    - `gitlab/mod.rs:1-240`, `fleet/domain.rs:1-120`, and `fleet/registry/mod.rs:1-16`;
+    - `fleet/targets.rs:536-548`, plus `grep` for `begin_with("BEGIN IMMEDIATE")`, `state.database.begin()`, `connect_database_path` and `ExternalId::try_from`;
+    - `gridops-reconciler/src/main.rs:480-520`, `:1390-1445` and `:1955-1975`;
+    - `migrations/0047_gitlab.sql:55-90` and `:119-170`, and `0001_initial.sql:83-95`;
+    - `sqlx-sqlite-0.9.0/src/types/{mod.rs,uint.rs}` (`u64` is decode-only).
+  - Epic #136's comments, with D18 at 00:15:49 UTC (`gh api`).
+  - #146: PR #153's files and merge time (`gh api`), and master's `146-brief.md`, `146/decisions.md`, `gitlab/mod.rs`, and the API and reconciler `main.rs` / `state.rs` (no GitLab wiring).
+  - Sibling worktrees: `148-brief.md` at `572f828` (`:120`, `:131`, `:155-191`), and `138-brief.md:124-127`.
