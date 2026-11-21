@@ -99,3 +99,8 @@
   - I did not re-run the full `cargo test -p gridops-api`: no API or core production file changed in the rework.
 - **Evidence:**
   - Mutation (Upstream uses full Display; loop returns on first failure) failed exactly the two tests; restored. reconciler 120 passed, core gitlab:: 36, vitest 603, fmt and clippy clean.
+
+## A (Phase 7, anti-duplication gate)
+- **Verdict:** PASS. No parallel path. `verify_access` loop extended, `pool_event` delegates to the new `runner_event` (single INSERT), the per-runner event sits in `deregister`, the sweep reuses `record_refused_deletion`, `fake.rs` unchanged, `PoolEventTable` reused.
+- **Warns (not blocking):** dead `NotFound` arm in `refusal_code`; "checks both" help wording.
+- **Handoff:** docs/handoffs/171/handoff-A-dup.md
