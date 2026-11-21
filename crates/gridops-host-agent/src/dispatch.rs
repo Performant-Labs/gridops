@@ -414,10 +414,14 @@ fn succeeded(evidence: SuccessEvidence) -> CommandOutcome {
 fn outcome(response: HelperResponse) -> CommandOutcome {
     match response {
         HelperResponse::Succeeded { evidence } => CommandOutcome::Succeeded { evidence },
-        HelperResponse::Failed { code, retryable } => CommandOutcome::Failed {
+        HelperResponse::Failed {
             code,
             retryable,
-            diagnostic: None,
+            diagnostic,
+        } => CommandOutcome::Failed {
+            code,
+            retryable,
+            diagnostic,
         },
     }
 }

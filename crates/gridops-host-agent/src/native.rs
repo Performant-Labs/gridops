@@ -601,7 +601,11 @@ fn succeeded(evidence: SuccessEvidence) -> HelperResponse {
 }
 
 const fn failed(code: FailureCode, retryable: bool) -> HelperResponse {
-    HelperResponse::Failed { code, retryable }
+    HelperResponse::Failed {
+        code,
+        retryable,
+        diagnostic: None,
+    }
 }
 
 #[cfg(test)]
