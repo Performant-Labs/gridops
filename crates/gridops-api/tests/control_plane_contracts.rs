@@ -704,6 +704,8 @@ fn shared_provisioning_contract_keeps_provider_labels_and_scale_targets_consiste
         repository_id: None,
         repository_ids: vec![7],
         bitbucket_connection_ids: vec![],
+        gitlab_connection_ids: vec![],
+        run_untagged: false,
         name: "fixture-pool".into(),
         scope: "repository".into(),
         mode: "ephemeral".into(),

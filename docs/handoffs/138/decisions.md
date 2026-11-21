@@ -123,3 +123,25 @@
   - `cargo test -p gridops-api --no-run`: the one error is `E0599 no method named with_gitlab`.
   - Seam-only scratch copy (only `with_gitlab`, the `gitlab` field and `UnconfiguredGitLab` added), `cargo test -p gridops-api --bins`: 59 passed and 28 failed. All existing bin tests pass, and the 28 failures are exactly the new and changed tests, each on its feature assertion (route 404, "Runner pool scope is invalid.", GitHub cleanup queued for a GitLab runner, `delete_runner` never called, a 500 from an in-request start).
   - `cargo fmt --all -- --check` is clean. `cargo clippy --all-targets` reports no warnings in T's files.
+
+## F (Phase 5, implement against RED): 2026-11-20T16:40:15-08:00
+- **Decided:** implemented #138 against T's suite; every authored test is GREEN (see `handoff-F.md`).
+  - **Handlers:** in a new `resources/gitlab.rs`. `resources.rs` keeps the pool create/update/detail/options plumbing, the D14 predicate, the D17 `match` on `ci_platform` and the generalised `public_webhook_url`.
+  - **`AppState`:** gains `gitlab`, `UnconfiguredGitLab` and `with_gitlab`, exactly as pinned with #140. `main.rs` changes only the route lines, the `patch` import and PATCH in CORS.
+  - **Core:** pool models gain `gitlabConnectionIds` and `runUntagged` with the no-mixing rule. `pool_targets` gains a `"gitlab"` arm that returns nothing. `ensure_pool_access` and `ensure_target_access` get explicit GitLab rules: system admin, or a service principal for targets.
+  - **D17:** the GitLab arm never fails a delete. A runner it can't remove is recorded as `gitlabCleanup: deferred` and left for #139's orphan sweep.
+- **Assumed:**
+  - Storing the base URL without a trailing slash and handing the client `stored + "/"` is what #146's client expects. That is what lets a path-prefixed instance join API paths correctly.
+  - A `{}` PATCH is a no-op 200 (the spec's partial update with nothing required).
+  - `runUntagged` only means something for a GitLab pool. A non-GitLab pool keeps its stored value whatever the client sends.
+- **Hedged:**
+  - **Base-URL normalisation is stricter than the brief.** It refuses userinfo, a query or a fragment, so no credential is ever stored in plain text in `base_url`. No test pins this; it is flagged for T.
+  - **The signed-out `/runner-pools/options` body is unchanged,** with no `gitlabConnections` key, because `fleet_http::token_access` pins it exactly. The signed-in body carries the field.
+  - **The new pool-detail fields are set after the `json!` literal** because the macro hit its recursion limit. This is the same pattern as `builtinRunnerHostEnabled`.
+  - **One compile-only edit to a test file:** the `CreateRunnerPool` literal in `control_plane_contracts.rs` gains the two new fields. T's RED handoff assigned this edit; no assertion changed.
+- **Evidence:**
+  - `cargo test -p gridops-api`: bin 87/87; `control_plane_contracts` 36/36; `fleet_http` 143/144. The one failure is the pre-existing environment-only `release_preflight`, which T recorded at RED.
+  - `cargo test -p gridops-core --tests`: all ok (lib 263; `gitlab_pools` 5/5).
+  - `cargo test -p gridops-reconciler`: 68/68.
+  - `cargo fmt --check` is clean, and `cargo clippy --workspace --all-targets` reports nothing in F's files.
+  - Source facts are in `docs/handoffs/138/evidence.md`.
