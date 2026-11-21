@@ -22,3 +22,33 @@
   - Config and deploy: `compose.yaml`, `.env.example`, `deploy/` `RUST_LOG`.
   - `git worktree list` and the status of the other worktrees.
   - `git diff --stat origin/master HEAD` shows only the brief.
+
+## Phase 3 Architecture (A, up-front plan review, R2 on brief a44aac1) - 2026-11-21T14:38:30-08:00
+- **Decided:** BLOCK, with 2 block and 4 warn findings (docs/handoffs/179/handoff-A.md). Both R1 blocks and R1 warns 3 to 7 are resolved.
+  - **Block 1: the result-retry deadline never fires.**
+    - The bound is "before the observation lease in `Authority` would expire". The `heartbeats` loop keeps renewing that lease while the `commands` loop retries `post_result`, so the deadline moves.
+    - `record_command_result` has no session or lease check. A poison result (`RegistryError::Json` or a `Database` fault, both mapped to 503 `DependencyUnavailable`) is retried forever, and heartbeats keep granting work authority to a host that never polls.
+    - Today the session ends, the host loses authority, and the 24 h `RESULT_REDELIVERY_WINDOW` lets it heal.
+    - Fix: read the deadline once, at the first failure. Name the field `lease_expires_at`, separate from the work-authority `expires_at`. Add a done-when arm.
+  - **Block 2: an existing test fails by construction.**
+    - `fleet_http/recovery.rs` `an_api_restart_leaves_a_running_runner_alone` waits for a new session after a 2 s API restart (`:649-655`).
+    - Part 3's heartbeat and result retries ride out the restart: the lease is 90 s, and the incarnation is kept across restarts (`fleet/mod.rs:50-51`). The wait times out.
+    - The brief pins only the poll test. Fix: authorise amending this test to assert that the session survives, and state that the two sibling `refuse_results` tests keep their assertions.
+  - **Warns:**
+    - (3) The lease-expiry arm needs 90 s unless the proxy rewrites `lease.expires_at`. Add no production lease knob.
+    - (4) `log_slow_statements` needs a new direct `log` dependency in core. Put the capture test in the api crate. Retention passes and migrations will WARN at 100 ms.
+    - (5) Create SQL consts only for the asserted or changed statements. The existing poll and cancel tests are api-crate tests, not core.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+  - Whether a poison result occurs in prod is not measured. Block 1 rests on the error mapping in code, not on an observed incident.
+- **Hedged:**
+  - Block 2 is traced through code (the test's timeline, the 200 ms test heartbeat, the 90 s lease, the incarnation kept across restarts), not run.
+  - I expect the two sibling `refuse_results` tests to pass unchanged, because late and stale results are accepted without a session check. Not run.
+- **Evidence:**
+  - Read: the amended brief and its diff against 4b9aea4; host-agent `supervisor.rs` and `client.rs` in full.
+  - Registry: `commands.rs:25-240`, `:515-618`, `:720-786`; `inventory.rs:30-40`, `:77-462`, `:1081-1145`; `fleet/mod.rs:48-62`.
+  - Api: `fleet/error.rs:55-100`; `main.rs:66-76`. Reconciler: `main.rs:425-435`, `:3282-3340`.
+  - Core: `db.rs:1-60`; `Cargo.toml` (core and workspace).
+  - Tests: `fleet_http/recovery.rs:1-130`, `:205-270`, `:320-375`, `:575-680`, `:780-900`, `:940-1000`; `placement.rs:229-394`; `agent.rs:1-160`; `inventory.rs:760-812`; `tests/retention.rs`.
+  - Third-party source: `sqlx-core-0.9.0` `connection.rs`. `Cargo.lock` for `log`.
+  - Coexistence: the gridops-134 branch diff and its merge status.

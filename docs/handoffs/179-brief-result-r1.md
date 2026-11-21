@@ -4,29 +4,25 @@
 None.
 
 ### Needs-verification findings
-**[NV-1]** `host_commands_poll_idx(host_id, state, cursor)` already exists in the schema with that exact column order (the brief's plan table shows SQLite using it, and the fix relies on reaching it). — Evidence: the `CREATE INDEX` statement in migrations up to 0047, or the live schema of the prod DB backup.
-
-**[NV-2]** sqlx's connection options in `connect_database_path` support `log_slow_statements(LevelFilter::Warn, Duration)` chained as specified, and "leave normal statements at their current level" is achievable via the same options API. — Evidence: sqlx `ConnectOptions` trait source / docs for the pinned sqlx version in `Cargo.lock`.
-
-**[NV-3]** The host agent can compute "when the observation lease the server last granted would expire" — i.e. the lease TTL/expiry is available client-side from the handshake/heartbeat responses. — Evidence: the session/handshake response struct in `crates/gridops-host-agent/src/supervisor.rs` and the corresponding api response payload.
-
-**[NV-4]** The observation-lease/idempotent-replay claims: heartbeat/inventory with same sequence+digest is a replay not a conflict, and `Unavailable` maps from 5xx/429/transport as the brief states. — Evidence: registry replay/idempotency code in `crates/gridops-core/src/fleet/registry/` and the `ClientError` mapping in the host-agent HTTP client. (The brief itself flags this as "verify each endpoint's replay behaviour" — correctly self-hedged.)
-
-**[NV-5]** 401 maps to `CredentialRejected` in the host-agent loop (asserted in the agent test's done-when). — Evidence: error mapping in `crates/gridops-host-agent/src/supervisor.rs` / client error enum.
+- **[NV-1]** The claim that `host_commands_poll_idx(host_id, state, cursor)` exists with exactly that column order and that a top-level `c.state IN ('pending','delivered')` makes SQLite use it with `state=?` — the schema/migration defining the index (file:line in migrations, or the `CREATE INDEX` DDL) would settle it. The measured plan table asserts the outcome but the index definition itself is not shown.
+- **[NV-2]** The claim that `settle_unreceived` reads `state IN ('delivered','uncertain')` and runs at every handshake, and that `host_commands_poll_idx` can bound it — the source of `settle_unreceived` (file:line) would settle whether 'uncertain' rows are indexable under the same index and whether the done-when assertion (`uses host_commands_poll_idx with state=?`) is achievable for it.
+- **[NV-3]** The claim that sqlx 0.9 logs slow statements at WARN over 1 s by default on target `sqlx::query`, and that `log_slow_statements(LevelFilter::Warn, 100 ms)` is the correct API — the sqlx 0.9 `SqliteConnectOptions` source/docs excerpt would settle it. Note the default threshold is a library-behavior hypothesis the brief's part 2 depends on.
+- **[NV-4]** The claim that heartbeat/inventory/command-result endpoints have idempotent-replay rules (same operation id + sequence is a replay, not a conflict) in the registry — the registry replay/idempotency code (file:line) would settle it. The brief itself hedges ("Verify each endpoint's replay behaviour… before relying on it"), so this is acknowledged-unverified, not proven.
+- **[NV-5]** The claim that `crates/gridops-api/tests/fleet_http/recovery.rs::host_recovers_when_a_delivered_command_never_reaches_it` exists and pins the delivered-command settle-on-reconnect behavior — the test source would settle it; the done-when requires it pass "unchanged," which is only checkable against the real file.
+- **[NV-6]** The claim that `POLL_STEP` is 500 ms, `busy_timeout` is 5 s in `db.rs`, and the api maps code 5 to 503 `DependencyUnavailable` — file:line excerpts would settle each; none are shown.
+- **[NV-7]** The claim that logs (`ship_logs`) and output already never end the session — the `supervisor.rs` error-handling code would settle it; part 3 relies on it being already true.
 
 ### WARN findings
-**[W-1]** Done-when for slow logging accepts "a unit test or doc comment naming the threshold" — a doc comment is not an executable criterion and would let the requirement ship untested. Recommend requiring the unit test (or at minimum a test that the option is set on the built options).
-
-**[W-2]** The held-lock test requires holding a write lock longer than `busy_timeout` (5 s per `db.rs`), so the test will take at least ~5–6 s of wall time. Recommend stating whether the test DB may use a shorter `busy_timeout` to keep suite time bounded, or explicitly accepting the duration.
-
-**[W-3]** The sweep scope ("about 21 statements outside tests", reconciler pass, placement) is broad; the done-when only requires planner assertions for "every other hot-path statement the sweep changed" without defining "hot-path statement". Recommend the brief name the enumerated list (or require the PR to include it) so coverage of the sweep is checkable rather than discretionary.
-
-**[W-4]** Missing error path: part 3 doesn't specify behaviour when a retried request's lease-expiry deadline is reached mid-backoff with the server still returning 503 while other operations (e.g. poll vs heartbeat) are pending — i.e., is the session torn down immediately, or do in-flight retries finish first? Recommend one sentence pinning the teardown rule.
+- **[W-1]** The agent test's lease-expiry arm ("when the 503s outlast the observation lease, the agent ends the session and reconnects") is timing-dependent and unbounded in wall-clock time: the lease duration and backoff (1–30 s full jitter) are not bounded in the brief. Recommend the brief state the test's maximum lease/backoff configuration so the test doesn't take minutes in CI.
+- **[W-2]** Part 1's sweep scope is open-ended ("about 21 statements" plus every statement inside any registry `BEGIN IMMEDIATE` on the hot paths, plus the reconciler fleet pass). The done-when ("add the same kind of assertion for every other hot-path statement the sweep changed") inherits that open-endedness. Recommend enumerating the statements to be swept, or defining a mechanical criterion for "hot path," so the sweep table can be checked for completeness at the diff gate.
+- **[W-3]** The planner regression test asserts `state=?` in the plan, but a rewritten sargable form might legitimately produce `state IN (...)` plan text rather than `state=?` depending on SQLite version. Recommend the criterion allow the equivalent plan shape or pin the SQLite version.
+- **[W-4]** The slow-statement logging test "must fail on today's code" — a property of a test relative to a code state, not directly runnable as written. Recommend restating as: the EnvFilter-construction function's output admits `sqlx::query` at WARN, and the connect options carry the 100 ms threshold (the brief's second alternative is the testable one; lead with it).
+- **[W-5]** Part 3's retry window is defined by "the observation lease the server last granted," but the brief gives no lease duration, no source location for how it's granted, and no handling of the case where no lease has been granted yet (retry before first heartbeat?). Recommend the brief specify the lease source and the no-lease-yet behavior.
 
 ### NIT findings
-**[NIT-1]** "Out of scope" says "Part 3 removes the reconnects a busy DB causes" — slightly overstated: an outage longer than the observation lease still ends the session by design. "Defers them past transient BUSY windows" would be accurate.
-
-**[NIT-2]** The migration instruction "Use the next free migration number after master's 0047" races with epic #136 shipping in the same deploy — recommend stating the tie-break (e.g. renumber at rebase if both add migrations).
+- **[NIT-1]** The brief says migration numbering must be "the next free number after master's 0047" while also shipping with epic #136's migration 0047 in the same deploy — worth stating explicitly that if #136 adds a further migration the number must be re-derived at handoff.
+- **[NIT-2]** "The PR should name it so the operator can remove it" (Mars cron) is not reflected in the done-when list; either add "PR description names the cron" to done-when or accept it as untestable.
+- **[NIT-3]** Part 2 says "Keep each process's filter construction in one testable function if it is not one already" — conditional shape instructions belong to the diff gate, not the brief; harmless but noise.
 
 ### Verdict
 PASS — no BLOCK findings; implementation may proceed.
