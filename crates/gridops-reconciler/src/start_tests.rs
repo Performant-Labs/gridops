@@ -4,7 +4,7 @@
 //! database.
 
 use super::*;
-use gridops_core::connect_database_path;
+use gridops_core::{connect_database_path, gitlab::fake::FakeGitLab};
 use rsa::pkcs1::{EncodeRsaPrivateKey as _, LineEnding};
 use std::fs;
 use std::sync::{
@@ -50,6 +50,13 @@ pub(crate) struct ManagerLog {
     /// agent goes on answering the runner list: it crashed on the start, it
     /// is not away (round 3 of PR #123, finding 2).
     pub(crate) tart_start_drops: AtomicBool,
+    /// The body of every runner start asked for (`POST /v1/runners`), in order.
+    pub(crate) bodies: Mutex<Vec<Value>>,
+    /// Runner removals (`DELETE /v1/runners/{id}`) fail with `500`.
+    pub(crate) removal_fails: AtomicBool,
+    /// Every request the routes above do not handle, as `METHOD /path`:
+    /// capacity lease releases among them.
+    pub(crate) other_requests: Mutex<Vec<String>>,
 }
 
 impl Default for ManagerLog {
@@ -69,6 +76,9 @@ impl Default for ManagerLog {
             tart_down_error: Mutex::new(tart_unreachable()),
             docker_fails: AtomicBool::default(),
             tart_start_drops: AtomicBool::default(),
+            bodies: Mutex::default(),
+            removal_fails: AtomicBool::default(),
+            other_requests: Mutex::default(),
         }
     }
 }
@@ -106,6 +116,43 @@ impl ManagerLog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn bodies(&self) -> Vec<Value> {
+        self.bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn other_requests(&self) -> Vec<String> {
+        self.other_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The runner `runner_id` started has exited, as the manager lists an
+    /// exited runner: `state: "exited"`, with the `exitReason` the GitLab
+    /// runner script's exit status maps to (`GITLAB_EXIT_REASONS`), when the
+    /// manager reports one (#147 / #142). Answers whether it was listed.
+    pub(crate) fn exit(&self, runner_id: &str, exit_reason: Option<&str>) -> bool {
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut found = false;
+        for runner in running
+            .iter_mut()
+            .filter(|runner| runner["labels"]["io.gridops.runner-id"] == runner_id)
+        {
+            runner["state"] = json!("exited");
+            if let Some(reason) = exit_reason {
+                runner["exitReason"] = json!(reason);
+            }
+            found = true;
+        }
+        found
     }
 }
 
@@ -156,6 +203,7 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
     let starts = Arc::clone(&log);
     let listing = Arc::clone(&log);
     let slots = Arc::clone(&log);
+    let others = Arc::clone(&log);
     let app = Router::new()
         .route("/v1/policy", put(|| async { Json(json!({})) }))
         .route(
@@ -199,6 +247,10 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                 async move {
                     let provider = body["provider"].as_str().unwrap_or_default().to_owned();
                     let runner_id = body["runnerId"].as_str().unwrap_or_default().to_owned();
+                    log.bodies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(body.clone());
                     log.starts
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -312,12 +364,33 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
                     if id.starts_with("tart-") && log.tart_down.load(Ordering::SeqCst) {
                         return tart_agent_unavailable().into_response();
                     }
+                    if log.removal_fails.load(Ordering::SeqCst) {
+                        return (
+                            Status::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "code": "docker_error",
+                                "error": "Docker could not remove the runner container",
+                            })),
+                        )
+                            .into_response();
+                    }
                     Status::NO_CONTENT.into_response()
                 }
             }),
         )
-        // Lease releases and anything else: done.
-        .fallback(|| async { Status::NO_CONTENT });
+        // Lease releases and anything else: done, and recorded.
+        .fallback(
+            move |method: axum::http::Method, uri: axum::http::Uri| {
+                let log = Arc::clone(&others);
+                async move {
+                    log.other_requests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(format!("{method} {}", uri.path()));
+                    Status::NO_CONTENT
+                }
+            },
+        );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let url = format!("http://{}/", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -379,6 +452,8 @@ async fn fake_github() -> Result<(String, GitHubRemovals)> {
 pub(crate) struct Setup {
     pub(crate) app: Reconciler,
     pub(crate) manager: Arc<ManagerLog>,
+    /// The GitLab every connection talks to (`app.gitlab`).
+    pub(crate) gitlab: FakeGitLab,
     /// Runner registrations removed from GitHub.
     pub(crate) github_removals: GitHubRemovals,
     directory: std::path::PathBuf,
@@ -422,12 +497,13 @@ impl Setup {
                 .execute(&database)
                 .await?;
         }
+        let gitlab = FakeGitLab::default();
         let app = Reconciler {
             github: GitHubClient::new(config.clone())?,
             config,
             database,
             bitbucket: BitbucketClient::new()?,
-            gitlab: Arc::new(crate::gitlab_poll::UnavailableGitLab),
+            gitlab: Arc::new(gitlab.clone()),
             vault,
             http: reqwest::Client::new(),
             pass: Arc::default(),
@@ -436,6 +512,7 @@ impl Setup {
         Ok(Self {
             app,
             manager,
+            gitlab,
             github_removals,
             directory,
         })

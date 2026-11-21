@@ -418,7 +418,8 @@ mod placeholder {
     use async_trait::async_trait;
     use gridops_core::fleet::ExternalId;
     use gridops_core::gitlab::{
-        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, Scope, ScopeKind,
+        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
+        ScopeKind,
     };
 
     /// A GitLab client that refuses every call as `Upstream`, for tests that need
@@ -449,6 +450,14 @@ mod placeholder {
             _credentials: &GitLabCredentials,
             _runner_id: ExternalId,
         ) -> Result<(), GitLabError> {
+            Err(Self::unavailable())
+        }
+
+        async fn list_runners(
+            &self,
+            _credentials: &GitLabCredentials,
+            _scope: &Scope,
+        ) -> Result<Vec<RunnerSummary>, GitLabError> {
             Err(Self::unavailable())
         }
 

@@ -124,6 +124,15 @@ impl fmt::Debug for CreatedRunner {
     }
 }
 
+/// One runner of a project or group, as the runner listing returns it (D17).
+/// `id` is the GitLab runner id; the orphan sweep converts it to an
+/// [`ExternalId`] in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerSummary {
+    pub id: u64,
+    pub description: String,
+}
+
 /// A GitLab CI job. `id` is the GitLab job id (`gitlab_jobs.job_id`), not the
 /// `gitlab_jobs.id` surrogate key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +254,14 @@ pub trait GitLabApi: Send + Sync {
         credentials: &GitLabCredentials,
         runner_id: ExternalId,
     ) -> Result<(), GitLabError>;
+
+    /// The project's or group's own runners (`type=project_type` /
+    /// `type=group_type`), so shared and instance runners are never listed.
+    async fn list_runners(
+        &self,
+        credentials: &GitLabCredentials,
+        scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError>;
 
     async fn job(
         &self,

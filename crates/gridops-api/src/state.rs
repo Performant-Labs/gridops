@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use gridops_core::{
     BitbucketClient, Config, GitHubClient, Vault,
     fleet::ExternalId,
-    gitlab::{CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, Scope, ScopeKind},
+    gitlab::{
+        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
+        ScopeKind,
+    },
 };
 use reqwest::Url;
 use secrecy::ExposeSecret;
@@ -63,6 +66,14 @@ impl GitLabApi for UnconfiguredGitLab {
         _credentials: &GitLabCredentials,
         _runner_id: ExternalId,
     ) -> Result<(), GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn list_runners(
+        &self,
+        _credentials: &GitLabCredentials,
+        _scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError> {
         Self::unavailable()
     }
 

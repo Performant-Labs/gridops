@@ -1,0 +1,217 @@
+# Decision journal: #139 GitLab reconciler runner lifecycle
+
+## A (Phase 3, up-front plan review): 2026-11-20T15:19:09-08:00
+- **Decided:** BLOCK, with 4 block findings and 5 warn findings (see `handoff-A.md`).
+  - (1) The orphan sweep has no seam. `GitLabApi`, which the brief puts off limits, has no way to list runners, and #146 doesn't add one. Without the sweep, there is also no recovery for a failed GitLab delete (no cleanup table, no migration allowed).
+  - (2) Pool delete, and the runner delete and rebuild actions, run in the API (`delete_runner_resources`, which sends GitLab runners to `cleanup_github_runner`). The `runners` rows then cascade away, so the reconciler can't clean them up.
+  - (3) "Same insert" contradicts D1 on the fleet path. The fleet path registers in `register_and_start`, after the row and placement exist. On the manager path it departs from the analogue, which inserts, registers in `start_admitted_runner`, updates the ID, and rolls back through `failure_cleanup`.
+  - (4) "main.rs gets only the call sites" leaves out `fleet.rs`, core `placement.rs` (the D5 diagnostic), the `Runner` and `ManagedRunner` structs, `delete_runner`'s platform dispatch, `Cargo.toml` and the test constructors. Read literally, it leads to a parallel pipeline.
+  - These parts of the plan were accepted as consistent: the child-module placement (`super::` imports, as in `fleet.rs`), the `gitlab` field, per-call credentials through `runtime_secret`, connection selection modelled on `next_bitbucket_connection`, the GitLab arms in `targets.rs` and `service.rs`, and D9's `CiPlatform::Gitlab`.
+- **Assumed:** #138's "GitLab sections of `resources.rs`" doesn't cover runner deletion; its issue text lists only the connection and pool-target handlers. A pool can't mix GitLab targets with others (#138), so a pool with `runner_pool_gitlab_connections` rows is a GitLab pool.
+- **Hedged:**
+  - Finding 1 offers two options, (a) a contract extension or (b) descoping plus a database-only retry. A gives no exact retry design, because none is established for a platform without a cleanup table.
+  - Finding 3 accepts "create before insert" on the manager path, if the brief limits it to that path in writing and keeps rollback in the existing failure branch.
+  - No Reuse map (`survey.md`) was provided, so the brief's named analogues were the baseline.
+- **Evidence:**
+  - Read: the brief, `139-brief-result-r1.md`, issues #136, #138, #146 and #148 (via `gh issue view`), and #137's `decisions.md` and `handoff-A.md`.
+  - Source: `crates/gridops-reconciler/src/{main.rs,fleet.rs,start_tests.rs (head),Cargo.toml}`, `crates/gridops-core/src/gitlab/{mod.rs,fake.rs}`, `crates/gridops-core/src/fleet/{placement.rs,targets.rs,service.rs,protocol/agent.rs,protocol/outcomes.rs}`, `crates/gridops-core/src/provisioning.rs` (`failure_cleanup`), `crates/gridops-api/src/resources.rs` (`delete_runner_pool`, `delete_runner_resources`), `migrations/0047_gitlab.sql`, and `git show 08c32b3`.
+
+## A (Phase 3, up-front plan review, round 2 on the amended brief): 2026-11-20T15:34:37-08:00
+- **Decided:** BLOCK, with 4 block findings and 5 warn findings (see `handoff-A.md`).
+  - Round-1 findings 1–3 are resolved: D17 option (a), #138 owns the API delete arm, and each path has one ordering. Finding 4 is resolved except for `retry.rs`.
+  - New blocks:
+    - (1) Counting `RegistrationRefused` through `record_provision_failure` doesn't work. On the manager path, `start_admitted_runner` resets the count at POST success (`main.rs:2766`), before the refusal arrives, so the count cycles 0→1 and the create/refuse/delete loop goes on. The fleet path has no reset, so a pool would stay `blocked`.
+    - (2) D147-1's "single substitution point" in `gitlab_lifecycle.rs` can't serve the fleet path. Core `pool_docker_image` fixes the image when the API saves the profile, and core can't call into the reconciler.
+    - (3) The sweep's connection set ("referenced by a pool or a `runners` row") misses the connection whose only pool was deleted, because both tables cascade. That is the pool-delete case the sweep covers.
+    - (4) Core `fleet/retry.rs` copies `ci_platform` but not `gitlab_connection_id` into the retried runner row, and the file isn't in the seam or Owns.
+  - Warnings:
+    - `RunnerSummary.id` is `u64` while the rest of the contract uses `ExternalId`.
+    - The sweep cadence analogue is wrong (`cleanup_retention` runs every pass; use the `maybe_sync_github` pattern).
+    - The marker has no instance discriminator, so two deployments would sweep each other's runners.
+    - A failed fleet `create_runner` leaves the placement `registering` (name `abandon_unstarted`).
+    - The `builtin_host.rs` test fixture needs the new `Runner` fields.
+- **Assumed:**
+  - #147's agent runs the image from `PrepareEnvironment` and doesn't pick the gitlab-runner image itself (per the brief's D147-1 note).
+  - A GitLab connection's access token stays readable after its last pool is deleted, until the connection row is deleted.
+- **Hedged:**
+  - Finding 1's fix names "proof of registration" (a `completed` or `idle_expired` exit, or busy) as the reset point. Another reset point is acceptable if the brief states one for both paths.
+  - Finding 2 offers two homes: core `targets.rs`, or the profile-save owner (#138/#141).
+  - Warning 7 is a warn, not a block, because it needs two deployments on one GitLab scope. It is flagged for O to decide while amending D17.
+- **Evidence:**
+  - Read: the amended brief (`git diff`), `139-brief-result-r1.md`, #136's comments (D1–D16 and D17), and issues #138, #140, #146, #147 and #148.
+  - Source: `crates/gridops-reconciler/src/{main.rs (Reconciler, Runner, ManagerView, reconcile, reconcile_pool, provision, provision_on_host, start_admitted_runner, delete_runner, retry_github_runner_cleanup, maybe_sync_github, cleanup_retention, record_provision_failure, pool_state), fleet.rs (whole file), builtin_host.rs (tests), Cargo.toml}`, `crates/gridops-core/src/gitlab/{mod.rs,fake.rs}`, `crates/gridops-core/src/fleet/{domain.rs (ExternalId), targets.rs (pool_docker_image, save_pool_fleet, link_pool_target, pool_targets, delete_pool), service.rs (ensure_target_identity_for_pool), retry.rs (retry_failed_start), start_health.rs, placement.rs (reported_gone), protocol/agent.rs, protocol/outcomes.rs}`, `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`, `failure_cleanup`) and `migrations/0047_gitlab.sql`.
+
+## A (Phase 3, up-front plan review, round 3 on the round-2-amended brief): 2026-11-20T15:47:12-08:00
+- **Decided:** BLOCK, with 2 block findings and 3 warn findings (see `handoff-A.md`).
+  - Round-2 blocks 1-4 are resolved in substance:
+    - The reset now waits for proof of registration, and there is no reset at POST time for GitLab.
+    - The image substitution is in core `targets.rs`.
+    - The sweep covers every `gitlab_connections` row.
+    - `retry.rs` copies `gitlab_connection_id`.
+  - Round-2 warnings 5-9 are resolved.
+  - New blocks:
+    - (1) The count and the reset aren't tied to one event per runner. `fleet::finish` revisits every failed or cleaned placement on every tick (`fleet.rs:265`), and placements are deleted only with their pool. `follow` keeps seeing `exited` until the Cleanup lands. Counted per observation, one Start refusal blocks the pool permanently. Reset per observation, refusals never reach the threshold. The fix: one count or one reset per runner, when its row first leaves service (the guarded UPDATE's `rows_affected`, or the previous status on the manager path), with a freshly loaded `Pool`.
+    - (2) The manager-path half of the image rule refuses Tart. A Tart-only pool always stores `docker_image = ''` (#103's `selected_image`, migration 0044), so "a GitLab pool with an empty `docker_image` is refused before `create_runner`" refuses every manager-path GitLab Tart start. A Docker pool can't have an empty `docker_image`, so for Docker starts the rule never fires. Scope it to the `docker` provider.
+  - Warnings:
+    - The reset helper's home: next to `record_provision_failure` in `main.rs`, so there is no second copy of the inline query at `:2766`.
+    - Where busy is observed: the manager status loop only, because `follow` doesn't read `busy`. Pools show `blocked` after a successful probe.
+    - A failed fleet `create_runner` should count every error once, as the manager path's `StartOutcome::Failed` does. Otherwise the placeholder client sends a new prepare to a machine every pass.
+- **Assumed:**
+  - Failed and cleaned placements are never moved out of those states except by `delete_pool` (no retention found for `workload_placements`).
+  - The GitLab `runners.busy` signal comes from #140's webhook, per #148's issue text.
+- **Hedged:**
+  - Finding 1's gate can be any one-time transition. The guarded runner UPDATE is named because it already exists in both `follow` and `finish`.
+  - Finding 2 accepts dropping the manager-path call altogether, since #103's validation already guarantees a Docker pool has an image.
+- **Evidence:**
+  - Read: the amended brief (`git diff` against d88acd5), `139-brief-result-r1.md`, and issue #148.
+  - Source:
+    - `crates/gridops-reconciler/src/fleet.rs` (whole file);
+    - `crates/gridops-reconciler/src/main.rs`: `Reconciler`, `Runner`, `reconcile`, `reconcile_pool`, `pool_state`, `provision`, `provision_on_host`, `start_admitted_runner`, `delete_runner`, `record_provision_failure`, `provision_failure_policy`, `cleanup_retention`;
+    - `crates/gridops-core/src/fleet/`: `placement.rs` (`placements`, `reported_gone`, `abandon_unstarted`), `registry/commands.rs` (`apply_to_placement`), `failure.rs` (`fail_placement`), `retry.rs` (`retry_failed_start`), `start_health.rs` (`is_start_failure`), `targets.rs` (`pool_docker_image`, `save_pool_fleet`), `service.rs` (`ensure_target_identity_for_pool`);
+    - `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`), `crates/gridops-core/src/models.rs` (`selected_image`, the pool image rule), `crates/gridops-core/src/config.rs` (`base_url`), `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`, `GitLabApi`);
+    - `migrations/0044_clear_unused_provider_images.sql`.
+
+## A (Phase 3, up-front plan review, round 4 on the round-3-amended brief, fresh run): 2026-11-20T16:21:55-08:00
+- **Decided:** BLOCK, with 1 block finding and 3 warn findings (see `handoff-A.md`).
+  - Round-3 blocks 1 and 2 and warnings 3-5 are resolved:
+    - The count and the reset happen on the guarded one-time transition, with a fresh `Pool` for the write.
+    - The manager-path image rule is Docker-only, so Tart starts pass `tart_image` unchanged.
+    - `clear_provision_failures` sits next to `record_provision_failure`.
+    - The fleet reset is exit-only.
+    - Every fleet `create_runner` failure counts once.
+  - New block:
+    - (1) The manager path counts or resets in `reconcile_pool`'s status loop (`main.rs:794-826`), but the rest of the pass reads the stale `pool`: `retry_deferred` at `:867`, `PassOutcome::for_pool` at `:1026`.
+      - The pass that counts a refusal starts a replacement straight away, skipping the 30 s and 60 s backoffs, and starts through the circuit it just opened at the threshold.
+      - The end-of-pass state can overwrite `backoff` or `blocked`.
+      - Both existing production call sites of `record_provision_failure` end the pass (`:942-944`, `:2503`→`:949`), and the only mid-pass circuit change is re-read at `:1028-1041`.
+      - Fix: a `load_pool` that shares `load_pools`'s SELECT, and a reload after the status loop.
+  - Warnings:
+    - A GitLab probe after the cool-down starts `desired - active` runners, not one, because a POST success neither resets nor aborts the loop.
+    - On the fleet path, the rollback deletes the GitLab runner inline after `gitlab_runner_id` was stored, so `delete_runner` deletes it again via the failed loop. The Bitbucket arm stores the uuid only after POST succeeds.
+    - Brief-gate W-3's "returns without error for that pool" could be read as swallowing `StartOutcome::Failed`, which would diverge from the Bitbucket arm.
+- **Assumed:**
+  - The pass order is `fleet::tick`, then `load_pools`, then each `reconcile_pool` (`main.rs:526`, `:566`, `:595`), so fleet-path counts are visible to that pass's pool load.
+  - The status loop is where the brief's "exited→failed mapping" lives. The brief names it so ("`reconcile_pool`'s exited→failed mapping", round-3 "previous status").
+- **Hedged:**
+  - Finding 1 is a block, not a warning: it bypasses the backoff for the exact failure this feature adds, Done-when 10's count-only tests would not catch it, and it is the read half of round-3's stale-pool point. The fix is one brief bullet.
+  - Warning 2 accepts recording the multi-start probe as deliberate.
+  - Warning 3 offers two equivalent fixes.
+- **Evidence:**
+  - Read: the brief (`git diff de7c4f4 HEAD`, plus the full file), the round-3 `handoff-A.md` and this journal.
+  - Source:
+    - `crates/gridops-reconciler/src/fleet.rs` (whole file);
+    - `crates/gridops-reconciler/src/main.rs`: `reconcile` `:440-640`, `load_pools`, `reconcile_pool` `:786-1057`, `PassOutcome`, `pool_state`, `finish_pool_pass`, `provision`, the end of `provision_on_host` and `start_admitted_runner` `:2440-2530`, `:2640-2781`, `delete_runner`, `bitbucket_registration`, `deregister_bitbucket_runner`, `remove_manager_container`, `set_pool_wait_reason`, `record_provision_failure`, `provision_failure_policy`, `maybe_sync_github`, `retry_github_runner_cleanup` (head), `runners()`, `Pool::retry_deferred`;
+    - `crates/gridops-core/src/fleet/start_health.rs` (`is_start_failure`), `crates/gridops-core/src/fleet/retry.rs` (`retry_failed_start`, head), `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`);
+    - `migrations/0047_gitlab.sql` (`:1-60`, `installation_id` grep), `migrations/0001_initial.sql` (`runner_pools.installation_id NOT NULL`).
+
+## A (Phase 3, up-front plan review, round 5 on the round-4-amended brief, fresh run): 2026-11-20T16:30:28-08:00
+- **Decided:** PASS, with 0 block findings and 2 warn findings (see `handoff-A.md`).
+  - Round-4 block 1 is resolved:
+    - `load_pool` shares `load_pools`'s SELECT, the only `Pool` query in the reconciler.
+    - The manager path reloads after the status loop, so `retry_deferred`, `provisioning_blocked`, the start loop and `PassOutcome::for_pool` use the fresh copy. This follows the re-read at `main.rs:1028-1041`.
+    - The fleet path needs no reload. Every fleet count runs in `fleet::tick` (`register_and_start`, `follow`, `finish`) before `load_pools` (`main.rs:526`, `:566`); the start loop's `fleet::provision` only inserts and admits.
+  - Round-4 warnings 2-4 are resolved:
+    - The probe stop sits in the one shared start loop (`:947`), which serves both paths through `provision` (`:2320-2336`).
+    - The fleet rollback sets `gitlab_runner_id` to NULL after a successful inline delete. `GitLabError::NotFound` exists and counts as done.
+    - `StartOutcome::Failed` is still returned as the pool's `Err`.
+  - Warnings:
+    - (1) The probe limit is one start per pass, not one per cool-down. A GitLab start the manager or fleet accepts neither resets the circuit nor sets a new `provision_retry_at`, so passes keep making probe starts until the refusal is counted. On the fleet path, where the refusal comes several ticks later, that can still reach `desired - active` per cool-down. The options: hold back while the probe is in flight, as `tart_lane`'s `HeldBack` does, or record the per-pass limit as deliberate.
+    - (2) The rule "every GitLab count gets a `Pool` from `load_pool`" needs a scope: counts outside the start loop only, so `:942` and `:2503` get no GitLab-only branch. It also needs a rule for `load_pool` returning `None`. And the reloaded `pool.state` can repeat the `:855` host-off event once.
+- **Assumed:**
+  - A pool is GitLab-only when it has `runner_pool_gitlab_connections` rows (#138), so the start loop can tell a "GitLab start" from the pool.
+  - The brief-gate reviewer's pass on this amendment (`139-brief-result-r1.md`, PASS) has no bearing on this gate.
+- **Hedged:**
+  - Warning 1 stays a warning, not a block. The cost is bounded by `desired - active`, it is the remainder of round-4's warning 2, and option (a) trades it for a slower refill after recovery. O decides.
+  - Warning 2's `:855` repeated event is cosmetic and rare (a refusal counted while the built-in host is off).
+- **Evidence:**
+  - Read: the role document, the round-4 `handoff-A.md`, this journal, the brief in full (`git diff HEAD` for the round-4 section), and `139-brief-result-r1.md` (`git diff HEAD`).
+  - Source:
+    - `crates/gridops-reconciler/src/main.rs`: `Pool` and `retry_deferred` (`:55-106`), `ProvisionAttempt` (`:338-355`), `run_passes`, `run_pass` (`:398-433`), `reconcile` (`:522-633`), `load_pools` and `reconcile_pool` (`:771-1057`), `PassOutcome`, `pool_state`, `finish_pool_pass` (`:1059-1143`), `provision`, `provision_on_host`, `AdmittedStart`, `StartOutcome` (`:2284-2580`), `start_admitted_runner`'s end and `delete_runner` (`:2680-2904`), `remove_manager_container` (`:2938-2958`), `set_pool_wait_reason` and `record_provision_failure` through `provision_backoff_ms` (`:3580-3655`); grep for `query_as::<_, Pool>`, `load_pools` and `provision_circuit_open`.
+    - `crates/gridops-reconciler/src/fleet.rs`: `:1-50` and `:150-619`.
+    - `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`).
+    - `crates/gridops-reconciler/src/start_tests.rs` (grep for the reset test).
+
+## T (Phase 4, author tests / RED): 2026-11-20T17:12:00-08:00
+- **Decided:** RED is valid. 32 new tests (see `handoff-T-red.md`):
+  - 26 reconciler tests in the new `gitlab_lifecycle_tests.rs`;
+  - 2 D11 admission unit tests;
+  - 3 D6/image integration tests in the new `crates/gridops-core/tests/gitlab_pool_fleet.rs`;
+  - 1 `list_runners` fake test.
+  - Every test fails for the right reason. The reconciler and the core lib fail at compile, on the brief's missing types only. The D11 tests fail with `Err(Forbidden)` and `0 != 1`. The D6 tests fail with "no GitLab target" and the stock-image substitution. With throwaway type stubs, each lifecycle test fails on a feature assertion.
+  - Three tests passed before code: the two "old completed does not reset again" tests (vacuously, since no reset existed yet) and the fleet probe (the pass errored before a second start). They were strengthened to assert the first reset and the probe's GitLab registration, then re-run.
+  - Item 4 is asserted in its refusal form, because `GITLAB_RUNNER_IMAGE` is absent on master (b22c451, origin c575130).
+  - Item 16 is tested through `FakeGitLab::fail_next(CreateRunner, Upstream("GitLab client not available yet"))`, the placeholder's own error.
+- **Assumed:**
+  - GitLab pools are `scope='gitlab'` with `runner_pool_gitlab_connections` rows (#138's shape).
+  - The names follow the brief:
+    - `FakeMethod::ListRunners`, `FakeGitLab::with_runner(&Url, FakeRunner)`;
+    - `RunnerSummary` re-exported at `gridops_core::gitlab`;
+    - `Reconciler.gitlab: Arc<dyn GitLabApi>`;
+    - `Runner.gitlab_connection_id: Option<String>` and `Runner.gitlab_runner_id: Option<i64>`.
+  - A readable diagnostic is any recorded text that names the connection and the outcome: `runners.failure_reason`, `runner_events.message`, `runner_pool_waits.reason`.
+  - The fleet selection picks the earliest-created connection when none has a live runner.
+  - The probe limit is one GitLab start per pass (A's round-5 warning 1); the tests check the probe pass only.
+  - The fleet tests need `min_count=1` (the `NoDemand` rule with `placement=machines` and no queued jobs).
+- **Hedged:**
+  - Brief-gate B-2(a), "no `create_runner`" at `save_pool_fleet`, is not asserted: `save_pool_fleet` takes no GitLab client, so the assertion would be vacuous.
+  - The fleet "Start fails on the host" case asserts no unreleased allocation for the placement, rather than a specific placement state, because `follow`/`finish` own that transition.
+  - `ensure_target_access` reads `bitbucket_connection_id` for any non-GitHub target. That is recorded as advisory for F, not pinned by a test (user-scoped GitLab visibility is deferred per D11).
+- **Evidence:**
+  - Commands:
+    - `cargo test -p gridops-reconciler --no-run`: 10 errors, all missing contract members;
+    - `cargo test -p gridops-core --lib --no-run`: 19 errors, all D17;
+    - `cargo test -p gridops-core --lib -- gitlab_targets_are_valid_only link_pool_target_links_a_gitlab`, run with HEAD's `fake_tests.rs` swapped in temporarily: 2 failed;
+    - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 failed;
+    - `cargo fmt --all -- --check`: clean.
+  - Throwaway-stub validation (production files restored with `git checkout` and backups, never staged):
+    - `cargo test -p gridops-reconciler gitlab_lifecycle_tests`: 26 failed, each on a behavior assertion;
+    - `cargo test -p gridops-reconciler -- --skip gitlab_lifecycle_tests`: 68 passed;
+    - `cargo clippy -p gridops-reconciler --all-targets`: only a pre-existing warning.
+  - Source read: `main.rs` (Reconciler, Runner, `reconcile`, `reconcile_pool`, `provision_on_host`, `start_admitted_runner`, `delete_runner`, `record_provision_failure`); `fleet.rs` (`provision`, `tick`, `register_and_start`, `follow`, `finish`); `fleet/service.rs` (`submit_intent_in`, `ensure_target_identity_for_pool`, `ensure_target_access`); `fleet/targets.rs`; `fleet/retry.rs`; `fleet/registry/commands.rs`; `gitlab/mod.rs`; `gitlab/fake.rs`; `fleet/protocol/agent.rs` (`GitlabRunnerMaterial`); `provisioning.rs` (GitLab constants).
+
+## F (Phase 5, implement against RED): 2026-11-20T17:40:00-08:00
+- **Decided:**
+  - Implemented the brief's seam: GitLab arms in the shared start, follow, finish and delete paths call `gitlab_lifecycle.rs`. There is no parallel pipeline. All 26 lifecycle tests, the 2 D11 tests, the 3 D6/image tests and the `list_runners` fake test pass. See `handoff-F.md`.
+  - Every GitLab count or reset is tied to a guarded `UPDATE … WHERE status NOT IN ('failed','deleted')` affecting one row. In `finish`, a retry made in that call (`retry_failed_start` retires the old row itself, once per placement) also counts as leaving service.
+  - Every failed GitLab fleet placement counts once, and so does every fleet `create_runner` failure and every failed bootstrap store. Resets are exit-only on both paths: completed, `idle_expired`, or Inspect with no diagnostic or with `IdleExpired`.
+  - The manager-path image refusal and the fleet Docker-socket refusal are counted through `record_provision_failure`, so a configuration error backs off and opens the circuit rather than logging an error every pass.
+  - The Docker-socket check applies to Docker platforms only, since `save_pool_fleet` stores the flag only for Docker.
+  - `exitReason` is read through a `ListedManagerRunners` / `ListedRunner` listing shape (`#[serde(from)]`), because `main.rs`'s test module builds `ManagedRunner` as a literal.
+  - A GitLab pool's `pool_targets` returns only its connections' targets.
+- **Assumed:**
+  - A pool is a GitLab pool when it has `runner_pool_gitlab_connections` rows; `pool_targets` also treats `scope='gitlab'` as one.
+  - A failed runner row is live to the sweep. The same pass's failed loop deletes it, and the next sweep then removes its runner.
+- **Hedged:**
+  - The optional manager-path busy reset (round 3, "may") is not implemented: `busy` is set only by #140's webhook, which is not on master, so no test could pin it.
+  - `cargo clippy --workspace --all-targets -- -D warnings` has 17 findings in files this change does not modify (clippy 0.1.99 lints). They are left alone as out of scope.
+  - `gridops-api`'s `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` fails on this Darwin arm64 workstation. The fixture agent reports the build host's OS (`probe::host_os()` uses `cfg!(target_os)`), so it is host-dependent and unrelated to this change. Along with it, 11 `gridops-manager` tests fail with `path must be shorter than SUN_LEN` (the `TMPDIR` socket path). All 12 also fail on the pre-change commit 2aa6002.
+- **Evidence:**
+  - `cargo test -p gridops-reconciler gitlab_lifecycle_tests`: 26 passed.
+  - `cargo test -p gridops-core --lib`: 264 passed.
+  - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 passed.
+  - `cargo test --workspace --no-fail-fast`: 878 passed, 12 failed. The 12 are environmental and reproduce on the pre-change commit 2aa6002 in a throwaway worktree.
+  - `cargo fmt --all -- --check`: clean.
+  - Facts relied on in unchanged code: `docs/handoffs/139/evidence.md`.
+
+## T (Phase 7, verify GREEN + Tier 2): 2026-11-20T18:10:00-08:00
+- **Decided:**
+  - Verdict PASS. All 26 lifecycle tests, 2 D11 tests, 3 D6/image tests and the `list_runners` fake test are green; no test needed repair and F touched none.
+  - Did not prune any test: the manager and fleet suites cover distinct code paths.
+- **Assumed:**
+  - The 12 workspace failures are environmental (Darwin host, `SUN_LEN`). I re-ran a sample of two and F ran all 12 on the pre-change commit.
+- **Hedged:**
+  - Workspace-wide clippy is not clean because of 17 findings in untouched files; I checked only that none sit in a changed file.
+- **Evidence:**
+  - `cargo test -p gridops-reconciler`: 94 passed. `cargo test -p gridops-core`: all ok (264 lib). `cargo fmt --check`: clean.
+  - Mutation (`deregister` made a no-op): `a_failed_manager_start_deregisters...` failed at `gitlab_lifecycle_tests.rs:584`; file restored.
+  - `retry.rs:269-270` and `:113` match evidence.md verbatim.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20T18:30:00-08:00
+- **Decided:**
+  - Verdict PASS. F extended the shared functions with GitLab arms; `gitlab_lifecycle.rs` holds only counterparts of the Bitbucket helpers, as the brief's seam required.
+  - The `ListedManagerRunners` shape for `exitReason` is a justified small deviation (a test literal of `ManagedRunner` would not compile), not a parallel path.
+- **Assumed:**
+  - The diff base is b22c451; `exclusive_labels` hunks seen against local master are baseline drift.
+- **Hedged:**
+  - `next_connection` and `next_bitbucket_connection` are similar but deliberately differ per the brief; I did not require a shared helper.
+- **Evidence:** `git diff b22c451 HEAD`, `docs/handoffs/139/handoff-A-dup.md`.

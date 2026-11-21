@@ -11,7 +11,8 @@ use secrecy::SecretString;
 use url::Url;
 
 use super::{
-    CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, Scope, ScopeKind,
+    CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, RunnerSummary, Scope,
+    ScopeKind,
 };
 use crate::fleet::ExternalId;
 
@@ -21,6 +22,7 @@ use crate::fleet::ExternalId;
 pub enum FakeMethod {
     CreateRunner,
     DeleteRunner,
+    ListRunners,
     Job,
     PendingJobs,
     GroupProjects,
@@ -112,6 +114,18 @@ impl FakeGitLab {
             .or_default()
             .group_projects
             .push((group_id, project_id));
+    }
+
+    /// Seeds a live runner `GridOps` did not create (for example one with no
+    /// `gridops-runner:` marker), for `list_runners` and `delete_runner`. It
+    /// does not move the instance's runner-id counter.
+    pub fn with_runner(&self, base_url: &Url, runner: FakeRunner) {
+        self.state()
+            .instances
+            .entry(base_url.clone())
+            .or_default()
+            .runners
+            .push(runner);
     }
 
     /// Queues a one-shot failure for the next `method` call on `base_url`,
@@ -214,6 +228,26 @@ impl GitLabApi for FakeGitLab {
             } else {
                 Ok(())
             }
+        })
+    }
+
+    async fn list_runners(
+        &self,
+        credentials: &GitLabCredentials,
+        scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError> {
+        self.call(credentials, FakeMethod::ListRunners, |instance| {
+            Ok(instance
+                .runners
+                .iter()
+                .filter(|runner| {
+                    runner.scope.kind() == scope.kind() && runner.scope.id() == scope.id()
+                })
+                .map(|runner| RunnerSummary {
+                    id: runner.id.get(),
+                    description: runner.description.clone(),
+                })
+                .collect())
         })
     }
 

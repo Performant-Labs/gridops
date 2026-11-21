@@ -407,6 +407,10 @@ async fn every_method(
             api.delete_runner(credentials, id(9001)?).await,
         ),
         (
+            "list_runners",
+            api.list_runners(credentials, &project).await.map(drop),
+        ),
+        (
             "job",
             api.job(credentials, id(42)?, id(1234)?).await.map(drop),
         ),
@@ -695,6 +699,60 @@ async fn group_projects_lists_every_project_of_the_group_and_its_subgroups() -> 
         ])
     );
     requests.iter().for_each(assert_authenticated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_runners_lists_every_page_of_the_scopes_own_runners() -> Result<()> {
+    let mock = Mock::start(|request, _| match request.query_value("page").as_deref() {
+        None | Some("1") => Reply::json(
+            200,
+            &json!([
+                { "id": 11, "description": "gridops-runner:gitlab.example:abc" },
+                { "id": 12, "description": null }
+            ]),
+        )
+        .header("x-next-page", "2"),
+        _ => Reply::json(200, &json!([{ "id": 13, "description": "other" }])),
+    })
+    .await?;
+    let runners = client()?
+        .list_runners(&mock.credentials(), &project_scope()?)
+        .await?;
+    let listed: Vec<(u64, &str)> = runners
+        .iter()
+        .map(|runner| (runner.id, runner.description.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (11, "gridops-runner:gitlab.example:abc"),
+            (12, ""),
+            (13, "other")
+        ]
+    );
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2, "an absent x-next-page ends the list");
+    assert_eq!(requests[0].path(), "/api/v4/projects/42/runners");
+    assert_eq!(
+        requests[0].query(),
+        pairs(&[("type", "project_type"), ("per_page", "100")])
+    );
+    requests.iter().for_each(assert_authenticated);
+
+    let group = group_scope()?;
+    let mock = Mock::start(|_, _| Reply::json(200, &json!([]))).await?;
+    let runners = client()?.list_runners(&mock.credentials(), &group).await?;
+    assert_eq!(runners.len(), 0, "an empty listing");
+    let requests = mock.requests();
+    assert_eq!(
+        requests[0].path(),
+        format!("/api/v4/groups/{}/runners", group.id().get())
+    );
+    assert_eq!(
+        requests[0].query(),
+        pairs(&[("type", "group_type"), ("per_page", "100")])
+    );
     Ok(())
 }
 

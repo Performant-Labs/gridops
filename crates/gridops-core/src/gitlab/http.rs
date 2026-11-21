@@ -26,7 +26,8 @@ use serde_json::{Map, Value};
 use url::Url;
 
 use super::{
-    CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, Scope, ScopeKind,
+    CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, RunnerSummary, Scope,
+    ScopeKind,
 };
 use crate::fleet::ExternalId;
 
@@ -181,6 +182,35 @@ impl GitLabApi for GitLabClient {
             return Ok(());
         }
         Err(error_for(response).await)
+    }
+
+    async fn list_runners(
+        &self,
+        credentials: &GitLabCredentials,
+        scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError> {
+        // Only the scope's own runners (#139 D17): `type` keeps instance and
+        // inherited group runners, which GridOps never registered there, out
+        // of the sweep's listing.
+        let (collection, runner_type) = match scope {
+            Scope::Project { .. } => ("projects", "project_type"),
+            Scope::Group { .. } => ("groups", "group_type"),
+        };
+        let mut url = api_url(
+            &credentials.base_url,
+            &[collection, &scope.id().get().to_string(), "runners"],
+        )?;
+        url.query_pairs_mut()
+            .append_pair("type", runner_type)
+            .append_pair("per_page", PER_PAGE);
+        let runners: Vec<RunnerResponse> = self.get_all_pages(credentials, url, "runners").await?;
+        Ok(runners
+            .into_iter()
+            .map(|runner| RunnerSummary {
+                id: runner.id.get(),
+                description: runner.description.unwrap_or_default(),
+            })
+            .collect())
     }
 
     async fn job(
@@ -352,6 +382,15 @@ impl JobResponse {
             tag_list: self.tag_list,
         }
     }
+}
+
+/// A runner from `/projects/:id/runners` or `/groups/:id/runners`. GitLab
+/// sends `description: null` for a runner registered without one.
+#[derive(Deserialize)]
+struct RunnerResponse {
+    id: ExternalId,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
