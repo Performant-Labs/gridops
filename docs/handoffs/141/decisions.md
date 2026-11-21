@@ -189,3 +189,57 @@
 
 ## A phase 7 (anti-duplication gate), 2026-11-20
 PASS. GitLab extends the existing descriptor, registry, connections section, targets and webhooks objects; no parallel path. One warn: hardcoded `OTHER_PLATFORM_KINDS` in `gitlab.tsx`, consistent with the Bitbucket pattern.
+
+## U (UI Walkthrough, Playwright backend) - 2026-11-20
+- **Decided:** PASS. Drove the real `vite dev` server (port 3000) in a headless Chromium (Playwright
+  1.63.0 / Chromium 153.0.8010.12), with every `/api/v1/*` call intercepted and mocked to match the
+  brief's Contract section (no DB/seed script exists for this project, and GridOps' only login is
+  GitHub OAuth, so a mocked `/api/v1/auth/session` plus a mocked API surface was the only way to
+  reach the UI headlessly without a real GitHub App + DB). All 24 scripted checks passed: connection
+  add (success + three error states: bad token, missing scope, duplicate), Verify (success and
+  failure), Rotate webhook secret (confirm + one-time reveal), Edit (name + token), Remove (success
+  on an unreferenced connection, 409 on a referenced one — re-checked in an isolated follow-up pass
+  after the first pass's screenshot of this step was inconclusive, see Hedged), the Targets picker
+  (GitLab project + group, exclusion against GitHub/Bitbucket), Platform options (Run untagged
+  jobs), pool create (POST body: `scope: "gitlab"`, both connection ids, `runUntagged: true`), pool
+  settings (fetches connections beyond the pool's own via `getGitlabConnections`, PUT body carries
+  the added id), the 64-char tag cap error, the GitLab runner's detail-sheet link
+  (`https://gitlab.com/acme/platform/-/runners/555`), the delivery badge and sheet "—" destination,
+  and 360px usability on Connections and the new-pool Targets control. Screenshots and the full
+  per-step JSON are in `/tmp/u141-shots/` and `/tmp/u141-results.json` (session-scratch, not
+  committed).
+- **Assumed:** the mocked API responses are a faithful stand-in for #137/#138's real contract (the
+  brief's own instruction: "headless, against mocked API responses that match the spec"). Real
+  server-side behavior (actual GitLab API verification, real webhook delivery) is T/S's and the
+  backend's concern, not U's.
+- **Hedged:**
+  - **Test-script flaw caught and fixed, not a #141 defect:** the first pass's Remove check used
+    `page.getByRole('button', { name: 'Remove' }).last()` to click the confirm dialog's own button,
+    which is ambiguous against the list's own per-row "Remove" buttons (same accessible name); the
+    resulting screenshot showed the confirm dialog still open 500ms later, so that result was
+    reported honestly as inconclusive rather than claimed as a pass. A follow-up pass scoped the
+    click to `page.getByRole('dialog')` and confirmed both outcomes cleanly (`13a`/`13b`/`13c`
+    screenshots): the unreferenced connection's row disappears after a 204, and the referenced
+    connection's row stays with the 409 "A runner pool still uses this connection…" toast.
+  - **Environment-only finding, not a #141 defect:** this session's bundled Chromium
+    (153.0.8010.12, from the Playwright 1.63.0 install used to drive the walkthrough) throws
+    `SyntaxError: Invalid regular expression … /v: Invalid character class` on the pool-name
+    input's `pattern="[a-z0-9][a-z0-9-]*[a-z0-9]"` (present on both pool routes, unchanged by this
+    diff, pre-dating #141) and silently blocks every pool-form submit. Worked around in the test by
+    stripping the `pattern` attribute before submitting; not a code change, and not something F
+    should fix under this issue. Flagging for the operator since a sufficiently new Chromium in a
+    real user's browser could hit the same thing; out of #141's scope to fix.
+  - `GET /api/v1/runner-pools/repositories` (an existing, unmocked endpoint the GitHub repository
+    target kind's prerequisite check always calls) 404s three times in the console during the
+    pool-form visits. Pre-existing, unrelated to GitLab, and does not block anything under test
+    (the GitHub repository kind is not exercised here) — noted, not filed as a #141 finding.
+  - The pool detail Overview page still shows the GitLab pool's Account as its GitHub installation
+    login ("acme") and "Scope: Gitlab" — this is the already-tracked #159 gap the brief marks
+    out of scope, reproduced here only as confirmation, not a new finding.
+  - Did not re-verify the dashboard Overview page or any non-GitLab surface beyond what the
+    walkthrough path touched incidentally.
+- **Evidence:** `/tmp/u141-shots/*.png` (26 screenshots across every state above, both desktop and
+  360px) and `/tmp/u141-results.json` (per-step JSON: action, expected, observed, PASS/FAIL,
+  request bodies captured for the two POST/PUT assertions, console/HTTP error log). No console
+  error, dead component, or blocking overlay was observed outside the deliberate 400/409 test
+  responses.
