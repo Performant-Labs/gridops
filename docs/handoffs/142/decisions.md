@@ -183,3 +183,9 @@ Verdict PASS: gitlab.rs and the image script are brief-mandated; all other chang
 - **Assumed:** T's mutation table is a valid RED for this run, given that the code already exists (handoff-T-red.md).
 - **Hedged:** none. NV-1 and the 300 s mid-run refusal delay are carried over unchanged as known issues.
 - **Evidence:** `cargo test -p gridops-tart-agent` passed 52/52 on 3 consecutive runs. `cargo fmt --check` is clean, CI's 1.98.1 clippy line is clean, and `bash -n` and shellcheck pass on the image script.
+
+## T (Phase 7, verify GREEN + Tier 2, second run): 2026-11-20
+- **Decided:** PASS, no blocking issue. The suite is 52/52 GREEN on 3 runs; fmt, CI-pinned clippy and shellcheck are clean. I changed no test, since F flagged none as wrong. I re-applied mutation N4 (a signal-killed exec recorded as 0) on a scratch copy and the intended assertion failed (`left Some(0), right None`).
+- **Assumed:** F's "no production change" is right, because the lines it cites already hold each pinned behaviour (I read `valid_token`, the waiter's `code()` guard and `record_exit_code`).
+- **Hedged:** the workspace run has one failure, `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine`. It fails because this dev host is macOS arm64, and the branch touches nothing in `gridops-api`. NV-1 and the real-VM check (#143) stay open as known issues.
+- **Evidence:** `cargo test -p gridops-tart-agent` x3, `TMPDIR=/tmp/t142 cargo test --workspace --no-fail-fast`, the scratch mutation run, `handoff-T-green.md`.
