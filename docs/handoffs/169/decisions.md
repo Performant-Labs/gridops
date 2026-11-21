@@ -57,3 +57,9 @@
 - **Decided:** PASS (docs/handoffs/169/handoff-A-dup.md). F extended `PoolBindings`, `platformForPool`, `connectionLabel`/`connectionAddress`, the `runners` handler and the `runner_pools` SQL; no parallel path.
 - **Assumed:** with no `survey.md`, the analogues named in the brief and handoff-A.md serve as the Reuse map.
 - **Hedged:** `tests/dashboard-pool-scope.test.ts` is a new file; judged a new surface (no existing home), not duplication.
+
+## Phase 8 UI Walkthrough (U) - 2026-11-21
+- **Decided:** PASS (docs/handoffs/169/handoff-U.md). All wireframe cases (GitHub repository/organization, Bitbucket-on-GitHub pool, GitLab name/address/one-address-part/neither, unknown scope, dashboard scope text) confirmed live in a real headless browser, at 1280px and 360px, via SPA nav and hard load, with a clean console throughout. No regression to #159's adjacent surfaces (`/runner-pools` list, pool detail's Destination sidebar group).
+- **Assumed:** no GitHub OAuth was exercised; a hand-minted session cookie (the vault's own `Vault::sign` HMAC scheme) stood in for login, as #159's U round did. `runner_pool_installations` needed no manual seeding — migration 0014's insert trigger populates it from `runner_pools.installation_id`.
+- **Hedged:** the "older server, no `poolScope`" case (R4) cannot be produced on a live server build (the current server always emits the field) and was not independently re-verified live; it is covered only by T's jsdom test. Not treated as a defect.
+- **Evidence:** live DOM captures of every runner row (right-hand column, narrow line, details sheet) for all 8 seeded runner states plus the dashboard's 5 pool rows; `browser_console_messages` 0/0 across the whole session; `curl` cross-check of `/api/v1/runners` and `/api/v1/runner-pools` (including a 9th, runner-less pool added post-hoc to confirm `totalRunners: 0` live) against the matching jsdom/Rust test assertions; 5 screenshots under `docs/handoffs/169/screenshots/`.
