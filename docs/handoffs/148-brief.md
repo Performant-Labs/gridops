@@ -41,7 +41,7 @@ Where these differ from the issue text, these win. The contract lives on master;
 
 ## Constraints
 
-- Six other wave-1 sessions edit nearby files in parallel (#146 client, #138 API, #139 lifecycle, #147 host agent, #140 webhooks, #142 Tart, #141 UI). Keep the diff to the files above plus tests, plus the shared `crates/gridops-core/src/gitlab_jobs.rs` (D18) and its `lib.rs` line if #140 has not landed it.
+- Six other wave-1 sessions edit nearby files in parallel (#146 client, #138 API, #139 lifecycle, #147 host agent, #140 webhooks, #142 Tart, #141 UI). Keep the diff to the files above plus tests, plus the D18 local copy `crates/gridops-core/src/gitlab/jobs.rs` and its `pub mod jobs;` line in `gitlab/mod.rs` if #140 has not landed it (an agreed addition, not a change to existing contract types).
 - Tests seed `gitlab_jobs` rows directly; the poll tests use `FakeGitLab` (`with_job`, `with_group_project`, `fail_next`). Tests that need two connections isolated must give them different base URLs (the fake records no credential identity).
 - No deploy. Mars production stays at `80e6f1b`.
 
@@ -152,30 +152,43 @@ No per-connection budget. Each `GitLabApi` call (`group_projects`, each `pending
 - Concluding a `running` row clears its runner's `busy` (A2-W4).
 - Rows of a project whose `pending_jobs` call failed are not concluded in that poll (A2-W6).
 
-## Amendments, round 3: the shared `gitlab_jobs` upsert (D18, agreed with #140)
+## Amendments, round 3: the shared `gitlab_jobs` write (D18, agreed with #140)
 
-Binding; replaces A-W3, A2-W2/W3's write mechanics and the "INSERT .. ON CONFLICT DO NOTHING then guarded update" text.
+Binding; replaces A-W3, A2-W2/W3's write mechanics, and any "INSERT .. ON CONFLICT DO NOTHING then guarded update" text.
 
-- All poll writes of a job's status go through one shared function in `gridops-core` (D18, owned by #140; whichever of #140/#148 merges first adds it with exactly this signature and its unit tests; the second rebases onto it). The poll writes **no** SQL merge of its own for `status`, `status_changed_at`, `tag_list` or `gitlab_runner_id`:
+- All poll writes of a job go through D18, a shared function **owned by #140**, in `crates/gridops-core/src/gitlab/jobs.rs` plus `pub mod jobs;` in `gitlab/mod.rs`. Until #140 merges, #148 carries a local copy **at that identical path with the identical signature and rules** (plus unit tests); whichever of #140/#148 merges second takes master's file and drops its own. The poll writes no SQL merge of its own for any `gitlab_jobs` column other than the re-check mark below.
 
-      // crates/gridops-core/src/gitlab_jobs.rs  (`pub mod gitlab_jobs;` in lib.rs; not inside the contract's gitlab/ module)
-      pub fn status_tier(status: JobStatus) -> Option<u8>   // None for Unknown
-      pub struct GitlabJobWrite<'a> {
-          pub connection_id: &'a str, pub project_id: i64, pub job_id: i64, pub pipeline_id: i64,
-          pub status: JobStatus, pub status_changed_at: i64,   // epoch ms
-          pub tag_list: Option<&'a [String]>,                   // None = keep stored ([] on insert)
-          pub gitlab_runner_id: Option<i64>,                    // None = keep stored
+      pub struct JobObservation<'a> {
+          pub connection_id: &'a str,
+          pub project_id: u64,
+          pub job_id: u64,
+          pub pipeline_id: u64,
+          pub status: JobStatus,
+          pub status_changed_at: i64,          // epoch ms (poll: observation time, taken before pending_jobs)
+          pub retries_count: Option<u32>,      // None = keep stored (0 on insert); the poll passes None
+          pub tag_list: Option<&'a [String]>,  // poll: Some(&job.tag_list)
+          pub gitlab_runner_id: Option<u64>,   // poll: None
       }
-      pub enum GitlabJobUpsert { Inserted, StatusChanged, RunnerFilled, Unchanged }
-      pub async fn upsert_gitlab_job<'e, E: sqlx::SqliteExecutor<'e>>(executor: E, write: &GitlabJobWrite<'_>, now: i64) -> Result<GitlabJobUpsert, sqlx::Error>
+      pub enum JobWrite { Inserted, StatusApplied, FilledOnly, Ignored }
+      pub struct JobWriteOutcome { pub write: JobWrite, pub previous_status: Option<String>, pub status: String, pub gitlab_runner_id: Option<u64> }
+      pub fn status_tier(status: &str) -> Option<u8>;   // 0 created/waiting_for_resource/preparing/manual/scheduled, 1 pending, 2 running, 3 success/failed/canceled/skipped; None = unknown
+      pub fn status_write_applies(stored_status: &str, stored_at: i64, incoming: JobStatus, incoming_at: i64) -> bool;
+      pub async fn record_gitlab_job(conn: &mut SqliteConnection, obs: &JobObservation<'_>, now_ms: i64) -> sqlx::Result<JobWriteOutcome>;
+      pub async fn set_gitlab_runner_busy(conn: &mut SqliteConnection, connection_id: &str, gitlab_runner_id: u64, busy: bool, now_ms: i64) -> sqlx::Result<Option<(String, Option<String>)>>;
 
-- Column rules inside it: tiers 0 = `created`/`waiting_for_resource`/`preparing`/`manual`/`scheduled`, 1 = `pending`, 2 = `running`, 3 = `success`/`failed`/`canceled`/`skipped`. A terminal row never changes. `status` moves only forward by tier, or within a tier when `status_changed_at` is newer. `unknown` is never stored (`status_tier` → `None` → no write). `gitlab_runner_id` is COALESCE-filled, never cleared, never filled on a terminal row. `tag_list` is never cleared by a writer that passes `None`. `id` is a UUID v4 on insert; `updated_at` = `now` on any change. `status_changed_at` is **epoch milliseconds** everywhere.
-- The poll calls it with `tag_list = Some(&job.tag_list)` (from `pending_jobs` or `job`), `gitlab_runner_id = None`, `status_changed_at` = the poll's observation time (taken before the request), through `retry_when_busy`.
-- The poll concludes a job **only** from a `GitLabApi::job` lookup: the status it returns, or `canceled` when it returns `NotFound`. A missing row in `pending_jobs` alone never concludes anything.
-- The re-check mark (A2-B1: `updated_at` set to the observation time before each `job` request) is a separate one-column `UPDATE gitlab_jobs SET updated_at=?` owned by the poll; it touches no other column. Selection is least-recently-checked within the A2-B1 status order, so no row is re-asked within `GITLAB_JOB_CHECK_AGE_MS` and running rows cannot crowd out a stale pending row.
-- When the conclusion writes a terminal status to a `running` row with a `gitlab_runner_id` (`GitlabJobUpsert::StatusChanged`), the busy clear of A2-W4 matches the runner by `gitlab_runner_id` among live (`deleted_at IS NULL`) `ci_platform='gitlab'` runners whose connection has the same `base_url` as the job's connection (the #140 busy-match rule on #136).
-- **Duplicate rows across connections**: a project connection and its parent group's connection give one GitLab job two `gitlab_jobs` rows (identity is `(connection_id, job_id)`). The demand scan deduplicates on `(gitlab_connections.base_url, gitlab_jobs.job_id)`, counting each GitLab job once (candidate pools = the union of pools linked to either connection). Test: one job recorded under a project connection and under its group's connection adds demand 1, not 2.
-- Done-when additions: the shared function's unit tests (if #148 adds it first): each tier transition, terminal-final, same-tier timestamp rule, `unknown` not stored, `tag_list`/`gitlab_runner_id` not cleared by `None`.
+- Rules (one SQL statement per call: `INSERT ... ON CONFLICT(connection_id, job_id) DO UPDATE ... WHERE`):
+  - `unknown` writes nothing → `Ignored`.
+  - A new row: UUID v4 `id`, `tag_list` = given tags or `[]`, `retries_count` = given or 0, `pool_id` NULL. The function never writes `pool_id`.
+  - `status`/`status_changed_at` change only when the stored row is not terminal AND (incoming tier higher, OR equal tiers and `incoming_at` > `stored_at`); `pipeline_id` and (when `Some`) `retries_count` move with them.
+  - `gitlab_runner_id` = COALESCE(stored, incoming): never cleared or overwritten; filled even when the status write is rejected, if the row isn't terminal (`FilledOnly`).
+  - `tag_list` replaced only by `Some(non-empty)`, never overwritten with `[]`; filled likewise on a rejected status write when stored is `[]` and the row isn't terminal.
+  - A terminal row never changes in any column. `updated_at` = `now_ms` whenever anything changed; `Ignored` means no write.
+  - `set_gitlab_runner_busy` matches `gitlab_runner_id` among live (`deleted_at IS NULL`) `ci_platform='gitlab'` runners whose `gitlab_connection_id` shares the job connection's `base_url`; writes only `busy`, `status` (busy/online), `last_heartbeat_at`, `updated_at`; returns the runner it changed.
+  - Callers own `retry_when_busy`, transactions, `runner_events` rows, and when busy changes.
+- The poll concludes a job **only** from a `GitLabApi::job` lookup (the returned status, or `canceled` when the lookup returns `NotFound`), never by inference from `pending_jobs`. On a conclusion whose outcome is `StatusApplied` from `running` (`previous_status == Some("running")`) with a known `gitlab_runner_id`, it calls `set_gitlab_runner_busy(.., busy=false, ..)` (A2-W4) and writes one `runner_events` row like #140 (`level` `info`, `event` `GitLab job <status>`, the runner's `runner_id`/`pool_id`, metadata `{ "jobId", "projectId", "pipelineId", "connectionId" }`), when a runner was changed.
+- The re-check mark (A2-B1: `updated_at` set to the observation time before each `job` request) is the poll's own one-column `UPDATE gitlab_jobs SET updated_at=? WHERE id=?`, touching no other column. Selection is least-recently-checked (`updated_at`) within the A2-B1 status order, so no row is re-asked within `GITLAB_JOB_CHECK_AGE_MS` and running rows cannot crowd out a stale pending row.
+- **Duplicate rows across connections**: a project connection and its parent group's connection give one GitLab job two `gitlab_jobs` rows. The demand scan deduplicates on `(gitlab_connections.base_url, gitlab_jobs.job_id)`, counting each GitLab job once (candidate pools = the pools linked to either connection). Test: one job recorded under a project connection and under its group's connection adds demand 1, not 2.
+- Done-when additions: the D18 unit tests in #148's local copy: each tier transition, terminal-final in every column, same-tier timestamp rule, `unknown` → `Ignored`, `tag_list`/`gitlab_runner_id`/`retries_count` not cleared by `None` or `[]`, `FilledOnly` on a rejected status write, and `set_gitlab_runner_busy`'s base_url match.
 
 ## Verified source excerpts (brief review R1, NV-1 to NV-4)
 
