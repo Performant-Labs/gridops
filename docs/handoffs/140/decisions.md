@@ -128,3 +128,38 @@
   - Epic #136's comments, with D18 at 00:15:49 UTC (`gh api`).
   - #146: PR #153's files and merge time (`gh api`), and master's `146-brief.md`, `146/decisions.md`, `gitlab/mod.rs`, and the API and reconciler `main.rs` / `state.rs` (no GitLab wiring).
   - Sibling worktrees: `148-brief.md` at `572f828` (`:120`, `:131`, `:155-191`), and `138-brief.md:124-127`.
+
+## A (Phase 3, up-front plan review, round 5): 2026-11-20T17:40:28-08:00
+- **Decided:** PASS, with 0 block findings and 3 warn findings (see `handoff-A.md`).
+  - Round-4 blocks 1 and 2 and warnings 3 to 5 are resolved by the round-4 amendments (`0af30ed`). The D18 amendment is on #136 (01:27:44 UTC).
+    - `previous_gitlab_runner_id` and the busy-set rule now cover every write variant.
+    - One `BEGIN IMMEDIATE` per delivery follows the `fleet/` precedent.
+    - Client wiring belongs to PR #161.
+    - The ids are `ExternalId`, and the pool id is `String` (`runners.pool_id` is NOT NULL).
+    - The writer reads, then runs one write. Its tests use temp-file databases.
+  - The warnings:
+    - (1) PR #160 (#148, `754a72b`) already has a full, gated D18 writer, plus `jobs_tests.rs` written to run against either copy. #140 should take those files byte for byte instead of writing a second implementation and suite;
+    - (2) #138's private `credentials()` helper (`resources/gitlab.rs:714`, which keeps a trailing slash that `FakeGitLab` keying depends on) isn't on #140's shared-file list. Expose it as `pub(crate)` or explicitly accept a copy;
+    - (3) the openapi test the brief names was renamed by #138 (`fleet/openapi.rs:293`).
+- **Assumed:**
+  - PR #160 will most likely merge before #140's F runs. Either way, a byte-identical copy merges cleanly.
+  - #148's `jobs.rs` at `754a72b` is the reviewed shape: its A-dup and S passed before the D18-amendment merge commit, and its own commit message says the local copy follows the round-4 amendment.
+  - GitLab 19.7 isn't released yet as of 2026-11-20 (GitLab releases on the third Thursday, so 19.6 came out on Nov 19).
+- **Hedged:**
+  - I kept W1 a warning, not a block. D18 says in writing that "whichever merges second takes master's file", so the duplicate is a deliberate decision and not drift. The cost is wasted work and divergence risk, not two copies on master.
+  - I kept W2 a warning. It matches round-1 W5 (bookkeeping copy vs. extraction), and `GitLabClient::api_url` accepts either URL form.
+  - The `build_status_changed_at` availability note is outside architecture. I reported it for the brief gate's NV-4 and NIT-1.
+- **Evidence:**
+  - Read:
+    - `docs/handoffs/140-brief.md` (`370c679`, in full), `140-brief-result-r1.md` / `-r2.md`, and round-4 `handoff-A.md` and `decisions.md`;
+    - `state.rs` (`:1-165`), `webhooks.rs` (`:1-192`, `:562-660`, `:889-938`), and `resources/gitlab.rs` (`:1-100`, `:560-730`, `:295-318`);
+    - `resources.rs:85-97`, `agent.rs:30-40`, `fleet/openapi.rs:247-315` and `access.rs:281-296`;
+    - `main.rs:195-215`, and the `gridops-api` and `gridops-core` `Cargo.toml` files;
+    - `gitlab/http.rs:395-415`, `gitlab/mod.rs:15-22`, `fleet/domain.rs:1-120`, and `db.rs:17-32`;
+    - `migrations/0047_gitlab.sql:20-170`.
+  - `grep` for `begin_with("BEGIN IMMEDIATE")`, `runner_events` inserts, `GitLabCredentials {`, `GitlabConnectionId` and `runtime_secret`.
+  - `git show --stat 0086aa9` (#138).
+  - `gh pr list`, plus `gh pr view 160` / `161` (files, body, head, mergeable).
+  - Epic #136's comments since 00:10 UTC (`gh api`).
+  - Sibling worktree `gitlab-148-scaling-71c514` at `754a72b`: `crates/gridops-core/src/gitlab/jobs.rs` (in full), `jobs_tests.rs` (test list), `gitlab/mod.rs:21-27`, and `148-brief.md` (`grep`).
+  - GitLab `doc/user/project/integrations/webhook_events.md` (Job events section, raw from gitlab.com master, read in the session scratchpad).
