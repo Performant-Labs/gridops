@@ -69,16 +69,30 @@ const unknownPoolPlatform: PoolPlatform = {
       leading: <span aria-hidden="true" className="size-4 shrink-0 rounded-[5px] border border-dashed border-border-strong" />,
     }),
     Destination: UnknownPoolDestination,
+    runnerDestination: () => ({ text: "—", title: "Unknown destination" }),
+    scopeLabel: () => "Unknown",
   },
 };
+
+const hasPoolBindings = (platform: PlatformDescriptor): platform is PoolPlatform => platform.pool !== undefined;
+
+/**
+ * The pool platform of a pool whose scope the server did not send (a runner from a server before
+ * #169): GitHub's, since every pool was GitHub's until GitLab pools, as `platformForDeliveryId`
+ * treats an unprefixed delivery. A scope that is sent but unknown still gets the neutral fallback.
+ */
+const absentScopePoolPlatform: PoolPlatform = hasPoolBindings(githubPlatform) ? githubPlatform : unknownPoolPlatform;
 
 const ownsPoolScope = (platform: PlatformDescriptor, scope: string): platform is PoolPlatform => platform.pool?.scopes.includes(scope) ?? false;
 
 /**
  * The platform that owns a pool's scope, which says where the pool registers its runners. A
  * platform whose pools ride on another's scope (a Bitbucket workspace on a GitHub pool) owns
- * none, so those pools resolve to the scope's owner. An unknown scope gets a neutral fallback.
+ * none, so those pools resolve to the scope's owner. An unknown scope gets a neutral fallback; an
+ * absent one (an older server) is GitHub's.
  */
-export function platformForPool(pool: { scope: string }): PoolPlatform {
-  return platforms.find((platform): platform is PoolPlatform => ownsPoolScope(platform, pool.scope)) ?? unknownPoolPlatform;
+export function platformForPool(pool: { scope?: string | null }): PoolPlatform {
+  const { scope } = pool;
+  if (scope === undefined || scope === null) return absentScopePoolPlatform;
+  return platforms.find((platform): platform is PoolPlatform => ownsPoolScope(platform, scope)) ?? unknownPoolPlatform;
 }

@@ -1,0 +1,189 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#169 spec audit: visual report</title>
+<style>
+body{font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#0f1114;color:#e6e8eb}
+header,main{max-width:1320px;margin:0 auto;padding:0 20px}
+nav{position:sticky;top:0;background:#14171b;border-bottom:1px solid #2a2f36;padding:8px 20px;z-index:5}
+nav a{color:#9ab7ff;margin-right:16px;text-decoration:none}
+.banner{margin:20px 0;padding:18px 22px;border-radius:10px;background:#12301f;border:1px solid #2e7d4f}
+.banner h1{margin:0 0 4px;font-size:34px;color:#7be0a4}.banner p{margin:4px 0}
+h2{border-bottom:1px solid #2a2f36;padding-bottom:6px;margin-top:40px}h3{margin:28px 0 4px}h4{margin:14px 0 4px;color:#aab2bd;font-weight:600}
+table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border:1px solid #2a2f36;padding:6px 10px;text-align:left;vertical-align:top}th{background:#181c21}td.n{text-align:right;font-variant-numeric:tabular-nums}
+.tag{font-size:12px;padding:2px 8px;border-radius:99px;margin-left:6px;vertical-align:middle}.ok{background:#12301f;color:#7be0a4}.chg{background:#3a2c0e;color:#ffcf6b}
+.meta{color:#aab2bd;margin:2px 0 6px}
+.scroll{overflow:auto;max-height:720px;border:1px solid #2a2f36;background:#000}.scroll img{display:block;max-width:none}
+.cmp .stage{position:relative;display:inline-block;max-width:100%;border:1px solid #2a2f36;background:#000;overflow:auto;max-height:720px}
+.cmp .stage img{display:block;max-width:none}.cmp .live{position:absolute;top:0;left:0;clip-path:inset(0 50% 0 0)}
+.ctl{display:block;margin-top:6px;color:#aab2bd}.ctl input{width:min(520px,100%);vertical-align:middle}
+img.crop{width:300px;max-width:100%;border:1px solid #2a2f36}.cap{font-size:12px;color:#8a929c}
+ul li{margin:4px 0}code{background:#1b1f25;padding:1px 5px;border-radius:4px}
+</style></head><body>
+<nav><a href="#verdict">Verdict</a><a href="#diffs">What I see different</a><a href="#vp-360">360</a><a href="#vp-768">768</a><a href="#vp-1280">1280</a><a href="#sections">Per-section table</a><a href="#older">Older server</a><a href="#recs">Recommendations</a></nav>
+<header><div class="banner" id="verdict"><h1>PASS</h1>
+<p>Issue #169, branch <code>claude/gitlab-169-runner-rows</code>, head <code>75b0cab</code>. Live = the branch's frontend; reference = the frontend before #169 (<code>acd2afd</code>), same API binary and same seeded data, Chromium headless, clock frozen.</p>
+<p>Whole-page pixel difference, worst page per width: 360px <b>0.2104%</b> (Runners list), 768px <b>0.0279%</b> (details sheet), 1280px <b>0.0439%</b> (Runners list). Every changed pixel is in a cell the brief says must change.</p></div></header>
+<main>
+<h2 id="diffs">What I see different</h2>
+<ul>
+<li>Runners list and GitLab pool page, 1280px: in the right-hand column, GitLab runners show "Acme / web" (connection name), the GitLab address (cut off with "..." at this column width), or "GitLab" instead of the GitHub account name "acme-labs". A runner on a pool with an unknown scope shows "—".</li>
+<li>Runners list and GitLab pool page, 360px: the same text appears in the line under the runner name.</li>
+<li>768px: no difference on the Runners list or the GitLab pool page, because neither place shows the destination between 768 and 1279px. This is the existing layout, not a regression.</li>
+<li>Overview, 768px and 1280px: Runner pools rows read "GitLab" instead of "Gitlab", and "Unknown" instead of the raw "Quantum" for the unknown scope. "Repository" and "Organization" rows are identical to before. At 360px the text is hidden by the existing layout, so nothing changes.</li>
+<li>Details sheet of a GitLab runner, all widths: the "Repository" row reads "Acme / web" instead of "acme-labs". The row's label is still "Repository" (decided up front in the wireframe, see recommendation 1).</li>
+<li>GitHub rows, the Bitbucket row (it looks exactly like a GitHub row, only its badge says Bitbucket), the pool rows' other columns, the sidebar and the header: no visible difference at any width.</li>
+<li>Old-server check: with the two new API fields removed from the response, the new frontend renders pixel-identical to the old frontend on every Runners list, pool page and unknown-pool page at all three widths (details in "Older server").</li>
+</ul>
+<h2>Pixels different, every comparison</h2>
+<table><tr><th>Page</th><th>Width</th><th>Pixels different</th><th>% of page</th><th>Status</th></tr><tr><td>Runners list</td><td>360</td><td class="n">606</td><td class="n">0.2104%</td><td><a href="#runners-360">DELTA (intended)</a></td></tr><tr><td>Runners list</td><td>768</td><td class="n">0</td><td class="n">0.0000%</td><td><a href="#runners-768">MATCH</a></td></tr><tr><td>Runners list</td><td>1280</td><td class="n">449</td><td class="n">0.0439%</td><td><a href="#runners-1280">DELTA (intended)</a></td></tr><tr><td>GitLab pool detail</td><td>360</td><td class="n">549</td><td class="n">0.1905%</td><td><a href="#pool-gl-360">DELTA (intended)</a></td></tr><tr><td>GitLab pool detail</td><td>768</td><td class="n">0</td><td class="n">0.0000%</td><td><a href="#pool-gl-768">MATCH</a></td></tr><tr><td>GitLab pool detail</td><td>1280</td><td class="n">401</td><td class="n">0.0392%</td><td><a href="#pool-gl-1280">DELTA (intended)</a></td></tr><tr><td>Overview</td><td>360</td><td class="n">0</td><td class="n">0.0000%</td><td><a href="#overview-360">MATCH</a></td></tr><tr><td>Overview</td><td>768</td><td class="n">148</td><td class="n">0.0074%</td><td><a href="#overview-768">DELTA (intended)</a></td></tr><tr><td>Overview</td><td>1280</td><td class="n">150</td><td class="n">0.0059%</td><td><a href="#overview-1280">DELTA (intended)</a></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>360</td><td class="n">219</td><td class="n">0.0761%</td><td><a href="#sheet-gl-360">DELTA (intended)</a></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>768</td><td class="n">219</td><td class="n">0.0279%</td><td><a href="#sheet-gl-768">DELTA (intended)</a></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>1280</td><td class="n">219</td><td class="n">0.0214%</td><td><a href="#sheet-gl-1280">DELTA (intended)</a></td></tr></table>
+
+<section id="vp-360"><h2>360px wide</h2>
+
+  <article id="runners-360"><h3>Runners list (/runners) <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">360x800px. Pixels different: <b>606</b> (0.2104% of the page). Changed area: 197x213+36+282. Line under each runner name (below the md breakpoint).</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-runners-360">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-runners-360-reference-20261121.png" alt="Reference (before #169) runners 360"><img class="live" src="screenshots/s/t3-runners-360-live-20261121.png" alt="Live (#169) runners 360"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-runners-360-diff-20261121.png" alt="Diff runners 360"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-runners-360-composite-20261121.png" alt="Composite runners 360"></div>
+  </article>
+  <article id="pool-gl-360"><h3>GitLab pool detail (/runner-pools/pool-gl), runner rows <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">360x800px. Pixels different: <b>549</b> (0.1905% of the page). Changed area: 197x162+36+302. Line under each runner name on the pool page.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-pool-gl-360">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-pool-gl-360-reference-20261121.png" alt="Reference (before #169) pool-gl 360"><img class="live" src="screenshots/s/t3-pool-gl-360-live-20261121.png" alt="Live (#169) pool-gl 360"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-360-diff-20261121.png" alt="Diff pool-gl 360"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-360-composite-20261121.png" alt="Composite pool-gl 360"></div>
+  </article>
+  <article id="overview-360"><h3>Overview (/), whole page (tall viewport so the Runner pools section is in the capture) <span class="tag ok">MATCH</span></h3>
+  <p class="meta">360x3200px. Pixels different: <b>0</b> (0.0000% of the page). The scope text of the Runner pools rows is hidden below sm (existing rule), so nothing visible can change here.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-overview-360">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-overview-360-reference-20261121.png" alt="Reference (before #169) overview 360"><img class="live" src="screenshots/s/t3-overview-360-live-20261121.png" alt="Live (#169) overview 360"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-overview-360-diff-20261121.png" alt="Diff overview 360"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-overview-360-composite-20261121.png" alt="Composite overview 360"></div>
+  </article>
+  <article id="sheet-gl-360"><h3>Runner details sheet, GitLab runner with a connection name <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">360x800px. Pixels different: <b>219</b> (0.0761% of the page). Changed area: 73x13+173+227. Details sheet, Repository row.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-sheet-gl-360">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-sheet-gl-360-reference-20261121.png" alt="Reference (before #169) sheet-gl 360"><img class="live" src="screenshots/s/t3-sheet-gl-360-live-20261121.png" alt="Live (#169) sheet-gl 360"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-360-diff-20261121.png" alt="Diff sheet-gl 360"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-360-composite-20261121.png" alt="Composite sheet-gl 360"></div>
+  </article>
+</section>
+<section id="vp-768"><h2>768px wide</h2>
+
+  <article id="runners-768"><h3>Runners list (/runners) <span class="tag ok">MATCH</span></h3>
+  <p class="meta">768x1024px. Pixels different: <b>0</b> (0.0000% of the page). Between md and xl neither the narrow line nor the right-hand column shows the destination, so nothing visible can change here.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-runners-768">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-runners-768-reference-20261121.png" alt="Reference (before #169) runners 768"><img class="live" src="screenshots/s/t3-runners-768-live-20261121.png" alt="Live (#169) runners 768"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-runners-768-diff-20261121.png" alt="Diff runners 768"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-runners-768-composite-20261121.png" alt="Composite runners 768"></div>
+  </article>
+  <article id="pool-gl-768"><h3>GitLab pool detail (/runner-pools/pool-gl), runner rows <span class="tag ok">MATCH</span></h3>
+  <p class="meta">768x1024px. Pixels different: <b>0</b> (0.0000% of the page). Same as /runners: no destination shown at this width.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-pool-gl-768">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-pool-gl-768-reference-20261121.png" alt="Reference (before #169) pool-gl 768"><img class="live" src="screenshots/s/t3-pool-gl-768-live-20261121.png" alt="Live (#169) pool-gl 768"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-768-diff-20261121.png" alt="Diff pool-gl 768"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-768-composite-20261121.png" alt="Composite pool-gl 768"></div>
+  </article>
+  <article id="overview-768"><h3>Overview (/), whole page (tall viewport so the Runner pools section is in the capture) <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">768x2600px. Pixels different: <b>148</b> (0.0074% of the page). Changed area: 53x98+371+1514. Scope text in the Runner pools rows.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-overview-768">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-overview-768-reference-20261121.png" alt="Reference (before #169) overview 768"><img class="live" src="screenshots/s/t3-overview-768-live-20261121.png" alt="Live (#169) overview 768"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-overview-768-diff-20261121.png" alt="Diff overview 768"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-overview-768-composite-20261121.png" alt="Composite overview 768"></div>
+  </article>
+  <article id="sheet-gl-768"><h3>Runner details sheet, GitLab runner with a connection name <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">768x1024px. Pixels different: <b>219</b> (0.0279% of the page). Changed area: 73x13+477+227. Details sheet, Repository row.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-sheet-gl-768">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-sheet-gl-768-reference-20261121.png" alt="Reference (before #169) sheet-gl 768"><img class="live" src="screenshots/s/t3-sheet-gl-768-live-20261121.png" alt="Live (#169) sheet-gl 768"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-768-diff-20261121.png" alt="Diff sheet-gl 768"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-768-composite-20261121.png" alt="Composite sheet-gl 768"></div>
+  </article>
+</section>
+<section id="vp-1280"><h2>1280px wide</h2>
+
+  <article id="runners-1280"><h3>Runners list (/runners) <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">1280x800px. Pixels different: <b>449</b> (0.0439% of the page). Changed area: 143x186+1028+257. Right-hand destination column (xl and up).</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-runners-1280">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-runners-1280-reference-20261121.png" alt="Reference (before #169) runners 1280"><img class="live" src="screenshots/s/t3-runners-1280-live-20261121.png" alt="Live (#169) runners 1280"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-runners-1280-diff-20261121.png" alt="Diff runners 1280"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-runners-1280-composite-20261121.png" alt="Composite runners 1280"></div>
+  </article>
+  <article id="pool-gl-1280"><h3>GitLab pool detail (/runner-pools/pool-gl), runner rows <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">1280x800px. Pixels different: <b>401</b> (0.0392% of the page). Changed area: 143x142+732+278. Right-hand destination column on the pool page.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-pool-gl-1280">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-pool-gl-1280-reference-20261121.png" alt="Reference (before #169) pool-gl 1280"><img class="live" src="screenshots/s/t3-pool-gl-1280-live-20261121.png" alt="Live (#169) pool-gl 1280"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-1280-diff-20261121.png" alt="Diff pool-gl 1280"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-pool-gl-1280-composite-20261121.png" alt="Composite pool-gl 1280"></div>
+  </article>
+  <article id="overview-1280"><h3>Overview (/), whole page (tall viewport so the Runner pools section is in the capture) <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">1280x2000px. Pixels different: <b>150</b> (0.0059% of the page). Changed area: 49x98+470+1315. Scope text in the Runner pools rows.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-overview-1280">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-overview-1280-reference-20261121.png" alt="Reference (before #169) overview 1280"><img class="live" src="screenshots/s/t3-overview-1280-live-20261121.png" alt="Live (#169) overview 1280"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-overview-1280-diff-20261121.png" alt="Diff overview 1280"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-overview-1280-composite-20261121.png" alt="Composite overview 1280"></div>
+  </article>
+  <article id="sheet-gl-1280"><h3>Runner details sheet, GitLab runner with a connection name <span class="tag chg">DELTA (intended)</span></h3>
+  <p class="meta">1280x800px. Pixels different: <b>219</b> (0.0214% of the page). Changed area: 73x13+989+227. Details sheet, Repository row.</p>
+  <h4>Wipe slider</h4>
+<div class="cmp" id="c-sheet-gl-1280">
+  <div class="stage"><img class="ref" src="screenshots/s/t3-sheet-gl-1280-reference-20261121.png" alt="Reference (before #169) sheet-gl 1280"><img class="live" src="screenshots/s/t3-sheet-gl-1280-live-20261121.png" alt="Live (#169) sheet-gl 1280"></div>
+  <label class="ctl">Drag: left = live (#169), right = reference (before) <input type="range" min="0" max="100" value="50" aria-label="Wipe between live and reference"></label>
+</div>
+  <h4>Pixel difference (red = changed)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-1280-diff-20261121.png" alt="Diff sheet-gl 1280"></div>
+  <h4>Side by side (left = live #169, right = reference before)</h4><div class="scroll"><img src="screenshots/s/t3-sheet-gl-1280-composite-20261121.png" alt="Composite sheet-gl 1280"></div>
+  </article>
+</section>
+<h2 id="sections">Per-section delta table</h2>
+<table><tr><th>Section</th><th>Width</th><th>Status</th><th>Description</th><th>Crop preview</th></tr><tr><td>Runners list</td><td>360</td><td><span class="tag chg">DELTA (intended)</span></td><td>Five runner rows (the four GitLab ones and the unknown-scope one) now show the GitLab connection name, address, "GitLab" or a dash under the runner name instead of the GitHub account name. The GitHub and Bitbucket rows are untouched.</td><td><img class="crop" src="screenshots/s/t3-runners-delta-360-crop-20261121.png" alt="crop runners 360"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Runners list</td><td>1280</td><td><span class="tag chg">DELTA (intended)</span></td><td>The right-hand destination column changes in the same five rows: "Acme / web", the GitLab address (cut off with "..." at this column width), "GitLab", and "—" for the unknown scope. GitHub and Bitbucket rows are untouched.</td><td><img class="crop" src="screenshots/s/t3-runners-delta-1280-crop-20261121.png" alt="crop runners 1280"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>GitLab pool detail</td><td>360</td><td><span class="tag chg">DELTA (intended)</span></td><td>Same four GitLab rows on the pool page, line under the name.</td><td><img class="crop" src="screenshots/s/t3-pool-gl-delta-360-crop-20261121.png" alt="crop pool-gl 360"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>GitLab pool detail</td><td>1280</td><td><span class="tag chg">DELTA (intended)</span></td><td>Same four GitLab rows on the pool page, right-hand column.</td><td><img class="crop" src="screenshots/s/t3-pool-gl-delta-1280-crop-20261121.png" alt="crop pool-gl 1280"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Overview</td><td>768</td><td><span class="tag chg">DELTA (intended)</span></td><td>Runner pools rows: "Gitlab" now reads "GitLab" (two pools) and "Quantum" (an unknown scope) now reads "Unknown". Repository, Organization and Bitbucket-pool rows are untouched.</td><td><img class="crop" src="screenshots/s/t3-overview-delta-768-crop-20261121.png" alt="crop overview 768"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Overview</td><td>1280</td><td><span class="tag chg">DELTA (intended)</span></td><td>Same three rows as at 768; the other three pool rows are untouched.</td><td><img class="crop" src="screenshots/s/t3-overview-delta-1280-crop-20261121.png" alt="crop overview 1280"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>360</td><td><span class="tag chg">DELTA (intended)</span></td><td>Details sheet of a GitLab runner: the "Repository" row reads "Acme / web" instead of the GitHub account name.</td><td><img class="crop" src="screenshots/s/t3-sheet-gl-delta-360-crop-20261121.png" alt="crop sheet-gl 360"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>768</td><td><span class="tag chg">DELTA (intended)</span></td><td>Same row at 768.</td><td><img class="crop" src="screenshots/s/t3-sheet-gl-delta-768-crop-20261121.png" alt="crop sheet-gl 768"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Runner details sheet, GitLab runner with a connection name</td><td>1280</td><td><span class="tag chg">DELTA (intended)</span></td><td>Same row at 1280.</td><td><img class="crop" src="screenshots/s/t3-sheet-gl-delta-1280-crop-20261121.png" alt="crop sheet-gl 1280"><div class="cap">top: before / middle: live / bottom: diff</div></td></tr><tr><td>Runners list</td><td>768</td><td><span class="tag ok">MATCH</span></td><td>Between md and xl neither the narrow line nor the right-hand column shows the destination, so nothing visible can change here.</td><td>No changed pixels.</td></tr><tr><td>GitLab pool detail</td><td>768</td><td><span class="tag ok">MATCH</span></td><td>Same as /runners: no destination shown at this width.</td><td>No changed pixels.</td></tr><tr><td>Overview</td><td>360</td><td><span class="tag ok">MATCH</span></td><td>The scope text of the Runner pools rows is hidden below sm (existing rule), so nothing visible can change here.</td><td>No changed pixels.</td></tr></table>
+<h2 id="older">Older server (no <code>poolScope</code>, no <code>gitlabConnectionName</code>)</h2>
+<p>A live server can no longer omit the fields, so the new frontend was loaded with the two fields stripped from the <code>/api/v1/runners</code> responses in the browser (Playwright route), and compared with the old frontend:</p>
+<table><tr><th>Page</th><th>360</th><th>768</th><th>1280</th></tr>
+<tr><td>Runners list</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+<tr><td>GitLab pool page</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+<tr><td>GitHub organization pool page</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+<tr><td>Unknown-scope pool page</td><td class="n">0</td><td class="n">0</td><td class="n">0</td></tr>
+<tr><td>Details sheet (GitLab runner with name)</td><td class="n">0</td><td class="n">0.03 (1/255 on one sub-pixel)</td><td class="n">0.03 (1/255 on one sub-pixel)</td></tr>
+<tr><td>Details sheet (GitLab runner, no connection)</td><td class="n">0</td><td class="n">0.06 (1/255)</td><td class="n">0</td></tr></table>
+<p>All eight runners show the installation login ("acme-labs" or "acme-labs/web") in all three places, exactly as before #169. The sub-pixel entries are one-level rounding in the sheet's fade, not a change.</p>
+<h2 id="recs">Recommendations (verdict is PASS, so none blocks the commit)</h2>
+<ol>
+<li><b>Details sheet label.</b> A GitLab runner's row still says "Repository" over a connection name or address. Branch suggestion: <code>claude/runner-details-destination-label</code>. Problem: the label is GitHub's word. Decision needed from O: rename the row to "Destination" for every platform (changes GitHub output, so it needs the operator's call) or add a label to the hook.</li>
+<li><b>Narrow right-hand column.</b> At 1280px two GitLab addresses sharing a host both read "https://gitlab.example.c..." in the 144px column; the hover title holds the full text. Branch suggestion: <code>claude/runner-row-destination-width</code>. Decision needed: leave as is (the brief fixed the text as <code>baseUrl/scopePath</code>) or show the path first.</li>
+</ol>
+</main>
+<script>
+document.querySelectorAll('.cmp').forEach(function(c){var live=c.querySelector('.live'),r=c.querySelector('input');
+function set(){live.style.clipPath='inset(0 '+(100-r.value)+'% 0 0)';}r.addEventListener('input',set);set();});
+</script></body></html>

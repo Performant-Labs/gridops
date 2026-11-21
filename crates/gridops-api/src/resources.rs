@@ -1326,7 +1326,8 @@ pub async fn runner_pools(
           repo.full_name AS repository,
           (SELECT COUNT(*) FROM runner_pool_repositories membership WHERE membership.pool_id=p.id) AS repository_count,
           (SELECT COUNT(*) FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id) AS account_count,
-          COUNT(CASE WHEN r.deleted_at IS NULL THEN 1 END) AS total_runners,
+          -- `r.id IS NOT NULL`: a pool with no runners still joins one all-NULL row, which is not a runner.
+          COUNT(CASE WHEN r.id IS NOT NULL AND r.deleted_at IS NULL THEN 1 END) AS total_runners,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.status IN ('online','idle','busy') THEN 1 END) AS online_runners,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.busy=1 THEN 1 END) AS busy_runners,
           COUNT(CASE WHEN r.deleted_at IS NULL AND r.status='failed' THEN 1 END) AS failed_runners,
@@ -1949,8 +1950,8 @@ pub async fn runners(
     let rows = sqlx::query(
         r#"SELECT r.id,r.name,r.provider,r.ci_platform,r.status,r.busy,r.ephemeral,r.os,r.architecture,r.container_id,
           r.github_runner_id,r.bitbucket_runner_uuid,r.gitlab_runner_id,r.failure_reason,r.registered_at,r.last_heartbeat_at,r.created_at,
-          gc.base_url AS gitlab_base_url,gc.scope_path AS gitlab_scope_path,
-          p.id AS pool_id,p.name AS pool_name,p.paused AS pool_paused,
+          gc.name AS gitlab_connection_name,gc.base_url AS gitlab_base_url,gc.scope_path AS gitlab_scope_path,
+          p.id AS pool_id,p.name AS pool_name,p.paused AS pool_paused,p.scope AS pool_scope,
           COALESCE(target_installation.account_login,primary_installation.account_login) AS account_login,
           CASE WHEN NOT EXISTS (
             SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id
@@ -1997,10 +1998,14 @@ pub async fn runners(
         "gitlabRunnerId": row.try_get::<Option<i64>,_>("gitlab_runner_id").ok().flatten(),
         "gitlabBaseUrl": row.try_get::<Option<String>,_>("gitlab_base_url").ok().flatten(),
         "gitlabScopePath": row.try_get::<Option<String>,_>("gitlab_scope_path").ok().flatten(),
+        // The runner's destination when its pool is a GitLab pool; null for a GitHub or Bitbucket runner or a deleted connection.
+        "gitlabConnectionName": row.try_get::<Option<String>,_>("gitlab_connection_name").ok().flatten(),
         "failureReason": row.try_get::<Option<String>,_>("failure_reason").ok().flatten(),
         "registeredAt": iso_optional(row.try_get::<Option<i64>,_>("registered_at").ok().flatten()),
         "lastHeartbeatAt": iso_optional(row.try_get::<Option<i64>,_>("last_heartbeat_at").ok().flatten()), "createdAt": iso(row.get::<i64,_>("created_at")),
         "poolId": row.get::<String,_>("pool_id"), "poolName": row.get::<String,_>("pool_name"), "poolPaused": row.get::<bool,_>("pool_paused"),
+        // The scope of the runner's pool: which platform's registry entry says where the runner registers.
+        "poolScope": row.get::<String,_>("pool_scope"),
         "accountLogin": row.get::<String,_>("account_login"), "repository": row.try_get::<Option<String>,_>("repository").ok().flatten(),
         "currentJobName": row.try_get::<Option<String>,_>("current_job_name").ok().flatten(), "currentRunId": row.try_get::<Option<i64>,_>("current_run_id").ok().flatten(),
         "machine": machine_json(row),

@@ -57,6 +57,9 @@ describe("shared rows do not branch on a platform", () => {
     // #159: the pool list and the pool detail take each pool's destination from the registry.
     "src/routes/_app/runner-pools.index.tsx",
     "src/routes/_app/runner-pools.$poolId.index.tsx",
+    // #169: the runner row and the Overview's pool rows take the pool's platform from the registry.
+    "src/features/runners/runner-row.tsx",
+    "src/routes/_app/index.tsx",
   ];
   const BRANCHING = [
     /["'](github|bitbucket|gitlab)(\.[a-z-]+)?["']/, // a platform or kind id
@@ -65,10 +68,15 @@ describe("shared rows do not branch on a platform", () => {
     /bitbucketConnectionIds\.length/,
     /runUntagged|gitlabConnectionIds/, // GitLab pool fields travel inside the descriptor's partials only
     /\b(githubAvatar|repositoryCount|bitbucketConnections|gitlabConnections)\b/, // #159: a GitHub avatar helper or a platform-named pool field
+    /["'](repository|organization)["']/, // #169: a GitHub scope id (the registry owns the absent-scope default)
+    /\b(runner|pool)\.(repository|accountLogin)\b/, // #169: GitHub's destination fields, which only the descriptors read
   ];
+  /** #169: a runner's pool scope is read only to hand it to the registry. */
+  const scopeOutsideRegistry = (line: string) => /\bpoolScope\b/.test(line) && !/\bplatformForPool\(/.test(line);
 
   it.each(SHARED)("%s compares against no platform id, kind id, scope or platform-named field", (path) => {
-    const lines = read(path).split("\n").flatMap((line, index) => BRANCHING.some((pattern) => pattern.test(line)) ? [`${index + 1}: ${line.trim()}`] : []);
+    const lines = read(path).split("\n").flatMap((line, index) =>
+      BRANCHING.some((pattern) => pattern.test(line)) || scopeOutsideRegistry(line) ? [`${index + 1}: ${line.trim()}`] : []);
     expect(lines).toEqual([]);
   });
 
@@ -77,6 +85,15 @@ describe("shared rows do not branch on a platform", () => {
     "src/routes/_app/runner-pools.$poolId.index.tsx",
   ])("%s works out the pool's destination through the registry (#159)", (path) => {
     expect(read(path)).toMatch(/from "~\/features\/platform-connections\/registry"/);
+  });
+
+  it.each([
+    "src/features/runners/runner-row.tsx",
+    "src/routes/_app/index.tsx",
+  ])("%s resolves the pool's platform through the registry's platformForPool (#169)", (path) => {
+    const source = read(path);
+    expect(source).toMatch(/import \{[^}]*\bplatformForPool\b[^}]*\} from "~\/features\/platform-connections\/registry"/);
+    expect(source).toMatch(/\bplatformForPool\(/);
   });
 
   it("the Tart base VM row and the plan preview carry no platform text or prop", () => {
