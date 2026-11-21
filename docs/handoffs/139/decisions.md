@@ -192,3 +192,16 @@
   - `cargo test --workspace --no-fail-fast`: 878 passed, 12 failed. The 12 are environmental and reproduce on the pre-change commit 2aa6002 in a throwaway worktree.
   - `cargo fmt --all -- --check`: clean.
   - Facts relied on in unchanged code: `docs/handoffs/139/evidence.md`.
+
+## T (Phase 7, verify GREEN + Tier 2): 2026-11-20T18:10:00-08:00
+- **Decided:**
+  - Verdict PASS. All 26 lifecycle tests, 2 D11 tests, 3 D6/image tests and the `list_runners` fake test are green; no test needed repair and F touched none.
+  - Did not prune any test: the manager and fleet suites cover distinct code paths.
+- **Assumed:**
+  - The 12 workspace failures are environmental (Darwin host, `SUN_LEN`). I re-ran a sample of two and F ran all 12 on the pre-change commit.
+- **Hedged:**
+  - Workspace-wide clippy is not clean because of 17 findings in untouched files; I checked only that none sit in a changed file.
+- **Evidence:**
+  - `cargo test -p gridops-reconciler`: 94 passed. `cargo test -p gridops-core`: all ok (264 lib). `cargo fmt --check`: clean.
+  - Mutation (`deregister` made a no-op): `a_failed_manager_start_deregisters...` failed at `gitlab_lifecycle_tests.rs:584`; file restored.
+  - `retry.rs:269-270` and `:113` match evidence.md verbatim.
