@@ -230,3 +230,10 @@
 - **Evidence:**
   - A mutation of the busy-clear arm (`gitlab.rs:367`) failed four tests. The file was restored with `git checkout`; the 60 `gitlab_tests` pass again.
   - `cargo fmt --check` is clean, and clippy shows no warning in touched files.
+
+## A (Phase 7, anti-duplication gate)
+
+- **Decided:** verdict PASS. F extended `receive`/`retry` in `webhooks.rs` and used D18's `gridops-core::gitlab::jobs` writer unchanged (blobs equal to `origin/master`); no parallel path.
+- **Assumed:** the `credentials` visibility change outside the brief's list is acceptable, as it follows A's round-5 W2 option and changes visibility only.
+- **Hedged:** two `warn`s, no action. The private `external_id` helper in `gitlab.rs` has a different input from the one in `jobs.rs`. The inline `runner_events` insert matches existing writers.
+- **Evidence:** `docs/handoffs/140/handoff-A-dup.md`.
