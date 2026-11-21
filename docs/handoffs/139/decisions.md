@@ -70,3 +70,36 @@
     - `crates/gridops-core/src/fleet/`: `placement.rs` (`placements`, `reported_gone`, `abandon_unstarted`), `registry/commands.rs` (`apply_to_placement`), `failure.rs` (`fail_placement`), `retry.rs` (`retry_failed_start`), `start_health.rs` (`is_start_failure`), `targets.rs` (`pool_docker_image`, `save_pool_fleet`), `service.rs` (`ensure_target_identity_for_pool`);
     - `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`), `crates/gridops-core/src/models.rs` (`selected_image`, the pool image rule), `crates/gridops-core/src/config.rs` (`base_url`), `crates/gridops-core/src/gitlab/mod.rs` (`GitLabError`, `GitLabApi`);
     - `migrations/0044_clear_unused_provider_images.sql`.
+
+## A (Phase 3, up-front plan review, round 4 on the round-3-amended brief, fresh run): 2026-11-20T16:21:55-08:00
+- **Decided:** BLOCK, with 1 block finding and 3 warn findings (see `handoff-A.md`).
+  - Round-3 blocks 1 and 2 and warnings 3-5 are resolved:
+    - The count and the reset happen on the guarded one-time transition, with a fresh `Pool` for the write.
+    - The manager-path image rule is Docker-only, so Tart starts pass `tart_image` unchanged.
+    - `clear_provision_failures` sits next to `record_provision_failure`.
+    - The fleet reset is exit-only.
+    - Every fleet `create_runner` failure counts once.
+  - New block:
+    - (1) The manager path counts or resets in `reconcile_pool`'s status loop (`main.rs:794-826`), but the rest of the pass reads the stale `pool`: `retry_deferred` at `:867`, `PassOutcome::for_pool` at `:1026`.
+      - The pass that counts a refusal starts a replacement straight away, skipping the 30 s and 60 s backoffs, and starts through the circuit it just opened at the threshold.
+      - The end-of-pass state can overwrite `backoff` or `blocked`.
+      - Both existing production call sites of `record_provision_failure` end the pass (`:942-944`, `:2503`→`:949`), and the only mid-pass circuit change is re-read at `:1028-1041`.
+      - Fix: a `load_pool` that shares `load_pools`'s SELECT, and a reload after the status loop.
+  - Warnings:
+    - A GitLab probe after the cool-down starts `desired - active` runners, not one, because a POST success neither resets nor aborts the loop.
+    - On the fleet path, the rollback deletes the GitLab runner inline after `gitlab_runner_id` was stored, so `delete_runner` deletes it again via the failed loop. The Bitbucket arm stores the uuid only after POST succeeds.
+    - Brief-gate W-3's "returns without error for that pool" could be read as swallowing `StartOutcome::Failed`, which would diverge from the Bitbucket arm.
+- **Assumed:**
+  - The pass order is `fleet::tick`, then `load_pools`, then each `reconcile_pool` (`main.rs:526`, `:566`, `:595`), so fleet-path counts are visible to that pass's pool load.
+  - The status loop is where the brief's "exited→failed mapping" lives. The brief names it so ("`reconcile_pool`'s exited→failed mapping", round-3 "previous status").
+- **Hedged:**
+  - Finding 1 is a block, not a warning: it bypasses the backoff for the exact failure this feature adds, Done-when 10's count-only tests would not catch it, and it is the read half of round-3's stale-pool point. The fix is one brief bullet.
+  - Warning 2 accepts recording the multi-start probe as deliberate.
+  - Warning 3 offers two equivalent fixes.
+- **Evidence:**
+  - Read: the brief (`git diff de7c4f4 HEAD`, plus the full file), the round-3 `handoff-A.md` and this journal.
+  - Source:
+    - `crates/gridops-reconciler/src/fleet.rs` (whole file);
+    - `crates/gridops-reconciler/src/main.rs`: `reconcile` `:440-640`, `load_pools`, `reconcile_pool` `:786-1057`, `PassOutcome`, `pool_state`, `finish_pool_pass`, `provision`, the end of `provision_on_host` and `start_admitted_runner` `:2440-2530`, `:2640-2781`, `delete_runner`, `bitbucket_registration`, `deregister_bitbucket_runner`, `remove_manager_container`, `set_pool_wait_reason`, `record_provision_failure`, `provision_failure_policy`, `maybe_sync_github`, `retry_github_runner_cleanup` (head), `runners()`, `Pool::retry_deferred`;
+    - `crates/gridops-core/src/fleet/start_health.rs` (`is_start_failure`), `crates/gridops-core/src/fleet/retry.rs` (`retry_failed_start`, head), `crates/gridops-core/src/provisioning.rs` (`for_selected_provider`);
+    - `migrations/0047_gitlab.sql` (`:1-60`, `installation_id` grep), `migrations/0001_initial.sql` (`runner_pools.installation_id NOT NULL`).
