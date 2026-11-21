@@ -276,15 +276,32 @@ fn refusal_code(error: &GitLabError) -> String {
     }
 }
 
+/// What an operator may be told about why GitLab refused a request: the
+/// fixed text of each `GitLabError` variant (a missing scope's name is
+/// checked to look like one by the client), but never an `Upstream` error's
+/// detail, which is free-form and stays in the log, as the API's
+/// `gitlab_message` keeps it out of its responses.
+fn client_safe_reason(error: &GitLabError) -> String {
+    match error {
+        GitLabError::Upstream(_) => "GitLab request failed".to_owned(),
+        GitLabError::Unauthorized
+        | GitLabError::MissingScope(_)
+        | GitLabError::MissingRole
+        | GitLabError::NotFound
+        | GitLabError::RateLimited { .. } => error.to_string(),
+    }
+}
+
 /// What an operator is told when GitLab refused to delete one of the
-/// connection's runners: the connection, the GitLab runner, `GitLabError`'s
-/// client-safe text (it never carries a response body or a token), and,
-/// for a token problem only, what to give the connection.
+/// connection's runners: the connection, the GitLab runner, the
+/// client-safe reason (`client_safe_reason`: no upstream detail, no token),
+/// and, for a token problem only, what to give the connection.
 fn refused_deletion_message(
     connection_name: &str,
     gitlab_runner_id: i64,
     error: &GitLabError,
 ) -> String {
+    let reason = client_safe_reason(error);
     let remedy = match error {
         GitLabError::MissingScope(scope) => format!(
             "Give the connection a token with {scope} (or api); the orphan sweep retries it."
@@ -293,7 +310,7 @@ fn refused_deletion_message(
         _ => "The orphan sweep retries it.".to_owned(),
     };
     format!(
-        "GitLab could not delete runner {gitlab_runner_id} of connection {connection_name}: {error}. {remedy}"
+        "GitLab could not delete runner {gitlab_runner_id} of connection {connection_name}: {reason}. {remedy}"
     )
 }
 
@@ -854,6 +871,9 @@ async fn sweep_connection(
 /// changes", because a delete that succeeds writes nothing: a token fixed and
 /// then broken the same way again would otherwise never warn. The per-runner
 /// warnings `deregister` writes are not deduplicated.
+///
+/// One pool's failure is logged and the next pool is still told, so a row
+/// that cannot be written never suppresses the other pools' warnings.
 async fn warn_linked_pools(
     app: &Reconciler,
     connection: &GitlabConnection,
@@ -870,24 +890,51 @@ async fn warn_linked_pools(
     .await?;
     let since = now_millis().saturating_sub(SWEEP_WARNING_WINDOW_MS);
     for pool_id in pools {
-        let recorded = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS(SELECT 1 FROM runner_events
-              WHERE pool_id=? AND event=? AND runner_id IS NULL AND created_at>?
-                AND json_extract(metadata,'$.connectionId')=?
-                AND json_extract(metadata,'$.reason')=?)",
+        if let Err(event_error) = warn_pool(
+            app,
+            &pool_id,
+            connection,
+            gitlab_runner_id,
+            error,
+            &reason,
+            since,
         )
-        .bind(&pool_id)
-        .bind(DELETION_REFUSED_EVENT)
-        .bind(since)
-        .bind(&connection.id)
-        .bind(&reason)
-        .fetch_one(&app.database)
-        .await?
-            != 0;
-        if !recorded {
-            record_refused_deletion(app, &pool_id, None, connection, gitlab_runner_id, error)
-                .await?;
+        .await
+        {
+            tracing::warn!(pool_id = %pool_id, connection = %connection.name, gitlab_runner_id, error = ?event_error, "could not record the refused GitLab runner deletion in the pool's events");
         }
+    }
+    Ok(())
+}
+
+/// `warn_linked_pools` for pool `pool_id`: records the sweep's refused
+/// delete unless the pool already has a warning for the connection and
+/// reason code `reason` written after `since`.
+async fn warn_pool(
+    app: &Reconciler,
+    pool_id: &str,
+    connection: &GitlabConnection,
+    gitlab_runner_id: i64,
+    error: &GitLabError,
+    reason: &str,
+    since: i64,
+) -> Result<()> {
+    let recorded = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM runner_events
+          WHERE pool_id=? AND event=? AND runner_id IS NULL AND created_at>?
+            AND json_extract(metadata,'$.connectionId')=?
+            AND json_extract(metadata,'$.reason')=?)",
+    )
+    .bind(pool_id)
+    .bind(DELETION_REFUSED_EVENT)
+    .bind(since)
+    .bind(&connection.id)
+    .bind(reason)
+    .fetch_one(&app.database)
+    .await?
+        != 0;
+    if !recorded {
+        record_refused_deletion(app, pool_id, None, connection, gitlab_runner_id, error).await?;
     }
     Ok(())
 }

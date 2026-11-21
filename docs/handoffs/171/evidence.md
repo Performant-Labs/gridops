@@ -7,7 +7,7 @@
   **Verbatim excerpt:**
   > const tone = event.level === "error" ? "danger" : event.level === "warning" ? "warning" : "success";
 
-- **Fact:** The reason text in the event message is `GitLabError`'s `Display`. That text carries only a fixed description, a scope name or a status, never a response body or a token. The message for `Upstream` starts "GitLab request failed", and the message for `MissingScope` names the scope.
+- **Fact (corrected in the Phase 6 rework for diff-gate B-1):** `GitLabError::Upstream` carries a free-form string, so the event message no longer uses `GitLabError`'s `Display` for it. `client_safe_reason` (in the diff) writes plain "GitLab request failed" for `Upstream` and the fixed `Display` text for every other variant. The detail stays in the returned error, which callers only log.
   **Source:** `crates/gridops-core/src/gitlab/mod.rs:223-238`
   **Verbatim excerpt:**
   > pub enum GitLabError {
@@ -25,6 +25,29 @@
   >     RateLimited { retry_after: Option<Duration> },
   >     #[error("GitLab request failed: {0}")]
   >     Upstream(String),
+  > }
+
+- **Fact:** The one variant whose text comes from a GitLab response, `MissingScope`, can only hold lowercase letters, `_` and spaces (at most 64 bytes); anything else is reported as the default scope. A response body never reaches the event message.
+  **Source:** `crates/gridops-core/src/gitlab/http.rs:502-520`
+  **Verbatim excerpt:**
+  > fn missing_scope(body: &[u8]) -> Option<String> {
+  >     let body: Value = serde_json::from_slice(body).ok()?;
+  >     if body.get("error").and_then(Value::as_str) != Some("insufficient_scope") {
+  >         return None;
+  >     }
+  >     let scope = body
+  >         .get("scope")
+  >         .and_then(Value::as_str)
+  >         .map(str::trim)
+  >         .filter(|scope| {
+  >             !scope.is_empty()
+  >                 && scope.len() <= 64
+  >                 && scope
+  >                     .bytes()
+  >                     .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte == b' ')
+  >         })
+  >         .unwrap_or(DEFAULT_MISSING_SCOPE);
+  >     Some(scope.to_owned())
   > }
 
 - **Fact:** Create, token replacement and Verify all call `verify_access`. Tightening its scope loop therefore makes all three refuse a token without `manage_runner`.
@@ -61,3 +84,57 @@
   **Source:** `crates/gridops-reconciler/src/main.rs:3988`
   **Verbatim excerpt:**
   > .bind(now_millis())
+
+## F (Phase 6 rework, diff-gate round 1)
+
+- **Fact (NV-2):** The fake does not model token scopes. Its `verify_access` checks only that the project or group was seeded, so `fake.rs` needs no change to stay consistent with the HTTP client's scope rule.
+  **Source:** `crates/gridops-core/src/gitlab/fake.rs:316-332`
+  **Verbatim excerpt:**
+  >     async fn verify_access(
+  >         &self,
+  >         credentials: &GitLabCredentials,
+  >         scope: &Scope,
+  >     ) -> Result<(), GitLabError> {
+  >         self.call(credentials, FakeMethod::VerifyAccess, |instance| {
+  >             if instance
+  >                 .scopes
+  >                 .iter()
+  >                 .any(|seeded| seeded.kind() == scope.kind() && seeded.id() == scope.id())
+  >             {
+  >                 Ok(())
+  >             } else {
+  >                 Err(GitLabError::NotFound)
+  >             }
+  >         })
+  >     }
+
+- **Fact (NV-3):** The table-driven create-refusal test runs all seven cases, including the new "missing manage_runner" case, and only then asserts that no connection row and no runtime secret were stored. The stored-nothing assertion therefore covers the seventh case.
+  **Source:** `crates/gridops-api/src/resources/gitlab_tests.rs:768` and `:799-806`
+  **Verbatim excerpt:**
+  >     for (case, failure, scope_path, named) in cases {
+  >
+  >     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gitlab_connections")
+  >         .fetch_one(&h.database)
+  >         .await?;
+  >     let secrets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runtime_secrets")
+  >         .fetch_one(&h.database)
+  >         .await?;
+  >     assert_eq!((rows, secrets), (0, 0), "a refused create stores nothing");
+
+- **Fact (NV-1):** The failing `release_preflight` test asserts on a "Linux" fixture machine and fails at the pre-branch commit `7164fda` too, with no #171 code present. Run on this Mac: `cargo test -p gridops-api --test fleet_http release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` in a detached worktree at `7164fda` -> `test result: FAILED. 0 passed; 1 failed` (panic at `release_preflight.rs:234:5`).
+  **Source:** `crates/gridops-api/tests/fleet_http/release_preflight.rs:220-224`
+  **Verbatim excerpt:**
+  > async fn the_release_preflight_fails_early_without_a_macos_arm64_machine() -> Result<()> {
+  >     let f = Fixture::new().await?;
+  >     seed_pool(&f).await?;
+  >     // A healthy fleet of one Linux machine: no Mac for the macOS agent build.
+  >     active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+
+- **Fact (NV-4):** Outside `docs/handoffs/` and the OpenAPI file, the only GitLab scope lists in `docs/`, `README.md` and `CHANGELOG.md` are the three-row table in `docs/gitlab-runners.md`, its runtime-warning paragraph and the new CHANGELOG entry. None still lists two scopes. Output of `grep -rn -E "create_runner|manage_runner|read_api" docs README.md CHANGELOG.md | grep -v docs/handoffs/ | grep -v openapi`:
+  **Source:** `docs/gitlab-runners.md:23-25`
+  **Verbatim excerpt:**
+  > | `create_runner` | Creating each runner (`POST /user/runners`). |
+  > | `manage_runner` | Deleting each runner when it leaves service, and the orphan sweep (`DELETE /runners/:id`). GitLab 17.1 or later. |
+  > | `read_api` | Resolving the project or group, the pending-jobs poll, reading single jobs, listing the scope's runners for the sweep, and checking the token. |
+  >
+  > (other hits: `docs/gitlab-runners.md:158` "refuses it (for example, the token lacks `manage_runner`), the runner's pool"; `CHANGELOG.md:35` and `:37`, the Unreleased "Fixed" entry)

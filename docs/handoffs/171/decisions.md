@@ -73,3 +73,19 @@
   - I did not mutate production code to re-prove each test; I relied on the Phase-4 RED run plus the exact-count assertions in the sweep test.
 - **Evidence:**
   - reconciler 119 passed; core gitlab:: 36 passed; vitest 603 passed; clippy 1.98.1 and fmt clean; gridops-api all targets ok except the one named test.
+
+## Phase 6 Rework, diff gate round 1 (F) - 2026-11-21
+- **Decided:**
+  - The refused-deletion event message uses `client_safe_reason`: "GitLab request failed" for `Upstream`, and fixed `Display` text for every other variant. The match is exhaustive. The detail stays in the logs only (B-1).
+  - `warn_linked_pools` now logs each pool's failure and continues, through `warn_pool` (W-1).
+  - NIT-2 declined: the help text matches the approved wireframe verbatim.
+  - W-2 is intended: there is an hourly cap per pool, connection and reason.
+- **Assumed:**
+  - B-2 is satisfied by Phase 9 (U), which runs after the diff gate. It needs no production change, and F supplies the seed SQL in the handoff.
+- **Hedged:**
+  - The `Upstream` detail in the pre-existing "Pool reconciliation failed" event (`main.rs:677-681`) is left alone as out of scope and is flagged in Known issues.
+- **Evidence:**
+  - `cargo test -p gridops-reconciler`: 119 passed.
+  - `cargo fmt --all --check`: clean.
+  - clippy 1.98.1 on gridops-reconciler (`--all-targets -D warnings`): clean.
+  - Preflight test at `7164fda`: FAILED (0/1), which confirms that failure predates this branch.
