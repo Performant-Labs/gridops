@@ -150,6 +150,13 @@ The original "Done when" list stands. Tests must **also** cover each behaviour t
 - `docs/openapi/gridops-v1.json` (`POST /api/v1/webhooks/gitlab` path entry)
 - `src/routes/_app/webhooks.tsx` (`:100-166`)
 - GitLab webhooks documentation, `https://docs.gitlab.com/user/project/integrations/webhooks/` (header table)
+- `docs/handoffs/140/handoff-A.md` (round 3, in full)
+- `crates/gridops-core/src/gitlab/fake.rs` (in full, for brief-gate NV-3)
+- `crates/gridops-api/src/webhooks.rs` (`:100-200`, `retry`)
+- `crates/gridops-api/src/fleet/openapi.rs` (`:280-320`)
+- `migrations/0001_initial.sql` (`:200-218`, `webhook_deliveries`)
+- `docs/fleet-api.md` (webhook rows, `:128-177`)
+- `gitlab-148-scaling-71c514/docs/handoffs/148-brief.md` (sibling worktree, `:1-60`)
 
 ## Orchestrator decisions (brief gate round 2 warnings)
 
@@ -186,6 +193,7 @@ These resolve the round-2 Phase 3 findings in `docs/handoffs/140/handoff-A.md`. 
 - **`docs/fleet-api.md`:** one "Who may call what" row for `POST /api/v1/webhooks/gitlab` (`— | — | — | ignored`), after the GitHub webhook rows, so `access::tests::the_documented_matrix_lists_exactly_the_registered_routes` passes.
 - **`docs/openapi/gridops-v1.json`:** remove only the sentence "Not served yet: implemented by #140." from this path's description. Nothing else in the spec changes.
 - **`crates/gridops-api/src/fleet/openapi.rs`:** the #140 entry of `the_gitlab_operations_are_specified_before_they_are_served` stops asserting that prefix. #138 edits the same function and table, and whichever lands second reconciles.
+- **Exception to "Do not change shared contract types" (brief review, B-1).** The OpenAPI sentence removal above is the one permitted edit to `docs/openapi/gridops-v1.json`. It is an exception to the Clarifications rule "Do not change shared contract types (... the OpenAPI spec)", and that rule still applies to every other part of the spec. Removing the "Not served yet" marker is not a contract change, so it does not trigger "stop and report". The path's parameters, responses, security and the rest of its description stay as NV-3 records them. A spec change beyond this sentence still means stop and report.
 
 ### Warnings settled
 
@@ -232,3 +240,51 @@ Both rules live in the same Rust source as the tier table.
 - **Where the rule lives (W-2): no shared helper in wave 1.** #140 keeps its tier table and guarded write in `webhooks/gitlab.rs`, and #148 keeps its own. The two must match #136's one status rule, and that rule is the specification. Moving both into a `gridops-core` helper is the follow-up already recorded on #136, done after both merge. #140 adds nothing to `gridops-core`. Recorded on #136.
 - **Busy match (W-3):** both writers match the busy runner by `gitlab_runner_id` among live (`deleted_at IS NULL`) `ci_platform = 'gitlab'` runners whose connection has the same `base_url` as the job's connection. Recorded on #136.
 - **Pins (W-4):** `runner_events.message` = `"{build_name} · pipeline {pipeline_id}"` (`build_name` from the payload, `Job` if absent). The retry arm strips the `gitlab:` prefix and splits once at the next `:` to get `<connection_id>` and `<key>`.
+
+## Brief gate additions (after architecture review round 3)
+
+These add to the sections above. They do not remove or weaken anything in them. The B-1 resolution is the exception bullet under round 2, "Block 3: route side effects".
+
+### Verified excerpts (NV-3 to NV-5)
+
+**NV-3, `crates/gridops-core/src/gitlab/fake.rs`.** `FakeMethod` (`:21`) has one variant per `GitLabApi` method, including `Job` (`:24`), documented as "for [`FakeGitLab::fail_next`] and the call log". `fail_next` (`:120`):
+
+    pub fn fail_next(&self, base_url: &Url, method: FakeMethod, error: GitLabError) {
+
+It queues a one-shot failure for the next `method` call on `base_url`, whatever the token; "a failed call has no other effect". `calls` (`:143`):
+
+    pub fn calls(&self) -> Vec<FakeCall> {
+
+It returns "Every call made on any clone, in invocation order, failed ones included". Each `FakeCall` is `{ base_url: Url, method: FakeMethod }`, and the access token is never recorded. All fake state is keyed by `base_url` alone, so tests that need two connections isolated (for example the retry-connection test) give them different base URLs.
+
+**NV-4, `crates/gridops-api/src/webhooks.rs` `retry`.** The unverified-row branch (`:134-138`) runs before any dispatch:
+
+    if !delivery.get::<bool, _>("signature_valid") {
+        return Err(ApiError::BadRequest(
+            "Only verified webhook payloads can be retried.".into(),
+        ));
+    }
+
+A `gitlab:unmatched:<key>` row is recorded with `signature_valid` false, so this existing branch refuses it before the GitLab arm runs. The GitLab arm adds no separate refusal. The UI shows the retry button only when `delivery.canRetry && delivery.status === "failed" && delivery.signatureValid` (`src/routes/_app/webhooks.tsx:122`), so it is hidden for rejected GitLab rows.
+
+**NV-5, dependencies and the delivery id.** `crates/gridops-api/Cargo.toml:26` has `subtle.workspace = true` under `[dependencies]`, so the constant-time compare needs no new dependency. `webhook_deliveries.id` is `` `id` text PRIMARY KEY NOT NULL `` (`migrations/0001_initial.sql:203`). The column has no length or charset limit, so `gitlab:<connection_id>:<key>` fits. Only `0001_initial.sql` and `0034_retention_indexes.sql` (an index on `received_at`) touch the table.
+
+### Done when (added, W-2)
+
+- **Malformed body.** A request with valid headers whose body is not a JSON object (both a non-JSON body and a JSON non-object such as `[]`) is answered `400` with an `ApiErrorBody`, matching the OpenAPI `400` "The payload is not a JSON object", and writes nothing to `gitlab_jobs` or `runners`.
+
+### Delivery-id header order: code comment (W-1)
+
+The order in "Orchestrator decisions" stands unchanged. The code that reads the headers carries a comment saying that GitLab's docs name `webhook-id` as preferred over `Idempotency-Key`, that `Idempotency-Key` comes first because it is documented as constant across retries, and that the fallbacks matter if a future GitLab drops `Idempotency-Key`.
+
+### Recovery of a failed `pending` fetch (W-4)
+
+A `pending` delivery whose tag fetch fails leaves no `gitlab_jobs` row, and a later duplicate is acknowledged without reprocessing. The job is still recovered without a human retry: #148's poll inserts "any job missing from `gitlab_jobs`" that GitLab still lists as pending, with `tag_list` from `Job.tag_list` (`gitlab-148-scaling-71c514/docs/handoffs/148-brief.md:36`, at `c48f951`). The GitLab `retry` arm is the second path. #140 needs no change for this.
+
+### Retry id split (NIT-1)
+
+"Splits once at the next `:`" means the first `:` after the `gitlab:` prefix. `<connection_id>` (or `unmatched`) is everything before it, and `<key>` is everything after it, including any further colons. A `<key>` that contains `:` therefore round-trips unchanged. The code comments this, and a unit test covers a key containing `:`.
+
+### Outside #140 (added, NIT-2)
+
+When one delivery matches two candidate connections, it produces two `webhook_deliveries` rows (`gitlab:<connection_a>:<key>` and `gitlab:<connection_b>:<key>`) as well as the two `gitlab_jobs` rows recorded above. The deliveries list then shows that delivery twice. That is by design under W-4 option (a), and #140 does not deduplicate it.
