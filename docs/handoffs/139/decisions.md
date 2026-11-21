@@ -205,3 +205,13 @@
   - `cargo test -p gridops-reconciler`: 94 passed. `cargo test -p gridops-core`: all ok (264 lib). `cargo fmt --check`: clean.
   - Mutation (`deregister` made a no-op): `a_failed_manager_start_deregisters...` failed at `gitlab_lifecycle_tests.rs:584`; file restored.
   - `retry.rs:269-270` and `:113` match evidence.md verbatim.
+
+## A (Phase 7, anti-duplication gate): 2026-11-20T18:30:00-08:00
+- **Decided:**
+  - Verdict PASS. F extended the shared functions with GitLab arms; `gitlab_lifecycle.rs` holds only counterparts of the Bitbucket helpers, as the brief's seam required.
+  - The `ListedManagerRunners` shape for `exitReason` is a justified small deviation (a test literal of `ManagedRunner` would not compile), not a parallel path.
+- **Assumed:**
+  - The diff base is b22c451; `exclusive_labels` hunks seen against local master are baseline drift.
+- **Hedged:**
+  - `next_connection` and `next_bitbucket_connection` are similar but deliberately differ per the brief; I did not require a shared helper.
+- **Evidence:** `git diff b22c451 HEAD`, `docs/handoffs/139/handoff-A-dup.md`.
