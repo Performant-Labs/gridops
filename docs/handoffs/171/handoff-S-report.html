@@ -1,0 +1,116 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>S audit report - #171 GitLab token scopes</title>
+<style>
+body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#f5f5f6;color:#18181b}
+header,main{max-width:1320px;margin:0 auto;padding:16px 24px}
+nav{position:sticky;top:0;background:#18181b;padding:8px 24px;z-index:5}nav a{color:#e4e4e7;margin-right:16px;font-size:13px}
+.verdict{background:#dcfce7;border:2px solid #16a34a;border-radius:8px;padding:12px 20px;display:flex;gap:24px;align-items:baseline;flex-wrap:wrap}
+.verdict b{font-size:34px;color:#166534}
+h2{border-bottom:2px solid #18181b;padding-bottom:4px;margin-top:40px}h3{margin:24px 0 4px}h4{margin:14px 0 4px;color:#52525b;font-size:13px;text-transform:uppercase}
+.hint{color:#52525b;font-size:13px;margin:0 0 6px}
+.wipe{position:relative;width:100%;border:1px solid #a1a1aa;line-height:0}
+.wipe img{display:block;width:100%}.wipe img.top{position:absolute;top:0;left:0}
+.tag{position:absolute;top:6px;background:#18181bcc;color:#fff;font:12px system-ui;padding:2px 8px;border-radius:3px;line-height:1.4}.tag.l{left:6px}.tag.r{right:6px}
+input[type=range]{width:100%;max-width:1280px;margin:6px 0}
+img.full{width:100%;border:1px solid #d4d4d8}
+table{border-collapse:collapse;background:#fff;width:100%}th,td{border:1px solid #d4d4d8;padding:6px 10px;text-align:left;vertical-align:top;font-size:13px}th{background:#e4e4e7}
+.m{color:#166534;font-weight:600}.d{color:#92400e;font-weight:600}code{background:#e4e4e7;padding:0 4px;border-radius:3px}
+</style></head><body>
+<nav><a href="#verdict">Verdict</a><a href="#different">What I see different</a><a href="#connection-form">Connection form</a><a href="#pool-events">Pool events</a><a href="#sections">Sections</a><a href="#rework">Rework</a></nav>
+<header id="verdict"><h1>#171 / #174 &middot; GitLab token scopes and deletion warnings</h1>
+<div class="verdict"><b>PASS</b><span>360&times;800: 2.436% &middot; 768&times;1024: 0.500% &middot; 1280&times;800: 1.010% (connection form, driven only by the help paragraph and the one line it adds)</span><span>Pool events: 0 px at all three</span></div>
+<p>Comparison is <b>after</b> (HEAD, this branch) against <b>before</b> (the frontend built from the pre-branch commit 7164fda), both served by the same API binary and the same seeded data, headless Chromium via Playwright. The top 18 px strip (the build stamp, which reads "build unknown" in the before build because it has no git metadata) is blacked out in every image so it does not count as a difference. The wireframe is a low-fidelity sketch in another visual style and was used for content and copy, not pixels.</p></header>
+<main>
+<h2 id="different">What I see different</h2>
+<ul>
+<li>Add connection, GitLab, Access token: the help paragraph is longer. It now names <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code> (or <code>api</code>) and asks for Maintainer or higher on a project, or Owner on a group. Before, it named two scopes and said the owner needs the Owner role on the project or group.</li>
+<li>That paragraph is one line taller at all three widths (4 to 5 lines at 360, 2 to 3 lines at 768 and 1280), so the "Connect GitLab" and "Back" buttons sit about 20 px lower. Nothing is clipped, nothing overflows sideways, and the dialog still scrolls inside itself as before.</li>
+<li>At 360 and 1280 the dialog is scrolled to the help paragraph (same step on both sides), so every field above it also appears shifted. That is the scroll position, not a change to those fields.</li>
+<li>Runner pool overview with the seeded "GitLab runner not deleted" warning: no visible differences at any viewport. The amber warning dot, the event name, the truncated message, the "&mdash;" in the Runner column for a sweep row and the relative time all render the same before and after, because the table component is unchanged.</li>
+</ul>
+<h2 id='connection-form'>Add connection > GitLab (token help)</h2>
+<section id="connection-form-360">
+ <h3>Add connection > GitLab (token help) &middot; 360&times;800 &middot; 7,016 px differ (2.436%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:360px">
+  <img class="base" src="screenshots-s/t3-connection-form-360-ref-20261121.png" alt="before">
+  <img class="top" id="top-connection-form-360" src="screenshots-s/t3-connection-form-360-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe connection-form-360" oninput="document.getElementById('top-connection-form-360').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-connection-form-360-diff-20261121.png" alt="diff" style="max-width:360px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-connection-form-360-composite-20261121.png" alt="composite" style="max-width:720px">
+</section>
+<section id="connection-form-768">
+ <h3>Add connection > GitLab (token help) &middot; 768&times;1024 &middot; 3,929 px differ (0.500%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:768px">
+  <img class="base" src="screenshots-s/t3-connection-form-768-ref-20261121.png" alt="before">
+  <img class="top" id="top-connection-form-768" src="screenshots-s/t3-connection-form-768-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe connection-form-768" oninput="document.getElementById('top-connection-form-768').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-connection-form-768-diff-20261121.png" alt="diff" style="max-width:768px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-connection-form-768-composite-20261121.png" alt="composite" style="max-width:1536px">
+</section>
+<section id="connection-form-1280">
+ <h3>Add connection > GitLab (token help) &middot; 1280&times;800 &middot; 10,342 px differ (1.010%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:1280px">
+  <img class="base" src="screenshots-s/t3-connection-form-1280-ref-20261121.png" alt="before">
+  <img class="top" id="top-connection-form-1280" src="screenshots-s/t3-connection-form-1280-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe connection-form-1280" oninput="document.getElementById('top-connection-form-1280').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-connection-form-1280-diff-20261121.png" alt="diff" style="max-width:1280px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-connection-form-1280-composite-20261121.png" alt="composite" style="max-width:2560px">
+</section><h2 id='pool-events'>Runner pool overview (seeded deletion warning)</h2>
+<section id="pool-events-360">
+ <h3>Runner pool overview (seeded deletion warning) &middot; 360&times;800 &middot; 0 px differ (0.000%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:360px">
+  <img class="base" src="screenshots-s/t3-pool-events-360-ref-20261121.png" alt="before">
+  <img class="top" id="top-pool-events-360" src="screenshots-s/t3-pool-events-360-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe pool-events-360" oninput="document.getElementById('top-pool-events-360').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-pool-events-360-diff-20261121.png" alt="diff" style="max-width:360px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-pool-events-360-composite-20261121.png" alt="composite" style="max-width:720px">
+</section>
+<section id="pool-events-768">
+ <h3>Runner pool overview (seeded deletion warning) &middot; 768&times;1024 &middot; 0 px differ (0.000%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:768px">
+  <img class="base" src="screenshots-s/t3-pool-events-768-ref-20261121.png" alt="before">
+  <img class="top" id="top-pool-events-768" src="screenshots-s/t3-pool-events-768-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe pool-events-768" oninput="document.getElementById('top-pool-events-768').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-pool-events-768-diff-20261121.png" alt="diff" style="max-width:768px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-pool-events-768-composite-20261121.png" alt="composite" style="max-width:1536px">
+</section>
+<section id="pool-events-1280">
+ <h3>Runner pool overview (seeded deletion warning) &middot; 1280&times;800 &middot; 0 px differ (0.000%)</h3>
+ <p class="hint">Drag the slider: left of the handle is <b>after</b> (this branch), right is <b>before</b> (pre-branch 7164fda).</p>
+ <div class="wipe" style="max-width:1280px">
+  <img class="base" src="screenshots-s/t3-pool-events-1280-ref-20261121.png" alt="before">
+  <img class="top" id="top-pool-events-1280" src="screenshots-s/t3-pool-events-1280-live-20261121.png" alt="after" style="clip-path:inset(0 50% 0 0)">
+  <div class="tag l">after</div><div class="tag r">before</div>
+ </div>
+ <input type="range" min="0" max="100" value="50" aria-label="wipe pool-events-1280" oninput="document.getElementById('top-pool-events-1280').style.clipPath='inset(0 '+(100-this.value)+'% 0 0)'">
+ <h4>Pixel diff (red = differs)</h4><img class="full" src="screenshots-s/t3-pool-events-1280-diff-20261121.png" alt="diff" style="max-width:1280px">
+ <h4>Side by side (after | before)</h4><img class="full" src="screenshots-s/t3-pool-events-1280-composite-20261121.png" alt="composite" style="max-width:2560px">
+</section>
+<h2 id="sections">Per-section delta table</h2>
+<table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop (diff)</th></tr>
+<tr><td>Access token help paragraph</td><td>360</td><td class="d">DELTA (intended)</td><td>New text, one line longer. Matches the operator-approved wireframe copy word for word.</td><td><img src="screenshots-s/t3-connection-form-help-360-crop-20261121.png" width="300"></td></tr>
+<tr><td>Access token help paragraph</td><td>768</td><td class="d">DELTA (intended)</td><td>Same text change; two lines become three.</td><td><img src="screenshots-s/t3-connection-form-help-768-crop-20261121.png" width="300"></td></tr>
+<tr><td>Access token help paragraph</td><td>1280</td><td class="d">DELTA (intended)</td><td>Same text change; two lines become three.</td><td><img src="screenshots-s/t3-connection-form-help-1280-crop-20261121.png" width="300"></td></tr>
+<tr><td>Name, address, scope, path fields</td><td>360</td><td class="m">MATCH</td><td>Identical content; shifted only by the dialog's scroll position.</td><td><img src="screenshots-s/t3-connection-form-fields-360-crop-20261121.png" width="300"></td></tr>
+<tr><td>Name, address, scope, path fields</td><td>768</td><td class="m">MATCH</td><td>Identical and in the same place.</td><td><img src="screenshots-s/t3-connection-form-fields-768-crop-20261121.png" width="300"></td></tr>
+<tr><td>Name, address, scope, path fields</td><td>1280</td><td class="m">MATCH</td><td>Identical content; shifted only by the dialog's scroll position.</td><td><img src="screenshots-s/t3-connection-form-fields-1280-crop-20261121.png" width="300"></td></tr>
+<tr><td>Buttons row (Back, Connect GitLab)</td><td>all</td><td class="m">MATCH</td><td>Same buttons, same styling; about 20 px lower because the paragraph above is one line longer.</td><td>see diff above</td></tr>
+<tr><td>Runner pool overview, Recent activity</td><td>all</td><td class="m">MATCH</td><td>No pixel differs. All sections match.</td><td>see diff above (all black)</td></tr>
+</table>
+<h2 id="rework">Sub-issue recommendations</h2>
+<p>None required for this verdict. Optional follow-ups noted in handoff-S.md (the API's "Runner deleted" row uses level <code>warn</code>, which the pool Events list shows green; the host-dependent <code>release_preflight</code> test on macOS hosts).</p>
+</main></body></html>
