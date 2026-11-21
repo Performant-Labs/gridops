@@ -20,7 +20,84 @@ use gridops_core::{
     record_job_report, scale_up_target,
 };
 
+mod gitlab;
+pub use self::gitlab::receive_gitlab;
+
 const MAX_WEBHOOK_BYTES: usize = 25 * 1024 * 1024;
+
+/// A delivery about to be recorded in `webhook_deliveries`, by `receive` or
+/// the GitLab receiver.
+struct NewDelivery<'a> {
+    id: &'a str,
+    event: &'a str,
+    action: Option<&'a str>,
+    hook_id: Option<i64>,
+    installation_id: Option<i64>,
+    repository_id: Option<i64>,
+    signature_valid: bool,
+    payload: &'a Value,
+    received_at: i64,
+}
+
+/// Records `delivery` as `received`. Answers `false`, writing nothing, when
+/// its id is already recorded: that delivery is a duplicate, whatever its
+/// status.
+async fn record_delivery(database: &SqlitePool, delivery: &NewDelivery<'_>) -> ApiResult<bool> {
+    let result = sqlx::query(
+        r#"INSERT INTO webhook_deliveries (
+          id,event,action,hook_id,installation_id,repository_id,signature_valid,status,payload,received_at
+        ) VALUES (?,?,?,?,?,?,?,'received',?,?) ON CONFLICT(id) DO NOTHING"#,
+    )
+    .bind(delivery.id)
+    .bind(delivery.event)
+    .bind(delivery.action)
+    .bind(delivery.hook_id)
+    .bind(delivery.installation_id)
+    .bind(delivery.repository_id)
+    .bind(delivery.signature_valid)
+    .bind(delivery.payload.to_string())
+    .bind(delivery.received_at)
+    .execute(database)
+    .await?;
+    Ok(result.rows_affected() != 0)
+}
+
+/// Marks a delivery that failed authentication `rejected`.
+async fn reject_delivery(database: &SqlitePool, delivery_id: &str, error: &str) -> ApiResult<()> {
+    sqlx::query("UPDATE webhook_deliveries SET status='rejected',error=? WHERE id=?")
+        .bind(error)
+        .bind(delivery_id)
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+/// Marks a received delivery `processed`.
+async fn mark_delivery_processed(database: &SqlitePool, delivery_id: &str) -> ApiResult<()> {
+    sqlx::query("UPDATE webhook_deliveries SET status='processed',processed_at=? WHERE id=?")
+        .bind(now_millis())
+        .bind(delivery_id)
+        .execute(database)
+        .await?;
+    Ok(())
+}
+
+/// Marks a delivery `failed` with `error`, cut to 2,000 characters; `retry`
+/// can process it again.
+async fn mark_delivery_failed(
+    database: &SqlitePool,
+    delivery_id: &str,
+    error: &ApiError,
+) -> ApiResult<()> {
+    let message = error.to_string().chars().take(2_000).collect::<String>();
+    sqlx::query("UPDATE webhook_deliveries SET status='failed',error=?,processed_at=? WHERE id=?")
+        .bind(&message)
+        .bind(now_millis())
+        .bind(delivery_id)
+        .execute(database)
+        .await?;
+    Ok(())
+}
 
 pub async fn receive(
     State(state): State<AppState>,
@@ -49,58 +126,44 @@ pub async fn receive(
     let hook_id = nested_i64(object, "hook", "id");
     let now = now_millis();
 
-    let result = sqlx::query(
-        r#"INSERT INTO webhook_deliveries (
-          id,event,action,hook_id,installation_id,repository_id,signature_valid,status,payload,received_at
-        ) VALUES (?,?,?,?,?,?,?,'received',?,?) ON CONFLICT(id) DO NOTHING"#,
+    let recorded = record_delivery(
+        &state.database,
+        &NewDelivery {
+            id: &delivery_id,
+            event: &event,
+            action,
+            hook_id,
+            installation_id,
+            repository_id,
+            signature_valid,
+            payload: &payload,
+            received_at: now,
+        },
     )
-    .bind(&delivery_id)
-    .bind(&event)
-    .bind(action)
-    .bind(hook_id)
-    .bind(installation_id)
-    .bind(repository_id)
-    .bind(signature_valid)
-    .bind(payload.to_string())
-    .bind(now)
-    .execute(&state.database)
     .await?;
-    if result.rows_affected() == 0 {
+    if !recorded {
         return Ok((
             StatusCode::ACCEPTED,
             Json(json!({ "accepted": true, "duplicate": true })),
         ));
     }
     if !signature_valid {
-        sqlx::query("UPDATE webhook_deliveries SET status='rejected',error=? WHERE id=?")
-            .bind("Invalid or unavailable webhook signature.")
-            .bind(&delivery_id)
-            .execute(&state.database)
-            .await?;
+        reject_delivery(
+            &state.database,
+            &delivery_id,
+            "Invalid or unavailable webhook signature.",
+        )
+        .await?;
         return Err(ApiError::Unauthorized);
     }
 
     match process(&state, &event, action, object).await {
         Ok(()) => {
-            sqlx::query(
-                "UPDATE webhook_deliveries SET status='processed',processed_at=? WHERE id=?",
-            )
-            .bind(now_millis())
-            .bind(&delivery_id)
-            .execute(&state.database)
-            .await?;
+            mark_delivery_processed(&state.database, &delivery_id).await?;
             Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
         }
         Err(error) => {
-            let message = error.to_string().chars().take(2_000).collect::<String>();
-            sqlx::query(
-                "UPDATE webhook_deliveries SET status='failed',error=?,processed_at=? WHERE id=?",
-            )
-            .bind(&message)
-            .bind(now_millis())
-            .bind(&delivery_id)
-            .execute(&state.database)
-            .await?;
+            mark_delivery_failed(&state.database, &delivery_id, &error).await?;
             tracing::error!(delivery_id, event, error = ?error, "webhook processing failed");
             Ok((
                 StatusCode::ACCEPTED,
@@ -151,7 +214,13 @@ pub async fn retry(
     let event = delivery.get::<String, _>("event");
     let action = delivery.try_get::<Option<String>, _>("action")?;
 
-    match process(&state, &event, action.as_deref(), object).await {
+    // A GitLab delivery is reprocessed by the GitLab path, on the connection
+    // its id records; it never reaches GitHub's `process`.
+    let processed = match gitlab::recorded_connection(&delivery_id) {
+        Some(connection_id) => gitlab::reprocess(&state, &delivery_id, connection_id, object).await,
+        None => process(&state, &event, action.as_deref(), object).await,
+    };
+    match processed {
         Ok(()) => {
             sqlx::query("UPDATE webhook_deliveries SET status='processed',error=NULL,processed_at=? WHERE id=?")
                 .bind(now_millis())
@@ -160,15 +229,7 @@ pub async fn retry(
                 .await?;
         }
         Err(error) => {
-            let message = error.to_string().chars().take(2_000).collect::<String>();
-            sqlx::query(
-                "UPDATE webhook_deliveries SET status='failed',error=?,processed_at=? WHERE id=?",
-            )
-            .bind(&message)
-            .bind(now_millis())
-            .bind(&delivery_id)
-            .execute(&state.database)
-            .await?;
+            mark_delivery_failed(&state.database, &delivery_id, &error).await?;
             return Err(error);
         }
     }

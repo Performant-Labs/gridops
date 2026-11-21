@@ -203,6 +203,7 @@ fn public_routes() -> Router<AppState> {
         .route("/api/v1/auth/github", get(oauth::begin))
         .route("/api/v1/auth/github/callback", get(oauth::callback))
         .route("/api/v1/webhooks/github", post(webhooks::receive))
+        .route("/api/v1/webhooks/gitlab", post(webhooks::receive_gitlab))
         .route("/auth/github", get(oauth::begin))
         .route("/auth/github/callback", get(oauth::callback))
         .route(

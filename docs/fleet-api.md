@@ -127,6 +127,7 @@ cookie-only on purpose. Paths not listed here answer `404`.
 | GET | `/auth/github-app/manifest/callback` | — | — | — | ignored |
 | POST | `/api/v1/webhooks/github` | — | — | — | ignored |
 | POST | `/api/webhooks/github` | — | — | — | ignored |
+| POST | `/api/v1/webhooks/gitlab` | — | — | — | ignored |
 | GET | `/api/v1/auth/session` | optional | — | — | 403 `token_not_accepted` |
 | GET | `/api/v1/auth/me` | required | — | — | 403 `token_not_accepted` |
 | POST | `/api/v1/auth/logout` | required | — | foreign refused | 403 `token_not_accepted` |

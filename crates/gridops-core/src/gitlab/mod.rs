@@ -18,6 +18,7 @@ use crate::fleet::{CiTarget, ExternalId, GitlabConnectionId};
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod http;
+pub mod jobs;
 
 // D18's tests sit here, not in `jobs.rs`, so they keep running against
 // whichever copy of `jobs.rs` (#140's or #148's) lands on master.

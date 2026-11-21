@@ -195,3 +195,27 @@
     - `fleet/openapi.rs:240-360`, `access.rs:281-296`, and the OpenAPI path entry;
     - `754a72b`'s `gitlab/jobs.rs`, `jobs_tests.rs` and `mod.rs`.
   - GitLab's `webhook_events.md` "Job events" section, fetched 2026-11-20: the payload shape, and `build_status_changed_at` in RFC 3339 with milliseconds, introduced in 19.7.
+
+## F (Phase 6, implement against RED): 2026-11-20T18:13:14-08:00
+- **Decided:**
+  - **The route.** `POST /api/v1/webhooks/gitlab` is served by `webhooks/gitlab.rs` (`receive_gitlab`), registered with one line in `public_routes()`.
+  - **D18's writer** is `754a72b`'s `jobs.rs`, byte for byte. It is also master's, since #160 has merged. `gitlab/mod.rs` now equals master's.
+  - **The credentials** come from #138's `credentials` helper, made `pub(crate)` and re-exported as `resources::gitlab_credentials`. This is A round-5 W2's primary option.
+  - **Delivery bookkeeping** was extracted from `receive` into four helpers that `receive`, `retry` and the GitLab receiver share. `receive` behaves as before.
+  - **`retry`** gets one GitLab arm, keyed on the `gitlab:` prefix and split once at the first `:` after it.
+  - **The runner id** is passed to the writer only for `running` events. A conclusion clears the runner recorded on the job.
+  - **The fallback status time** is the delivery's `received_at`, on the live path and on retry.
+- **Assumed:**
+  - A missing `X-Gitlab-Event` is a 400 through `required_header`, as `receive` treats its required headers. No test pins this, and GitLab always sends the header.
+  - A `build` event without a usable `build_id`, `project_id` or `pipeline_id` is processed with no effect, like `process_workflow_job`.
+  - A redelivered unmatched id still answers 401, not 202.
+- **Hedged:**
+  - The `resources.rs` and `resources/gitlab.rs` visibility edit is outside the brief's shared-file list. It is A's suggested fix, and the brief was not amended after round 5. If O prefers the local-copy option, it is a two-line revert plus a copy of `credentials` into `gitlab.rs`.
+  - Master has not been merged into the branch. The driver owns commits. The D18 files are byte-identical, so the merge is clean.
+- **Evidence:**
+  - `cargo test -p gridops-api --bin gridops-api`: 121 passed, 0 failed (was 90 passed, 31 failed).
+  - `cargo test -p gridops-core --lib`: 291 passed.
+  - `control_plane_contracts`: 36 passed.
+  - `fleet_http`: 143 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`, which depends on the host OS (this Mac). Nothing in the diff touches it.
+  - `cargo fmt --all -- --check` is clean. clippy reports nothing in the touched files.
+  - `git hash-object`: `jobs.rs` is `c51247dd` and `mod.rs` is `96be8825`, both equal to `origin/master`.
