@@ -52,3 +52,29 @@
   - Tests: `fleet_http/recovery.rs:1-130`, `:205-270`, `:320-375`, `:575-680`, `:780-900`, `:940-1000`; `placement.rs:229-394`; `agent.rs:1-160`; `inventory.rs:760-812`; `tests/retention.rs`.
   - Third-party source: `sqlx-core-0.9.0` `connection.rs`. `Cargo.lock` for `log`.
   - Coexistence: the gridops-134 branch diff and its merge status.
+
+## Phase 3 Architecture (A, up-front plan review, R3 on brief f5fc862) - 2026-11-21T14:56:38-08:00
+- **Decided:** PASS, with 0 block and 5 warn findings (docs/handoffs/179/handoff-A.md). Both R2 blocks are resolved.
+  - Results are no longer retried. The heartbeat and inventory-refresh retries run in the loop that renews the lease, with the deadline fixed at the first failure.
+  - The exhaustive session-end list and the conditional amendment authority for `an_api_restart_leaves_a_running_runner_alone` close the test gap. Under R3 the refused inspect result still ends the session, so that test should pass unchanged.
+  - **Warns:**
+    - (1) `lease_expires_at` belongs in a local in the `heartbeats` block, now that only that loop reads it. Seed it from the first inventory, update it from every refresh and heartbeat reply, and clip retry sleeps at the deadline.
+    - (2) The plan test's "never `host_kind_issued_idx`" clause is planner-dependent. On a fresh migrated DB, today's poll select uses `sqlite_autoindex_host_commands_2 (host_id=?)`, so the clause should forbid any `(host_id=?)`-only step and `SCAN c`.
+    - (3) Relabel the existing behaviour tests as api-crate tests; "about 21" vs 25 grep hits; non-core const visibility.
+    - (4) The slow-statement capture test needs a process-global subscriber, because sqlx-sqlite emits on its worker thread.
+    - (5) Declare `log` through `[workspace.dependencies]`.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+  - The bundled SQLite in `libsqlite3-sys` 0.37 plans like the sqlite3 3.54 CLI for these statements. Warn 2's point holds whichever `(host_id=?)` index it picks.
+- **Hedged:**
+  - Warn 4 is traced through the sqlx-sqlite and tracing dispatch code, not run.
+  - That `an_api_restart_leaves_a_running_runner_alone` passes unchanged under R3 is traced, not run.
+- **Evidence:**
+  - Read: the amended brief and its diff against a44aac1; `179-brief-result-r2.md`; `supervisor.rs` in full; `client.rs:245-278`; `output.rs:40-55` and `:180-198`.
+  - Registry: `commands.rs:1-250`, `:500-786`; `inventory.rs:30-40`, `:77-145`, `:255-345`; `registry/tests.rs:1-60`; `protocol/inventory.rs` response types.
+  - Core: `db.rs:1-70`; core and workspace `Cargo.toml`.
+  - Api and reconciler: the EnvFilter sites in both `main.rs` files; `tart_outage_tests.rs:35-75`.
+  - Tests: `recovery.rs:1-130`, `:575-690`; `fleet_http/inventory.rs:790-812`; `tests/retention.rs`.
+  - Third-party: `sqlx-core-0.9.0/src/logger.rs`; `sqlx-sqlite-0.9.0` `worker.rs`, `execute.rs` and `arguments.rs`.
+  - Re-ran the brief's grep: 25 hits, and the per-file breakdown matches. No `ANALYZE` or `PRAGMA optimize` anywhere in the repo.
+  - Scratch-DB `EXPLAIN QUERY PLAN` (sqlite3 3.54, all 47 migrations applied): the as-written poll select uses the autoindex `(host_id=?)`; the as-written cancel uses `host_kind_issued_idx (host_id=?)`; both rewrites and `settle_unreceived` use `host_commands_poll_idx (host_id=? AND state=?)`.
