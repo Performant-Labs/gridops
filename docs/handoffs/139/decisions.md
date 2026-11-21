@@ -168,3 +168,27 @@
     - `cargo test -p gridops-reconciler -- --skip gitlab_lifecycle_tests`: 68 passed;
     - `cargo clippy -p gridops-reconciler --all-targets`: only a pre-existing warning.
   - Source read: `main.rs` (Reconciler, Runner, `reconcile`, `reconcile_pool`, `provision_on_host`, `start_admitted_runner`, `delete_runner`, `record_provision_failure`); `fleet.rs` (`provision`, `tick`, `register_and_start`, `follow`, `finish`); `fleet/service.rs` (`submit_intent_in`, `ensure_target_identity_for_pool`, `ensure_target_access`); `fleet/targets.rs`; `fleet/retry.rs`; `fleet/registry/commands.rs`; `gitlab/mod.rs`; `gitlab/fake.rs`; `fleet/protocol/agent.rs` (`GitlabRunnerMaterial`); `provisioning.rs` (GitLab constants).
+
+## F (Phase 5, implement against RED): 2026-11-20T17:40:00-08:00
+- **Decided:**
+  - Implemented the brief's seam: GitLab arms in the shared start, follow, finish and delete paths call `gitlab_lifecycle.rs`. There is no parallel pipeline. All 26 lifecycle tests, the 2 D11 tests, the 3 D6/image tests and the `list_runners` fake test pass. See `handoff-F.md`.
+  - Every GitLab count or reset is tied to a guarded `UPDATE … WHERE status NOT IN ('failed','deleted')` affecting one row. In `finish`, a retry made in that call (`retry_failed_start` retires the old row itself, once per placement) also counts as leaving service.
+  - Every failed GitLab fleet placement counts once, and so does every fleet `create_runner` failure and every failed bootstrap store. Resets are exit-only on both paths: completed, `idle_expired`, or Inspect with no diagnostic or with `IdleExpired`.
+  - The manager-path image refusal and the fleet Docker-socket refusal are counted through `record_provision_failure`, so a configuration error backs off and opens the circuit rather than logging an error every pass.
+  - The Docker-socket check applies to Docker platforms only, since `save_pool_fleet` stores the flag only for Docker.
+  - `exitReason` is read through a `ListedManagerRunners` / `ListedRunner` listing shape (`#[serde(from)]`), because `main.rs`'s test module builds `ManagedRunner` as a literal.
+  - A GitLab pool's `pool_targets` returns only its connections' targets.
+- **Assumed:**
+  - A pool is a GitLab pool when it has `runner_pool_gitlab_connections` rows; `pool_targets` also treats `scope='gitlab'` as one.
+  - A failed runner row is live to the sweep. The same pass's failed loop deletes it, and the next sweep then removes its runner.
+- **Hedged:**
+  - The optional manager-path busy reset (round 3, "may") is not implemented: `busy` is set only by #140's webhook, which is not on master, so no test could pin it.
+  - `cargo clippy --workspace --all-targets -- -D warnings` has 17 findings in files this change does not modify (clippy 0.1.99 lints). They are left alone as out of scope.
+  - `gridops-api`'s `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` fails on this Darwin arm64 workstation. The fixture agent reports the build host's OS (`probe::host_os()` uses `cfg!(target_os)`), so it is host-dependent and unrelated to this change. Along with it, 11 `gridops-manager` tests fail with `path must be shorter than SUN_LEN` (the `TMPDIR` socket path). All 12 also fail on the pre-change commit 2aa6002.
+- **Evidence:**
+  - `cargo test -p gridops-reconciler gitlab_lifecycle_tests`: 26 passed.
+  - `cargo test -p gridops-core --lib`: 264 passed.
+  - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 passed.
+  - `cargo test --workspace --no-fail-fast`: 878 passed, 12 failed. The 12 are environmental and reproduce on the pre-change commit 2aa6002 in a throwaway worktree.
+  - `cargo fmt --all -- --check`: clean.
+  - Facts relied on in unchanged code: `docs/handoffs/139/evidence.md`.

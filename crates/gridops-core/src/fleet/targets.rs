@@ -54,6 +54,50 @@ pub async fn sync_github_targets(pool: &SqlitePool) -> Result<(), FleetError> {
     Ok(())
 }
 
+/// Creates the fleet target of every GitLab connection (#139 D6): its own
+/// project or group, from `scope_kind` and `scope_id`.
+pub async fn sync_gitlab_targets(pool: &SqlitePool) -> Result<(), FleetError> {
+    let connections = sqlx::query("SELECT id FROM gitlab_connections")
+        .fetch_all(pool)
+        .await?;
+    for row in connections {
+        let connection: String = row.get("id");
+        gitlab_connection_target(pool, &connection).await?;
+    }
+    Ok(())
+}
+
+/// The fleet target of GitLab connection `connection_id` (its own project or
+/// group), created on first use; `None` when the connection does not exist.
+pub async fn gitlab_connection_target(
+    pool: &SqlitePool,
+    connection_id: &str,
+) -> Result<Option<String>, FleetError> {
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT scope_kind,scope_id FROM gitlab_connections WHERE id=?")
+            .bind(connection_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((scope_kind, scope_id)) = row else {
+        return Ok(None);
+    };
+    let connection_id = super::domain::GitlabConnectionId::new(connection_id)
+        .map_err(|_| FleetError::InvalidRequest("GitLab connection"))?;
+    let scope_id = external(scope_id)?;
+    let target = match scope_kind.as_str() {
+        "project" => CiTarget::GitlabProject {
+            connection_id,
+            project_id: scope_id,
+        },
+        "group" => CiTarget::GitlabGroup {
+            connection_id,
+            group_id: scope_id,
+        },
+        _ => return Err(FleetError::InvalidRequest("GitLab scope kind")),
+    };
+    ensure_target(pool, &target).await.map(Some)
+}
+
 /// The fleet target ID for `target`, created on first use. GitHub and GitLab
 /// targets are stored; Bitbucket targets are refused.
 pub async fn ensure_target(pool: &SqlitePool, target: &CiTarget) -> Result<String, FleetError> {
@@ -163,6 +207,7 @@ async fn target_id_for_key(pool: &SqlitePool, key: &str) -> Result<String, Fleet
 /// Targets with a readable label, for granting hosts.
 pub async fn list_targets(pool: &SqlitePool) -> Result<Vec<TargetSummary>, FleetError> {
     sync_github_targets(pool).await?;
+    sync_gitlab_targets(pool).await?;
     let rows = sqlx::query(
         "SELECT t.id,t.kind,COALESCE(r.full_name,i.account_login,t.canonical_key) AS label
            FROM fleet_ci_targets t
@@ -449,6 +494,34 @@ async fn pinned_hosts(pool: &SqlitePool, host_ids: &[String]) -> Result<Vec<Stri
 /// The image a Docker platform runs when the pool has no Docker image of its own.
 const STOCK_DOCKER_IMAGE: &str = "ghcr.io/actions/actions-runner:latest";
 
+/// Why a GitLab pool's Docker start or Docker platform is refused while it has
+/// no image of its own (#139, until #147's GitLab runner image exists).
+pub const GITLAB_NO_RUNNER_IMAGE: &str = "GitLab pool has no runner image";
+
+/// The one place a Docker runner's image is chosen when the pool has none of
+/// its own (#139 round-2 block 2): a GitHub or Bitbucket pool gets the stock
+/// runner image; a GitLab pool (one with `runner_pool_gitlab_connections`
+/// rows) is refused, since the stock image cannot run GitLab jobs. A
+/// non-empty `pool_image` is used as given.
+pub fn docker_runner_image(pool_image: &str, gitlab: bool) -> Result<String, FleetError> {
+    match pool_image.trim() {
+        "" if gitlab => Err(FleetError::InvalidRequest(GITLAB_NO_RUNNER_IMAGE)),
+        "" => Ok(STOCK_DOCKER_IMAGE.to_owned()),
+        image => Ok(image.to_owned()),
+    }
+}
+
+/// Whether the pool runs GitLab runners: it has a GitLab connection.
+pub async fn is_gitlab_pool(pool: &SqlitePool, pool_id: &str) -> Result<bool, FleetError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM runner_pool_gitlab_connections WHERE pool_id=?)",
+    )
+    .bind(pool_id)
+    .fetch_one(pool)
+    .await?
+        != 0)
+}
+
 /// The Docker image the pool's built-in runners use, so a Docker platform
 /// saved without an image gets the same tools.
 async fn pool_docker_image(pool: &SqlitePool, pool_id: &str) -> Result<String, FleetError> {
@@ -466,10 +539,7 @@ async fn pool_docker_image(pool: &SqlitePool, pool_id: &str) -> Result<String, F
             }
         })
         .unwrap_or_default();
-    Ok(match image.trim() {
-        "" => STOCK_DOCKER_IMAGE.to_owned(),
-        image => image.to_owned(),
-    })
+    docker_runner_image(&image, is_gitlab_pool(pool, pool_id).await?)
 }
 
 /// Saves the pool's fleet settings: updates the platforms that are kept,
@@ -538,6 +608,7 @@ pub async fn save_pool_fleet(
         },
     };
     sync_github_targets(pool).await?;
+    sync_gitlab_targets(pool).await?;
     let targets = pool_targets(pool, pool_id).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = crate::now_millis();
@@ -837,11 +908,20 @@ pub async fn link_pool_target(
         "INSERT INTO profile_ci_targets (profile_id,target_id,enabled)
          SELECT p.id,t.id,1 FROM pool_execution_profiles p
            JOIN runner_pools rp ON rp.id=p.pool_id
-           JOIN fleet_ci_targets t ON t.id=?2 AND t.kind='github_repository'
+           JOIN fleet_ci_targets t ON t.id=?2
           WHERE p.pool_id=?1 AND p.archived_at IS NULL
-            AND (rp.repository_id=t.repository_id OR EXISTS (
-              SELECT 1 FROM runner_pool_repositories pr
-               WHERE pr.pool_id=rp.id AND pr.repository_id=t.repository_id))
+            AND ((t.kind='github_repository'
+                  AND (rp.repository_id=t.repository_id OR EXISTS (
+                    SELECT 1 FROM runner_pool_repositories pr
+                     WHERE pr.pool_id=rp.id AND pr.repository_id=t.repository_id)))
+              OR (t.kind IN ('gitlab_project','gitlab_group') AND EXISTS (
+                    SELECT 1 FROM runner_pool_gitlab_connections rpc
+                      JOIN gitlab_connections gc ON gc.id=rpc.connection_id
+                     WHERE rpc.pool_id=rp.id AND gc.id=t.gitlab_connection_id
+                       AND ((t.kind='gitlab_project' AND gc.scope_kind='project'
+                             AND t.gitlab_project_id=gc.scope_id)
+                         OR (t.kind='gitlab_group' AND gc.scope_kind='group'
+                             AND t.gitlab_group_id=gc.scope_id)))))
          ON CONFLICT(profile_id,target_id) DO UPDATE SET enabled=1,revoked_at=NULL",
     )
     .bind(pool_id)
@@ -857,6 +937,24 @@ pub async fn pool_targets(pool: &SqlitePool, pool_id: &str) -> Result<Vec<String
         .fetch_optional(pool)
         .await?
         .ok_or(FleetError::NotFound)?;
+    // #139 D6: a GitLab pool's targets are its connections' own targets, in
+    // membership order, and never the installation's GitHub targets.
+    let connections: Vec<String> = sqlx::query_scalar(
+        "SELECT connection_id FROM runner_pool_gitlab_connections WHERE pool_id=?
+          ORDER BY created_at,connection_id",
+    )
+    .bind(pool_id)
+    .fetch_all(pool)
+    .await?;
+    if !connections.is_empty() || row.get::<String, _>("scope") == "gitlab" {
+        let mut targets = Vec::new();
+        for connection in connections {
+            if let Some(target) = gitlab_connection_target(pool, &connection).await? {
+                targets.push(target);
+            }
+        }
+        return Ok(targets);
+    }
     if row.get::<String, _>("scope") == "repository" {
         let repositories = sqlx::query(
             "SELECT r.id,r.installation_id FROM runner_pool_repositories pr
