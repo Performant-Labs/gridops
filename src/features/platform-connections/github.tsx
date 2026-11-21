@@ -202,6 +202,8 @@ export const githubPlatform: PlatformDescriptor = {
     },
   },
   targetKinds: [repositoryKind, runnerGroupKind],
+  // Deliveries with no other platform's id prefix are GitHub's; one with no repository or account came to the App.
+  deliveryDestinationFallback: "GitHub App",
   runnerLink: (runner) => runner.repository && runner.githubRunnerId !== null
     ? { href: `https://github.com/${runner.repository}/settings/actions/runners/${runner.githubRunnerId}`, label: "Open on GitHub" }
     : null,
@@ -233,6 +235,8 @@ export const githubPlatform: PlatformDescriptor = {
         .filter((id) => repositoryIds.includes(id));
       return { repositoryIds, priorityRepositoryIds, priorityWaitMinutes: values.priorityWaitMinutes, runnerGroupId: 1 };
     }
+    // A pool of another platform's scope has no GitHub targets to save.
+    if (pool.scope !== "organization") return {};
     const { groupId } = runnerGroupParts(selection[RUNNER_GROUP]?.[0]);
     return {
       repositoryIds: undefined,
@@ -241,9 +245,10 @@ export const githubPlatform: PlatformDescriptor = {
       runnerGroupId: groupId || pool.runnerGroupId,
     };
   },
+  // Repository and organization pools are GitHub's; any other scope belongs to another platform.
   initialSelection: (pool) => pool.scope === "repository"
     ? { [REPOSITORY]: repositorySelection(pool) }
-    : {
+    : pool.scope !== "organization" ? {} : {
       [RUNNER_GROUP]: [{
         key: runnerGroupKey(`${pool.installationId}/${pool.runnerGroupId}`),
         kindId: RUNNER_GROUP,
@@ -254,7 +259,7 @@ export const githubPlatform: PlatformDescriptor = {
       }],
     },
   initialPriorityKeys: (pool) => pool.scope === "repository" ? pool.priorityRepositoryIds.map(repositoryKey) : [],
-  readOnlySummary: (pool) => pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.accountLogin,
+  readOnlySummary: (pool) => pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.scope === "organization" ? pool.accountLogin : null,
   prerequisiteEmptyState(context) {
     if (context.form !== "create") return null;
     const { options } = context;

@@ -1,0 +1,26 @@
+## Implementation Review (Round 1)
+
+### BLOCK findings
+None.
+
+### Needs-verification findings
+- **[NV-1]** crates/gridops-api/src/resources.rs:1981-1995 — the new test asserts `gitlab["platform"] == "gitlab"`, but the diff does not show the runners JSON emitting a `platform` key (only `ci_platform` is selected). — The unchanged portion of `resources.rs` around the JSON map (~:1975-1995) showing the `"platform"` field, or the passing cargo test output, would settle it.
+- **[NV-2]** crates/gridops-api/src/resources/gitlab_tests.rs — the test relies on `h.seed_connection`, `h.seed_pool(GITLAB_POOL, …, "gitlab", &[CONNECTION_1])` and `h.seed_runner(…, Some(CONNECTION_1), Some(77))` helpers supporting the GitLab shapes. — The harness/seed helpers in the unchanged part of `gitlab_tests.rs` (and `GITLAB_POOL`/`ORG_POOL`/`GITLAB` consts) showing these signatures.
+- **[NV-3]** src/routes/_app/webhooks.tsx:82-83 — the brief says the page's existing "Verified GitHub App deliveries…" and "GitHub settings" copy stays, while the new `platform-neutral-source.test.ts` bans `/["']GitHub App["']/` and quoted platform ids in `webhooks.tsx`. If that existing copy is a quoted string literal, the test cannot be green. — The unchanged lines ~:80-90 of `webhooks.tsx`, showing how that copy is written (JSX text vs. quoted literal).
+- **[NV-4]** src/features/platform-connections/connections-section.tsx — the rotate-reveal mechanism captures `action.run`'s return via a closure assigned inside the `useAction` `action` callback, and reads it after `perform` resolves. This depends on `useAction` awaiting the callback's promise before returning (shown true in `src/lib/use-action.ts:18-25` excerpt) — settled; but TypeScript's definite-assignment analysis on `let reveal: SecretReveal | null = null` captured in a closure is not provable from the excerpt. — A clean `tsc --noEmit` run (claimed, not shown) settles it.
+- **[NV-5]** src/features/platform-connections/gitlab.tsx — the claim that lucide 0.552.0 exports `Gitlab`. — `node_modules/lucide-react` export list or the green `vite build`.
+- **[NV-6]** src/components/ui/searchable-select.tsx — the select rendering assumes `SearchableSelect` accepts `value: string | null`, `onValueChange(next | null)` and `ariaLabel`. — The component's prop signature.
+- **[NV-7]** src/features/runner-pools/schemas.ts — `validateGitlabConnections` on the update schema reads `value.labels`; the excerpt of `schemas.ts` is not shown, so whether `configurationShape` puts `labels` on the update schema is unverified (the new test's green run is asserted, not shown). — `schemas.ts` `configurationShape` definition (~:20-35).
+- **[NV-8]** Handoff Tier 1 self-check — all 548 vitest tests, `tsc`, lint and cargo suites are reported green; none of that output is in the prompt beyond the quoted blocks (the first handoff quotes 2 failing tests, the rework quotes all green after the `connections-page.test.ts` fix, which is in the diff). — CI/test logs settle it.
+
+### WARN findings
+- **[W-1]** src/features/platform-connections/gitlab.tsx (toCreatePayload) — when no installation exists, `installationId: 0` is sent and the client schema (`z.number().int().positive()`) rejects it with a generic zod message, not the server's message. The brief anticipated this ("submit fails with the server's/validator's message — record what the UI shows") and the handoff records it as a known issue, but the user-facing message ("Number must be greater than 0" or similar) is not asserted in any test. — Recommendation: assert what message the create form shows in the no-installation case (or add a `validationError` message on `installationId`), per the brief's "record what the UI shows".
+- **[W-2]** src/features/platform-connections/gitlab.tsx (planNote) — the plan note's `text` never includes the actual count, so `ok: false` at over-maximum reads the same as `ok: true`; the operator gets no numeric cue. Recorded as a deviation, but the count is available (`count`) and the brief's wireframe used it. — Recommendation: include the count when `ok: false`.
+- **[W-3]** src/features/runner-pools/schemas.ts (validateGitlabConnections) — applying `gitlabLabelError` to labels whenever GitLab ids are present means a GitLab pool's update is rejected for a comma-tag even when `gitlabConnectionIds` is not in the payload (the check keys off `labels` only via the early `if (!connections?.length) return;` — actually it returns when ids are absent, so a GitLab pool update that omits ids entirely skips the tag rule). The rule is therefore inconsistent: tags are validated only when the update also carries ids. — Recommendation: mirror the Bitbucket rule exactly or state the asymmetry in decisions.md.
+
+### NIT findings
+- **[NIT-1]** tests/gitlab-descriptor.test.ts ("sends runUntagged from the platform option values") — seeds create-path option values from `initialPlatformOptionValues(platforms, gitlabPool(...))`, i.e. an update-pool detail on a create context; works but misrepresents the real form flow.
+- **[NIT-2]** src/features/platform-connections/connections-section.tsx (runAction) — `success: action.success ?? "Done."` gives Verify a default it never uses; harmless.
+
+### Verdict
+PASS — no BLOCK findings; testing may proceed.

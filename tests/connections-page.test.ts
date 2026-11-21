@@ -27,7 +27,7 @@ import { ConnectionsSection } from "../src/features/platform-connections/connect
 import { GitHubAppSection } from "../src/features/platform-connections/github-app-section";
 import type { BitbucketConnection } from "../src/features/platform-connections/platform-connections.functions";
 import { getPlatform } from "../src/features/platform-connections/registry";
-import type { ConnectionList, PlatformDescriptor, PostCreateReveal } from "../src/features/platform-connections/types";
+import type { ConnectionList, PlatformDescriptor, SecretReveal } from "../src/features/platform-connections/types";
 import type { SettingsPage } from "../src/features/operations/operations.functions";
 import { Route as ConnectionsRoute } from "../src/routes/settings.connections";
 
@@ -79,6 +79,9 @@ let bitbucketList: { canManage: boolean; items: BitbucketConnection[] };
 function apiFetch(url: string, init?: RequestInit) {
   const method = init?.method ?? "GET";
   if (method === "GET" && url === BITBUCKET_URL) return Response.json(bitbucketList);
+  // GitLab (#141) is registered too; these tests keep its list empty and give it the same per-role
+  // permission as the Bitbucket list, since the server reports canManage per user, not per platform.
+  if (method === "GET" && url === "/api/v1/platform-connections/gitlab") return Response.json({ canManage: bitbucketList.canManage, items: [] });
   if (method === "POST" && url === BITBUCKET_URL) return Response.json({ id: "new-1", provider: "bitbucket", name: "Web platform", workspace: "acme-web", workspaceUuid: "{acme-web}" }, { status: 201 });
   if ((method === "PUT" || method === "DELETE") && url === `${BITBUCKET_URL}/${MOBILE.id}`) return method === "PUT" ? Response.json(MOBILE) : new Response(null, { status: 204 });
   if (method === "POST" && url === "/api/v1/repositories/sync") return Response.json({ repositories: 4 });
@@ -286,7 +289,7 @@ describe("Per-platform loading", () => {
 });
 
 describe("Post-create one-time reveal", () => {
-  const REVEAL: PostCreateReveal = {
+  const REVEAL: SecretReveal = {
     title: "Webhook secret created",
     description: "Copy this value now. It is shown only once.",
     secretLabel: "Webhook secret",

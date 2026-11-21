@@ -7,6 +7,9 @@
  *   platform; the picker, the Platform options section and the Connections list contain no
  *   platform-specific code; the runner row has no platform ternary;
  * - the Bitbucket label rule exists once, in schemas.ts.
+ * Extended by #141 (GitLab): GitLab ids and pool fields join the branching patterns; the delivery
+ * list takes its platform from the registry; and GitLab code lives only in its descriptor, its
+ * API functions, the wire-field files and its one registry entry.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -53,10 +56,11 @@ describe("shared rows do not branch on a platform", () => {
     "src/routes/_app/runner-pools.$poolId.settings.tsx",
   ];
   const BRANCHING = [
-    /["'](github|bitbucket)(\.[a-z-]+)?["']/, // a platform or kind id
+    /["'](github|bitbucket|gitlab)(\.[a-z-]+)?["']/, // a platform or kind id
     /\bpool\.scope\b/,
     /\bscope\s*[!=]==/,
     /bitbucketConnectionIds\.length/,
+    /runUntagged|gitlabConnectionIds/, // GitLab pool fields travel inside the descriptor's partials only
   ];
 
   it.each(SHARED)("%s compares against no platform id, kind id, scope or platform-named field", (path) => {
@@ -76,15 +80,57 @@ describe("shared rows do not branch on a platform", () => {
       "src/features/platform-connections/connections-section.tsx",
     ]) {
       expect(existsSync(join(ROOT, path)), `${path} exists`).toBe(true);
-      if (existsSync(join(ROOT, path))) expect(read(path)).not.toMatch(/github|bitbucket/i);
+      if (existsSync(join(ROOT, path))) expect(read(path)).not.toMatch(/github|bitbucket|gitlab/i);
     }
   });
 
   it("the runner row takes platform names from the registry, with no platform ternary", () => {
     const row = read("src/features/runners/runner-row.tsx");
     expect(row).not.toMatch(/runner\.platform\s*[!=]==/);
-    expect(row).not.toMatch(/["'](github|bitbucket)["']/);
+    expect(row).not.toMatch(/["'](github|bitbucket|gitlab)["']/);
     expect(row).toMatch(/from "~\/features\/platform-connections\/registry"/);
+  });
+
+  it("the deliveries list takes each delivery's platform and fallback destination from the registry, with no platform comparison", () => {
+    const page = read("src/routes/_app/webhooks.tsx");
+    expect(page).not.toMatch(/["'](github|bitbucket|gitlab)["']/);
+    expect(page).not.toMatch(/\.(platform|id)\s*[!=]==\s*["']/);
+    expect(page).not.toMatch(/\.startsWith\(\s*["']/);
+    // The fallback destination is GitHub's descriptor value now, not page copy.
+    expect(page).not.toMatch(/["']GitHub App["']/);
+    expect(page).toMatch(/from "~\/features\/platform-connections\/registry"/);
+  });
+});
+
+describe("GitLab code has one home (#141)", () => {
+  /** The files that may name GitLab: the descriptor, its API functions, and the wire-field files. */
+  const ALLOWED = [
+    "src/features/platform-connections/gitlab.tsx",
+    "src/features/platform-connections/platform-connections.functions.ts",
+    "src/features/runner-pools/schemas.ts",
+    "src/features/runner-pools/runner-pools.functions.ts",
+    "src/features/operations/operations.functions.ts",
+  ];
+  const REGISTRY = "src/features/platform-connections/registry.tsx";
+
+  it("lives in gitlab.tsx, and outside it only in the API functions, the wire-field files and the registry", () => {
+    expect(existsSync(join(ROOT, ALLOWED[0] ?? "")), "gitlab.tsx exists").toBe(true);
+    const files = new Set(grep([/gitlab/i]).map((hit) => hit.split(":")[0]));
+    expect(files.has(ALLOWED[0] ?? "")).toBe(true);
+    expect([...files].filter((path) => path !== REGISTRY && !ALLOWED.includes(path ?? "")).sort()).toEqual([]);
+  });
+
+  it("the registry names GitLab only in its import, its array entry and comments", () => {
+    const lines = read(REGISTRY).split("\n").filter((line) => /gitlab/i.test(line));
+    expect(lines.some((line) => /^import \{ gitlabPlatform \} from "\.\/gitlab";$/.test(line.trim()))).toBe(true);
+    const other = lines.filter((line) => {
+      const text = line.trim();
+      return !/^import \{ gitlabPlatform \} from "\.\/gitlab";$/.test(text)
+        && !/^(\/\/|\*|\/\*)/.test(text)
+        && !/^export const platforms\b.*\bgitlabPlatform\b/.test(text)
+        && !/^gitlabPlatform,?$/.test(text);
+    });
+    expect(other).toEqual([]);
   });
 });
 

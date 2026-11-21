@@ -1942,7 +1942,8 @@ pub async fn runners(
     let (page, offset) = bounded_pagination(requested_page, total, per_page);
     let rows = sqlx::query(
         r#"SELECT r.id,r.name,r.provider,r.ci_platform,r.status,r.busy,r.ephemeral,r.os,r.architecture,r.container_id,
-          r.github_runner_id,r.bitbucket_runner_uuid,r.failure_reason,r.registered_at,r.last_heartbeat_at,r.created_at,
+          r.github_runner_id,r.bitbucket_runner_uuid,r.gitlab_runner_id,r.failure_reason,r.registered_at,r.last_heartbeat_at,r.created_at,
+          gc.base_url AS gitlab_base_url,gc.scope_path AS gitlab_scope_path,
           p.id AS pool_id,p.name AS pool_name,p.paused AS pool_paused,
           COALESCE(target_installation.account_login,primary_installation.account_login) AS account_login,
           CASE WHEN NOT EXISTS (
@@ -1962,6 +1963,7 @@ pub async fn runners(
         LEFT JOIN repositories repo ON repo.id=r.target_repository_id
         LEFT JOIN installations target_installation ON target_installation.id=repo.installation_id
         LEFT JOIN workflow_jobs wj ON wj.id=r.current_job_id
+        LEFT JOIN gitlab_connections gc ON gc.id=r.gitlab_connection_id
         WHERE r.deleted_at IS NULL AND (? IS NULL OR r.pool_id=?)
           AND EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)
           AND NOT EXISTS (
@@ -1985,6 +1987,10 @@ pub async fn runners(
         "architecture": row.get::<String,_>("architecture"), "containerId": row.try_get::<Option<String>,_>("container_id").ok().flatten(),
         "githubRunnerId": row.try_get::<Option<i64>,_>("github_runner_id").ok().flatten(),
         "bitbucketRunnerUuid": row.try_get::<Option<String>,_>("bitbucket_runner_uuid").ok().flatten(),
+        // What the GitLab runner link is built from; null for a GitHub or Bitbucket runner or a deleted connection.
+        "gitlabRunnerId": row.try_get::<Option<i64>,_>("gitlab_runner_id").ok().flatten(),
+        "gitlabBaseUrl": row.try_get::<Option<String>,_>("gitlab_base_url").ok().flatten(),
+        "gitlabScopePath": row.try_get::<Option<String>,_>("gitlab_scope_path").ok().flatten(),
         "failureReason": row.try_get::<Option<String>,_>("failure_reason").ok().flatten(),
         "registeredAt": iso_optional(row.try_get::<Option<i64>,_>("registered_at").ok().flatten()),
         "lastHeartbeatAt": iso_optional(row.try_get::<Option<i64>,_>("last_heartbeat_at").ok().flatten()), "createdAt": iso(row.get::<i64,_>("created_at")),

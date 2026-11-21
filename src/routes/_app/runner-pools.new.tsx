@@ -27,7 +27,8 @@ import { poolImages } from "~/features/runner-pools/pool-images";
 import type { CreateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import {
-  anyStandaloneKindAvailable, buildCreatePayload, labelError, labelRules, minMaxCount, prerequisiteEmptyState, requiredProviders, targetPlanCheck,
+  anyStandaloneKindAvailable, buildCreatePayload, initialPlatformOptionValues, labelError, labelRules, minMaxCount, prerequisiteEmptyState, requiredProviders,
+  targetPlanCheck,
 } from "~/features/runner-pools/targets";
 import { TargetsRow } from "~/features/runner-pools/targets-row";
 
@@ -93,6 +94,8 @@ function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selection, setSelection] = useState<ResolvedSelection>({});
+  // Each platform's Platform options values, edited by its own component and read by its partial.
+  const [platformOptions, setPlatformOptions] = useState(() => initialPlatformOptionValues(platforms));
   const [mode, setMode] = useState<"ephemeral" | "persistent">("ephemeral");
   const [providers, setProviders] = useState<RunnerProvider[]>(options.defaults.providers);
   const provider = providers[0] ?? options.defaults.provider;
@@ -130,7 +133,7 @@ function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; 
     try {
       const data = {
         // installationId, scope, repositoryIds, runnerGroupId and each platform's own fields.
-        ...buildCreatePayload(platforms, selection, context),
+        ...buildCreatePayload(platforms, selection, context, { platformOptions }),
         name: poolName,
         mode,
         provider,
@@ -184,7 +187,7 @@ function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; 
           </SettingsRow>
         </SettingsSection>
 
-        <PlatformOptionsSection descriptors={platforms} selection={selection} />
+        <PlatformOptionsSection descriptors={platforms} onChange={setPlatformOptions} selection={selection} values={platformOptions} />
 
         <SettingsSection description="What each runner is and how jobs find it." title="Runner definition">
           <SettingsRow description="Lowercase letters, numbers, and hyphens. Also registered as a runner label." htmlFor="pool-name" label="Pool name">

@@ -13,6 +13,8 @@ import { Dialog, SheetContent } from "~/components/ui/dialog";
 import { Tooltip } from "~/components/ui/tooltip";
 import { LiveRouteRefreshNotice } from "~/components/live-refresh-notice";
 import { type WebhookDelivery, type WebhookPayload, dismissFailedWebhooksAction, getWebhookPayloadAction, getWebhooksPage, retryWebhookAction } from "~/features/operations/operations.functions";
+import { PlatformBadge } from "~/features/platform-connections/connections-section";
+import { platformForDeliveryId } from "~/features/platform-connections/registry";
 import { validatePageSearch } from "~/lib/pagination";
 import { useAction } from "~/lib/use-action";
 import { useLiveRouteRefresh } from "~/lib/use-live-route-refresh";
@@ -38,6 +40,11 @@ function deliveryGroup(delivery: WebhookDelivery): (typeof GROUPS)[number]["key"
   if (delivery.status === "failed" || delivery.status === "rejected" || !delivery.signatureValid) return "failed";
   if (delivery.status === "processed") return "processed";
   return "pending";
+}
+
+/** Where a delivery went, or its platform's fallback text (none for most platforms). */
+function deliveryDestination(delivery: WebhookDelivery): string | null {
+  return delivery.repository ?? delivery.accountLogin ?? platformForDeliveryId(delivery.id).deliveryDestinationFallback ?? null;
 }
 
 type PayloadState = { delivery: WebhookDelivery; payload: WebhookPayload | null; loading: boolean; error: string | null };
@@ -107,6 +114,7 @@ function WebhooksPage() {
 
 function DeliveryRow({ delivery, onOpen }: { delivery: WebhookDelivery; onOpen: () => void }) {
   const run = useAction();
+  const destination = deliveryDestination(delivery);
   return (
     <div className={cn(listRowClassName, "relative pr-2")}>
       <button aria-label={`Inspect delivery ${delivery.id}`} className="absolute inset-0 outline-none" data-list-row="" disabled={!delivery.hasPayload} onClick={onOpen} type="button" />
@@ -116,7 +124,8 @@ function DeliveryRow({ delivery, onOpen }: { delivery: WebhookDelivery; onOpen: 
       {!delivery.signatureValid ? <Badge dot={false} variant="destructive"><ShieldAlert className="size-3" />Invalid signature</Badge> : null}
       {delivery.error ? <span className="hidden min-w-0 truncate text-xs text-danger md:block" title={delivery.error}>{delivery.error}</span> : null}
       <span className="flex-1" />
-      <span className="hidden max-w-52 truncate text-xs text-muted-foreground lg:block">{delivery.repository ?? delivery.accountLogin ?? "GitHub App"}</span>
+      <span className="relative hidden shrink-0 lg:inline-flex"><PlatformBadge descriptor={platformForDeliveryId(delivery.id)} /></span>
+      {destination ? <span className="hidden max-w-52 truncate text-xs text-muted-foreground lg:block">{destination}</span> : null}
       <Tooltip content={formatDateTime(delivery.receivedAt)}><span className="tabular relative w-10 text-right text-xs text-faint">{formatAge(delivery.receivedAt)}</span></Tooltip>
       <span className="relative flex w-7 justify-end">
         {delivery.canRetry && delivery.status === "failed" && delivery.signatureValid ? (
@@ -132,18 +141,24 @@ function DeliveryRow({ delivery, onOpen }: { delivery: WebhookDelivery; onOpen: 
 function PayloadSheet({ state }: { state: PayloadState }) {
   const { delivery, payload, loading, error } = state;
   const formatted = payload?.payload == null ? "" : JSON.stringify(payload.payload, null, 2);
+  const destination = deliveryDestination(delivery);
   return (
     <SheetContent
       actions={formatted ? <CopyButton label="Payload" size="sm" value={formatted} variant="outline">Copy JSON</CopyButton> : null}
       aria-describedby={undefined}
       description={`${delivery.id}${payload ? ` · ${formatBytes(payload.payloadBytes)}` : ""}`}
-      heading={<span className="font-mono">{delivery.event}{delivery.action ? ` · ${delivery.action}` : ""}</span>}
+      heading={(
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono">{delivery.event}{delivery.action ? ` · ${delivery.action}` : ""}</span>
+          <PlatformBadge descriptor={platformForDeliveryId(delivery.id)} />
+        </span>
+      )}
     >
       <div className="space-y-4 p-4">
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <dt className="text-muted-foreground">Status</dt><dd><StatusBadge status={delivery.status} /></dd>
           <dt className="text-muted-foreground">Signature</dt><dd>{delivery.signatureValid ? "Verified" : <span className="text-danger">Invalid</span>}</dd>
-          <dt className="text-muted-foreground">Destination</dt><dd className="truncate">{delivery.repository ?? delivery.accountLogin ?? "GitHub App"}</dd>
+          <dt className="text-muted-foreground">Destination</dt><dd className="truncate">{destination ?? "—"}</dd>
           <dt className="text-muted-foreground">Received</dt><dd>{formatDateTime(delivery.receivedAt)}</dd>
           {delivery.processedAt ? <><dt className="text-muted-foreground">Processed</dt><dd>{formatDateTime(delivery.processedAt)}</dd></> : null}
         </dl>

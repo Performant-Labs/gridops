@@ -8,11 +8,16 @@ import { api } from "~/lib/api";
 import type { CannotRun } from "./builtin-host";
 import type { RunnerHost } from "./resource-risk";
 
+/** A GitLab connection as a pool's options and detail carry it (#138). */
+export type GitlabPoolConnection = { id: string; name: string; baseUrl: string; scopeKind: "project" | "group"; scopePath: string };
+
 type BaseOptions = {
   installations: Array<{ id: number; accountLogin: string; accountType: string }>;
   repositories: Array<{ id: number; installationId: number; fullName: string; private: boolean }>;
   runnerGroups: Array<{ installationId: number; id: number; name: string; visibility: string; isDefault: boolean }>;
   bitbucketConnections: Array<{ id: string; name: string; workspace: string; workspaceUuid: string }>;
+  /** Every GitLab connection a new pool may target. Absent from a server before #138. */
+  gitlabConnections?: GitlabPoolConnection[];
 };
 
 export type RunnerGroupOption = {
@@ -60,9 +65,14 @@ export type RunnerPoolDetail = {
   priorityWaitMinutes: number;
   bitbucketConnections: Array<{ id: string; name: string; workspace: string; workspaceUuid: string }>;
   bitbucketConnectionIds: string[];
+  /** The GitLab connections the pool uses (only those). Absent from a server before #138. */
+  gitlabConnections?: GitlabPoolConnection[];
+  gitlabConnectionIds?: string[];
+  /** Whether a GitLab pool's runners also take jobs with no tags. */
+  runUntagged?: boolean;
   accountLogin: string;
   name: string;
-  scope: "repository" | "organization";
+  scope: "repository" | "organization" | "gitlab";
   mode: "ephemeral" | "persistent";
   provider: "docker" | "tart";
   providers: Array<"docker" | "tart">;

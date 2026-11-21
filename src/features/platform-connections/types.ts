@@ -7,13 +7,18 @@
 import type { ComponentType, ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
+import type { ConfirmOptions } from "~/components/confirm-dialog";
+
 import type { Runner, SettingsPage } from "~/features/operations/operations.functions";
 import type { RunnerPoolDetail, RunnerPoolOptions } from "~/features/runner-pools/runner-pools.functions";
 
 // ---- Connections -------------------------------------------------------------------------------
 
-/** What a post-create hook asks the Connections page to show once (e.g. a webhook secret). */
-export type PostCreateReveal = {
+/**
+ * A value the Connections page shows once (e.g. a webhook secret), returned by a post-create hook
+ * or by a row action. The page owns the one dialog that shows it.
+ */
+export type SecretReveal = {
   title: string;
   description: string;
   secretLabel: string;
@@ -38,7 +43,14 @@ export type ConnectionListBinding =
 export type ConnectionField = {
   key: string;
   label: string;
-  type: "text" | "secret";
+  /** `select` renders a choice among `options`, with `label` as its accessible name. */
+  type: "text" | "secret" | "select";
+  /** The choices of a `select` field. */
+  options?: readonly { value: string; label: string }[];
+  /** What the create form starts with. */
+  defaultValue?: string;
+  /** A client-side check of the value: the problem shown under the field, or null. A problem blocks submit. */
+  validate?: (value: string) => string | null;
   required: boolean;
   help?: ReactNode;
   placeholder?: string;
@@ -59,6 +71,21 @@ export type ConnectionRowView = {
   badges?: ReactNode;
   /** Platform-owned trailing content, e.g. an external "Configure" link. */
   aside?: ReactNode;
+};
+
+/**
+ * One more action in a connection row's cluster, beside Edit and Remove. The row runs it through
+ * `useAction` (the same option names), so it asks, reports and refreshes like Remove. A returned
+ * reveal is shown once in the Connections page's dialog.
+ */
+export type ConnectionRowAction = {
+  label: string;
+  run: (item: unknown) => Promise<SecretReveal | null | void>;
+  /** Asked first when set ("Question? Details."). */
+  confirm?: string;
+  confirmOptions?: ConfirmOptions;
+  /** The success toast; defaults to "Done.". */
+  success?: string;
 };
 
 export type ConnectionBindings = {
@@ -83,6 +110,8 @@ export type ConnectionBindings = {
   create?: (values: Record<string, string>) => Promise<unknown>;
   update?: (item: unknown, values: Record<string, string>) => Promise<unknown>;
   remove?: (item: unknown) => Promise<unknown>;
+  /** Row actions shown, in order, between Edit and Remove for a manager. */
+  actions?: (item: unknown) => readonly ConnectionRowAction[];
   /** Field values the edit form starts from. */
   editValues?: (item: unknown) => Record<string, string>;
   createTitle?: string;
@@ -178,11 +207,26 @@ export type TargetKind = {
 
 // ---- Descriptor --------------------------------------------------------------------------------
 
+/**
+ * The pool form's Platform options values, per platform id: whatever each descriptor's
+ * `platformOptions.initialValues` started and its `Component` reported back.
+ */
+export type PlatformOptionValues = Readonly<Record<string, unknown>>;
+
+/** Form values the create partials need besides the selection (built at submit). */
+export type TargetCreateValues = {
+  platformOptions?: PlatformOptionValues;
+};
+
+/** What a platform's Platform options component is given: its own value and a way to replace it. */
+export type PlatformOptionsProps = { values: unknown; onChange: (values: unknown) => void };
+
 /** Form values the update partials need besides the selection (built at submit). */
 export type TargetUpdateValues = {
   /** Selected target keys the operator prioritised. */
   priorityKeys: readonly string[];
   priorityWaitMinutes?: number;
+  platformOptions?: PlatformOptionValues;
 };
 
 export type PayloadPartial = Record<string, unknown>;
@@ -206,18 +250,29 @@ export type PlatformDescriptor = {
   /** "Additional labels" help, placeholder and validator while the pool targets this platform. */
   labelRules?: { help?: ReactNode; placeholder?: string; validate?: (labels: string[]) => string | null };
   /** Content of the Platform options section while the pool targets this platform. */
-  platformOptions?: { help: readonly ReactNode[]; Component?: ComponentType };
+  platformOptions?: {
+    help: readonly ReactNode[];
+    /** The platform's option values a form starts from: the pool's on settings, defaults on a new pool. */
+    initialValues?: (pool?: RunnerPoolDetail) => unknown;
+    Component?: ComponentType<PlatformOptionsProps>;
+  };
   /** The runner's page on the platform, or null. */
   runnerLink?: (runner: Runner) => { href: string; label: string } | null;
   /** Runs after a connection is created; a returned value is shown once in a dialog. */
   // `created` is whatever this descriptor's `connections.create` resolves to.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  postCreate?: (created: any) => PostCreateReveal | null | Promise<PostCreateReveal | null>;
+  postCreate?: (created: any) => SecretReveal | null | Promise<SecretReveal | null>;
+  /**
+   * What the deliveries list shows as the destination of this platform's delivery (one whose id
+   * starts with `<id>:`, or any unprefixed one for the fallback platform) when it has no
+   * repository or account; none renders a dash.
+   */
+  deliveryDestinationFallback?: string;
   /**
    * Payload partials. Total: they never throw, and return the platform's empty/default partial
    * when it has no selected target. Validation stays in `schemas.ts` at submit time.
    */
-  toCreatePayload: (selection: ResolvedSelection, context: TargetContext) => PayloadPartial;
+  toCreatePayload: (selection: ResolvedSelection, context: TargetContext, values?: TargetCreateValues) => PayloadPartial;
   toUpdatePayload: (selection: ResolvedSelection, pool: RunnerPoolDetail, values: TargetUpdateValues) => PayloadPartial;
   /** The pool's current targets, for the settings form. */
   initialSelection?: (pool: RunnerPoolDetail) => ResolvedSelection;

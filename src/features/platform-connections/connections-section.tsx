@@ -5,6 +5,8 @@
  * error and Retry, so one platform's failure never hides another's). While every list has loaded
  * and all are empty, one generic empty state replaces the per-platform rows. Adding a connection
  * asks for the platform first, then shows that descriptor's fields or its link to connect elsewhere.
+ * A value shown once (after a create, or returned by a row action) goes to the section's one
+ * reveal dialog.
  */
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftRight, ExternalLink, LoaderCircle, Plus } from "lucide-react";
@@ -19,13 +21,17 @@ import { Badge } from "~/components/ui/badge";
 import { Button, buttonVariants } from "~/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
+import { SearchableSelect } from "~/components/ui/searchable-select";
 import type { SettingsPage } from "~/features/operations/operations.functions";
 import { useAction } from "~/lib/use-action";
 
 import { platforms } from "./registry";
-import type { ConnectionField, ConnectionList, PlatformDescriptor, PostCreateReveal } from "./types";
+import type { ConnectionField, ConnectionList, ConnectionRowAction, PlatformDescriptor, SecretReveal } from "./types";
 
 type FetchBinding = Extract<PlatformDescriptor["connections"]["list"], { kind: "fetch" }>;
+
+/** Shows a value once in the section's reveal dialog. */
+type OnReveal = (reveal: SecretReveal) => void;
 
 /** Where one platform's list stands: a page-derived list is always ready. */
 type ListState = { status: "loading" | "error" } | { status: "ready"; list: ConnectionList };
@@ -44,7 +50,7 @@ const fetchBinding = (descriptor: PlatformDescriptor): FetchBinding | null =>
 
 export function ConnectionsSection({ descriptors = platforms, page }: { descriptors?: readonly PlatformDescriptor[]; page: SettingsPage }) {
   const queryClient = useQueryClient();
-  const [reveal, setReveal] = useState<PostCreateReveal | null>(null);
+  const [reveal, setReveal] = useState<SecretReveal | null>(null);
   const [adding, setAdding] = useState(false);
   // Each opening starts the Add connection dialog afresh (no platform chosen, no values).
   const [addSession, setAddSession] = useState(0);
@@ -95,8 +101,8 @@ export function ConnectionsSection({ descriptors = platforms, page }: { descript
         {descriptors.map((descriptor) => {
           const binding = fetchBinding(descriptor);
           return binding
-            ? <FetchedConnections binding={binding} descriptor={descriptor} key={descriptor.id} page={page} showEmpty={!nothingConnected} />
-            : <ConnectionRows descriptor={descriptor} key={descriptor.id} list={readList(descriptor, page)} page={page} showEmpty={!nothingConnected} />;
+            ? <FetchedConnections binding={binding} descriptor={descriptor} key={descriptor.id} onReveal={setReveal} page={page} showEmpty={!nothingConnected} />
+            : <ConnectionRows descriptor={descriptor} key={descriptor.id} list={readList(descriptor, page)} onReveal={setReveal} page={page} showEmpty={!nothingConnected} />;
         })}
       </SettingsSection>
       {addable.length ? (
@@ -138,7 +144,7 @@ function readList(descriptor: PlatformDescriptor, page: SettingsPage): Connectio
 }
 
 /** One platform with a fetching list: its own query, loading row, error and Retry. */
-function FetchedConnections({ descriptor, binding, page, showEmpty }: { descriptor: PlatformDescriptor; binding: FetchBinding; page: SettingsPage; showEmpty: boolean }) {
+function FetchedConnections({ descriptor, binding, page, showEmpty, onReveal }: { descriptor: PlatformDescriptor; binding: FetchBinding; page: SettingsPage; showEmpty: boolean; onReveal: OnReveal }) {
   const query = useQuery(connectionsQuery(descriptor, binding));
   if (query.isPending) return <LoadingRows rows={1} />;
   if (query.isError) {
@@ -150,10 +156,10 @@ function FetchedConnections({ descriptor, binding, page, showEmpty }: { descript
       </div>
     );
   }
-  return <ConnectionRows descriptor={descriptor} list={query.data} page={page} showEmpty={showEmpty} />;
+  return <ConnectionRows descriptor={descriptor} list={query.data} onReveal={onReveal} page={page} showEmpty={showEmpty} />;
 }
 
-function ConnectionRows({ descriptor, list, page, showEmpty }: { descriptor: PlatformDescriptor; list: ConnectionList; page: SettingsPage; showEmpty: boolean }) {
+function ConnectionRows({ descriptor, list, page, showEmpty, onReveal }: { descriptor: PlatformDescriptor; list: ConnectionList; page: SettingsPage; showEmpty: boolean; onReveal: OnReveal }) {
   if (!list.items.length) {
     const text = showEmpty ? descriptor.connections.emptyText(page) : null;
     if (text === null) return null;
@@ -164,7 +170,7 @@ function ConnectionRows({ descriptor, list, page, showEmpty }: { descriptor: Pla
       </div>
     );
   }
-  return list.items.map((item) => <ConnectionRow canManage={list.canManage} descriptor={descriptor} item={item} key={descriptor.connections.describe(item).id} />);
+  return list.items.map((item) => <ConnectionRow canManage={list.canManage} descriptor={descriptor} item={item} key={descriptor.connections.describe(item).id} onReveal={onReveal} />);
 }
 
 export function PlatformBadge({ descriptor }: { descriptor: PlatformDescriptor }) {
@@ -172,7 +178,7 @@ export function PlatformBadge({ descriptor }: { descriptor: PlatformDescriptor }
   return <Badge variant="outline"><Icon className="size-3" />{descriptor.name}</Badge>;
 }
 
-function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDescriptor; item: unknown; canManage: boolean }) {
+function ConnectionRow({ descriptor, item, canManage, onReveal }: { descriptor: PlatformDescriptor; item: unknown; canManage: boolean; onReveal: OnReveal }) {
   const queryClient = useQueryClient();
   const run = useAction();
   const bindings = descriptor.connections;
@@ -180,22 +186,52 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
   const [editing, setEditing] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const [showProblems, setShowProblems] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // While a row action or Remove runs, the row's actions are disabled.
+  const [busy, setBusy] = useState(false);
   const editable = (bindings.fields ?? []).filter((field) => field.editableOnUpdate);
   const update = bindings.update;
   const remove = bindings.remove;
+  const actions = bindings.actions?.(item) ?? [];
   const reload = () => queryClient.invalidateQueries({ queryKey: connectionsQueryKey(descriptor.id) });
-  const showActions = canManage && !editing && Boolean(update || remove);
+  const showActions = canManage && !editing && Boolean(update || remove || actions.length);
+
+  async function perform(options: Parameters<typeof run>[0]) {
+    setBusy(true);
+    try {
+      await run(options);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runAction(action: ConnectionRowAction) {
+    let reveal: SecretReveal | null = null;
+    await perform({
+      action: async () => { reveal = (await action.run(item)) ?? null; },
+      after: reload,
+      confirm: action.confirm,
+      confirmOptions: action.confirmOptions,
+      success: action.success ?? "Done.",
+    });
+    if (reveal) onReveal(reveal);
+  }
 
   function startEditing() {
     setValues(bindings.editValues?.(item) ?? {});
     setError(null);
+    setShowProblems(false);
     setEditing(true);
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!update) return;
+    if (fieldProblems(editable, values)) {
+      setShowProblems(true);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -227,12 +263,18 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
         {view.aside || showActions ? (
           <div className="flex w-full items-center justify-end gap-3 sm:w-auto sm:shrink-0">
             {view.aside}
+            {/* The actions wrap, right-aligned, when a narrow row cannot hold them all on one line
+                (a descriptor may contribute several); from `sm` up the row sizes this group to fit. */}
             {showActions ? (
-              <div className="flex shrink-0 items-center gap-1">
-                {update && editable.length ? <Button onClick={startEditing} size="sm" variant="ghost">Edit</Button> : null}
+              <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
+                {update && editable.length ? <Button disabled={busy} onClick={startEditing} size="sm" variant="ghost">Edit</Button> : null}
+                {actions.map((action) => (
+                  <Button disabled={busy} key={action.label} onClick={() => void runAction(action)} size="sm" variant="ghost">{action.label}</Button>
+                ))}
                 {remove ? (
                   <Button
-                    onClick={() => void run({
+                    disabled={busy}
+                    onClick={() => void perform({
                       action: () => remove(item),
                       after: reload,
                       confirm: bindings.removeConfirm?.(item) ?? `Remove ${view.name}?`,
@@ -258,6 +300,7 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
                 id={`connection-edit-${descriptor.id}-${view.id}-${field.key}`}
                 key={field.key}
                 onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+                showProblem={showProblems}
                 update
                 value={values[field.key] ?? ""}
               />
@@ -274,22 +317,61 @@ function ConnectionRow({ descriptor, item, canManage }: { descriptor: PlatformDe
   );
 }
 
-function FieldInput({ field, id, value, onChange, update = false }: { field: ConnectionField; id: string; value: string; onChange: (value: string) => void; update?: boolean }) {
+/** The fields' starting values on the create form: each field's `defaultValue`. */
+function defaultValues(fields: readonly ConnectionField[] = []): Record<string, string> {
+  return Object.fromEntries(fields.flatMap((field) => field.defaultValue === undefined ? [] : [[field.key, field.defaultValue]]));
+}
+
+/** Whether any field's own check rejects its value (a problem blocks submit). */
+function fieldProblems(fields: readonly ConnectionField[], values: Record<string, string>) {
+  return fields.some((field) => field.validate?.(values[field.key] ?? "") != null);
+}
+
+function FieldInput({ field, id, value, onChange, update = false, showProblem = false }: {
+  field: ConnectionField;
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  update?: boolean;
+  /** Show a problem with an untouched (empty) value too, once a submit was refused. */
+  showProblem?: boolean;
+}) {
   const secret = field.type === "secret";
+  const label = update ? field.updateLabel ?? field.label : field.label;
+  const problem = value || showProblem ? field.validate?.(value) ?? null : null;
+  const problemId = `${id}-problem`;
   return (
     <div>
-      <label className="mb-1.5 block text-xs font-medium text-foreground" htmlFor={id}>{update ? field.updateLabel ?? field.label : field.label}</label>
-      <Input
-        autoCapitalize="none"
-        autoComplete="off"
-        id={id}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={update ? field.updatePlaceholder ?? field.placeholder : field.placeholder}
-        // On the edit form a blank secret keeps the stored one.
-        required={field.required && !(update && secret)}
-        type={secret ? "password" : "text"}
-        value={value}
-      />
+      {field.type === "select" ? (
+        <>
+          <span className="mb-1.5 block text-xs font-medium text-foreground" id={`${id}-label`}>{label}</span>
+          <SearchableSelect
+            ariaLabel={label}
+            onValueChange={(next) => onChange(next ?? "")}
+            options={(field.options ?? []).map((option) => ({ value: option.value, label: option.label }))}
+            searchable={false}
+            value={value || null}
+          />
+        </>
+      ) : (
+        <>
+          <label className="mb-1.5 block text-xs font-medium text-foreground" htmlFor={id}>{label}</label>
+          <Input
+            aria-describedby={problem ? problemId : undefined}
+            aria-invalid={problem ? true : undefined}
+            autoCapitalize="none"
+            autoComplete="off"
+            id={id}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={update ? field.updatePlaceholder ?? field.placeholder : field.placeholder}
+            // On the edit form a blank secret keeps the stored one.
+            required={field.required && !(update && secret)}
+            type={secret ? "password" : "text"}
+            value={value}
+          />
+        </>
+      )}
+      {problem ? <p className="mt-1.5 text-xs leading-5 text-danger" id={problemId}>{problem}</p> : null}
       {field.help ? <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{field.help}</p> : null}
     </div>
   );
@@ -309,13 +391,15 @@ function AddConnectionDialog({ descriptors, page, open, onOpenChange, onCreated 
   const [chosen, setChosen] = useState<PlatformDescriptor | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [showProblems, setShowProblems] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A platform with a create binding gets its form; otherwise its connect link.
   const link = chosen && !chosen.connections.create ? chosen.connections.connectLink?.(page) ?? null : null;
 
   function choose(descriptor: PlatformDescriptor | null) {
     setChosen(descriptor);
-    setValues({});
+    setValues(defaultValues(descriptor?.connections.fields));
+    setShowProblems(false);
     setError(null);
   }
 
@@ -323,6 +407,11 @@ function AddConnectionDialog({ descriptors, page, open, onOpenChange, onCreated 
     event.preventDefault();
     const create = chosen?.connections.create;
     if (!chosen || !create) return;
+    // A field's own check blocks the request; nothing is sent until it passes.
+    if (fieldProblems(chosen.connections.fields ?? [], values)) {
+      setShowProblems(true);
+      return;
+    }
     setSubmitting(true);
     setError(null);
     let created: unknown;
@@ -366,6 +455,7 @@ function AddConnectionDialog({ descriptors, page, open, onOpenChange, onCreated 
                   id={`connection-new-${chosen.id}-${field.key}`}
                   key={field.key}
                   onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+                  showProblem={showProblems}
                   value={values[field.key] ?? ""}
                 />
               ))}
