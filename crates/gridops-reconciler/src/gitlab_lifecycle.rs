@@ -14,8 +14,9 @@
 //!   warning on the runner's pool (#171), so an operator sees it.
 //! - Outcomes: a runner that completed its job or idled out proves the
 //!   registration works and resets the pool's provisioning failures; one
-//!   GitLab refused counts one failure. Either happens once per runner, when
-//!   its row first leaves service.
+//!   GitLab refused, or one whose Tart image has no `gitlab-runner` (#173),
+//!   fails with a readable reason and an error event and counts one failure.
+//!   Each happens once per runner, when its row first leaves service.
 //! - Sweep: GitLab runners this deployment marked whose runner row is gone.
 //!   A delete GitLab refuses is a warning on each pool linked to the
 //!   connection, at most once an hour per pool, connection and reason.
@@ -35,7 +36,7 @@ use gridops_core::{
     now_millis,
     provisioning::{
         GITLAB_DEFAULT_WAIT_TIMEOUT_SECS, GITLAB_EXIT_COMPLETED, GITLAB_EXIT_IDLE_EXPIRED,
-        GITLAB_EXIT_REASONS, GITLAB_EXIT_REGISTRATION_REFUSED,
+        GITLAB_EXIT_REASONS, GITLAB_EXIT_REGISTRATION_REFUSED, GITLAB_EXIT_RUNNER_MISSING,
     },
 };
 use reqwest::Url;
@@ -367,6 +368,8 @@ pub(super) enum Exit {
     IdleExpired,
     /// GitLab refused its token.
     RegistrationRefused,
+    /// Its Tart image has no `gitlab-runner` (#173).
+    RunnerMissing,
     /// Nothing says how: an older manager, or a runtime that disappeared.
     Unknown,
 }
@@ -382,6 +385,7 @@ impl Exit {
             Some(GITLAB_EXIT_COMPLETED) => Self::Completed,
             Some(GITLAB_EXIT_IDLE_EXPIRED) => Self::IdleExpired,
             Some(GITLAB_EXIT_REGISTRATION_REFUSED) => Self::RegistrationRefused,
+            Some(GITLAB_EXIT_RUNNER_MISSING) => Self::RunnerMissing,
             _ => Self::Unknown,
         }
     }
@@ -403,6 +407,7 @@ impl Exit {
             Self::Completed => GITLAB_EXIT_COMPLETED,
             Self::IdleExpired => GITLAB_EXIT_IDLE_EXPIRED,
             Self::RegistrationRefused => GITLAB_EXIT_REGISTRATION_REFUSED,
+            Self::RunnerMissing => GITLAB_EXIT_RUNNER_MISSING,
             Self::Unknown => return "unknown",
         };
         GITLAB_EXIT_REASONS
@@ -420,11 +425,21 @@ fn refusal_reason(connection_name: &str) -> String {
     )
 }
 
+/// What an operator is told when a GitLab runner's Tart image has no
+/// `gitlab-runner`.
+fn runner_missing_reason() -> String {
+    format!(
+        "The pool's Tart image has no gitlab-runner ({}): prepare the image with scripts/prepare-tart-gitlab-runner-image.sh and point the pool at it.",
+        Exit::RunnerMissing.name()
+    )
+}
+
 /// Records how a GitLab runner row that just left service (this call's
-/// guarded update took it out) ended: a refusal fails it with a readable
-/// diagnostic and counts one provisioning failure; a completed or idled-out
-/// runner proved the registration works and resets the pool's failures.
-/// Answers whether the pool's circuit changed.
+/// guarded update took it out) ended: a refusal or a Tart image without
+/// `gitlab-runner` fails it with a readable diagnostic and counts one
+/// provisioning failure; a completed or idled-out runner proved the
+/// registration works and resets the pool's failures. Answers whether the
+/// pool's circuit changed.
 async fn left_service(
     app: &Reconciler,
     pool_id: &str,
@@ -432,33 +447,40 @@ async fn left_service(
     connection_id: Option<&str>,
     exit: Exit,
 ) -> Result<bool> {
-    match exit {
+    let (title, reason) = match exit {
         Exit::Completed | Exit::IdleExpired => {
             clear_provision_failures(app, pool_id).await?;
-            Ok(true)
+            return Ok(true);
         }
-        Exit::RegistrationRefused => {
-            let reason = refusal_reason(&connection_name(app, connection_id).await?);
-            sqlx::query("UPDATE runners SET failure_reason=?,updated_at=? WHERE id=?")
-                .bind(&reason)
-                .bind(now_millis())
-                .bind(runner_id)
-                .execute(&app.database)
-                .await?;
-            system_event(
-                app,
-                Some(pool_id),
-                "error",
-                "GitLab runner registration refused",
-                &reason,
-                json!({ "runnerId": runner_id, "outcome": Exit::RegistrationRefused.name() }),
-            )
-            .await?;
-            count_failure(app, pool_id).await?;
-            Ok(true)
-        }
-        Exit::Unknown => Ok(false),
-    }
+        Exit::Unknown => return Ok(false),
+        Exit::RegistrationRefused => (
+            "GitLab runner registration refused",
+            refusal_reason(&connection_name(app, connection_id).await?),
+        ),
+        Exit::RunnerMissing => (
+            "GitLab runner missing from the Tart image",
+            runner_missing_reason(),
+        ),
+    };
+    // A provisioning failure, whichever exit it was: the readable reason on
+    // the runner row, an error event on the pool, one failure counted.
+    sqlx::query("UPDATE runners SET failure_reason=?,updated_at=? WHERE id=?")
+        .bind(&reason)
+        .bind(now_millis())
+        .bind(runner_id)
+        .execute(&app.database)
+        .await?;
+    system_event(
+        app,
+        Some(pool_id),
+        "error",
+        title,
+        &reason,
+        json!({ "runnerId": runner_id, "outcome": exit.name() }),
+    )
+    .await?;
+    count_failure(app, pool_id).await?;
+    Ok(true)
 }
 
 /// Counts one provisioning failure against the pool as it is now.

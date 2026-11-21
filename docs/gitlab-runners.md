@@ -153,6 +153,10 @@ Each runner runs `gitlab-runner run-single` for at most one job:
   GitLab.
 - If GitLab refuses its token (`registration_refused`), it is deleted and the
   pool's provisioning failure count goes up, as for any failed start.
+- If its Tart image has no `gitlab-runner` (`runner_missing`), it is deleted,
+  the runner's failure reason names the image script to run, the pool records
+  an error event, and the pool's provisioning failure count goes up, as for any
+  failed start.
 
 A delete that fails is logged and retried by the orphan sweep. When GitLab
 refuses it (for example, the token lacks `manage_runner`), the runner's pool
@@ -192,8 +196,9 @@ Each job runs in the image its `.gitlab-ci.yml` names with `image:`, or in
 A GitLab pool whose provider is Tart runs each runner in a fresh macOS VM with
 the shell executor. The shell executor ignores `image:`, so install the tools
 the jobs need in the base image. Prepare the image with
-`scripts/prepare-tart-gitlab-runner-image.sh`; see
-[macOS runners](macos-runners.md#gitlab).
+`scripts/prepare-tart-gitlab-runner-image.sh`, which checks the finished image
+in a fresh clone of it and deletes the image if `gitlab-runner` is missing
+there; see [macOS runners](macos-runners.md#gitlab).
 
 ## Known limits
 

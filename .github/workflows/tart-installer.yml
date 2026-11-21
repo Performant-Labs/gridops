@@ -4,8 +4,15 @@
 # plutil and launchctl, so nothing is built, installed or started, and the job
 # needs no Rust.
 #
-# It runs only when a change can affect what the test checks: the installer,
-# its plist template, the test itself, the Tart agent crate, or this workflow.
+# The same job tests the GitLab and Bitbucket Tart image preparation scripts
+# (scripts/prepare-tart-gitlab-runner-image.sh and
+# scripts/prepare-tart-bitbucket-runner-image.sh, #173) with
+# scripts/test-prepare-tart-runner-images.sh, under the system /bin/bash (3.2
+# on macOS). A fake tart stands in, so no VM boots.
+#
+# It runs only when a change can affect what the tests check: the installer,
+# its plist template, the two image scripts, the tests themselves, the Tart
+# agent crate, or this workflow.
 # A `paths` filter does that without starting any job, so a change elsewhere
 # costs no runner and no macOS VM. (A changed-files step would need a Linux job
 # on every push just to decide; it would be the better choice only if this
@@ -20,6 +27,9 @@ on:
     paths:
       - scripts/install-tart-agent.sh
       - scripts/test-install-tart-agent.sh
+      - scripts/prepare-tart-gitlab-runner-image.sh
+      - scripts/prepare-tart-bitbucket-runner-image.sh
+      - scripts/test-prepare-tart-runner-images.sh
       - deploy/launchd/dev.gridops.tart-agent.plist
       - crates/gridops-tart-agent/**
       - .github/workflows/tart-installer.yml
@@ -29,6 +39,9 @@ on:
     paths:
       - scripts/install-tart-agent.sh
       - scripts/test-install-tart-agent.sh
+      - scripts/prepare-tart-gitlab-runner-image.sh
+      - scripts/prepare-tart-bitbucket-runner-image.sh
+      - scripts/test-prepare-tart-runner-images.sh
       - deploy/launchd/dev.gridops.tart-agent.plist
       - crates/gridops-tart-agent/**
       - .github/workflows/tart-installer.yml
@@ -43,7 +56,7 @@ concurrency:
 
 jobs:
   test:
-    name: Tart installer test (macOS)
+    name: Tart installer and image preparation tests (macOS)
     # Like ci.yml: a trusted run (push, dispatch, or a pull request from a
     # branch of this repo whose author is in the org variable
     # TRUSTED_CI_AUTHORS) uses the runner the release's macOS agent job uses, a
@@ -65,9 +78,11 @@ jobs:
           [ "$(uname -s)" = Darwin ] || fail "not macOS: $(uname -s)"
           command -v zsh >/dev/null || fail "zsh is missing"
           command -v python3 >/dev/null || fail "python3 is missing"
+          [ -x /bin/bash ] || fail "/bin/bash is missing"
           python3 -I -c 'import plistlib' || fail "python3 cannot run: install the Xcode command line tools, or use a Tart base image that has them"
           zsh --version
           python3 --version
+          /bin/bash --version | head -n 1
 
       - name: Check out repository
         uses: actions/checkout@v5
@@ -84,5 +99,18 @@ jobs:
           [ "$status" = 0 ] || { echo "::error::scripts/test-install-tart-agent.sh failed (exit $status)"; exit 1; }
           if [ "$(printf '%s\n' "$out" | tail -n 1)" != "all passed" ]; then
             echo "::error::scripts/test-install-tart-agent.sh did not run its checks: $(printf '%s\n' "$out" | tail -n 1)"
+            exit 1
+          fi
+
+      # The same rule: only the test's own "all passed" as its last line passes.
+      - name: Test the GitLab and Bitbucket Tart image preparation
+        timeout-minutes: 5
+        run: |
+          status=0
+          out="$(sh scripts/test-prepare-tart-runner-images.sh 2>&1)" || status=$?
+          printf '%s\n' "$out"
+          [ "$status" = 0 ] || { echo "::error::scripts/test-prepare-tart-runner-images.sh failed (exit $status)"; exit 1; }
+          if [ "$(printf '%s\n' "$out" | tail -n 1)" != "all passed" ]; then
+            echo "::error::scripts/test-prepare-tart-runner-images.sh did not run its checks: $(printf '%s\n' "$out" | tail -n 1)"
             exit 1
           fi

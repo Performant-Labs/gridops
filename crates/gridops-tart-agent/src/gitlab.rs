@@ -112,7 +112,8 @@ pub(crate) fn exit_reason(code: i32) -> Option<&'static str> {
 /// The script `start_runner` runs in the VM with `/bin/bash -lc`, the token on
 /// its stdin. Every interpolated value is single-quoted.
 ///
-/// It exits 78 if the image has no `gitlab-runner`. Otherwise it verifies the
+/// It exits 78 (`runner_missing`, `EX_CONFIG`) if the image has no
+/// executable `gitlab-runner` at `runner_binary`. Otherwise it verifies the
 /// token with GitLab (`POST /api/v4/runners/verify`, the body piped to `curl`
 /// by the `printf` builtin, so the token is in no argv; 403 exits 77), then
 /// runs `gitlab-runner run-single` for one job with the token only in its
@@ -122,7 +123,8 @@ pub(crate) fn exit_reason(code: i32) -> Option<&'static str> {
 /// limit reached exits 0; otherwise "Checking for jobs... forbidden" (the
 /// token was refused after the verify passed) exits 77; otherwise the wait
 /// timeout's line exits 75. Anything else keeps a status outside the table:
-/// `run-single`'s own non-zero status (70 if that is itself 75 or 77), 69 for
+/// `run-single`'s own non-zero status (70 if that is itself 75, 77 or 78, so a
+/// status in the table is always the script's own verdict), 69 for
 /// a verify call GitLab did not answer with 200 or 403, and 70 for a
 /// `run-single` that exited 0 with none of those lines (stopped by a signal).
 pub(crate) fn runner_script(runner_binary: &str, bootstrap: &GitlabBootstrap) -> String {
@@ -158,7 +160,7 @@ set -e
 unset GRIDOPS_BOOTSTRAP_SECRET
 if [ "$runner_status" -ne 0 ]; then
   case "$runner_status" in
-    75|77)
+    75|77|78)
       printf 'gitlab-runner exited with status %s.\n' "$runner_status" >&2
       exit 70 ;;
   esac
