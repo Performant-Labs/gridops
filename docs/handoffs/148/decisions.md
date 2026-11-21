@@ -272,3 +272,9 @@
   - Ran `gridops-api` and `gridops-manager` and got the same failures F reported.
   - Two mutations were caught, then reverted: the same-tier/newer rule in `status_write_applies`, and the poll's busy-clear flag.
   - Read `jobs.rs` in full and grepped the poll for direct `gitlab_jobs` SQL (only the check mark, line 269).
+
+## A (Phase 7, anti-duplication gate)
+- **Decided:** PASS. F extended `queued_job_candidates` / `assign_queued_jobs` / `queued_job_owners` / `waiting_job_pools` with a GitLab arm and shared `pool_room!()`, `PoolStanding::of` and `pool_platforms!()`. The new poll module and D18's `jobs.rs` are the brief's own named new objects, and each follows its GitHub analogue.
+- **Assumed:** No survey.md was provided, so the brief's Scope and amendments serve as the Reuse map.
+- **Hedged:** The poll's `runner_events` `INSERT` is a third copy of that shape (warn, follow-up helper once #140 lands). The add/add conflict on `jobs.rs` is a planned merge-order matter.
+- **Evidence:** Diffed `572f828..f873139` for the 9 non-doc files; read `gitlab_poll.rs` in full and the `jobs.rs` header and API; grepped `gitlab_jobs` and `INSERT INTO runner_events` across `crates/` and `src/`. The only non-test `gitlab_jobs` writers are `jobs.rs` and the guarded re-check mark.
