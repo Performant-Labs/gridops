@@ -39,3 +39,38 @@
     - `crates/gridops-core/src/provisioning.rs`, the GitLab constants.
   - **Scripts and docs:** `scripts/prepare-tart-bitbucket-runner-image.sh` (in full) and `scripts/prepare-tart-runner-image.sh` (checksum lines); `docs/macos-runners.md` (section list and "Bitbucket Cloud workspaces").
   - **Searched:** `GRIDOPS_TART_*_RUNNER_ROOT` references across `scripts/`, `docs/`, `deploy/` and `crates/`.
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:00:53-08:00
+- **Decided:**
+  - **RED is valid.** 13 new tests: 7 in a new `crates/gridops-tart-agent/src/gitlab_tests.rs`, 6 in `main.rs`'s tests module. The placeholder test `gitlab_runners_are_refused_by_name_until_142_lands` is removed, as the brief directs.
+  - **Real RED is a compile RED.** It has 14 errors, and each names a missing field: `AgentState.gitlab_runner_binary`, `TartRecord.platform` or `TartRecord.exit_code`.
+  - **Runtime RED was shown on a throwaway stub scaffold:** 11 failures, each on the missing behaviour.
+  - **Two tests are not RED, by design.** The GitHub/Bitbucket no-`exitReason` test is a guard. The old-record test passes once the `#[serde(default)]` fields exist.
+  - **Pinned API, the smallest the tests need:**
+    - `gitlab::runner_script(runner_binary, &GitlabBootstrap) -> String`, mirroring `bitbucket_runner_script`;
+    - `gitlab::exit_reason(i32) -> Option<&'static str>`;
+    - `gitlab::DEFAULT_GITLAB_RUNNER_BINARY`;
+    - `AgentState.gitlab_runner_binary` and `TartRecord.{platform: Option<String>, exit_code: Option<i32>}`, per A findings 2 and 6.
+    - Validation is tested through `ProvisionRunner::validate`, so `gitlab::validate`'s name is F's choice.
+  - **Test placement follows A finding 5.** The pure and bash tests sit beside the module, in `gitlab_tests.rs`, mounted with `#[path]` as in #137's `fake_tests.rs`, so F's `gitlab.rs` holds no test code. Tests that need the handlers stay in `main.rs` and extend `FAKE_TART`, `FakeTart` and `vm_record`.
+  - **The fake `gitlab-runner` models upstream behaviour** (`run-single` exits 0 after a job and after the idle timeout; a refused token logs "forbidden" and idles), cited in `evidence.md`. A fake that exited 75 or 77 itself would have proved nothing about the script's detection.
+  - **Refused-token cases depend on what the script implements.** The guest test checks whether the script text contains `runners/verify` and/or `forbidden`, and gives each implemented mechanism its own case. A verify-only script must map a token revoked mid-run to 75, the brief's accepted W-1 gap. The brief allows either design, so the test does not force one.
+  - **The `'` URL case accepts both choices,** refused or carried verbatim (A finding 4 leaves it to F). Other hostile URLs go straight into `runner_script`, so the script's quoting is tested whatever validation does.
+- **Assumed:**
+  - The script calls `curl` by name on `PATH`.
+  - The verify call uses `--data-binary @-` with `-w '%{http_code}'` (the brief's NIT-2 mechanism). The fake also honours `-o` and `--fail`.
+  - The builds directory is passed as `--builds-dir` or `RUNNER_BUILDS_DIR`, under `$HOME`.
+  - If F needs another verify mechanism, T extends the fake.
+- **Hedged:**
+  - **Clippy baseline.** Local clippy 0.1.99 flags 3 pre-existing `assert!(x.is_empty())` lines (`assert_is_empty`) in master's tests. The Done-when clippy gate may need them fixed, depending on CI's toolchain; flagged to F.
+  - **A possible pre-existing flake.** `every_tart_command_gets_a_path_starting_with_tarts_directory` failed once in about 20 full runs and could not be reproduced. To be watched in Phase 6.
+  - **Not tested.** The image script's pinned version and checksum, and the docs prose. Neither is a Done-when test item; T checks them in Phase 6 Tier 1 (`bash -n`, review).
+- **Evidence:**
+  - **Read:** the brief in full; `handoff-A.md`; the A entry of `decisions.md`; `docs/handoffs/137/handoff-T-red.md`, for format and the compile-RED precedent.
+  - **Source:** `crates/gridops-tart-agent/src/main.rs`: `AgentState`, `TartRecord`, `ProvisionRunner`, `validate`, `list_runners`, `provision_runner`, `provision_native`, `start_native_runner`, `delete_runner`, `start_runner`, the script builders, `shell_single_quote`, the record helpers, and the tests module (`FAKE_TART`, `install_script`, `FakeTart`, `vm_record`, `gitlab_request` and the GitLab tests).
+  - **Upstream:** `gitlab-runner` at `e2320620bae7319498c63f7b2b05e52afe99393e`: `commands/single.go`, `network/gitlab.go`, `common/config.go`, and `log/` for the stderr output.
+  - **Runs:**
+    - compile RED, and the stub-scaffold runtime RED (11 failed / 40 passed);
+    - a throwaway draft: 51 passed on 9 consecutive runs, `cargo fmt --check` clean, and clippy clean in the test code;
+    - 15 mutations, each failing exactly the intended tests;
+    - every scaffold and draft file removed afterwards: `git status` shows only the two test files plus the handoffs.

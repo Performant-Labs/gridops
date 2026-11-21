@@ -2840,15 +2840,29 @@ case "$1" in
     echo $$ > "$dir/pid"; touch "$dir/running"; exec sleep 30 ;;
   exec)
     [ -f "$dir/running" ] || exit 1
-    if [ "$2" = "-i" ]; then cat > /dev/null; fi
+    if [ "$2" = "-i" ]; then
+      # The runner start: keep what the agent wrote to stdin, optionally run
+      # until the runner is deleted, and exit with a scripted status, as
+      # `tart exec` returns the guest command's.
+      cat > "$dir/stdin"
+      if [ -f "$dir/exec-until-deleted" ]; then
+        while [ ! -f "$dir/deleted" ]; do sleep 0.05; done
+        sleep 0.3
+      fi
+      exit "$(cat "$dir/exec-status" 2>/dev/null || echo 0)"
+    fi
     exit 0 ;;
   stop)
+    # What the record files said when the VM was stopped.
+    cat "$dir"/home/records/*.json >> "$dir/records-at-stop" 2>/dev/null
     rm -f "$dir/running"
     if [ -f "$dir/pid" ]; then kill "$(cat "$dir/pid")" 2>/dev/null; rm -f "$dir/pid"; fi
+    echo stopped >> "$dir/stops-done"
     exit 0 ;;
   clone)
     if [ -f "$dir/slow-clone" ]; then sleep "$(cat "$dir/slow-clone")"; fi
     exit 0 ;;
+  delete) touch "$dir/deleted"; exit 0 ;;
   list) cat "$dir/list.json" 2>/dev/null || echo '[]' ;;
   *) exit 0 ;;
 esac
@@ -2864,11 +2878,15 @@ exit 0
 
     const CLONE: &str = "gridops-homelab-abcd1234";
 
+    /// The guest path `FakeTart` configures for `gitlab-runner`: not the
+    /// default, so a script that ignores the setting is caught.
+    const FAKE_GITLAB_RUNNER_BINARY: &str = "/opt/gridops-test/bin/gitlab-runner";
+
     /// Writes an executable script from a short-lived `sh`, so this process
     /// never holds it open for writing. Written here, a child that another
     /// test thread forks at that moment would inherit the open file, and
     /// running the script would then fail with "Text file busy".
-    async fn install_script(path: &FsPath, contents: &str) -> Result<()> {
+    pub(super) async fn install_script(path: &FsPath, contents: &str) -> Result<()> {
         let mut child = Command::new("/bin/sh")
             .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
             .arg(path)
@@ -2928,6 +2946,7 @@ exit 0
                 home,
                 runner_root: "/Users/admin/actions-runner".into(),
                 bitbucket_runner_root: "/Users/admin/atlassian-bitbucket-pipelines-runner".into(),
+                gitlab_runner_binary: FAKE_GITLAB_RUNNER_BINARY.into(),
                 network_mode: NetworkMode::Nat,
                 limits: AgentLimits {
                     cpu_budget: 4.0,
@@ -3240,6 +3259,8 @@ admin     tart run
             created_at: "2026-11-03T00:00:00.000Z".into(),
             runtime: runtime.into(),
             root: None,
+            platform: None,
+            exit_code: None,
         }
     }
 
@@ -3336,7 +3357,7 @@ admin     tart run
 
     /// A `POST /v1/runners` body for a GitLab runner, as the manager forwards
     /// it (#137 R2-1).
-    fn gitlab_request() -> serde_json::Value {
+    pub(super) fn gitlab_request() -> serde_json::Value {
         serde_json::json!({
             "runnerId": "runner-1",
             "poolId": "pool-1",
@@ -3378,21 +3399,6 @@ admin     tart run
         Ok(())
     }
 
-    #[test]
-    fn gitlab_runners_are_refused_by_name_until_142_lands() -> Result<()> {
-        let input: ProvisionRunner = serde_json::from_value(gitlab_request())?;
-        let refused = input.validate();
-        assert!(
-            matches!(
-                &refused,
-                Err(AgentError::BadRequest(message))
-                    if message == "GitLab runners are not supported yet: Tart is #142."
-            ),
-            "{refused:?}"
-        );
-        Ok(())
-    }
-
     /// This crate's copy of `gridops_core::provisioning::GITLAB_EXIT_REASONS`,
     /// pinned by the same literals as the core test.
     #[test]
@@ -3405,5 +3411,318 @@ admin     tart run
                 (77, "registration_refused")
             ]
         );
+    }
+
+    // ---- GitLab runners on Tart (#142): start, exit code, listing ----
+    //
+    // `FakeTart` answers the runner's `tart exec -i` with the status in
+    // `exec-status`, as `tart exec` returns the guest script's, keeps what the
+    // agent wrote to its stdin, and appends the record files to
+    // `records-at-stop` whenever a VM is stopped.
+
+    /// A token no command line, error or listing may ever contain.
+    const GITLAB_TOKEN: &str = "glrt-tart-e2e-token-must-never-leak";
+
+    fn gitlab_input() -> Result<ProvisionRunner> {
+        let mut input: ProvisionRunner = serde_json::from_value(gitlab_request())?;
+        input.gitlab_runner_token = Some(GITLAB_TOKEN.into());
+        Ok(input)
+    }
+
+    async fn start(tart: &FakeTart, input: ProvisionRunner) -> Result<String> {
+        let result = provision_runner(State(tart.state.clone()), AgentAuth, Json(input)).await;
+        let Ok((StatusCode::CREATED, Json(body))) = result else {
+            anyhow::bail!("expected the runner to start, got {result:?}")
+        };
+        body["id"]
+            .as_str()
+            .map(ToOwned::to_owned)
+            .context("no runner id")
+    }
+
+    /// Waits until `tart stop` has finished `count` times. The runner's own
+    /// stop runs in the background once its `tart exec` has ended.
+    async fn wait_for_stops(tart: &FakeTart, count: usize) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while fs::read_to_string(tart.dir.join("stops-done"))
+            .await
+            .unwrap_or_default()
+            .lines()
+            .count()
+            < count
+        {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the runner was not stopped: {:?}",
+                tart.calls().await
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
+    }
+
+    async fn listed(state: &AgentState) -> Result<Vec<Value>> {
+        let Ok(Json(list)) = list_runners(State(state.clone()), AgentAuth).await else {
+            anyhow::bail!("listing runners failed")
+        };
+        list["runners"]
+            .as_array()
+            .cloned()
+            .context("the listing has no runners array")
+    }
+
+    fn stopped(vm_names: &[&str]) -> String {
+        Value::Array(
+            vm_names
+                .iter()
+                .map(|name| json!({"Name": name, "State": "stopped"}))
+                .collect(),
+        )
+        .to_string()
+    }
+
+    /// The token reaches the guest only on `tart exec`'s stdin. The guest
+    /// script's exit status is recorded before the VM is stopped, survives an
+    /// agent restart, and is listed as `exitReason` when the table knows it.
+    #[tokio::test]
+    async fn a_gitlab_runner_gets_its_token_on_stdin_and_lists_its_exit_reason() -> Result<()> {
+        for (status, reason) in [
+            (77, Some("registration_refused")),
+            (0, Some("completed")),
+            (78, None),
+        ] {
+            let tart = FakeTart::new(Duration::from_secs(30)).await?;
+            tart.flag("exec-status", &status.to_string()).await?;
+            let id = start(&tart, gitlab_input()?).await?;
+            wait_for_stops(&tart, 1).await?;
+
+            assert_eq!(
+                fs::read_to_string(tart.dir.join("stdin")).await?,
+                format!("{GITLAB_TOKEN}\n")
+            );
+            let calls = tart.calls().await.join("\n");
+            assert!(
+                !calls.contains(GITLAB_TOKEN),
+                "the token was on a tart command line"
+            );
+            assert!(
+                calls.contains(&format!("exec -i {CLONE} /bin/bash -lc ")),
+                "{calls}"
+            );
+            assert!(calls.contains("run-single"), "{calls}");
+            assert!(calls.contains(FAKE_GITLAB_RUNNER_BINARY), "{calls}");
+
+            // Written before the stop, so no listing sees the VM exited
+            // without the code.
+            let at_stop: TartRecord =
+                serde_json::from_str(&fs::read_to_string(tart.dir.join("records-at-stop")).await?)?;
+            assert_eq!(at_stop.exit_code, Some(status), "exit {status}");
+
+            let reloaded = load_records(&tart.state.home).await?;
+            let record = reloaded.get(&id).context("the record was not kept")?;
+            assert_eq!(record.exit_code, Some(status));
+            assert_eq!(record.platform.as_deref(), Some("gitlab"));
+
+            tart.flag("list.json", &stopped(&[CLONE])).await?;
+            let runners = listed(&tart.state).await?;
+            let [runner] = runners.as_slice() else {
+                anyhow::bail!("expected one runner, got {runners:?}")
+            };
+            assert_eq!(runner["state"], "exited", "{runner}");
+            assert_eq!(
+                runner.get("exitReason").cloned(),
+                reason.map(Value::from),
+                "exit {status}: {runner}"
+            );
+            assert!(!runner.to_string().contains(GITLAB_TOKEN));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn only_exited_gitlab_runners_with_a_known_code_list_an_exit_reason() -> Result<()> {
+        // (name, platform, recorded exit code, Tart state, expected exitReason)
+        type Case = (
+            &'static str,
+            Option<&'static str>,
+            Option<i32>,
+            &'static str,
+            Option<&'static str>,
+        );
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        let cases: [Case; 9] = [
+            (
+                "gitlab-completed",
+                Some("gitlab"),
+                Some(0),
+                "stopped",
+                Some("completed"),
+            ),
+            (
+                "gitlab-idle",
+                Some("gitlab"),
+                Some(75),
+                "stopped",
+                Some("idle_expired"),
+            ),
+            (
+                "gitlab-refused",
+                Some("gitlab"),
+                Some(77),
+                "stopped",
+                Some("registration_refused"),
+            ),
+            (
+                "gitlab-other-exit",
+                Some("gitlab"),
+                Some(1),
+                "stopped",
+                None,
+            ),
+            ("gitlab-no-code", Some("gitlab"), None, "stopped", None),
+            ("gitlab-running", Some("gitlab"), Some(0), "running", None),
+            ("github", Some("github"), Some(0), "stopped", None),
+            ("bitbucket", Some("bitbucket"), Some(0), "stopped", None),
+            ("before-142", None, Some(0), "stopped", None),
+        ];
+        let mut vms = Vec::new();
+        {
+            let mut records = tart.state.records.write().await;
+            for (name, platform, exit_code, vm_state, _) in cases {
+                let mut record = vm_record(name, &format!("gridops-{name}"), "vm");
+                record.platform = platform.map(ToOwned::to_owned);
+                record.exit_code = exit_code;
+                records.insert(name.to_owned(), record);
+                vms.push(json!({"Name": format!("gridops-{name}"), "State": vm_state}));
+            }
+        }
+        tart.flag("list.json", &Value::Array(vms).to_string())
+            .await?;
+        let runners = listed(&tart.state).await?;
+        assert_eq!(runners.len(), cases.len());
+        for (name, _, _, vm_state, reason) in cases {
+            let runner = runners
+                .iter()
+                .find(|runner| runner["id"] == name)
+                .with_context(|| format!("{name} was not listed"))?;
+            let expected_state = if vm_state == "running" {
+                "running"
+            } else {
+                "exited"
+            };
+            assert_eq!(runner["state"], expected_state, "{name}: {runner}");
+            assert_eq!(
+                runner.get("exitReason").cloned(),
+                reason.map(Value::from),
+                "{name}: {runner}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Guard, green by design before #142: whatever platform value the agent
+    /// writes for a GitHub or a Bitbucket runner, neither lists an
+    /// `exitReason` once its VM has exited.
+    #[tokio::test]
+    async fn github_and_bitbucket_runners_never_list_an_exit_reason() -> Result<()> {
+        let github = provision_request("vm", "gridops-macos-tahoe-base");
+        let mut bitbucket = provision_request("vm", "gridops-macos-tahoe-base");
+        bitbucket.platform = "bitbucket".into();
+        bitbucket.mode = "persistent".into();
+        bitbucket.jit_config = None;
+        bitbucket.bitbucket = Some(BitbucketBootstrap {
+            account_uuid: "{account}".into(),
+            repository_uuid: None,
+            runner_uuid: "{runner}".into(),
+            oauth_client_id: "client".into(),
+        });
+        bitbucket.bitbucket_oauth_client_secret = Some("s".repeat(32));
+        for input in [github, bitbucket] {
+            let platform = input.platform.clone();
+            let tart = FakeTart::new(Duration::from_secs(30)).await?;
+            let id = start(&tart, input).await?;
+            wait_for_stops(&tart, 1).await?;
+            tart.flag("list.json", &stopped(&[CLONE])).await?;
+            let runners = listed(&tart.state).await?;
+            let [runner] = runners.as_slice() else {
+                anyhow::bail!("{platform}: expected one runner, got {runners:?}")
+            };
+            assert_eq!(runner["state"], "exited", "{platform}: {runner}");
+            assert!(runner.get("exitReason").is_none(), "{platform}: {runner}");
+            assert!(load_records(&tart.state.home).await?.contains_key(&id));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn records_keep_their_exit_code_and_records_from_before_142_still_load() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        // A record as the agent wrote it before #142: no platform, no exit code.
+        let old_id = "tart-0123456789abcdef0123456789abcdef";
+        fs::write(
+            record_path(&tart.state, old_id),
+            format!(
+                r#"{{"id":"{old_id}","runnerId":"runner-1","poolId":"pool-1","name":"homelab-abcd1234","vmName":"gridops-homelab-abcd1234","image":"gridops-macos-tahoe-base","cpuLimit":3.0,"memoryLimitMb":6144,"createdAt":"2026-11-03T00:00:00.000Z","runtime":"vm","root":null}}"#
+            ),
+        )
+        .await?;
+        let gitlab_id = "tart-fedcba9876543210fedcba9876543210";
+        let mut gitlab = vm_record(gitlab_id, "gridops-homelab-gitlab01", "vm");
+        gitlab.platform = Some("gitlab".into());
+        gitlab.exit_code = Some(75);
+        persist_record(&tart.state, &gitlab).await?;
+
+        let records = load_records(&tart.state.home).await?;
+        assert_eq!(records.len(), 2);
+        let old = records.get(old_id).context("the old record did not load")?;
+        assert_eq!((old.platform.as_deref(), old.exit_code), (None, None));
+        let gitlab = records
+            .get(gitlab_id)
+            .context("the GitLab record did not load")?;
+        assert_eq!(
+            (gitlab.platform.as_deref(), gitlab.exit_code),
+            (Some("gitlab"), Some(75))
+        );
+        Ok(())
+    }
+
+    /// The exit code is written by the runner's background task, while a
+    /// delete may be removing the same record (A finding 1): the task must
+    /// update the record only if it is still there, never re-create it.
+    #[tokio::test]
+    async fn deleting_a_gitlab_runner_as_it_exits_does_not_bring_its_record_back() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("exec-status", "77").await?;
+        // The runner's exec ends only once the VM has been deleted, so the
+        // exit code arrives after the delete removed the record.
+        tart.flag("exec-until-deleted", "").await?;
+        let id = start(&tart, gitlab_input()?).await?;
+        let deleted = delete_runner(State(tart.state.clone()), Path(id.clone()), AgentAuth).await;
+        assert!(deleted.is_ok(), "{deleted:?}");
+        // The delete's stop, then the runner's own, which follows its write.
+        wait_for_stops(&tart, 2).await?;
+        assert!(tart.state.records.read().await.is_empty());
+        let mut files = fs::read_dir(tart.state.home.join("records")).await?;
+        let left = files.next_entry().await?.map(|entry| entry.path());
+        assert!(
+            left.is_none(),
+            "a deleted runner's record came back: {left:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_gitlab_start_never_reports_its_token() -> Result<()> {
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        tart.flag("broken", "").await?;
+        let result =
+            provision_runner(State(tart.state.clone()), AgentAuth, Json(gitlab_input()?)).await;
+        let Err(AgentError::Internal(error)) = &result else {
+            anyhow::bail!("expected an ordinary start failure, got {result:?}")
+        };
+        assert!(!format!("{error:?}").contains(GITLAB_TOKEN));
+        assert!(!format!("{error:#}").contains(GITLAB_TOKEN));
+        assert!(tart.released().await?, "{:?}", tart.calls().await);
+        Ok(())
     }
 }
