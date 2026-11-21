@@ -314,10 +314,13 @@ const GITLAB_RUNNER_TOKEN_PREFIX: &str = "glrt-";
 const GITLAB_EXIT_COMPLETED: i32 = 0;
 const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
 const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
-const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+/// `EX_CONFIG`: the image has no `gitlab-runner` (`gitlab::runner_script`).
+const GITLAB_EXIT_RUNNER_MISSING: i32 = 78;
+const GITLAB_EXIT_REASONS: [(i32, &str); 4] = [
     (GITLAB_EXIT_COMPLETED, "completed"),
     (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
     (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+    (GITLAB_EXIT_RUNNER_MISSING, "runner_missing"),
 ];
 
 fn default_platform() -> String {

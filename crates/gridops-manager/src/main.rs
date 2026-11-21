@@ -624,9 +624,10 @@ struct ManagedRunner {
     labels: HashMap<String, String>,
     created_at: String,
     provider: String,
-    /// Why an exited GitLab runner ended (`completed`, `idle_expired` or
-    /// `registration_refused`), from `GITLAB_EXIT_REASONS`. Absent for every
-    /// other runner. A Tart agent's own survives the manager's re-parse.
+    /// Why an exited GitLab runner ended (`completed`, `idle_expired`,
+    /// `registration_refused` or, from a Tart agent only, `runner_missing`),
+    /// from `GITLAB_EXIT_REASONS`. Absent for every other runner. A Tart
+    /// agent's own survives the manager's re-parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit_reason: Option<String>,
 }

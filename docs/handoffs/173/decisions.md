@@ -73,3 +73,28 @@
   - Full `--no-fail-fast` runs on the reverted tree: core 1+1 RED, Tart 5 RED, manager 0, reconciler 1 RED. No collateral failures.
   - `cargo fmt --check` and `shellcheck` on the driver are clean. Clippy with the draft was clean apart from two lints on untouched lines (rustc 1.99.1): `unused_async_trait_impl` at manager `main.rs:233` and `assert_is_empty` at reconciler `builtin_host.rs:119`.
   - The manager's tests need a short TMPDIR in this session (`SUN_LEN`).
+
+## Phase 5 Implementation (F) - 2026-11-21T09:43:11-08:00
+- **Decided:** all of T's RED is now GREEN across 11 production files (docs/handoffs/173/handoff-F.md).
+  - Both bash prep scripts:
+    - `sync` is the guest script's last line;
+    - the target is stopped with `tart stop` and its `tart run` pid is `wait`ed on;
+    - the image is checked in a fresh clone (`<target>-gridops-check-<pid>`) over `tart exec`;
+    - one `cleanup` stops either VM and deletes only the clone;
+    - the target is deleted only when the check fails and the clone's agent still answers.
+  - The scripts stay self-contained, with no sourced helper (A warn 4).
+  - Traps: `trap cleanup EXIT`, plus INT/TERM traps that `exit 130/143` (A warn 1).
+  - `GITLAB_EXIT_RUNNER_MISSING = 78` / `"runner_missing"` is in both tables. Both collision guards are extended to 78.
+  - `Exit::RunnerMissing` shares one failure path in `left_service` with `RegistrationRefused`.
+  - CI wiring, the docs and two CHANGELOG bullets are done.
+- **Assumed:** a `tart exec` that catches SIGINT and exits normally would let bash continue, so the INT/TERM traps must `exit`; a returning trap or no trap is not enough. A failed check whose clone agent no longer answers is not a missing runner.
+- **Hedged:**
+  - `cargo clippy --all-targets -D warnings` fails on `clippy::assert_is_empty` on 5 untouched lines: 4 in `gridops-core` (`autoscaling.rs`, `autoscaling_gitlab_tests.rs`) and 1 in reconciler `builtin_host.rs`. With that lint and `unused_async_trait_impl` allowed, it is clean. I left these out of #173 for O.
+  - No real VM was run; the brief forbids it.
+- **Evidence:**
+  - `cargo fmt --check` is clean.
+  - Tests: core lib 307/307, core `gitlab_runner_script` 12/12, Tart 52/52, manager 111/111, reconciler 115/115.
+  - The script driver gave `all passed` (55 checks) 3 times.
+  - `bash -n`, `shellcheck` and `actionlint` are clean.
+  - A manual SIGINT to the process group during the clone check exited 130, kept the target, deleted the clone and left nothing running.
+  - Evidence entries: docs/handoffs/173/evidence.md.

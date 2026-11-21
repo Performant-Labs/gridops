@@ -30,6 +30,21 @@ Known problems in the current release are in the README's
   untagged jobs. See [GitLab runners](docs/gitlab-runners.md). (#150, #153,
   #157, #158, #160, #161, #162, #163, #164, #166)
 
+### Fixed
+
+- The GitLab and Bitbucket Tart image scripts
+  (`scripts/prepare-tart-gitlab-runner-image.sh`,
+  `scripts/prepare-tart-bitbucket-runner-image.sh`) flush the guest's disk
+  before stopping the VM, so the runner they install is kept, and check the
+  finished image in a fresh clone before reporting success. An image whose
+  clone has no runner is deleted, and the script exits non-zero. (#173)
+- A Tart GitLab runner whose image has no `gitlab-runner` now fails with the
+  exit reason `runner_missing`: its failure reason says to prepare the image
+  with `scripts/prepare-tart-gitlab-runner-image.sh`, the pool records an
+  error event, and the pool's provisioning failure count and backoff go up,
+  where before the pool kept starting VMs and reported each one provisioned.
+  (#173)
+
 ## 0.2.0 - 2026-11-04
 
 ### Upgrading

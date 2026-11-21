@@ -17,14 +17,22 @@ pub const GITLAB_EXIT_COMPLETED: i32 = 0;
 pub const GITLAB_EXIT_IDLE_EXPIRED: i32 = 75;
 /// GitLab rejected the runner's token.
 pub const GITLAB_EXIT_REGISTRATION_REFUSED: i32 = 77;
+/// The runner's image has no `gitlab-runner` (`EX_CONFIG` from `sysexits.h`,
+/// #173). Only the Tart agent's GitLab guest script exits with it, when the
+/// Tart image has no executable at `GRIDOPS_TART_GITLAB_RUNNER_BINARY`; the
+/// pool's image must be prepared again. [`gitlab_runner_script`] never
+/// exits with it: a `run-single` that itself exits 78 ends that script with
+/// a status outside the table.
+pub const GITLAB_EXIT_RUNNER_MISSING: i32 = 78;
 
 /// A GitLab runner script's exit status and the `exitReason` the runner
 /// listing (`GET /v1/runners`) reports for it. `gridops-tart-agent` holds a
 /// copy with the same names and values.
-pub const GITLAB_EXIT_REASONS: [(i32, &str); 3] = [
+pub const GITLAB_EXIT_REASONS: [(i32, &str); 4] = [
     (GITLAB_EXIT_COMPLETED, "completed"),
     (GITLAB_EXIT_IDLE_EXPIRED, "idle_expired"),
     (GITLAB_EXIT_REGISTRATION_REFUSED, "registration_refused"),
+    (GITLAB_EXIT_RUNNER_MISSING, "runner_missing"),
 ];
 
 /// The official GitLab Runner image, Ubuntu-based (the script needs `bash`
@@ -118,7 +126,10 @@ pub fn gitlab_runner_env(url: &str, wait_timeout_seconds: u32) -> Vec<String> {
 /// to `POST /api/v4/runners/verify`, [`GITLAB_EXIT_VERIFY_UNAVAILABLE`] when
 /// it can't be asked, [`GITLAB_EXIT_COMPLETED`] after the one job ran,
 /// [`GITLAB_EXIT_IDLE_EXPIRED`] after `--wait-timeout` passed without a
-/// job, and another non-zero status for any other failure.
+/// job, and another non-zero status for any other failure. A `run-single`
+/// that itself exits with a status in [`GITLAB_EXIT_REASONS`] or with
+/// [`GITLAB_EXIT_VERIFY_UNAVAILABLE`] ends the script with 1, so a status in
+/// the table is always the script's own verdict.
 #[must_use]
 pub fn gitlab_runner_script() -> String {
     GITLAB_RUNNER_SCRIPT
@@ -138,6 +149,10 @@ pub fn gitlab_runner_script() -> String {
         .replace(
             "@EXIT_UNAVAILABLE@",
             &GITLAB_EXIT_VERIFY_UNAVAILABLE.to_string(),
+        )
+        .replace(
+            "@EXIT_RUNNER_MISSING@",
+            &GITLAB_EXIT_RUNNER_MISSING.to_string(),
         )
 }
 
@@ -195,7 +210,7 @@ finish() {
 if [ "$runner_status" -ne 0 ]; then
   echo "GridOps: gitlab-runner exited with status $runner_status." >&2
   case "$runner_status" in
-    @EXIT_IDLE@|@EXIT_REFUSED@|@EXIT_UNAVAILABLE@) finish 1 ;;
+    @EXIT_IDLE@|@EXIT_REFUSED@|@EXIT_UNAVAILABLE@|@EXIT_RUNNER_MISSING@) finish 1 ;;
   esac
   finish "$runner_status"
 fi
