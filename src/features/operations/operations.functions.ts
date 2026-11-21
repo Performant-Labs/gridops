@@ -56,6 +56,10 @@ export type Runner = {
   repository: string | null; currentJobName: string | null; currentRunId: number | null; machine: RunnerMachine | null; canManage: boolean;
   /** A GitLab runner's id and its connection's address and path (the runner link); null otherwise, absent from an older server. */
   gitlabRunnerId?: number | null; gitlabBaseUrl?: string | null; gitlabScopePath?: string | null;
+  /** The scope of the runner's pool, which names the platform the runner registers with; absent from an older server. */
+  poolScope?: string;
+  /** A GitLab runner's connection name; null otherwise or for a deleted connection, absent from an older server. */
+  gitlabConnectionName?: string | null;
 };
 
 export type WorkflowRun = {

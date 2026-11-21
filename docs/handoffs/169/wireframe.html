@@ -1,0 +1,359 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>#169 Runner rows and dashboard take the pool platform from the registry - low-fi wireframe</title>
+<style>
+:root{--fg:#1b1c1f;--mut:#6b6f76;--faint:#9b9ea4;--bd:#e7e7ea;--bd2:#d9d9dd;--ok:#3da873;--note:#fff7d6}
+*{box-sizing:border-box}
+body{margin:0;padding:24px 32px 80px;background:#e9eaee;color:var(--fg);font:13px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+h1{font-size:20px;margin:0 0 4px}.lede{color:var(--mut);max-width:1000px;margin:0 0 18px}
+h2{font-size:15px;margin:28px 0 8px;padding-bottom:4px;border-bottom:2px solid #c9cad1}h2 small{color:var(--mut);font-weight:400;margin-left:8px}
+h3{font-size:13px;margin:0 0 8px}h3 small{color:var(--mut);font-weight:400;margin-left:6px}
+.tag{display:inline-block;background:#555;color:#fff;border-radius:3px;padding:0 6px;margin-right:6px;font-size:11px}
+.case{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;margin:0 0 10px;max-width:1180px}
+.case.chg{border-left:4px solid #c2410c}.case.base{border-left:4px solid #9b9ea4}
+.trio{display:flex;flex-direction:column;gap:8px}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sh{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:600;margin-bottom:3px}.sh small{text-transform:none;letter-spacing:0;font-weight:400}
+.copy{background:var(--note);box-shadow:0 0 0 1px #ecd98a;border-radius:2px}
+.rrow,.nrow,.drow{display:flex;align-items:center;gap:10px;min-height:38px;padding:0 12px;border:1px solid var(--bd);border-radius:6px;background:#fafafb;font-size:12.5px}
+.st{color:var(--ok)}.nm{min-width:0}.nm b{font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:500}
+.sub{font-size:11px;color:var(--mut)}.sp{flex:1}
+.badge{border:1px solid var(--bd2);border-radius:10px;padding:0 7px;font-size:11px;background:#fff}.badge.o{background:#fff}
+.pl{font-size:12px;color:var(--mut)}.dc{width:190px;text-align:right;font-size:12px;color:var(--faint);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.hb,.mn{color:var(--faint);font-size:12px;width:26px;text-align:right}
+.sheet{border:1px solid var(--bd);border-radius:6px;padding:6px 10px;background:#fafafb;font-size:12.5px}.sr{display:flex;gap:12px;min-height:24px;align-items:center}.lb{width:86px;color:var(--mut)}
+.drow .dn{font-weight:500}.ds{font-size:12px;color:var(--mut)}.meter,.q{font-size:12px;color:var(--faint)}.case-t code{background:transparent;color:#fff}.case-t{font-size:10px;background:#555;color:#fff;border-radius:3px;padding:0 6px}
+.notes{max-width:1100px;font-size:12.5px;padding-left:20px}.notes li{margin-bottom:5px}
+table{border-collapse:collapse;background:#fff;font-size:12px;max-width:1180px;width:100%}th,td{border:1px solid var(--bd2);padding:4px 8px;text-align:left;vertical-align:top}th{background:#f3f3f6}
+code{font-size:11.5px;background:#f0f0f3;padding:0 3px;border-radius:3px}
+.legend span{margin-right:14px}
+</style></head><body>
+<h1>#169 Runner rows and dashboard take the pool platform from the registry</h1>
+<p class="lede">No new screen or control. Three existing places that print a GitHub-only destination or the raw scope now ask the registry (<code>platformForPool</code>) what to show. Low-fi: exact copy is <span class="copy">highlighted yellow</span>. Orange left border = output changes; grey left border = output must stay exactly as today. Rows are shown at the widths where each piece of text is visible: the right-hand column at <code>xl</code>, the line under the name below <code>md</code>, the details sheet always. The existing status dot, badges, heartbeat age and actions menu are drawn as grey stand-ins and do not change.</p>
+
+<h2>A. Runner rows: GitHub, Bitbucket and older server <small>baseline, unchanged</small></h2>
+
+<section class="case base">
+  <h3><span class="tag">R1</span>GitHub repository pool <small>scope: <code>repository</code> · repository present · UNCHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">acme/web</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitHub</span>
+  <span class="sp"></span>
+  <span class="pl">web-ci</span>
+  <span class="dc copy" title="acme/web">acme/web</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">acme/web</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>web-ci</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">acme/web</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case base">
+  <h3><span class="tag">R2</span>GitHub organization pool (no repository) <small>scope: <code>organization</code> · falls back to the installation login · UNCHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">acme</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitHub</span>
+  <span class="sp"></span>
+  <span class="pl">org-pool</span>
+  <span class="dc copy" title="acme">acme</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">acme</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>org-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">acme</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case base">
+  <h3><span class="tag">R3</span>Bitbucket runner on a GitHub-scoped pool <small>scope: <code>repository</code> · resolves to GitHub; looks as today · UNCHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">acme/api</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">Bitbucket</span>
+  <span class="sp"></span>
+  <span class="pl">bb-pool</span>
+  <span class="dc copy" title="acme/api">acme/api</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">acme/api</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>bb-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">acme/api</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case base">
+  <h3><span class="tag">R4</span>Older server (no poolScope) <small>scope: <code>(absent)</code> · treated as GitHub repository scope; looks as today · UNCHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">acme/web</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitHub</span>
+  <span class="sp"></span>
+  <span class="pl">web-ci</span>
+  <span class="dc copy" title="acme/web">acme/web</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">acme/web</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>web-ci</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">acme/web</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<ol class="notes">
+<li>Text and title are exactly <code>runner.repository ?? runner.accountLogin</code> today; GitHub's runner-destination hook returns that for both.</li>
+<li>Bitbucket runners sit on a GitHub-scoped pool, so the registry returns GitHub for the pool; only the CI platform badge (still from <code>getPlatform(runner.platform)</code>) says Bitbucket.</li>
+<li>A runner from a server that does not send <code>poolScope</code> resolves as GitHub's <code>repository</code> scope. The component holds no platform comparison.</li>
+<li>The narrow line shows the running job's name when there is one (unchanged); the destination only when idle. It has no <code>title</code> today and gets none.</li>
+</ol>
+
+<h2>B. Runner rows: GitLab pool and unknown scope <small>changed</small></h2>
+
+<section class="case chg">
+  <h3><span class="tag">L1</span>GitLab pool, connection name <small>scope: <code>gitlab</code> · gitlabConnectionName · CHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">Acme / web</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitLab</span>
+  <span class="sp"></span>
+  <span class="pl">gl-pool</span>
+  <span class="dc copy" title="Acme / web">Acme / web</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">Acme / web</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>gl-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">Acme / web</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case chg">
+  <h3><span class="tag">L2</span>GitLab pool, address only <small>scope: <code>gitlab</code> · no connection name: gitlabBaseUrl/gitlabScopePath · CHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">gitlab.example.com/acme/web</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitLab</span>
+  <span class="sp"></span>
+  <span class="pl">gl-pool</span>
+  <span class="dc copy" title="gitlab.example.com/acme/web">gitlab.example.com/acme/web</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">gitlab.example.com/acme/web</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>gl-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">gitlab.example.com/acme/web</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case chg">
+  <h3><span class="tag">L2b</span>GitLab pool, one address part <small>scope: <code>gitlab</code> · scope path missing: no stray slash · CHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">gitlab.example.com</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitLab</span>
+  <span class="sp"></span>
+  <span class="pl">gl-pool</span>
+  <span class="dc copy" title="gitlab.example.com">gitlab.example.com</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">gitlab.example.com</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>gl-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">gitlab.example.com</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case chg">
+  <h3><span class="tag">L3</span>GitLab pool, no name and no address <small>scope: <code>gitlab</code> · last fallback; never the installation login · CHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">GitLab</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitLab</span>
+  <span class="sp"></span>
+  <span class="pl">gl-pool</span>
+  <span class="dc copy" title="GitLab">GitLab</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">GitLab</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>gl-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">GitLab</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<section class="case chg">
+  <h3><span class="tag">U1</span>Unknown pool scope <small>scope: <code>quantum</code> · registry fallback; raw scope never echoed · CHANGED</small></h3>
+  <div class="trio">
+    <div><div class="sh">≥ xl: row, right-hand column <small>title (hover): <span class="copy">Unknown destination</span></small></div>
+<div class="rrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b></span>
+  <span class="badge">Linux · x64</span><span class="badge o">GitHub</span>
+  <span class="sp"></span>
+  <span class="pl">odd-pool</span>
+  <span class="dc copy" title="Unknown destination">—</span>
+  <span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+    <div class="two">
+      <div><div class="sh">&lt; md: line under the name (no job running)</div>
+<div class="nrow">
+  <span class="st">●</span>
+  <span class="nm"><b>runner-7f3a</b><br><span class="sub copy">—</span></span>
+  <span class="sp"></span><span class="hb">12s</span><span class="mn">⋯</span>
+</div></div>
+      <div><div class="sh">Details sheet row</div>
+<div class="sheet">
+  <div class="sr"><span class="lb">Pool</span><span>odd-pool</span></div>
+  <div class="sr"><span class="lb">Repository</span><span class="copy">—</span></div>
+  <div class="sr"><span class="lb">Current job</span><span>None</span></div>
+</div></div>
+    </div>
+  </div>
+</section>
+<ol class="notes">
+<li>GitLab destination order: connection name, else <code>gitlabBaseUrl/gitlabScopePath</code> (only the parts present, no stray "/"), else <span class="copy">GitLab</span>. Text and title are the same string. Never the GitHub installation login, never a repository.</li>
+<li>Unknown scope: text <span class="copy">—</span>, title <span class="copy">Unknown destination</span> in all three places. The raw scope is never shown.</li>
+<li>The details-sheet label stays <span class="copy">Repository</span> for every platform (see open question 1). The CI platform row and badge still read GitLab from the runner's own platform.</li>
+</ol>
+
+<h2>C. Dashboard "Runner pools" rows <small>scope text only</small></h2>
+<div class="case chg" style="max-width:1180px">
+
+<div class="drow">
+  <span class="st">●</span><span class="dn">web-ci</span><span class="sp"></span>
+  <span class="ds"><span class="copy">Repository</span> · ephemeral</span>
+  <span class="meter">■■□□ 2/4</span><span class="q">0 queued</span>
+  <span class="case-t">D1 <code>repository</code> unchanged</span>
+</div><br>
+<div class="drow">
+  <span class="st">●</span><span class="dn">org-pool</span><span class="sp"></span>
+  <span class="ds"><span class="copy">Organization</span> · persistent</span>
+  <span class="meter">■■□□ 2/4</span><span class="q">0 queued</span>
+  <span class="case-t">D2 <code>organization</code> unchanged</span>
+</div><br>
+<div class="drow">
+  <span class="st">●</span><span class="dn">gl-pool</span><span class="sp"></span>
+  <span class="ds"><span class="copy">GitLab</span> · ephemeral</span>
+  <span class="meter">■■□□ 2/4</span><span class="q">0 queued</span>
+  <span class="case-t">D3 <code>gitlab</code> changed</span>
+</div><br>
+<div class="drow">
+  <span class="st">●</span><span class="dn">odd-pool</span><span class="sp"></span>
+  <span class="ds"><span class="copy">Unknown</span> · ephemeral</span>
+  <span class="meter">■■□□ 2/4</span><span class="q">0 queued</span>
+  <span class="case-t">D4 <code>quantum</code> changed</span>
+</div>
+</div>
+<ol class="notes">
+<li>Drawn as rendered. The text comes from the registry scope-label hook. GitHub returns the raw scope (repository, organization), so the existing CSS <code>capitalize</code> still renders "Repository" and "Organization" (unchanged). GitLab returns <span class="copy">GitLab</span> (not "Gitlab"); unknown returns <span class="copy">Unknown</span>.</li>
+<li>The "· mode" part, the capacity meter and the queue count are untouched. The scope text is hidden below <code>sm</code> as today.</li>
+</ol>
+
+<h2>D. Pool list runner count <small>API only, no visible change in this UI</small></h2>
+<p class="notes">The pool list API's <code>totalRunners</code> reports 0 for a pool with no runners (it reported 1). The web UI does not display this field, so there is nothing to draw; it is covered by the Rust API tests. No empty-state copy changes.</p>
+
+<h2>E. Contract for the Tester and Feature implementor</h2>
+<table>
+<tr><th>Case</th><th>Resolves to</th><th>Destination text</th><th>Title</th><th>Dashboard scope text</th></tr>
+<tr><td>repository + repository set</td><td>GitHub</td><td>repository</td><td>repository</td><td>"repository" (CSS capitalizes)</td></tr>
+<tr><td>organization, no repository</td><td>GitHub</td><td>accountLogin</td><td>accountLogin</td><td>"organization"</td></tr>
+<tr><td>Bitbucket runner, GitHub pool</td><td>GitHub</td><td>as GitHub</td><td>as GitHub</td><td>as GitHub</td></tr>
+<tr><td>no <code>poolScope</code> (older server)</td><td>GitHub (repository scope)</td><td>as GitHub</td><td>as GitHub</td><td>n/a (dashboard sends scope)</td></tr>
+<tr><td>gitlab + connection name</td><td>GitLab</td><td>name</td><td>name</td><td>"GitLab"</td></tr>
+<tr><td>gitlab + base URL and scope path</td><td>GitLab</td><td>baseUrl/scopePath</td><td>same</td><td>"GitLab"</td></tr>
+<tr><td>gitlab + only one address part</td><td>GitLab</td><td>that part, no "/"</td><td>same</td><td>"GitLab"</td></tr>
+<tr><td>gitlab + neither</td><td>GitLab</td><td>"GitLab"</td><td>"GitLab"</td><td>"GitLab"</td></tr>
+<tr><td>unknown scope</td><td>registry fallback</td><td>"—"</td><td>"Unknown destination"</td><td>"Unknown"</td></tr>
+</table>
+</body></html>
