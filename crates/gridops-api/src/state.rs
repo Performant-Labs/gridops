@@ -1,5 +1,15 @@
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
-use gridops_core::{BitbucketClient, Config, GitHubClient, Vault};
+use async_trait::async_trait;
+use gridops_core::{
+    BitbucketClient, Config, GitHubClient, Vault,
+    fleet::ExternalId,
+    gitlab::{
+        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
+        ScopeKind,
+    },
+};
 use reqwest::Url;
 use secrecy::ExposeSecret;
 use sqlx::SqlitePool;
@@ -19,7 +29,95 @@ pub struct AppState {
     pub vault: Vault,
     pub github: GitHubClient,
     pub bitbucket: BitbucketClient,
+    /// One client serves every GitLab connection: each call carries that
+    /// connection's credentials. Tests swap in `FakeGitLab` with
+    /// [`AppState::with_gitlab`]; `main.rs` sets the real `GitLabClient` there.
+    pub gitlab: Arc<dyn GitLabApi>,
     pub http: reqwest::Client,
+}
+
+/// The GitLab client until #146's lands: every call fails with `Upstream`,
+/// which the handlers answer as "GitLab request failed".
+struct UnconfiguredGitLab;
+
+impl UnconfiguredGitLab {
+    fn unavailable<T>() -> Result<T, GitLabError> {
+        Err(GitLabError::Upstream(
+            "GitLab client not available yet".into(),
+        ))
+    }
+}
+
+#[async_trait]
+impl GitLabApi for UnconfiguredGitLab {
+    async fn create_runner(
+        &self,
+        _credentials: &GitLabCredentials,
+        _scope: &Scope,
+        _tags: &[String],
+        _run_untagged: bool,
+        _description: &str,
+    ) -> Result<CreatedRunner, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn delete_runner(
+        &self,
+        _credentials: &GitLabCredentials,
+        _runner_id: ExternalId,
+    ) -> Result<(), GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn list_runners(
+        &self,
+        _credentials: &GitLabCredentials,
+        _scope: &Scope,
+    ) -> Result<Vec<RunnerSummary>, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn job(
+        &self,
+        _credentials: &GitLabCredentials,
+        _project_id: ExternalId,
+        _job_id: ExternalId,
+    ) -> Result<Job, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn pending_jobs(
+        &self,
+        _credentials: &GitLabCredentials,
+        _project_id: ExternalId,
+    ) -> Result<Vec<Job>, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn group_projects(
+        &self,
+        _credentials: &GitLabCredentials,
+        _group_id: ExternalId,
+    ) -> Result<Vec<ExternalId>, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn resolve_scope(
+        &self,
+        _credentials: &GitLabCredentials,
+        _kind: ScopeKind,
+        _path: &str,
+    ) -> Result<Scope, GitLabError> {
+        Self::unavailable()
+    }
+
+    async fn verify_access(
+        &self,
+        _credentials: &GitLabCredentials,
+        _scope: &Scope,
+    ) -> Result<(), GitLabError> {
+        Self::unavailable()
+    }
 }
 
 impl AppState {
@@ -36,10 +134,19 @@ impl AppState {
             vault,
             github,
             bitbucket,
+            gitlab: Arc::new(UnconfiguredGitLab),
             http: reqwest::Client::builder()
                 .user_agent("GridOps/0.1")
                 .build()?,
         })
+    }
+
+    /// Replaces the GitLab client: the binary sets #146's `GitLabClient`,
+    /// tests inject `FakeGitLab`.
+    #[must_use]
+    pub fn with_gitlab(mut self, gitlab: Arc<dyn GitLabApi>) -> Self {
+        self.gitlab = gitlab;
+        self
     }
 
     pub fn manager_url(&self, path: &str) -> Result<Url> {

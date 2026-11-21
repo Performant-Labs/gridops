@@ -18,9 +18,11 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderName, HeaderValue, Method, Request, StatusCode, header},
     middleware,
-    routing::{any, delete, get, post, put},
+    routing::{any, delete, get, patch, post, put},
 };
-use gridops_core::{BitbucketClient, Config, GitHubClient, Vault, connect_database};
+use gridops_core::{
+    BitbucketClient, Config, GitHubClient, Vault, connect_database, gitlab::GitLabClient,
+};
 use tower::ServiceBuilder;
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -81,7 +83,8 @@ async fn main() -> Result<()> {
     let vault = Vault::from_config(&config)?;
     let github = GitHubClient::new(config.clone())?;
     let bitbucket = BitbucketClient::new()?;
-    let state = AppState::new(config.clone(), database, vault, github, bitbucket)?;
+    let state = AppState::new(config.clone(), database, vault, github, bitbucket)?
+        .with_gitlab(std::sync::Arc::new(GitLabClient::new()?));
     state.validate_api().await?;
     tokio::spawn({
         let state = state.clone();
@@ -167,7 +170,13 @@ async fn main() -> Result<()> {
             CorsLayer::new()
                 .allow_origin(origin)
                 .allow_credentials(true)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                ])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     HeaderName::from_static("x-csrf-token"),
@@ -365,6 +374,22 @@ fn session_routes() -> Router<AppState> {
             "/api/v1/platform-connections/bitbucket/{connection_id}",
             put(resources::update_bitbucket_connection)
                 .delete(resources::delete_bitbucket_connection),
+        )
+        .route(
+            "/api/v1/platform-connections/gitlab",
+            get(resources::gitlab_connections).post(resources::create_gitlab_connection),
+        )
+        .route(
+            "/api/v1/platform-connections/gitlab/{connection_id}",
+            patch(resources::update_gitlab_connection).delete(resources::delete_gitlab_connection),
+        )
+        .route(
+            "/api/v1/platform-connections/gitlab/{connection_id}/verify",
+            post(resources::verify_gitlab_connection),
+        )
+        .route(
+            "/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate",
+            post(resources::rotate_gitlab_webhook_secret),
         )
         .route(
             "/api/v1/github-app/manifest",

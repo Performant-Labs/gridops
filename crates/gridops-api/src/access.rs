@@ -208,7 +208,12 @@ mod tests {
                 .split('|')
                 .map(|cell| cell.trim().replace('`', ""))
                 .collect();
-            if cells.len() == 6 && matches!(cells[0].as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+            if cells.len() == 6
+                && matches!(
+                    cells[0].as_str(),
+                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+                )
+            {
                 rows.push((
                     cells[0].clone(),
                     cells[1].clone(),
@@ -245,7 +250,7 @@ mod tests {
             let call = &rest[..end.context("unbalanced .route(")?];
             let path = call.split('"').nth(1).context("route without a path")?;
             let handlers = &call[call.find(',').context("route without a handler")?..];
-            for method in ["get", "post", "put", "delete", "any"] {
+            for method in ["get", "post", "put", "patch", "delete", "any"] {
                 let needle = format!("{method}(");
                 let mut search = handlers;
                 while let Some(found) = search.find(&needle) {
@@ -356,6 +361,52 @@ mod tests {
                 .contains("route_layer(middleware::from_fn(access::refuse_bearer))"),
             "the session group refuses bearer tokens"
         );
+        Ok(())
+    }
+
+    /// #138: the GitLab connection routes are cookie-only (a bearer token is
+    /// refused before the handler runs) and documented as such, PATCH
+    /// included.
+    #[test]
+    fn the_gitlab_connection_routes_are_documented_session_routes() -> anyhow::Result<()> {
+        let session: BTreeSet<(String, String)> = routes_in(function(MAIN, "session_routes")?)?
+            .into_iter()
+            .collect();
+        let documented: std::collections::BTreeMap<(String, String), String> = documented()?
+            .into_iter()
+            .map(|(method, path, outcome, _)| ((method, path), outcome))
+            .collect();
+        for (method, path) in [
+            ("GET", "/api/v1/platform-connections/gitlab"),
+            ("POST", "/api/v1/platform-connections/gitlab"),
+            (
+                "PATCH",
+                "/api/v1/platform-connections/gitlab/{connection_id}",
+            ),
+            (
+                "DELETE",
+                "/api/v1/platform-connections/gitlab/{connection_id}",
+            ),
+            (
+                "POST",
+                "/api/v1/platform-connections/gitlab/{connection_id}/verify",
+            ),
+            (
+                "POST",
+                "/api/v1/platform-connections/gitlab/{connection_id}/webhook-secret/rotate",
+            ),
+        ] {
+            let route = (method.to_owned(), path.to_owned());
+            assert!(
+                session.contains(&route),
+                "{method} {path} is not a session route"
+            );
+            assert_eq!(
+                documented.get(&route).map(String::as_str),
+                Some("403 token_not_accepted"),
+                "{method} {path} in docs/fleet-api.md"
+            );
+        }
         Ok(())
     }
 

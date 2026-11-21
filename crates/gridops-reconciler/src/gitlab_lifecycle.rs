@@ -19,10 +19,7 @@
 //! The `glrt-` runner token goes to the runner manager's start request or the
 //! fleet's sealed bootstrap material only: never to a row, event or log.
 
-use std::sync::Arc;
-
 use anyhow::{Context as _, Result, anyhow};
-use async_trait::async_trait;
 use gridops_core::{
     fleet::{
         ExternalId,
@@ -30,10 +27,7 @@ use gridops_core::{
         placement::{self, Placement},
         protocol::{agent::GitlabRunnerMaterial, outcomes::DiagnosticCode},
     },
-    gitlab::{
-        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
-        ScopeKind,
-    },
+    gitlab::{CreatedRunner, GitLabCredentials, GitLabError, RunnerSummary, Scope, ScopeKind},
     now_millis,
     provisioning::{
         GITLAB_DEFAULT_WAIT_TIMEOUT_SECS, GITLAB_EXIT_COMPLETED, GITLAB_EXIT_IDLE_EXPIRED,
@@ -745,97 +739,4 @@ async fn runner_live(app: &Reconciler, runner_id: &str) -> Result<bool> {
     .fetch_one(&app.database)
     .await?
         != 0)
-}
-
-// ---------------------------------------------------------------------------
-// The client until #146's is wired.
-// ---------------------------------------------------------------------------
-
-/// What every call answers while `GitLab`'s HTTP client (#146) is not wired.
-const UNWIRED: &str = "GitLab client not available yet";
-
-/// The production `GitLabApi` until #146 lands: every call fails, so a GitLab
-/// start fails cleanly at registration (counted, nothing left starting or
-/// registered) and the sweep lists nothing. #146 replaces
-/// [`unwired_client`]'s one line.
-struct UnwiredGitLab;
-
-pub(super) fn unwired_client() -> Arc<dyn GitLabApi> {
-    Arc::new(UnwiredGitLab)
-}
-
-fn unwired<T>() -> Result<T, GitLabError> {
-    Err(GitLabError::Upstream(UNWIRED.to_owned()))
-}
-
-#[async_trait]
-impl GitLabApi for UnwiredGitLab {
-    async fn create_runner(
-        &self,
-        _credentials: &GitLabCredentials,
-        _scope: &Scope,
-        _tags: &[String],
-        _run_untagged: bool,
-        _description: &str,
-    ) -> Result<CreatedRunner, GitLabError> {
-        unwired()
-    }
-
-    async fn delete_runner(
-        &self,
-        _credentials: &GitLabCredentials,
-        _runner_id: ExternalId,
-    ) -> Result<(), GitLabError> {
-        unwired()
-    }
-
-    async fn list_runners(
-        &self,
-        _credentials: &GitLabCredentials,
-        _scope: &Scope,
-    ) -> Result<Vec<RunnerSummary>, GitLabError> {
-        unwired()
-    }
-
-    async fn job(
-        &self,
-        _credentials: &GitLabCredentials,
-        _project_id: ExternalId,
-        _job_id: ExternalId,
-    ) -> Result<Job, GitLabError> {
-        unwired()
-    }
-
-    async fn pending_jobs(
-        &self,
-        _credentials: &GitLabCredentials,
-        _project_id: ExternalId,
-    ) -> Result<Vec<Job>, GitLabError> {
-        unwired()
-    }
-
-    async fn group_projects(
-        &self,
-        _credentials: &GitLabCredentials,
-        _group_id: ExternalId,
-    ) -> Result<Vec<ExternalId>, GitLabError> {
-        unwired()
-    }
-
-    async fn resolve_scope(
-        &self,
-        _credentials: &GitLabCredentials,
-        _kind: ScopeKind,
-        _path: &str,
-    ) -> Result<Scope, GitLabError> {
-        unwired()
-    }
-
-    async fn verify_access(
-        &self,
-        _credentials: &GitLabCredentials,
-        _scope: &Scope,
-    ) -> Result<(), GitLabError> {
-        unwired()
-    }
 }

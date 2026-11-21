@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>#145 Platform-neutral UI - low-fi wireframe</title>
+<style>
+  :root { --bg:#f4f4f6; --panel:#fff; --sub:#f7f7f9; --fg:#1b1c1f; --mut:#6b6f76; --faint:#9b9ea4; --bd:#e7e7ea; --bd2:#d9d9dd; --hover:#efeff2; --ok:#3da873; --warn:#d99a18; --bad:#e5484d; --info:#3b8fe8; --note:#fff7d6; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 32px 80px; background:#e9eaee; color:var(--fg); font:13px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .lede { color:var(--mut); max-width:900px; margin:0 0 18px; }
+  .toc { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 24px; }
+  .toc a { color:var(--fg); background:#fff; border:1px solid var(--bd2); border-radius:12px; padding:2px 10px; text-decoration:none; font-size:12px; }
+  .frame { margin:0 0 40px; }
+  .frame > h2 { font-size:15px; margin:0 0 8px; padding-bottom:4px; border-bottom:2px solid #c9cad1; }
+  .frame > h2 small { color:var(--mut); font-weight:400; margin-left:8px; }
+  .cols { display:grid; grid-template-columns:minmax(0,760px) minmax(260px,1fr); gap:20px; align-items:start; }
+  .screens { display:flex; flex-direction:column; gap:16px; }
+  .sub-h { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:0 0 4px; font-weight:600; }
+  .screen { background:var(--bg); border:1px solid var(--bd2); border-radius:8px; padding:20px 24px; position:relative; }
+  .screen.tight { padding:14px; }
+  .notes { margin:0; padding:0; list-style:none; font-size:12px; color:#333; }
+  .notes li { position:relative; padding:0 0 8px 28px; }
+  .notes li > .n { position:absolute; left:0; top:0; }
+  .notes b { font-weight:600; }
+  .n { display:inline-flex; align-items:center; justify-content:center; width:17px; height:17px; border-radius:50%; background:#c2410c; color:#fff; font-size:10px; font-weight:700; vertical-align:middle; flex:none; }
+  .copy { background:var(--note); box-shadow:0 0 0 1px #ecd98a; border-radius:2px; }
+  .empty .t.copy, .empty .d.copy { display:block; width:fit-content; margin-left:auto; margin-right:auto; }
+  h3.pt { font-size:22px; margin:0 0 4px; font-weight:600; letter-spacing:-.015em; }
+  p.pd { margin:0 0 16px; color:var(--mut); max-width:58ch; }
+  .head { display:flex; justify-content:space-between; align-items:flex-end; gap:12px; margin-bottom:20px; }
+  .sec { margin-bottom:22px; }
+  .sec > .st { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:6px; }
+  .sec > .st h4 { margin:0; font-size:14px; font-weight:600; }
+  .sec > .st p { margin:1px 0 0; color:var(--mut); font-size:12px; }
+  .panel { background:var(--panel); border:1px solid var(--bd); border-radius:8px; overflow:visible; }
+  .panel > * + * { border-top:1px solid var(--bd); }
+  .panel > :first-child { border-radius:8px 8px 0 0; } .panel > :last-child { border-radius:0 0 8px 8px; }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 14px; }
+  .row.top { align-items:flex-start; }
+  .row .grow { flex:1; min-width:0; }
+  .row .t { font-weight:600; font-size:13px; } .row .d { color:var(--mut); font-size:12px; margin-top:1px; }
+  .stack { flex-direction:column; align-items:stretch; gap:8px; }
+  .ctl { width:300px; flex:none; }
+  .btn { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:4px 10px; font-size:12.5px; white-space:nowrap; }
+  .btn.p { background:#1b1c1f; color:#fff; border-color:#1b1c1f; }
+  .btn.g { border-color:transparent; background:transparent; color:#333; }
+  .btn.dis { opacity:.45; }
+  .btn.sm { padding:2px 8px; font-size:12px; }
+  .input { border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:5px 9px; color:#444; font-size:12.5px; min-height:28px; }
+  .input.ph { color:var(--faint); } .input.err { border-color:var(--bad); }
+  .input.mono { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .lbl { font-size:12px; font-weight:600; margin-bottom:3px; display:block; }
+  .badge { display:inline-flex; align-items:center; gap:4px; border:1px solid var(--bd2); border-radius:5px; padding:0 6px; font-size:11px; background:#fff; white-space:nowrap; }
+  .badge.gh { background:#f0f0f3; } .badge.bb { background:#e8f0ff; border-color:#b6ccf5; color:#1d4ed8; } .badge.unk { border-style:dashed; color:var(--mut); }
+  .badge.bad { color:var(--bad); border-color:#f0b4b6; background:#fdecec; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); } .dot.w { background:var(--warn); } .dot.b { background:var(--bad); }
+  .av { width:28px; height:28px; border-radius:6px; background:#d7d8de; display:flex; align-items:center; justify-content:center; font-weight:600; color:#555; flex:none; }
+  .faint { color:var(--faint); font-size:12px; } .mut { color:var(--mut); }
+  .callout { border:1px solid var(--bd2); border-radius:6px; background:#fff; padding:8px 12px; font-size:12px; }
+  .callout b { display:block; font-size:12.5px; }
+  .callout.danger { border-color:#f0b4b6; background:#fdecec; } .callout.info { border-color:#b6ccf5; background:#eef4ff; } .callout.warn { border-color:#ecd98a; background:#fff9e2; }
+  .empty { text-align:center; padding:26px 16px; } .empty .big { font-size:24px; color:var(--faint); } .empty .t { font-weight:600; margin-top:4px; } .empty .d { color:var(--mut); max-width:46ch; margin:3px auto 12px; }
+  .chip { display:inline-flex; align-items:center; gap:5px; background:#eceef4; border:1px solid var(--bd2); border-radius:12px; padding:1px 4px 1px 8px; font-size:12px; margin:0 4px 4px 0; }
+  .chip i { font-style:normal; color:var(--mut); padding:0 3px; }
+  .chip.lock { background:#f3f3f5; color:var(--mut); padding-right:8px; }
+  .trigger { border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:5px 9px; display:flex; justify-content:space-between; align-items:flex-start; min-height:32px; }
+  .listbox { border:1px solid var(--bd2); background:#fff; border-radius:8px; box-shadow:0 6px 18px rgb(0 0 0 / .12); margin-top:4px; overflow:hidden; }
+  .lb-s { padding:7px 10px; border-bottom:1px solid var(--bd); color:var(--faint); }
+  .gh-h { padding:5px 10px 3px; font-size:11px; font-weight:600; color:var(--mut); background:var(--sub); border-top:1px solid var(--bd); display:flex; justify-content:space-between; }
+  .gh-h:first-of-type { border-top:0; }
+  .opt { padding:5px 10px; display:flex; gap:8px; align-items:flex-start; }
+  .opt .ck { width:14px; color:var(--ok); font-weight:700; } .opt .d { color:var(--mut); font-size:11.5px; }
+  .opt.sel { background:#f3f6ff; } .opt.dim { opacity:.5; } .opt.act { background:var(--hover); }
+  .opt .why { color:var(--bad); font-size:11px; margin-left:auto; white-space:nowrap; }
+  .gstatus { padding:6px 10px 6px 32px; font-size:12px; color:var(--mut); display:flex; gap:8px; align-items:center; }
+  .lb-f { border-top:1px solid var(--bd); padding:5px 10px; font-size:11.5px; color:var(--mut); display:flex; justify-content:space-between; }
+  .dlg-bg { background:rgb(20 20 25 / .35); border-radius:8px; padding:26px 20px; display:flex; justify-content:center; }
+  .dlg { background:#fff; border:1px solid var(--bd2); border-radius:10px; width:470px; box-shadow:0 10px 30px rgb(0 0 0 / .2); }
+  .dlg > .dh { padding:12px 16px 4px; font-size:15px; font-weight:600; } .dlg > .dp { padding:0 16px 10px; color:var(--mut); font-size:12px; }
+  .dlg > .db { padding:6px 16px 12px; } .dlg > .df { padding:10px 16px; border-top:1px solid var(--bd); display:flex; justify-content:flex-end; gap:8px; }
+  .radio { border:1px solid var(--bd2); border-radius:8px; padding:8px 10px; display:flex; gap:10px; align-items:flex-start; margin-bottom:6px; background:#fff; }
+  .radio.on { border-color:#1b1c1f; box-shadow:0 0 0 1px #1b1c1f; } .radio .r { width:14px; height:14px; border:1.5px solid #888; border-radius:50%; margin-top:2px; flex:none; display:flex; align-items:center; justify-content:center; font-size:8px; }
+  .radio.on .r { border-color:#1b1c1f; } .radio.on .r::after { content:"●"; }
+  .secret { font-family:ui-monospace,Menlo,monospace; background:var(--sub); border:1px solid var(--bd2); border-radius:6px; padding:6px 9px; display:flex; justify-content:space-between; gap:8px; font-size:12px; }
+  .slot { border:1.5px dashed #b5b7c0; border-radius:6px; padding:8px 10px; color:var(--mut); font-size:12px; text-align:center; background:#fafafb; }
+  .disc { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; }
+  .nav { width:220px; background:#fbfbfc; border:1px solid var(--bd2); border-radius:8px; padding:8px; font-size:12.5px; }
+  .nav .g { color:var(--faint); font-size:11.5px; padding:6px 8px 2px; font-weight:600; } .nav .i { white-space:nowrap; padding:3px 8px; border-radius:5px; } .nav .i.on { background:var(--hover); font-weight:600; }
+  .nav .gone { text-decoration:line-through; color:var(--faint); }
+  .rr { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--bd); border-radius:6px; padding:7px 12px; }
+  .menu { width:230px; background:#fff; border:1px solid var(--bd2); border-radius:8px; box-shadow:0 6px 18px rgb(0 0 0 / .12); padding:4px; font-size:12.5px; }
+  .menu div { padding:4px 8px; border-radius:4px; } .menu hr { border:0; border-top:1px solid var(--bd); margin:3px 0; } .menu .new { background:var(--note); }
+  .tag { display:inline-block; font-size:10px; font-weight:700; color:#fff; background:#555; border-radius:3px; padding:0 5px; margin-left:6px; vertical-align:middle; }
+  .tag.new { background:#c2410c; } .tag.rm { background:#7c3aed; } .tag.keep { background:#4b5563; }
+  table.map { border-collapse:collapse; font-size:12px; background:#fff; } table.map td, table.map th { border:1px solid var(--bd2); padding:4px 8px; text-align:left; vertical-align:top; }
+  table.map th { background:var(--sub); }
+  .legend { background:#fff; border:1px solid var(--bd2); border-radius:8px; padding:10px 14px; max-width:900px; margin-bottom:22px; font-size:12px; }
+  .legend code, .notes code { font-family:ui-monospace,Menlo,monospace; font-size:11px; background:#eef; padding:0 3px; border-radius:3px; }
+  .sp { display:inline-block; animation:none; }
+</style>
+</head>
+<body>
+
+<h1>#145 &middot; Platform-neutral UI &mdash; low-fi wireframe</h1>
+<p class="lede">One Settings &rarr; Connections page, one grouped Targets row, one collapsed Platform options section, registry-driven runner badges. Structure, hierarchy, labels, controls and per-state copy only &mdash; not final visuals. Layout, spacing and components reuse the existing app (<code>SettingsLayout</code>, <code>SettingsSection</code>, <code>SettingsRow</code>, <code>Callout</code>, <code>StatusDot</code>, <code>SearchableMultiSelect</code>). Glyphs are Unicode (&#x25CF; &#x2713; &#x2715; &#x25B8; &#x25BE; &#x21BA; &#x2197;); no hand-drawn icon geometry. Yellow <span class="copy">monospace</span> = exact copy.</p>
+
+<div class="legend">
+  <b>Tags:</b> <span class="tag new">NEW</span> new surface/element &nbsp; <span class="tag keep">KEEP</span> existing element, same behaviour, now descriptor-driven &nbsp; <span class="tag rm">REMOVED</span> existing row that disappears.<br>
+  <b>Platform names, badge styling, icons, field lists, help text and target kinds in every frame below come from the registry descriptor</b> (<code>src/features/platform-connections/registry.tsx</code>) &mdash; the wireframe draws GitHub and Bitbucket only; an unknown id renders the fallback (frame G).
+</div>
+
+<div class="legend" style="border-color:#0f766e">
+  <b>Revision 4 (after the Phase-4 round-3 review and the round-3 brief amendments).</b> Brief wins on any difference. Changes, tagged <span class="tag new">REV4</span>:<br>
+  &bull; <b>B1, B1b, B4, B note 5</b>: installations are rendered <i>once</i>, as GitHub rows in the connections list (Configure link, &ldquo;Owner approval required&rdquo;, Suspended badge, and the empty text <span class="copy">No installations are visible to @{login}.</span>). The GitHub App section holds only Connection checks, Endpoints, the Create form (admin, App not configured) and the &ldquo;Adding another GitHub account&rdquo; callout; Refresh access, Install and Manage App (admin only) are its header actions. <b>Members</b> see the checks, the endpoints, the Refresh access and Install actions and one Read-only access callout; no Create section, no Manage App. B4 and the old note 5 (&ldquo;read-only users see no GitHub App section&rdquo;) are superseded.<br>
+  &bull; <b>B note 3, C3</b>: Add and Edit keep their <i>inline</i> errors; only Remove reports a failure by toast. Success copy keeps today&rsquo;s wording (<span class="copy">Bitbucket workspace connected.</span>), supplied by the descriptor.<br>
+  &bull; <b>D notes 2, 3, 7, 8, 9</b>: option keys are unique within a kind across connections (runner group = <code>installationId/groupId</code>); the manual &ldquo;Runner group ID&rdquo; entry is per installation; the create payload&rsquo;s installation comes from the first selected repository <i>in the loaded list&rsquo;s order</i>, not click order; the Maximum floor counts repositories only (flag <code>raisesMinMaxCount</code>); the empty-form plan sentence is the repository one.<br>
+  &bull; <b>C2, D5, E, F</b>: the descriptor fields the frames rely on are named (<code>externalLinks</code>, <code>prerequisiteEmptyState</code>, <code>offeredIn</code>, <code>readOnlySummary</code>, <code>labelsPlaceholder</code>).<br>
+</div>
+
+<div class="legend" style="border-color:#7c3aed">
+  <b>Revision 3 (after the Phase-4 round-2 review and the brief amendments).</b> Brief wins on any difference. Changes, tagged <span class="tag new">REV3</span>:<br>
+  &bull; <b>A</b>: the <code>?appError=</code> redirect carries no search and the message is a toast, not a Callout on the Connections page.<br>
+  &bull; <b>B (GitHub App section, notes 5 and 7)</b>: the route composes the GitHub App section next to the connections list; the descriptor has no <code>settingsSection</code> slot. Loading is per platform inside the connections list component (no route loader); Retry and refresh touch only that platform.<br>
+  &bull; <b>C4</b>: close button text is the dialog&rsquo;s default <span class="copy">I&rsquo;ve stored it, close</span> (not &ldquo;Done&rdquo;); title, description, secret label, details and optional button text come from the post-create hook&rsquo;s return value; the API tokens page uses the same extracted dialog.<br>
+</div>
+
+<div class="legend" style="border-color:#c2410c">
+  <b>Revision 2 (after the Phase-4 architecture review and the amended brief).</b> Where this file and <code>docs/handoffs/145-brief.md</code> disagree, the brief wins. Changes in this revision:<br>
+  &bull; <b>C4</b>: only the explicit button closes the reveal (Escape and outside clicks are ignored); it is the extracted <code>SecretDialog</code>, shared with API tokens.<br>
+  &bull; <b>D2/D2b/D7</b>: Bitbucket is <i>not standalone</i> &mdash; its options are disabled-with-reason until a GitHub repository or runner group is selected; removing the last GitHub target keeps the workspace selected and the form fails at submit, as today.<br>
+  &bull; <b>D5</b>: with no GitHub installation the page shows today&rsquo;s two empty states (copy now supplied by the GitHub descriptor); the invented &ldquo;Add a connection first&rdquo; is dropped.<br>
+  &bull; <b>D</b> notes: namespaced option keys, separate per-kind caps, installation pinned from the first repository, plan-preview sentence contract. <b>E3</b>: read-only pool targets. <b>A</b>: webhooks empty-state link. <b>B5b</b>: partial load failure. New or changed items carry the <span class="tag new">REV2</span> tag.
+</div>
+
+<nav class="toc">
+  <a href="#A">A &middot; Settings nav + redirects</a><a href="#B">B &middot; Connections page</a><a href="#C">C &middot; Add connection + reveal</a><a href="#D">D &middot; Targets row</a><a href="#E">E &middot; Pool settings Targets</a><a href="#F">F &middot; Platform options</a><a href="#G">G &middot; Runner row</a>
+</nav>
+
+<!-- ============================ A ============================ -->
+<section class="frame" id="A">
+<h2>A &middot; Settings navigation and redirects <small>alters <code>settings.tsx</code>, <code>settings.index.tsx</code>, <code>_app/platform-connections.tsx</code></small></h2>
+<div class="cols">
+<div class="screens">
+  <div class="screen"><div style="display:flex;gap:24px;align-items:flex-start">
+    <div class="nav">
+      <div class="g">Account</div><div class="i">Preferences</div><div class="i">API tokens</div>
+      <div class="g">Workspace</div><div class="i">General</div><div class="i">Members</div><div class="i">Runner host</div>
+      <div class="g">Integrations</div>
+      <div class="i on">&#x21C4; Connections <span class="tag new">NEW</span></div>
+      <div class="i gone">GitHub</div><div class="i gone">Bitbucket</div>
+      <div class="i">&#x2728; AI agent <span class="tag keep">KEEP</span></div>
+    </div>
+    <table class="map">
+      <tr><th>Old URL</th><th>Behaviour</th></tr>
+      <tr><td>/settings/integrations</td><td>replace-redirect &rarr; /settings/connections</td></tr>
+      <tr><td>/settings/github</td><td>replace-redirect &rarr; /settings/connections</td></tr>
+      <tr><td>/platform-connections</td><td>replace-redirect &rarr; /settings/connections (edited in place; was &rarr; integrations)</td></tr>
+      <tr><td>/settings?appError=&hellip;</td><td>replace-redirect &rarr; /settings/connections with no search; the error is shown as a toast (<code>toast.error</code>, skipped on preload), as today; the Connections page does not read <code>appError</code> <span class="tag new">REV3</span></td></tr>
+      <tr><td>Pool form link &ldquo;Settings &rarr; Integrations&rdquo;</td><td>&ldquo;Settings &rarr; Connections&rdquo; &rarr; /settings/connections</td></tr>
+      <tr><td>Webhooks empty-state button <span class="tag new">REV2</span></td><td>keeps its label <span class="copy">GitHub settings</span>; link &rarr; /settings/connections (was /settings/github)</td></tr>
+      <tr><td>Settings nav items</td><td>one &ldquo;Connections&rdquo; item &rarr; /settings/connections</td></tr>
+    </table>
+  </div></div>
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>One nav item replaces two.</b> &ldquo;GitHub&rdquo; and &ldquo;Bitbucket&rdquo; items are removed; &ldquo;Connections&rdquo; sits first in the Integrations section; &ldquo;AI agent&rdquo; is unchanged. Active-state styling as today (<code>aria-current=page</code>).</li>
+  <li><span class="n">2</span>Every redirect, and every in-app link (nav, pool form, webhooks empty state), points directly at the new route &mdash; no link or redirect targets a redirecting route. The three old routes are redirect-only (no component, no loader).</li>
+  <li><span class="n">3</span>A future platform adds no nav item; it only appears as a platform choice and as rows in the list.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ B ============================ -->
+<section class="frame" id="B">
+<h2>B &middot; Settings &rarr; Connections <small>new route <code>/settings/connections</code>; states: many &middot; one &middot; empty &middot; read-only &middot; loading &middot; error &middot; inline edit</small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">B1 &middot; Many &mdash; administrator (can manage)</p>
+  <div class="screen">
+    <div class="head"><div><h3 class="pt">Connections</h3><p class="pd" style="margin:0">Connect CI platforms once, then assign them to runner pools as targets.</p></div>
+      <div><span class="btn p">&#xFF0B; Add connection</span></div></div>
+
+    <div class="sec">
+      <div class="st"><div><h4>Connections &middot; 4</h4></div></div>
+      <div class="panel">
+        <div class="row"><span class="badge gh">&#x25C9; GitHub</span><span class="av">A</span>
+          <div class="grow"><div class="t">acme <span class="faint">&middot; Organization</span></div><div class="d">GitHub App installation &middot; All repositories &middot; 3 pools &middot; synced 4m ago</div></div>
+          <span class="mut"><span class="dot"></span> Active</span><span class="btn g sm">Configure &#x2197;</span></div>
+        <div class="row"><span class="badge gh">&#x25C9; GitHub</span><span class="av">J</span>
+          <div class="grow"><div class="t">jdoe <span class="faint">&middot; User</span> <span class="badge bad">Suspended</span></div><div class="d">GitHub App installation &middot; Selected repositories &middot; 0 pools &middot; synced 2d ago</div></div>
+          <span class="mut"><span class="dot b"></span> Suspended</span><span class="faint">Owner approval required</span></div>
+        <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span>
+          <div class="grow"><div class="t">Mobile delivery</div><div class="d">bitbucket.org/acme-mobile &middot; Workspace &middot; 1 pool</div></div>
+          <span class="mut"><span class="dot"></span> Connected &middot; verified 2h ago</span><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+        <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span>
+          <div class="grow"><div class="t">Web platform</div><div class="d">bitbucket.org/acme-web &middot; Workspace &middot; 0 pools</div></div>
+          <span class="mut"><span class="dot"></span> Connected &middot; verified 3d ago</span><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="st"><div><h4>Connection</h4><p><code>GitHubAppSection</code> &middot; no installations list <span class="tag new">REV4</span></p></div><div style="white-space:nowrap"><span class="btn sm">&#x21BA; Refresh access</span> <span class="btn sm">&#xFF0B; Install</span> <span class="btn g sm">Manage App &#x2197;</span></div></div>
+      <div class="panel">
+        <div class="row"><div class="grow"><div class="t">GitHub OAuth</div><div class="d">Client ID and secret</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
+        <div class="row"><div class="grow"><div class="t">Runner control</div><div class="d">GitHub App installation credentials</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
+        <div class="row"><div class="grow"><div class="t">Webhook verification &middot; Encrypted storage &middot; Manager authentication</div><div class="d">(same checks as today)</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
+        <div class="st" style="padding:8px 14px 0"><b>Endpoints</b> <span class="faint copy">Configure these on the GitHub App.</span></div>
+        <div class="row"><div class="grow"><div class="t">OAuth callback URL &middot; Webhook URL</div><div class="d">(copy rows as today)</div></div><span class="faint">&#x2398; Copy</span></div>
+      </div>
+      <p class="faint" style="margin:6px 0 8px"><span class="tag new">REV4</span> The three header actions belong to this section&rsquo;s first <code>SettingsSection</code> (they were the old page&rsquo;s Refresh access layout action and the Installations section&rsquo;s Install / Manage App). Refresh access and Install appear whenever the App exists; Manage App only for administrators. &ldquo;Create the GitHub App&rdquo; (B7) is a further section here, shown to administrators only while the App is not configured. Same calls, arguments and success text as today.</p>
+      <div class="callout"><b>Adding another GitHub account</b>GridOps-created Apps start private. In Manage App &rarr; Advanced, choose Make public once, then use Install. Organization owners approve installations requested by members.</div>
+    </div>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">B1b &middot; GitHub App configured, no installation visible, another platform has rows <span class="tag new">REV4</span></p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Connections &middot; 1</b></div>
+    <div class="row"><span class="badge gh">&#x25C9; GitHub</span><div class="grow"><div class="d copy">No installations are visible to @jdoe.</div></div></div>
+    <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span><div class="grow"><div class="t">Mobile delivery</div><div class="d">bitbucket.org/acme-mobile &middot; Workspace &middot; 1 pool</div></div><span class="mut"><span class="dot"></span> Connected &middot; verified 2h ago</span><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Today&rsquo;s Installations empty text, now the GitHub descriptor&rsquo;s empty row; it is not counted in &ldquo;Connections &middot; N&rdquo;. Shown only when the App is configured (<code>githubApp</code> present). When <i>nothing at all</i> is listed the generic empty state B3 is shown instead (open question 9).</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">B2 &middot; One connection</p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Connections &middot; 1</b></div>
+    <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span><div class="grow"><div class="t">Mobile delivery</div><div class="d">bitbucket.org/acme-mobile &middot; Workspace &middot; 0 pools</div></div><span class="mut"><span class="dot"></span> Connected &middot; verified just now</span><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">B3 &middot; Empty (administrator)</p>
+  <div class="screen tight"><div class="panel"><div class="empty"><div class="big">&#x21C4;</div><div class="t copy">No connections yet</div><div class="d copy">Connect a CI platform to start assigning it to runner pools. GitHub is added by installing the GridOps GitHub App; Bitbucket by adding a workspace token.</div><span class="btn p">&#xFF0B; Add connection</span></div></div></div>
+  <p class="sub-h" style="margin-top:10px">B3b &middot; Empty (read-only member)</p>
+  <div class="screen tight"><div class="panel"><div class="empty"><div class="big">&#x21C4;</div><div class="t copy">No connections yet</div><div class="d copy">A GridOps administrator can add platform connections.</div></div></div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">B4 &middot; Read-only member (not an administrator) <span class="tag new">REV4</span></p>
+  <div class="screen tight">
+    <div class="callout" style="margin-bottom:10px"><b class="copy">Read-only access</b><span class="copy">A GridOps administrator can add or change platform connections.</span></div>
+    <div class="panel">
+      <div class="st" style="padding:8px 14px 0"><b>Connections &middot; 2</b></div>
+      <div class="row"><span class="badge gh">&#x25C9; GitHub</span><span class="av">A</span><div class="grow"><div class="t">acme <span class="faint">&middot; Organization</span></div><div class="d">GitHub App installation &middot; All repositories &middot; 3 pools</div></div><span class="mut"><span class="dot"></span> Active</span><span class="faint">Owner approval required</span></div>
+      <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span><div class="grow"><div class="t">Mobile delivery</div><div class="d">bitbucket.org/acme-mobile &middot; Workspace &middot; 1 pool</div></div><span class="mut"><span class="dot"></span> Connected &middot; verified 2h ago</span></div>
+    </div>
+    <div class="panel" style="margin-top:10px">
+      <div class="st" style="padding:8px 14px 0"><div><b>Connection</b></div><div><span class="btn sm">&#x21BA; Refresh access</span> <span class="btn sm">&#xFF0B; Install</span></div></div>
+      <div class="row"><div class="grow"><div class="t">GitHub OAuth</div><div class="d">Client ID and secret</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
+      <div class="row"><div class="grow"><div class="t">(other checks as today)</div></div><span class="mut"><span class="dot"></span> Configured</span></div>
+      <div class="st" style="padding:8px 14px 0"><b>Endpoints</b></div>
+      <div class="row"><div class="grow"><div class="t">OAuth callback URL &middot; Webhook URL</div></div><span class="faint">&#x2398; Copy</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">Header shows no &ldquo;Add connection&rdquo;; rows show no Edit / Remove; <b>one</b> Read-only callout (not one per platform). The GitHub App section stays visible for members &mdash; checks, endpoints and the &ldquo;Adding another GitHub account&rdquo; callout, as on today&rsquo;s GitHub page &mdash; but has <b>no Create section and no Manage App</b>. Refresh access and Install keep today&rsquo;s ungated behaviour. This replaces the earlier B4 (&ldquo;no GitHub App section&rdquo;).</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">B5 &middot; Loading and load error</p>
+  <div class="screen tight">
+    <div class="panel"><div class="row"><span class="mut">&#x27F3; Loading connections&hellip;</span></div><div class="row"><span style="display:block;height:14px;width:60%;background:#e6e7eb;border-radius:3px"></span></div></div>
+    <div style="height:8px"></div>
+    <div class="callout danger"><b class="copy">Couldn&rsquo;t load connections</b><span class="copy">{error message from the platform&rsquo;s list binding}</span> &nbsp; <span class="btn sm">&#x21BA; Retry</span></div>
+    <p class="faint" style="margin:6px 0 0">A failing platform does not hide the others: its rows are replaced by this callout, other platforms&rsquo; rows still render (see B5b).</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">B5b &middot; Partial failure &mdash; Bitbucket list rejected, GitHub list resolved <span class="tag new">REV2</span></p>
+  <div class="screen tight">
+    <div class="panel">
+      <div class="row"><span class="badge gh">&#x25C9; GitHub</span><span class="av">A</span>
+        <div class="grow"><div class="t">acme <span class="faint">&middot; Organization</span></div><div class="d">GitHub App installation &middot; All repositories &middot; 3 pools &middot; synced 4m ago</div></div>
+        <span class="mut"><span class="dot"></span> Active</span><span class="btn g sm">Configure &#x2197;</span></div>
+      <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span>
+        <div class="grow"><div class="callout danger" style="margin:0"><b class="copy">Couldn&rsquo;t load Bitbucket connections</b><span class="copy">{error message from the Bitbucket list binding}</span></div></div>
+        <span class="btn sm">&#x21BA; Retry</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">The error row names the failed platform (descriptor <code>name</code>). <b>Retry</b> re-runs only that platform&rsquo;s list binding; GitHub is not re-fetched, and while retrying only the Bitbucket row shows <span class="copy">&#x27F3; Loading connections&hellip;</span>. If both fail, both rows show their own error + Retry. Add connection stays available for platforms that can create.</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">B6 &middot; Inline edit (Bitbucket row; fields = descriptor fields marked editable-on-update)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row"><span class="badge bb">&#x25C6; Bitbucket</span><div class="grow"><div class="t">Mobile delivery</div><div class="d">bitbucket.org/acme-mobile &middot; Workspace</div></div><span class="mut"><span class="dot"></span> Connected</span></div>
+    <div style="padding:10px 14px;border-top:1px solid var(--bd)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div><span class="lbl">Connection name</span><div class="input">Mobile delivery</div></div>
+        <div><span class="lbl">New API token</span><div class="input ph">Leave blank to keep the current token</div></div>
+      </div>
+      <div class="callout danger" style="margin-top:10px"><b class="copy">Could not save</b>{error from update binding}</div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px"><span class="btn g">Cancel</span><span class="btn p">Save</span> <span class="faint" style="align-self:center">saving: &ldquo;&#x27F3; Saving&hellip;&rdquo;, both disabled</span></div>
+    </div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">B7 &middot; GitHub App not configured yet (administrator)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Create the GitHub App</b></div>
+    <div class="row"><div class="grow"><div class="t">Owner</div></div><div class="ctl input">My account &#x25BE;</div></div>
+    <div class="row"><div class="grow"><div class="t">App name</div></div><div class="ctl input">GridOps Self-Hosted</div></div>
+    <div class="row"><div class="grow d">Webhooks stay disabled for this private deployment; GridOps polls GitHub instead.</div><span class="btn p">Create GitHub App</span></div>
+  </div><p class="faint" style="margin:6px 0 0">Unchanged content of today&rsquo;s &ldquo;Create the GitHub App&rdquo; section; the list above then shows the empty state B3 with the GitHub card in C2 pointing here.</p></div>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>One flat list, one row shape:</b> platform badge (icon + name from <code>descriptor.badge</code>), name + one-line detail (<code>descriptor.describeConnection</code>), status dot + text, then the actions the descriptor binds. Sorted by platform then name. Title shows the total count like today (&ldquo;Connections &middot; N&rdquo;, counting real connections only). Installations are GitHub rows here; they are not repeated in the GitHub App section. <span class="tag new">REV4</span></li>
+  <li><span class="n">2</span><b>Add connection</b> (header, primary) is shown only when at least one descriptor has a create binding and <code>canManage</code> is true. Opens the dialog in frame C.</li>
+  <li><span class="n">3</span><b>Edit</b> (inline form, B6) appears only when the descriptor has an update binding and <code>canManage</code>. It shows only editable-on-update fields; the immutable workspace slug is not editable. A blank secret keeps the current one. <b>Remove</b> appears only with a remove binding and <code>canManage</code>; it uses the existing confirm: <span class="copy">Remove {name}? GridOps deletes its stored token. Pools that use it must be changed first.</span> followed by toast <span class="copy">{name} removed.</span>. Descriptor supplies the confirm text. <span class="tag new">REV4</span> <b>Failure handling differs by action, as today:</b> Add (C3) and Edit (B6) show their error <i>inline</i> (&ldquo;Could not connect&rdquo; / &ldquo;Could not save&rdquo;) and keep the form open; only Remove reports a failure as a toast. After any of the three, only that platform&rsquo;s list reloads.</li>
+  <li><span class="n">4</span><b>GitHub rows are list-only:</b> no Edit/Remove (no API). Their action is the external <b>Configure &#x2197;</b> link (new tab), or <span class="copy">Owner approval required</span> when the user lacks admin on the installation. Suspended installations get a danger badge and status.</li>
+  <li><span class="n">5</span><b>GitHub App section</b> (<code>GitHubAppSection</code>, props <code>configuration</code>, <code>githubApp</code>, <code>user</code> &mdash; not <code>installations</code>) holds the Connection checks, the Endpoints, the Create form (administrators, only while the App is not configured) and the &ldquo;Adding another GitHub account&rdquo; callout. Its header actions are Refresh access, Install and Manage App (administrators only). It is composed by the route beside the connections list; the descriptor has no settings slot and the connections list component has no GitHub-specific code. <b>Installations are not listed here</b>: each one is a GitHub row in the list (note 4), exactly once. <b>Members</b> see the section without Create and Manage App, plus one Read-only access callout (B4). <span class="tag new">REV4</span> Supersedes &ldquo;read-only users see no GitHub App section&rdquo; and the earlier &ldquo;settingsSection slot&rdquo; wording.</li>
+  <li><span class="n">6</span><b>Empty (B3):</b> guidance, not just &ldquo;nothing here&rdquo;; the primary CTA exists only for people who can add. <b>Read-only (B4):</b> one callout, copy as today; list still visible. <span class="tag new">REV4</span> The GitHub empty text (B1b) only appears while another platform has rows.</li>
+  <li><span class="n">7</span><b>Pending/error (B5, B5b):</b> each platform with a fetching list binding loads on its own (no route loader), showing loading rows while <i>that platform&rsquo;s</i> list loads; a per-platform error row (platform name in the title) with its own Retry that re-runs only that platform&rsquo;s load. GitHub rows come from the settings page data: no loading row, no Retry. After add/edit/remove only that platform&rsquo;s list reloads. <span class="tag new">REV3</span></li>
+  <li><span class="n">8</span>Responsive: rows wrap as today&rsquo;s page (status text hidden below <code>sm</code>).</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ C ============================ -->
+<section class="frame" id="C">
+<h2>C &middot; Add connection dialog and one-time reveal <small>new; platform first, then only that descriptor&rsquo;s fields</small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">C1 &middot; Step 1 &mdash; choose a platform (list = every registered descriptor)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh copy">Add connection</div><div class="dp copy">Choose the platform you want to connect.</div>
+    <div class="db">
+      <div class="radio on"><span class="r"></span><div><b>&#x25C9; GitHub</b><div class="d mut">Runners for GitHub Actions. Added by installing the GridOps GitHub App.</div></div></div>
+      <div class="radio"><span class="r"></span><div><b>&#x25C6; Bitbucket</b><div class="d mut">Bitbucket Cloud workspaces with managed macOS runners for Pipelines.</div></div></div>
+    </div>
+    <div class="df"><span class="btn g">Cancel</span><span class="btn p">Continue &rarr;</span></div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">C2 &middot; Step 2 &mdash; GitHub (descriptor has no create binding &rarr; link out, no fields)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh">Add connection <span class="badge gh">&#x25C9; GitHub</span></div><div class="dp copy">GitHub accounts are connected by installing the GridOps GitHub App on them.</div>
+    <div class="db">
+      <div class="callout info copy">GridOps then picks the installation up automatically after you return and refresh access.</div>
+    </div>
+    <div class="df"><span class="btn g">&larr; Back</span><span class="btn p">Install GitHub App &#x2197;</span></div>
+  </div></div>
+  <p class="faint" style="margin:4px 0 0"><span class="tag new">REV4</span> The install link (and the B1 Configure link) come from the descriptor&rsquo;s <code>externalLinks</code>. If the App is not configured yet: primary button is replaced by disabled <span class="btn dis sm">Install GitHub App</span> and copy <span class="copy">Create the GitHub App first (below on this page).</span> Non-admins never reach this dialog.</p>
+  </div>
+
+  <div>
+  <p class="sub-h">C3 &middot; Step 2 &mdash; Bitbucket (fields = descriptor field list), idle / submitting / error</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh">Add connection <span class="badge bb">&#x25C6; Bitbucket</span></div><div class="dp copy">GridOps verifies the workspace before saving. The token is encrypted at rest and never returned to the browser. Each workspace is connected once; edit an existing connection to replace its token.</div>
+    <div class="db">
+      <span class="lbl">Connection name <span class="faint">required</span></span><div class="input ph" style="margin-bottom:8px">Mobile delivery</div>
+      <span class="lbl">Workspace slug <span class="faint">required</span></span><div class="input ph" style="margin-bottom:8px">acme-mobile</div>
+      <span class="lbl">API token <span class="faint">required &middot; secret</span></span><div class="input ph">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</div>
+      <div class="d mut" style="font-size:11.5px;margin:3px 0 8px">Needs the read:workspace, read:runner and write:runner Bitbucket scopes. GridOps checks them before saving.</div>
+      <div class="callout danger"><b class="copy">Could not connect</b>{error from create binding}</div>
+    </div>
+    <div class="df"><span class="btn g">&larr; Back</span><span class="btn p">&#xFF0B; Connect workspace</span> <span class="faint" style="align-self:center">submitting: &ldquo;&#x27F3; Connecting&hellip;&rdquo; disabled</span></div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">C4 &middot; One-time reveal (post-create hook returned a value) &mdash; test-only descriptor today; real use by GitLab (#141)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh copy">{reveal.title} &mdash; e.g. Connection created</div><div class="dp copy">{reveal.description} &mdash; e.g. Copy this value now. It is shown only once and cannot be retrieved later.</div>
+    <div class="db">
+      <span class="lbl">{reveal.secretLabel} &mdash; e.g. Webhook secret</span>
+      <div class="secret"><span>whsec_9f2c&hellip;e41a</span><span>&#x2398; Copy</span></div>
+      <div class="d mut" style="font-size:11.5px;margin-top:6px">{reveal.details} (optional) &mdash; e.g. Add this as the secret token on the platform&rsquo;s webhook.</div>
+    </div>
+    <div class="df"><span class="btn p copy">I&rsquo;ve stored it, close</span></div>
+  </div></div>
+  <p class="faint" style="margin:4px 0 0"><span class="tag new">REV2</span> No &#x2715;, <b>Escape is ignored and outside clicks are ignored</b>: only the explicit close button closes (default text <span class="copy">I&rsquo;ve stored it, close</span>; a hook may override it with <code>closeButtonText</code>), so the value is not lost by a stray key or click. This is the existing one-time-secret dialog (extracted from the API tokens page to a shared component), so both pages behave identically. After close the value is dropped from state and is never cached; the list shows the new row and nothing offers the value again.</p>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Platform first.</b> The chooser lists every descriptor in <code>platforms</code> that is creatable-or-linkable (has a create binding <i>or</i> an external &ldquo;connect&rdquo; link). A single-platform registry skips straight to step 2.</li>
+  <li><span class="n">2</span><b>Dialog renders only the chosen descriptor&rsquo;s fields</b> from its declarative list (label, input type &mdash; text/secret, required, help). Secret fields are masked and <code>autocomplete=off</code>. The dialog has no per-platform branches.</li>
+  <li><span class="n">3</span><b>Submit</b> &ldquo;Connect workspace&rdquo; label comes from the descriptor (<code>createLabel</code>); disabled while submitting and while required fields are empty (native <code>required</code> validation). On success: dialog closes, toast with the descriptor&rsquo;s success text (Bitbucket: <span class="copy">Bitbucket workspace connected.</span>, today&rsquo;s wording), and only that platform&rsquo;s list reloads. <span class="tag new">REV4</span></li>
+  <li><span class="n">4</span><b>Error</b> stays <i>inline</i> in the dialog (does not close; no toast); field values are kept, the secret included, so the user can retry. <span class="tag new">REV4</span></li>
+  <li><span class="n">5</span><b>Post-create hook</b> (optional per descriptor). If it returns a value the dialog swaps to the reveal (C4) <i>instead of</i> closing; if it returns nothing the dialog closes as in note 3. GitHub and Bitbucket return nothing today.</li>
+  <li><span class="n">6</span>Focus: first field on step 2; <b>Copy</b> in C4 uses the existing <code>CopyButton</code> and toast.</li>
+  <li><span class="n">7</span><span class="tag new">REV2</span> C4 is the shared <code>SecretDialog</code> (props: title, description, secret label, optional details slot, close-button text, close handlers). The API tokens page now renders this same extracted dialog with its existing strings, so its rendered dialog and test are unchanged. <span class="tag new">REV3</span> GitHub and Bitbucket never reach C4 in this story; it is exercised by a test-only descriptor.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ D ============================ -->
+<section class="frame" id="D">
+<h2>D &middot; New runner pool &mdash; Targets row <small>alters <code>runner-pools.new.tsx</code>; replaces Scope, Installation, Repositories, Runner group and Bitbucket workspaces rows</small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">D1 &middot; Destination section &mdash; one row, a few selected (closed)</p>
+  <div class="screen">
+    <div class="sec">
+      <div class="st"><div><h4>Destination</h4><p>Where this pool&rsquo;s runners register.</p></div></div>
+      <div class="panel">
+        <div class="row top stack" style="display:flex">
+          <div><span class="lbl" style="font-size:13px">Targets <span class="tag new">NEW</span> <span class="tag rm">REMOVED: Scope, Installation, Repositories, Runner group, Bitbucket workspaces</span></span>
+            <div class="d mut copy" style="display:inline-block">2 repositories &middot; 1 workspace selected &middot; the maximum runner count must cover every repository.</div></div>
+          <div class="trigger"><div><span class="chip">acme/web <i>&#x2715;</i></span><span class="chip">acme/api <i>&#x2715;</i></span><span class="chip"><span class="badge bb" style="padding:0 4px">&#x25C6;</span> Mobile delivery <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+          <div class="callout info copy">Bitbucket targets run on macOS &middot; Tart, so it was added to Providers.</div>
+        </div>
+      </div>
+    </div>
+    <p class="faint" style="margin:0">Chips carry a small platform glyph so mixed pools read at a glance.</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">D2 &middot; Open listbox &mdash; grouped by platform &middot; target kind; one repository already picked (Bitbucket now selectable)</p>
+  <div class="screen tight" style="padding:14px 14px 20px">
+    <div class="trigger"><div><span class="chip">acme/web <i>&#x2715;</i></span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="lb-s">&#x1F50D; <span class="copy">Search by platform, account or name&hellip;</span></div>
+      <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">1 of 3 selected</span></div>
+      <div class="opt sel"><span class="ck">&#x2713;</span><div>acme/web<div class="d">acme &middot; Private</div></div></div>
+      <div class="opt act"><span class="ck"></span><div>acme/api<div class="d">acme &middot; Private</div></div></div>
+      <div class="opt"><span class="ck"></span><div>jdoe/dotfiles<div class="d">jdoe &middot; Public</div></div></div>
+      <div class="gh-h"><span>GitHub &middot; Organization runner group</span></div>
+      <div class="opt dim"><span class="ck"></span><div>acme &middot; Default runner group<div class="d">Default runner group</div></div><span class="why copy">Can&rsquo;t combine with repositories</span></div>
+      <div class="opt dim"><span class="ck"></span><div>acme &middot; Enter runner group ID<div class="d">Groups couldn&rsquo;t be listed</div></div><span class="why copy">Can&rsquo;t combine with repositories</span></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span></div>
+      <div class="opt"><span class="ck"></span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div></div>
+      <div class="opt"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div></div>
+      <div class="lb-f"><span>&uarr;&darr; navigate &middot; Enter select &middot; Esc close</span><span>Max 5 per kind</span></div>
+    </div>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">D2b &middot; Open listbox, nothing selected yet &mdash; Bitbucket is not standalone <span class="tag new">REV2</span></p>
+  <div class="screen tight" style="padding:14px 14px 20px">
+    <div class="trigger"><div><span class="mut copy">Select repositories, a runner group or workspaces&hellip;</span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="lb-s">&#x1F50D; <span class="copy">Search by platform, account or name&hellip;</span></div>
+      <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">0 of 5 selected</span></div>
+      <div class="opt act"><span class="ck"></span><div>acme/web<div class="d">acme &middot; Private</div></div></div>
+      <div class="opt"><span class="ck"></span><div>acme/api<div class="d">acme &middot; Private</div></div></div>
+      <div class="gh-h"><span>GitHub &middot; Organization runner group</span></div>
+      <div class="opt"><span class="ck"></span><div>acme &middot; Default runner group<div class="d">Default runner group</div></div></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span><span class="faint">0 of 5</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">Every Bitbucket option is disabled with its reason (not hidden) until one GitHub target is chosen, because a pool still needs a GitHub installation and scope. The options enable as soon as a repository or runner group is picked (D2). A Bitbucket-only pool stays impossible in this story.</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">D3 &middot; Group-level states (rows inside the listbox, per group)</p>
+  <div class="screen tight">
+    <div class="listbox" style="margin:0">
+      <div class="gh-h"><span>GitHub &middot; Repository</span></div>
+      <div class="gstatus">&#x27F3; <span class="copy">Loading repositories&hellip;</span></div>
+      <div class="gh-h"><span>GitHub &middot; Organization runner group</span></div>
+      <div class="gstatus"><span class="dot b"></span><span class="copy">Couldn&rsquo;t load runner groups</span> <span class="btn sm">&#x21BA; Retry</span></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span></div>
+      <div class="gstatus"><span class="copy">No workspaces connected.</span> <span class="mut copy">Add one in Settings &rarr; Connections &#x2197;</span></div>
+    </div>
+    <div class="listbox" style="margin-top:10px">
+      <div class="gh-h"><span>GitHub &middot; Repository</span></div>
+      <div class="gstatus"><span class="copy">No repositories match this search</span></div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">Also: group with a descriptor-provided &ldquo;not available&rdquo; message, e.g. <span class="copy">Sign in with GitHub to list repositories.</span> A group with zero rows and no status is omitted.</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">D4 &middot; Organization runner group selected (group kind is single-select)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top stack" style="display:flex">
+      <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut copy" style="display:inline-block">1 runner group &middot; repository access is controlled by this GitHub runner group.</div></div>
+      <div class="trigger"><div><span class="chip">acme &middot; Default runner group <i>&#x2715;</i></span><span class="chip"><span class="badge bb" style="padding:0 4px">&#x25C6;</span> Mobile delivery <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+    </div>
+    <div class="row"><div class="grow"><div class="t">Runner group ID</div><div class="d copy">Enter the GitHub runner group ID. (Only when the picked entry is an &ldquo;{account} &middot; Enter runner group ID&rdquo; entry; it applies to that installation.) <span class="tag new">REV4</span></div></div><div class="ctl input">1</div></div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">D5 &middot; No GitHub installation &mdash; the form is replaced by today&rsquo;s empty state (copy supplied by the GitHub descriptor) <span class="tag new">REV2</span></p>
+  <div class="screen tight">
+  <div class="panel"><div class="empty"><div class="big">&#x25C9;</div><div class="t copy">Connect GitHub first</div><div class="d copy">GridOps needs an authorized GitHub App installation before it can create a repository or organization runner pool.</div><span class="btn p">&#x25C9; Connect GitHub</span></div></div>
+  <p class="faint" style="margin:4px 0 8px">D5a &middot; not signed in with GitHub (<code>!authenticated</code> or no defaults).</p>
+  <div class="panel"><div class="empty"><div class="big">&#x25C9;</div><div class="t copy">Install the GitHub App</div><div class="d copy">Choose the account and repositories GridOps may operate, then come back here and refresh GitHub access.</div><span class="btn p">&#x25C9; Install GridOps on GitHub</span></div></div>
+  <p class="faint" style="margin:4px 0 0">D5b &middot; signed in but zero installations.</p>
+  <p class="faint" style="margin:6px 0 0">The gate is &ldquo;no GitHub installation&rdquo;, not &ldquo;no targets of any platform&rdquo;: Bitbucket cannot create a pool alone, so having workspaces does not unlock the form. The wording is unchanged from today; the title, description and action come from the GitHub descriptor&rsquo;s <code>prerequisiteEmptyState</code> so the page has no GitHub branch. <span class="tag new">REV4</span> Once an installation exists, a platform with no connection shows a status row inside the listbox (D3), and the &ldquo;Connect a workspace first&rdquo; link goes straight to <code>/settings/connections</code>.</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">D6 &middot; Maximum reached / incompatible</p>
+  <div class="screen tight"><div class="listbox" style="margin:0">
+    <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">5 of 5 selected</span></div>
+    <div class="opt dim"><span class="ck"></span><div>acme/mobile<div class="d">acme &middot; Private</div></div><span class="why copy">Maximum runner count reached</span></div>
+    <div class="gh-h"><span>Bitbucket &middot; Workspace</span><span class="faint">0 of 5</span></div>
+    <div class="opt"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div></div>
+  </div><p class="faint" style="margin:6px 0 0">The limit applies per kind exactly as today (repositories &le; max count, workspaces &le; max count). Form-level validation errors keep today&rsquo;s Callout above the submit area.</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">D7 &middot; Last GitHub target removed while a workspace is selected &mdash; unchanged from today <span class="tag new">REV2</span></p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top stack" style="display:flex">
+      <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut copy" style="display:inline-block">1 workspace selected</div></div>
+      <div class="trigger"><div><span class="chip"><span class="badge bb" style="padding:0 4px">&#x25C6;</span> Mobile delivery <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+    </div>
+  </div>
+  <div class="listbox" style="margin-top:8px">
+    <div class="gh-h"><span>Bitbucket &middot; Workspace</span><span class="faint">1 of 5</span></div>
+    <div class="opt sel"><span class="ck">&#x2713;</span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div></div>
+    <div class="opt dim"><span class="ck"></span><div>Web platform<div class="d">acme-web workspace</div></div><span class="why copy">Select a GitHub repository or runner group first</span></div>
+  </div>
+  <div class="callout danger" style="margin-top:8px"><b class="copy">Could not create the pool</b><span class="copy">{message thrown by the schema parse in createRunnerPoolAction}</span></div>
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px"><span class="btn g">Cancel</span><span class="btn p">&#xFF0B; Create pool</span></div>
+  <p class="faint" style="margin:6px 0 0">The picker does not block the deselection and does not drop the workspace: it stays selected (and removable), the other workspaces become disabled-with-reason again, and <b>Create pool stays enabled</b>. Submitting builds today&rsquo;s payload for that state (no repository, installation id 0); the schema parse rejects it before any request is sent, so no POST happens, and the thrown message appears in the existing &ldquo;Could not create the pool&rdquo; callout. The wording is whatever the schema throws (not designed here); the picker adds no second validator.</p></div>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>One searchable multi-select</b> (the existing <code>SearchableMultiSelect</code> extended with an optional option <code>group</code>; group headings are non-selectable). Group heading = <code>{platform name} &middot; {target kind label}</code>, in registry order. Search matches label, description and platform/kind keywords.</li>
+  <li><span class="n">2</span><b>Mixing rules (descriptor-declared):</b> GitHub repositories and a GitHub organization runner group are mutually exclusive (as today). Bitbucket workspaces combine with either but <b>need one of them</b> (not standalone, D2b). Incompatible options are shown <i>disabled with the reason</i> (<span class="copy">Can&rsquo;t combine with repositories</span> / <span class="copy">Can&rsquo;t combine with a runner group</span> / <span class="copy">Select a GitHub repository or runner group first</span>), not hidden, so the rule is discoverable. Deselect the blocking kind to re-enable. Repositories from different installations or accounts may still be selected together (as today); the pool&rsquo;s installation is taken from the first selected repository, with no stricter single-installation rule. <span class="tag new">REV4</span> &ldquo;First&rdquo; means first in the <i>loaded repository list&rsquo;s order</i>, not click order: clicking a repository of installation B and then one of installation A still pins the pool to A if A&rsquo;s repository is listed first.</li>
+  <li><span class="n">3</span><b>Organization runner group is single-select.</b> Picking another group replaces the current one. Entries are listed per organization installation (&ldquo;acme &middot; Default runner group&rdquo;), so the Installation row is gone. For each installation whose groups can&rsquo;t be listed (user account or load failure) <b>one &ldquo;{account} &middot; Enter runner group ID&rdquo; entry per installation</b> is offered (the manual entry belongs to the connection, not to the kind), which reveals the numeric <b>Runner group ID</b> row (today&rsquo;s fallback) below Targets. <span class="tag new">REV4</span> Option keys are unique within the kind across installations (every organization has a group&nbsp;1): the runner-group key is built from <code>installationId/groupId</code>, and the create payload reads the group&rsquo;s installation from it. Users never see the keys.</li>
+  <li><span class="n">4</span><b>Per-group status rows</b> (D3) cover loading, error + Retry, not-connected (guides to Settings &rarr; Connections) and no-match. Loading one group never blocks selecting from another.</li>
+  <li><span class="n">5</span><b>Description line</b> counts by kind, truthfully: <span class="copy">2 repositories &middot; 1 workspace selected</span>; the &ldquo;must cover every repository&rdquo; clause appears only when a kind with a per-item runner requirement (repositories) is selected. <b>Caps are per kind and counted separately</b> (repositories &le; maximum runner count, workspaces &le; maximum runner count), shown as &ldquo;n of max&rdquo; in each group heading.</li>
+  <li><span class="n">6</span><b>Side effect kept:</b> picking a Bitbucket workspace auto-adds the <code>macOS &middot; Tart</code> provider (today&rsquo;s behaviour) and now says so in an info callout (D1). Descriptor field: <code>requiresProviders</code>.</li>
+  <li><span class="n">7</span><b>Payload unchanged.</b> Each selected target maps through its kind to the existing fields (<code>installationId</code>, <code>scope</code>, <code>repositoryIds</code>, <code>runnerGroupId</code>, <code>bitbucketConnectionIds</code>); the data passed to the create action equals what the old form built for the same selection. Option values are internally namespaced per kind (a repository id and a runner-group id are both bare numbers and could collide); users never see the keys. Submit validation errors read as today (D7). <span class="tag new">REV4</span> The data a kind needs for the payload (the installation of the first selected repository, the repository names listed in the pool-settings Priority section) comes from the resolved selection the Targets row reports to the form, not from the picker&rsquo;s private state.</li>
+  <li><span class="n">8</span>Pool plan preview&rsquo;s runner-group sentence (<code>pool-plan-preview.tsx</code>) comes from the selected target kind (<code>planNote</code>) rather than <code>scope === &quot;organization&quot;</code>; text unchanged: <span class="copy">GitHub runner-group access defines which repositories can use the pool.</span> With a repository selection, <i>or no GitHub target yet</i>, it shows <span class="copy">{n} selected repositories fit within the {max}-runner maximum.</span> (n = 0 on an empty form, as today); Bitbucket workspaces add no sentence and never change the &ldquo;Ready&rdquo; state. <span class="tag new">REV4</span> The text and its ok / not-ok state depend on the repository count and the maximum; with nothing selected the repository kind speaks (the form starts as a repository pool), so the page has no GitHub branch.</li>
+  <li><span class="n">9</span>Capacity row &ldquo;Maximum&rdquo; minimum stays <code>max(1, repositories selected)</code>. <span class="tag new">REV4</span> Only a kind flagged <code>raisesMinMaxCount</code> (GitHub repository) raises it: selecting Bitbucket workspaces never does, exactly as today, although workspaces are still capped by the maximum (D6).</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ E ============================ -->
+<section class="frame" id="E">
+<h2>E &middot; Pool settings &mdash; Targets row <small>alters <code>runner-pools.$poolId.settings.tsx</code>; scope is fixed by the pool</small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">E1 &middot; Repository pool</p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Destination</b> <span class="faint">Where this pool&rsquo;s runners register.</span></div>
+    <div class="row top stack" style="display:flex">
+      <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut copy" style="display:inline-block">2 repositories selected &middot; the maximum runner count must cover every repository.</div></div>
+      <div class="trigger"><div><span class="chip">acme/web <i>&#x2715;</i></span><span class="chip">acme/api <i>&#x2715;</i></span><span class="chip lock"><span class="badge bb" style="padding:0 4px">&#x25C6;</span> Mobile delivery &#x1F512;</span></div><span class="mut">&#x25BE;</span></div>
+      <div class="d mut copy">Bitbucket workspaces are chosen when the pool is created and can&rsquo;t be changed here.</div>
+    </div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Listbox offers only the group <b>GitHub &middot; Repository</b> (same loading / error / retry rows as D3, with the pool&rsquo;s current repositories as the seed). The Priority section (&ldquo;Prioritised repositories&rdquo;) still follows this form, shown when a selected target kind supports prioritisation (descriptor flag <code>supportsPriority</code>, true for GitHub repository).</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">E2 &middot; Organization runner-group pool</p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Destination</b></div>
+    <div class="row top stack" style="display:flex">
+      <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut copy" style="display:inline-block">Repository access is controlled by this GitHub runner group.</div></div>
+      <div class="trigger"><div><span class="chip">acme &middot; Default runner group <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+    </div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Listbox offers only <b>GitHub &middot; Organization runner group</b> for the pool&rsquo;s own installation (single-select, replaces). Groups can&rsquo;t be listed &rarr; the &ldquo;Runner group ID&rdquo; numeric row appears as in D4. No Priority section.</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">E3 &middot; Read-only pool (user cannot manage) &mdash; targets through the same registry-driven display <span class="tag new">REV2</span></p>
+  <div class="screen tight"><div class="panel">
+    <div class="st" style="padding:8px 14px 0"><b>Runner definition</b> <span class="badge">Read only</span></div>
+    <div class="row"><div class="grow"><div class="t">Targets</div></div>
+      <div style="text-align:right"><div><span class="badge gh">&#x25C9; GitHub</span> <span class="copy">2 repositories</span></div><div style="margin-top:4px"><span class="badge bb">&#x25C6; Bitbucket</span> <span class="copy">1 workspace</span></div></div></div>
+    <div class="row"><div class="grow"><div class="t">Providers</div></div><div class="mut">Docker + macOS &middot; Tart</div></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">An organization pool shows <span class="badge gh">&#x25C9; GitHub</span> <span class="copy">acme</span> (the account, as today). The Priority section (Prioritised, Fair-share wait) is shown when the pool&rsquo;s target kind supports prioritisation, the same descriptor flag as E1. The Bitbucket line appears only when the pool has workspaces. No controls. <span class="tag new">REV4</span> The per-platform summary text comes from the descriptor&rsquo;s <code>readOnlySummary(pool)</code>.</p></div>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Same widget as the new-pool form</b>, restricted by the pool: the other scope&rsquo;s kinds are not offered (a pool can&rsquo;t change scope; each kind declares where it is offered, <code>offeredIn: create | update</code>). <span class="tag new">REV4</span> The old read-only &ldquo;GitHub accounts&rdquo; / &ldquo;Installation&rdquo; row is removed; accounts are visible in the chip detail and the listbox descriptions.</li>
+  <li><span class="n">2</span><b>Bitbucket targets are display-only here</b> (lock glyph, no &#x2715;), preserving today&rsquo;s behaviour: this form has no workspace picker and its save does not send <code>bitbucketConnectionIds</code>. See open question 1.</li>
+  <li><span class="n">3</span>Save payload for a repository pool and for an organization pool is deep-equal to the old form&rsquo;s (<code>repositoryIds: undefined</code> for organization pools).</li>
+  <li><span class="n">4</span>Truthful empties: a repository pool whose repositories fail to load shows the retry row (D3) while still showing its current chips; Save stays enabled only if &ge;1 repository remains selected.</li>
+  <li><span class="n">5</span><span class="tag new">REV2</span> This form cannot reach the D7 state: its GitHub kind is fixed by the pool and its Bitbucket chips are locked, so the &ldquo;not standalone&rdquo; rule never fires here. Option values are namespaced internally as in D. E3 is the read-only counterpart (same target display, no controls).</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ F ============================ -->
+<section class="frame" id="F">
+<h2>F &middot; Platform options section <small>new; collapsed by default; rendered only for the platforms the pool targets</small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">F1 &middot; Runner definition (shared rows now neutral) + Platform options, collapsed</p>
+  <div class="screen">
+    <div class="sec">
+      <div class="st"><div><h4>Runner definition</h4><p>What each runner is and how jobs find it.</p></div></div>
+      <div class="panel">
+        <div class="row"><div class="grow"><div class="t">Pool name</div></div><div class="ctl input">mobile-macos</div></div>
+        <div class="row"><div class="grow"><div class="t">Providers</div></div><div class="ctl input">macOS &middot; Tart &#x25BE;</div></div>
+        <div class="row"><div class="grow"><div class="t">Tart base VM</div><div class="d copy">The name of a stopped local Tart VM on the Mac, not an OCI reference, that each runner clones.</div></div><div class="ctl input mono">macos-runner-base</div></div>
+        <div class="row"><div class="grow"><div class="t">Additional labels</div><div class="d copy">Comma-separated. OS and architecture labels are added automatically.</div></div><div class="ctl input ph">build, release</div></div>
+      </div>
+    </div>
+    <div class="sec" style="margin-bottom:0">
+      <div class="panel">
+        <div class="disc"><div><b>&#x25B8; Platform options</b> <span class="tag new">NEW</span> <span class="badge gh">&#x25C9; GitHub</span> <span class="badge bb">&#x25C6; Bitbucket</span></div><span class="faint">Show</span></div>
+      </div>
+    </div>
+    <p class="faint" style="margin:6px 0 0">Collapsed summary = badges of the targeted platforms (so the user knows what is inside). Section sits after Runner definition, before Capacity.</p>
+  </div>
+  </div>
+
+  <div>
+  <p class="sub-h">F2 &middot; Expanded &mdash; GitHub + Bitbucket targeted (content = each descriptor&rsquo;s platform-options content)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="disc"><div><b>&#x25BE; Platform options</b></div><span class="faint">Hide</span></div>
+    <div style="padding:10px 14px"><span class="badge gh">&#x25C9; GitHub</span>
+      <div class="d mut" style="margin:6px 0 2px"><b>Labels:</b> <span class="copy">GitHub labels are free-form; OS and architecture labels are added automatically.</span></div>
+      <div class="d mut"><b>macOS image:</b> <span class="copy">Prepare the Tart VM with scripts/prepare-tart-runner-image.sh; xcodebuild needs an Xcode-ready VM.</span></div></div>
+    <div style="padding:10px 14px"><span class="badge bb">&#x25C6; Bitbucket</span>
+      <div class="d mut" style="margin:6px 0 2px"><b>Labels:</b> <span class="copy">Bitbucket labels may use lowercase letters, numbers, and dots.</span></div>
+      <div class="d mut" style="margin-bottom:6px"><b>macOS image:</b> <span class="copy">For Bitbucket workspaces, prepare the Tart VM with scripts/prepare-tart-bitbucket-runner-image.sh.</span></div>
+      <div class="slot">&lt;optional per-platform component slot&gt; &mdash; empty for GitHub and Bitbucket; e.g. GitLab&rsquo;s &ldquo;Run untagged jobs&rdquo; toggle (#141)</div></div>
+  </div></div>
+  </div>
+
+  <div>
+  <p class="sub-h">F3 &middot; Only one platform targeted &rarr; only that platform&rsquo;s block</p>
+  <div class="screen tight"><div class="panel">
+    <div class="disc"><div><b>&#x25BE; Platform options</b></div><span class="faint">Hide</span></div>
+    <div style="padding:10px 14px"><span class="badge gh">&#x25C9; GitHub</span>
+      <div class="d mut" style="margin:6px 0 2px"><b>Labels:</b> GitHub labels are free-form; OS and architecture labels are added automatically.</div>
+      <div class="d mut"><b>macOS image:</b> Prepare the Tart VM with scripts/prepare-tart-runner-image.sh; xcodebuild needs an Xcode-ready VM.</div></div>
+  </div></div>
+  <p class="sub-h" style="margin-top:10px">F4 &middot; No targets selected, or a platform with no options content &rarr; section not rendered</p>
+  <div class="screen tight"><p class="faint" style="margin:0">(nothing between Runner definition and Capacity)</p></div>
+  </div>
+
+  <div>
+  <p class="sub-h">F5 &middot; Label rule violation (error stays visible although the section is collapsed)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top"><div class="grow"><div class="t">Additional labels</div><div class="d">Comma-separated. OS and architecture labels are added automatically.</div></div>
+      <div class="ctl"><div class="input err">build, Release_iOS</div><div class="d" style="color:var(--bad);margin-top:3px">Bitbucket labels may use lowercase letters, numbers, and dots only: &ldquo;Release_iOS&rdquo;.</div></div></div>
+    <div class="disc"><div><b>&#x25B8; Platform options</b> <span class="badge bb">&#x25C6; Bitbucket</span></div><span class="faint">Show</span></div>
+  </div></div>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Shared rows no longer branch on platform.</b> Tart base VM and Additional labels descriptions and placeholders are neutral (copy above); the platform-specific sentences live only in Platform options, supplied by descriptors. Providers, Mode, images, counts, CPU/memory and autoscaling rows are unchanged. <span class="tag new">REV4</span> The Additional labels placeholder keeps today&rsquo;s provider-based defaults (<span class="copy">build, release</span> / <span class="copy">xcode, apple-silicon</span> / <span class="copy">docker, build</span>); a targeted platform may override it with its <code>labelsPlaceholder</code> (Bitbucket: <span class="copy">build, release.ios</span>, as today).</li>
+  <li><span class="n">2</span><b>Collapsed by default</b> on both forms; a disclosure button toggles (<code>aria-expanded</code>). One block per targeted platform, in registry order; each block = badge + that descriptor&rsquo;s help items + its optional component slot.</li>
+  <li><span class="n">3</span><b>Visibility:</b> rendered only when at least one targeted platform has options content. Selecting or deselecting targets updates it live; it stays in its open/closed state.</li>
+  <li><span class="n">4</span><b>Label validation</b> runs the targeted descriptors&rsquo; validators (today: Bitbucket&rsquo;s label character rule and the requirement for the tart provider; the Bitbucket descriptor calls the rule already exported from <code>schemas.ts</code>, which stays the submit-time authority &mdash; no second copy of the rule) and reports in the Additional labels row so the error is visible while the section is collapsed. Messages keep today&rsquo;s wording.</li>
+  <li><span class="n">5</span>On the pool settings form the section is identical and driven by the pool&rsquo;s own targets.</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================ G ============================ -->
+<section class="frame" id="G">
+<h2>G &middot; Runner row <small>alters <code>features/runners/runner-row.tsx</code></small></h2>
+<div class="cols">
+<div class="screens">
+
+  <div>
+  <p class="sub-h">G1 &middot; Rows: GitHub, Bitbucket, unknown platform (registry fallback)</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:6px">
+    <div class="rr"><span class="dot"></span><b>mac-runner-1</b><span class="badge gh">&#x25C9; GitHub</span><span class="faint">Idle</span><span style="flex:1"></span><span class="faint">acme/web</span><span class="faint">12s</span><span class="mut">&hellip;</span></div>
+    <div class="rr"><span class="dot"></span><b>mac-runner-2</b><span class="badge bb">&#x25C6; Bitbucket</span><span class="faint">Busy</span><span style="flex:1"></span><span class="faint">acme-mobile</span><span class="faint">3s</span><span class="mut">&hellip;</span></div>
+    <div class="rr"><span class="dot"></span><b>mac-runner-3</b><span class="badge unk">&#x25C7; gitlab</span><span class="faint">Idle</span><span style="flex:1"></span><span class="faint">group/proj</span><span class="faint">8s</span><span class="mut">&hellip;</span></div>
+  </div></div>
+
+  <div>
+  <p class="sub-h">G2 &middot; Actions menu (Bitbucket runner)</p>
+  <div class="screen tight"><div class="menu">
+    <div>View logs</div><hr><div>Pause</div><div>Stop</div><div>Restart</div><hr>
+    <div class="new">Open on Bitbucket &#x2197; <span class="tag new">NEW</span></div>
+    <div style="color:var(--bad)">Delete runner</div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Delete confirm: <span class="copy">Delete mac-runner-2 from its provider and Bitbucket?</span> (platform name from the registry; unknown platform &rarr; the raw id, e.g. &ldquo;gitlab&rdquo;).</p></div>
+  </div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Badge from the registry</b> (<code>getPlatform(runner.platform).badge</code>): icon + name + styling. Placed after the runner name, hidden below <code>sm</code> like the other secondary columns. No <code>runner.platform === &hellip;</code> ternary remains.</li>
+  <li><span class="n">2</span><b>Unknown platform id:</b> dashed neutral badge with a generic glyph and the raw id as text &mdash; the row never throws or goes blank.</li>
+  <li><span class="n">3</span><b>Runner link builder:</b> &ldquo;Open on {platform} &#x2197;&rdquo; menu item (new tab) appears only when the descriptor&rsquo;s builder returns a URL for that runner; hidden when it returns null.</li>
+  <li><span class="n">4</span>Everything else in the row and menu is unchanged.</li>
+</ol>
+</div>
+</section>
+
+</body>
+</html>

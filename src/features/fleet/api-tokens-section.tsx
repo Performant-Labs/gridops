@@ -5,19 +5,18 @@ import { useReducer, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { confirmAction } from "~/components/confirm-dialog";
-import { CopyButton } from "~/components/copy-button";
 import { Callout, InlineError, LoadingRows } from "~/components/page";
+import { SecretRevealDialog } from "~/components/secret-reveal-dialog";
 import { SettingsRow, SettingsSection, Switch, UnitField } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
 import { cn, formatDateTime, formatRelativeTime } from "~/lib/utils";
 import { createApiToken, listApiTokens, revokeApiToken } from "./admin-api";
 import { API_TOKEN_MAX_DAYS, apiTokenScopes, type ApiToken, type ApiTokenScope } from "./admin-contracts";
 import {
   apiTokenState, attemptFor, createFlowReducer, emptyTokenForm, initialCreateFlow, validateTokenForm,
-  type RevealedToken, type TokenFormErrors, type TokenFormField, type TokenFormValues,
+  type TokenFormErrors, type TokenFormField, type TokenFormValues,
 } from "./api-token-form";
 import { fleetErrorMessage, newIdempotencyKey } from "./fleet-ui";
 
@@ -164,12 +163,25 @@ export function CreateTokenSection() {
         </div>
       </form>
 
-      <SecretDialog
+      <SecretRevealDialog
+        copyLabel="API token"
+        description={<>This is the only time GridOps shows the secret for “{flow.revealed?.token.name}”. Store it now, for example as a masked CI secret. Once you close this dialog it can’t be shown again.</>}
+        details={flow.revealed ? (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+            <dt className="text-muted-foreground">Scopes</dt>
+            <dd className="font-mono text-foreground">{flow.revealed.token.scopes.join(", ")}</dd>
+            <dt className="text-muted-foreground">Expires</dt>
+            <dd className="text-foreground">{formatDateTime(flow.revealed.token.expiresAt)}</dd>
+          </dl>
+        ) : null}
         onClose={() => {
           dispatch({ type: "closeSecret" });
         }}
         onClosed={() => nameRef.current?.focus()}
-        revealed={flow.revealed}
+        open={flow.revealed !== null}
+        secretLabel="API token secret"
+        title="Copy your new token"
+        value={flow.revealed?.secret ?? ""}
       />
     </SettingsSection>
   );
@@ -177,52 +189,6 @@ export function CreateTokenSection() {
 
 function FieldError({ id, children }: { id: string; children: ReactNode }) {
   return <p className="mt-1.5 text-left text-xs leading-5 text-danger" id={id}>{children}</p>;
-}
-
-/**
- * Shows the plaintext once. Escape and clicks outside are ignored so the only
- * way out is the explicit button, which also drops the secret from state.
- */
-function SecretDialog({ revealed, onClose, onClosed }: { revealed: RevealedToken | null; onClose: () => void; onClosed: () => void }) {
-  return (
-    <Dialog open={revealed !== null}>
-      <DialogContent
-        // No exit animation: the secret leaves the DOM the moment it leaves state.
-        className="top-[16vh] max-w-[520px]"
-        instant
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          onClosed();
-        }}
-        onEscapeKeyDown={(event) => event.preventDefault()}
-        onInteractOutside={(event) => event.preventDefault()}
-      >
-        {revealed ? (
-          <div className="space-y-4 p-5">
-            <div>
-              <DialogTitle className="text-base font-medium leading-6 text-foreground">Copy your new token</DialogTitle>
-              <DialogDescription className="mt-1.5 text-sm leading-5 text-muted-foreground">
-                This is the only time GridOps shows the secret for “{revealed.token.name}”. Store it now, for example as a masked CI secret. Once you close this dialog it can’t be shown again.
-              </DialogDescription>
-            </div>
-            <div className="flex items-center gap-2 rounded-lg border border-border-strong bg-panel-subtle px-3 py-2">
-              <code aria-label="API token secret" className="min-w-0 flex-1 break-all font-mono text-xs text-foreground">{revealed.secret}</code>
-              <CopyButton label="API token" size="sm" value={revealed.secret} variant="outline">Copy</CopyButton>
-            </div>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-              <dt className="text-muted-foreground">Scopes</dt>
-              <dd className="font-mono text-foreground">{revealed.token.scopes.join(", ")}</dd>
-              <dt className="text-muted-foreground">Expires</dt>
-              <dd className="text-foreground">{formatDateTime(revealed.token.expiresAt)}</dd>
-            </dl>
-            <div className="flex justify-end">
-              <Button onClick={onClose}>I’ve stored it, close</Button>
-            </div>
-          </div>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 export function TokenListSection() {

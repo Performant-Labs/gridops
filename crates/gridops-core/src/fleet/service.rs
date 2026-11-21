@@ -887,6 +887,16 @@ async fn ensure_pool_access(
     if missing_connection != 0 {
         return Err(FleetError::Forbidden);
     }
+    // GitLab has no user grants yet (D11): a pool with GitLab targets is a
+    // system administrator's.
+    let gitlab_targets: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runner_pool_gitlab_connections WHERE pool_id=?")
+            .bind(pool_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if gitlab_targets != 0 && role != "admin" {
+        return Err(FleetError::Forbidden);
+    }
     Ok(())
 }
 
@@ -921,51 +931,58 @@ async fn ensure_target_access(
         return Err(FleetError::NotFound);
     };
     let kind: String = row.get("kind");
-    let allowed = if kind.starts_with("github_") {
-        let installation_id: i64 = row.get("installation_id");
-        let suspended: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM installations WHERE id=? AND suspended_at IS NOT NULL",
-        )
-        .bind(installation_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        if suspended != 0 {
-            return Err(FleetError::Forbidden);
-        }
-        match user_id {
-            Some(user_id) => {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM user_installations ui
+    let allowed = match kind.as_str() {
+        "github_repository" | "github_organization" => {
+            let installation_id: i64 = row.get("installation_id");
+            let suspended: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM installations WHERE id=? AND suspended_at IS NOT NULL",
+            )
+            .bind(installation_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if suspended != 0 {
+                return Err(FleetError::Forbidden);
+            }
+            match user_id {
+                Some(user_id) => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM user_installations ui
                       WHERE ui.user_id=? AND ui.installation_id=?
                         AND (ui.permission='admin' OR ?='admin')",
-                )
-                .bind(user_id)
-                .bind(installation_id)
-                .bind(&role)
-                .fetch_one(&mut **tx)
-                .await?
-                    != 0
+                    )
+                    .bind(user_id)
+                    .bind(installation_id)
+                    .bind(&role)
+                    .fetch_one(&mut **tx)
+                    .await?
+                        != 0
+                }
+                None => true,
             }
-            None => true,
         }
-    } else {
-        let connection_id: String = row.get("bitbucket_connection_id");
-        match user_id {
-            Some(user_id) => {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM bitbucket_user_grants
+        "bitbucket_workspace" | "bitbucket_repository" => {
+            let connection_id: String = row.get("bitbucket_connection_id");
+            match user_id {
+                Some(user_id) => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM bitbucket_user_grants
                       WHERE user_id=? AND connection_id=? AND revoked_at IS NULL
                         AND (permission='admin' OR ?='admin')",
-                )
-                .bind(user_id)
-                .bind(connection_id)
-                .bind(&role)
-                .fetch_one(&mut **tx)
-                .await?
-                    != 0
+                    )
+                    .bind(user_id)
+                    .bind(connection_id)
+                    .bind(&role)
+                    .fetch_one(&mut **tx)
+                    .await?
+                        != 0
+                }
+                None => true,
             }
-            None => true,
         }
+        // GitLab has no user grants yet (D11): service principals and system
+        // administrators only.
+        "gitlab_project" | "gitlab_group" => user_id.is_none() || role == "admin",
+        _ => false,
     };
     if !allowed {
         return Err(FleetError::Forbidden);
@@ -1015,3 +1032,7 @@ where
 {
     value.parse().map_err(FleetError::from)
 }
+
+#[cfg(test)]
+#[path = "service_gitlab_tests.rs"]
+mod gitlab_access_tests;
