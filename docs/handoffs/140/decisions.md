@@ -163,3 +163,35 @@
   - Epic #136's comments since 00:10 UTC (`gh api`).
   - Sibling worktree `gitlab-148-scaling-71c514` at `754a72b`: `crates/gridops-core/src/gitlab/jobs.rs` (in full), `jobs_tests.rs` (test list), `gitlab/mod.rs:21-27`, and `148-brief.md` (`grep`).
   - GitLab `doc/user/project/integrations/webhook_events.md` (Job events section, raw from gitlab.com master, read in the session scratchpad).
+
+## T (Phase 4, author tests / RED): 2026-11-20T18:02:10-08:00
+- **Decided:** RED is valid. 41 tests were authored, changed or adopted (see `handoff-T-red.md`):
+  - 30 in-crate HTTP tests in `crates/gridops-api/src/webhooks/gitlab_tests.rs`, one per Done-when item of the brief and its amendments. They run through `crate::public_routes()` and `crate::session_routes()` with `FakeGitLab`, and use `openapi_schema::check_response` for the 202, 400 and 401 shapes;
+  - 1 renamed unit test in `fleet/openapi.rs` (A round-5 W3): `the_gitlab_operations_are_specified_and_all_are_served`;
+  - 10 D18 tests: `crates/gridops-core/src/gitlab/jobs_tests.rs`, taken **byte for byte** from #148 at `754a72b` (blob `0d7ccf4b`), with #148's mount block in `gitlab/mod.rs`. This follows A's round-5 W1 rather than authoring a second D18 suite. The suite covers every rule in the brief's D18 "Tests" list. PR #160 is still open.
+  - **Wiring:** `#[cfg(test)] mod gitlab_tests;` in `webhooks.rs`, plus the `jobs_tests` mount. No production code was written.
+- **Assumed:** these are pins the brief leaves open. F implements against them; O may overrule any of them.
+  - The 202 has **no body**. The spec's 202 declares no content, and the shared checker enforces that, so `receive`'s `{"accepted": true}` body is not copied.
+  - A missing `X-Gitlab-Token` is a 401. The spec's only 400 is "payload is not a JSON object".
+  - A non-`build` event is tested as a real Pipeline Hook, so the candidate lookup must read the project from `project.id` and `project.path_with_namespace` when `project_id` is absent.
+  - The `runner_events.metadata` ids are JSON numbers, as in the GitHub path. Rows are compared with the metadata parsed, so key order is free.
+  - The `build_status_changed_at` fallback is checked as falling between `now_millis()` before and after the request, not as equal to `webhook_deliveries.received_at`. A's round-5 note about that NIT is left to O.
+  - `retry` answers 200 for a reprocessed GitLab row, as it does for GitHub rows.
+- **Hedged:**
+  - Every webhook test's RED is the same first failure: the route isn't served (405 from the GET-only `/api/v1/webhooks/{delivery_id}`). The downstream assertions can't fail individually until the route exists. To show the 405 hides no setup defect, T ran a throwaway harness-sanity test once and deleted it. It confirmed the seeding, secrets, admin `retry` access, the abort trigger, `FakeGitLab` and the helpers, and that a `gitlab:` row retried today goes through GitHub's `process` without writing a job.
+  - The brief's "a unit test covers a key containing `:`" is met by a retry-route test (`gl:retry:1`) rather than a unit test of the split helper, whose name and signature the brief doesn't pin.
+  - The D18 core suite's RED is a compile error (`E0432 unresolved import crate::gitlab::jobs`), the same way #138's seam RED was. T showed it can be satisfied by temporarily placing #148's `jobs.rs` on the branch: 10 passed. T then reverted it.
+  - Connections use host-only base URLs, so A's W2 (the trailing slash in `credentials`) is not constrained by any test.
+  - The delivery-id comment, the constant-time compare and log hygiene have no test. S should review them in the diff.
+- **Evidence:**
+  - `cargo test -p gridops-api --bin gridops-api`: 90 passed, 31 failed. The failures are the 30 new tests plus the renamed OpenAPI test, each failing at "405" or with the "Not served yet: implemented by #140" description.
+  - `cargo test -p gridops-core --lib --no-run`: one error, `E0432` at `jobs_tests.rs:34`.
+  - Satisfiability check: `cargo test -p gridops-core --lib -- gitlab::jobs_tests` with `754a72b`'s `jobs.rs` placed temporarily gave 10 passed.
+  - `cargo fmt --all -- --check` is clean. `cargo clippy -p gridops-api --bin gridops-api --tests` reports nothing in T's files.
+  - Read:
+    - `140-brief.md` (`370c679`), round-5 `handoff-A.md` and `decisions.md`;
+    - `webhooks.rs`, `state.rs`, `main.rs` (the router functions), `resources/gitlab_tests.rs` (the harness), and `tests/support/openapi_schema.rs`;
+    - `gitlab/mod.rs`, `gitlab/fake.rs`, and `migrations/0047_gitlab.sql` / `0001_initial.sql` (`webhook_deliveries`, `runner_events`);
+    - `fleet/openapi.rs:240-360`, `access.rs:281-296`, and the OpenAPI path entry;
+    - `754a72b`'s `gitlab/jobs.rs`, `jobs_tests.rs` and `mod.rs`.
+  - GitLab's `webhook_events.md` "Job events" section, fetched 2026-11-20: the payload shape, and `build_status_changed_at` in RFC 3339 with milliseconds, introduced in 19.7.

@@ -936,6 +936,10 @@ fn array<'a>(object: &'a Map<String, Value>, key: &str) -> &'a [Value] {
         .unwrap_or_default()
 }
 
+// #140: GitLab Job Hook tests, driven through the real routers.
+#[cfg(test)]
+mod gitlab_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
