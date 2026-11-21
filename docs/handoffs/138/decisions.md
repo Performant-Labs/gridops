@@ -157,3 +157,13 @@
 - **Assumed:** the repeated `runtime_secrets` upsert and the unique-violation helper have no shared seam to extend, so local copies are not parallel paths.
 - **Hedged:** four `warn` findings (secret-upsert duplication, local `is_unique_violation`, update-time no-mixing check, repeated link-row loop), none blocking.
 - **Evidence:** read the full diff of `resources.rs`, `state.rs`, `main.rs`, `models.rs`, `fleet/service.rs`, `fleet/targets.rs`, `Cargo.toml`, and `resources/gitlab.rs` in full; see `handoff-A-dup.md`.
+
+## S (Phase 8, spec audit): 2026-11-20
+- **Decided:** PASS (see `handoff-S.md`). All 27 spec items from the brief and the OpenAPI spec check out against the code; the test suite passes the `test-quality.md` section 7 rubric with no "delete or merge" finding. No HTML report: #138 has no visual surface.
+- **Assumed:**
+  - `fleet_http::release_preflight` fails only because this host is a ready macOS ARM64 machine. The diff doesn't touch that file, and T saw the same failure at RED.
+  - Mapping every `GitLabError`, outage included, to a 400 is the project's decision (the spec declares no 502; A weighed it in round 1), so it is an advisory note and not an `ADVISORY-HOLD`.
+- **Hedged:**
+  - No test captures logs to prove no secret is logged. I covered it by reading every `tracing` call in the diff, and none receives a token or webhook secret.
+  - The signed-out pool-options body has no `gitlabConnections` key (F's deviation, because `token_access` pins the body). Advisory only; #141 should treat the key as optional.
+- **Evidence:** re-ran `cargo test -p gridops-api` (bin 91, `control_plane_contracts` 36, `fleet_http` 143 of 144), `cargo test -p gridops-core --tests` (all ok) and `cargo fmt --check` (clean), matching T's numbers. Read `resources/gitlab.rs` in full, the diffs of `resources.rs`, `state.rs`, `main.rs`, `models.rs`, `fleet/service.rs`, `fleet/targets.rs`, `access.rs`, `fleet/openapi.rs`, the OpenAPI GitLab sections and `docs/fleet-api.md`, plus the key in-crate, binary-level and core tests. `git diff b22c451 HEAD` over migrations, `gitlab/`, `fleet/domain.rs` and the reconciler is empty.
