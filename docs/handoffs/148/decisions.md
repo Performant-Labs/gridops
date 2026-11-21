@@ -114,3 +114,36 @@
   - Commands:
     - a grep across `crates` for every caller of `associate_runner_with_job`, `record_job_report` and `finish_earlier_attempts`, in `gridops-api/src/webhooks.rs` and `gridops-reconciler/src/main.rs`;
     - a grep for `access_token_key` and `runtime_secret` in the reconciler.
+
+## T (Phase 4, author tests / RED): 2026-11-20T16:09:12-08:00
+- **Decided:** RED is valid; F may implement (see `handoff-T-red.md`). 26 tests authored.
+  - `crates/gridops-core/src/autoscaling_gitlab_tests.rs` (10, mounted from `autoscaling.rs`). Real SQLite through the public queue API: tag matching, connection linkage, untagged, A-B4 configured-labels-only (exclusive included), A2-W5 platform gate, A-B3 tiers, the display tier using up room, A-W4 one ordered list, the A-B2 key with no collision, and the saturated-pool handoff. Runtime RED: 10 failed and 24 existing passed, every failure on a feature assertion.
+  - `crates/gridops-reconciler/src/gitlab_poll_tests.rs` (16, mounted from `main.rs`). Real SQLite plus `FakeGitLab` through `poll_once`: record, group, conclude (terminal and `NotFound`→`canceled`), rate-limit backoff, A2-B1 limit, age and order, the re-check stamp, no backwards move, no resurrection, manual→pending, the A2-W4 busy clear, the A2-W6 failed-project rule, `gitlab_credentials`, `UnavailableGitLab` and `maybe_scale_down`. Compile RED (E0432 `gitlab_poll`, E0560 `gitlab`, E0425 `gitlab_credentials`). Runtime RED was proven behind it with a throwaway no-behaviour stub (14 failed for the feature, and the 2 contract-item tests passed), which was then removed.
+  - The test wiring adds a `gridops-core` dev-dependency with `test-support` to the reconciler, because `FakeGitLab` is behind that feature.
+- **Assumed:**
+  - Where the brief leaves a choice open, the tests take one reading. Each is listed in the handoff's "Ready for F":
+    - `poll_once(&Reconciler, &mut HashMap<_, std::time::Instant>, std::time::Instant) -> Result<()>`;
+    - both constants are `i64`;
+    - `UnavailableGitLab` is a unit struct;
+    - `NotFound` concludes as `canceled`;
+    - a `None` retry-after backs off for more than 1 s.
+  - A-B2 and A-B3 together mean that, in `waiting_job_pools`, a GitLab job in the display tier (`created`/`waiting_for_resource`/`preparing`) uses up room before it is filtered out. A test pins this.
+- **Hedged:**
+  - The poll tests pass when a correct implementation exists; I checked this by reasoning, not by running one. The no-behaviour stub proves they type-check against the pinned signatures and fail for the right reason, but no throwaway implementation was run to green.
+  - The timeout path (A2-W6, `GITLAB_REQUEST_TIMEOUT`) is a coverage hole. `FakeGitLab` has no delay, and tokio `test-util` is off. The same rule is pinned through an `Upstream` failure instead.
+  - A's round-3 warnings 1 to 3 were not folded into the brief, so they are not pinned either way.
+- **Evidence:**
+  - Read: the brief (233 lines), `handoff-A.md` (round 3), `decisions.md`, and `docs/handoffs/137/handoff-T-red.md` (precedent).
+  - Source:
+    - `crates/gridops-core/src/autoscaling.rs`, in full;
+    - `crates/gridops-core/src/gitlab/mod.rs` and `fake.rs`, in full;
+    - `migrations/0047_gitlab.sql` and `0046`;
+    - `crates/gridops-reconciler/src/main.rs`: lines 1-140, 355-522, 760-900, 1290-1460, 2026-2230, 3640-3800 and 4400-4880;
+    - `start_tests.rs:400-450`;
+    - the workspace and reconciler `Cargo.toml`.
+  - Commands:
+    - `cargo test -p gridops-core --lib autoscaling` (10 failed / 24 passed);
+    - `cargo test -p gridops-reconciler --no-run` (8 compile errors, all naming missing #148 items);
+    - the stub run of `cargo test -p gridops-reconciler gitlab_poll_tests` (14 failed / 2 passed);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (clean).

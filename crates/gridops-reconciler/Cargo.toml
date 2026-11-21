@@ -27,6 +27,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# The GitLab poll tests (#148) drive `gitlab::fake::FakeGitLab`.
+gridops-core = { path = "../gridops-core", features = ["test-support"] }
 rsa = { version = "0.9", features = ["getrandom"] }
 
 [lints]

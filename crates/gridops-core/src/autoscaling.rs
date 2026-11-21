@@ -1794,3 +1794,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "autoscaling_gitlab_tests.rs"]
+mod gitlab_tests;
