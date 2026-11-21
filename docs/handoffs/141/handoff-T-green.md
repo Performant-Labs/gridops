@@ -64,3 +64,40 @@ None.
 - F's deviations (plan-note wording, per-kind "not connected" copy) are not pinned by exact copy in the tests beyond what the brief fixes; U/S should compare them with the wireframe.
 - Known, tracked elsewhere: polling errors (#148) not listed; GitLab pool and runner still show under the GitHub login in the pool list, the pool detail and the runner Repository column (#159); a GitLab-only create with no GitHub installation sends `installationId: 0` and shows the schema message.
 - Not run: no live browser. Hand off to U (this is a UI surface).
+
+---
+
+# Handoff-T-green: Re-verification after S REWORK (cycle 1) - clipped Edit on narrow GitLab rows
+
+**Date:** 2026-11-20
+**Branch:** claude/gitlab-141-ui-3ae7f5
+**Issue:** #141
+**Handoff-F reviewed:** docs/handoffs/141/handoff-F.md (second section, "Rework after S")
+
+## What changed
+F's rework is one production class change in `src/features/platform-connections/connections-section.tsx` (action cluster: `flex shrink-0 items-center gap-1` became `flex min-w-0 flex-wrap items-center justify-end gap-1`, plus a comment). No GitLab string. No test file changed by F or by me; F reported no wrong tests and I found none.
+
+## GREEN confirmation (re-run by me at HEAD)
+| Check | Command | Result |
+|---|---|---|
+| Suite | `npx vitest run` | PASS, 51 files, 548/548 |
+| Types | `npx tsc --noEmit` | PASS (exit 0) |
+| Lint | `npm run lint` (`--max-warnings=0`) | PASS |
+| Build | `npm run build` | PASS (exit 0) |
+| Backend runners list | `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test -p gridops-api the_runners_list_carries` | PASS (1) |
+| Backend GitLab | `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test -p gridops-api gitlab` | PASS (34 + 3) |
+
+All match F's reported results. `tests/platform-neutral-source.test.ts` (inside the 548) stays green, so the generic class change adds no GitLab name to the shared file.
+
+## Tier 2
+- **Test quality / coverage:** unchanged and PASS. The defect is layout (wrapping and clipping of a flex cluster), which does not exist under jsdom, so no Vitest can pin it at a sufficient tier. Adding a class-string assertion would test implementation, not behavior, so I added none. Per-button geometry is covered by F's measured Playwright table (320-1280) and is for U's 360 px re-walk and S's re-audit, as S asked.
+- **Playwright suite:** N/A (the project has no Playwright config).
+- **Behavior regressions:** the existing component tests that click Edit, Verify, Rotate and Remove (gitlab-connections, connections-page) still pass, so the class change did not alter the action order, labels or handlers.
+- **Evidence appendix:** F's rework relies on nothing outside the diff; nothing to add.
+
+## Blocking issues
+None.
+
+## Advisory notes
+- Live layout at 360 px is unproven by headless jsdom; U must re-walk with per-button geometry (not page-level overflow).
+- S's cosmetic note (badge wraps and path truncates at 768 and 1280) remains open by design.

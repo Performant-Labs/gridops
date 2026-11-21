@@ -252,3 +252,9 @@ PASS. GitLab extends the existing descriptor, registry, connections section, tar
   - Headless Playwright measurement at 320/360/390/414/480/560/639/640/768/1280: all four actions inside the card and hit-testable, no page overflow from 320 up.
   - Pixel diff against `cycle-1` live captures, excluding the version bar: GitHub/Bitbucket rows 1-3 px at 360/768/1280; GitLab rows 4-5 px at 768/1280; only GitLab at 360 changed, as intended.
   - tsc clean, lint clean, vitest 548/548.
+
+## T (Phase 7 re-verification after S REWORK, cycle 1)
+- **Decided:** No new test for the wrapped action cluster. The defect is CSS layout, invisible under jsdom, and a class-name assertion would pin implementation. Geometry is left to U/S.
+- **Assumed:** F's Playwright geometry table (320-1280) is accurate; I did not re-measure because T runs headless Tier 1/2 only and U/S own the live layout.
+- **Hedged:** none.
+- **Evidence:** vitest 548/548, tsc 0, lint clean, build 0, cargo `the_runners_list_carries` 1 passed, `gitlab` 34 + 3 passed (all run at HEAD 675a213).
