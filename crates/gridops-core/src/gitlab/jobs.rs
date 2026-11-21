@@ -28,6 +28,7 @@
 use sqlx::SqliteConnection;
 
 use super::JobStatus;
+use crate::fleet::ExternalId;
 
 /// The tier of a concluded job: success, failed, canceled or skipped.
 const TERMINAL_TIER: u8 = 3;
@@ -39,9 +40,9 @@ const CONCURRENT_WRITE_ATTEMPTS: usize = 5;
 /// One writer's view of a GitLab job at `status_changed_at`.
 pub struct JobObservation<'a> {
     pub connection_id: &'a str,
-    pub project_id: u64,
-    pub job_id: u64,
-    pub pipeline_id: u64,
+    pub project_id: ExternalId,
+    pub job_id: ExternalId,
+    pub pipeline_id: ExternalId,
     pub status: JobStatus,
     /// Epoch milliseconds: when the writer saw this status.
     pub status_changed_at: i64,
@@ -50,7 +51,7 @@ pub struct JobObservation<'a> {
     /// `Some` only when the writer has GitLab's job tags.
     pub tag_list: Option<&'a [String]>,
     /// `Some` only when the writer knows the runner.
-    pub gitlab_runner_id: Option<u64>,
+    pub gitlab_runner_id: Option<ExternalId>,
 }
 
 /// What [`record_gitlab_job`] did.
@@ -74,7 +75,10 @@ pub struct JobWriteOutcome {
     /// The stored status after the call.
     pub status: String,
     /// The stored runner id after the call.
-    pub gitlab_runner_id: Option<u64>,
+    pub gitlab_runner_id: Option<ExternalId>,
+    /// The stored runner id before the call; `None` when the call inserted
+    /// the row (or there was none).
+    pub previous_gitlab_runner_id: Option<ExternalId>,
 }
 
 /// The D18 tier of a stored or incoming status; `None` for `unknown` (and any
@@ -266,9 +270,12 @@ pub async fn record_gitlab_job(
         if let Some((status, gitlab_runner_id)) = written {
             return Ok(JobWriteOutcome {
                 write,
+                previous_gitlab_runner_id: stored
+                    .as_ref()
+                    .and_then(|row| external_id(row.gitlab_runner_id)),
                 previous_status: stored.map(|row| row.status),
                 status,
-                gitlab_runner_id: gitlab_runner_id.and_then(|id| u64::try_from(id).ok()),
+                gitlab_runner_id: external_id(gitlab_runner_id),
             });
         }
         // Another writer inserted the row, or changed its status, after the
@@ -276,7 +283,8 @@ pub async fn record_gitlab_job(
     }
     Err(sqlx::Error::Protocol(format!(
         "gitlab_jobs row {}/{} kept changing while it was being written",
-        obs.connection_id, obs.job_id
+        obs.connection_id,
+        obs.job_id.get()
     )))
 }
 
@@ -290,11 +298,11 @@ pub async fn record_gitlab_job(
 pub async fn set_gitlab_runner_busy(
     conn: &mut SqliteConnection,
     connection_id: &str,
-    gitlab_runner_id: u64,
+    gitlab_runner_id: ExternalId,
     busy: bool,
     now_ms: i64,
-) -> sqlx::Result<Option<(String, Option<String>)>> {
-    sqlx::query_as::<_, (String, Option<String>)>(
+) -> sqlx::Result<Option<(String, String)>> {
+    sqlx::query_as::<_, (String, String)>(
         "UPDATE runners
          SET busy=?1,status=CASE WHEN ?1 THEN 'busy' ELSE 'online' END,last_heartbeat_at=?2,updated_at=?2
          WHERE id=(
@@ -320,13 +328,15 @@ fn ignored(stored: Option<StoredJob>, obs: &JobObservation<'_>) -> JobWriteOutco
             write: JobWrite::Ignored,
             previous_status: Some(row.status.clone()),
             status: row.status,
-            gitlab_runner_id: row.gitlab_runner_id.and_then(|id| u64::try_from(id).ok()),
+            gitlab_runner_id: external_id(row.gitlab_runner_id),
+            previous_gitlab_runner_id: external_id(row.gitlab_runner_id),
         },
         None => JobWriteOutcome {
             write: JobWrite::Ignored,
             previous_status: None,
             status: obs.status.as_str().to_owned(),
             gitlab_runner_id: None,
+            previous_gitlab_runner_id: None,
         },
     }
 }
@@ -337,6 +347,13 @@ fn contract_tag_list(tags: &[String]) -> sqlx::Result<String> {
 }
 
 /// A GitLab id as the SQLite integer it is stored as.
-fn sql_integer(value: u64) -> sqlx::Result<i64> {
-    i64::try_from(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))
+fn sql_integer(value: ExternalId) -> sqlx::Result<i64> {
+    i64::try_from(u64::from(value)).map_err(|error| sqlx::Error::Encode(Box::new(error)))
+}
+
+/// A stored GitLab id; `None` for NULL (or a value no GitLab id can be).
+fn external_id(value: Option<i64>) -> Option<ExternalId> {
+    value
+        .and_then(|id| u64::try_from(id).ok())
+        .and_then(|id| ExternalId::new(id).ok())
 }

@@ -527,3 +527,32 @@ async fn one_gitlab_job_recorded_under_a_project_and_its_group_connection_is_one
 
     finish(directory, database).await
 }
+
+#[tokio::test]
+async fn a_duplicated_gitlab_job_takes_the_furthest_status_of_its_rows() -> anyhow::Result<()> {
+    // Job 601 is recorded under `conn-a` and under its group connection on the
+    // same instance. Its status is the furthest along of its rows: once one
+    // row says `running`, a lagging `pending` duplicate is not demand.
+    let group_connection = "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+          VALUES ('conn-a-group','a group','https://gitlab-a.example.test','group',3,'group','gitlab.conn-a-group.token','gitlab.conn-a-group.webhook',1,1);";
+    let (directory, database) = gitlab_fixture(&format!(
+        "{group_connection}{}{}{}",
+        gitlab_pool("both", 1, 10, &["docker"], &["conn-a", "conn-a-group"]),
+        gitlab_job("conn-a", 601, "running", &["docker"], 1),
+        gitlab_job("conn-a-group", 601, "pending", &["docker"], 2),
+    ))
+    .await?;
+    assert_eq!(demand(&database, "both").await?, 0);
+    finish(directory, database).await?;
+
+    // `pending` beside a lagging `created` duplicate is demand, once.
+    let (directory, database) = gitlab_fixture(&format!(
+        "{group_connection}{}{}{}",
+        gitlab_pool("both", 1, 10, &["docker"], &["conn-a", "conn-a-group"]),
+        gitlab_job("conn-a", 601, "created", &["docker"], 1),
+        gitlab_job("conn-a-group", 601, "pending", &["docker"], 2),
+    ))
+    .await?;
+    assert_eq!(demand(&database, "both").await?, 1);
+    finish(directory, database).await
+}

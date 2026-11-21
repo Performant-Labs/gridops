@@ -11,14 +11,11 @@
 
 use std::{collections::HashMap, future::Future, time::Instant};
 
-use async_trait::async_trait;
 use gridops_core::fleet::ExternalId;
 use gridops_core::gitlab::jobs::{
     JobObservation, JobWrite, record_gitlab_job, set_gitlab_runner_busy,
 };
-use gridops_core::gitlab::{
-    CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, JobStatus, Scope, ScopeKind,
-};
+use gridops_core::gitlab::{GitLabCredentials, GitLabError, Job, JobStatus, ScopeKind};
 
 use super::{
     Duration, FromRow, Reconciler, Result, gitlab_credentials, json, now_millis, retry_when_busy,
@@ -152,6 +149,13 @@ async fn poll_connection(
             Err(GitLabError::RateLimited { retry_after }) => {
                 return Err(Interrupted::RateLimited(retry_after));
             }
+            // GitLab no longer has the group (or the token can no longer see
+            // it): it has no pending jobs, so every recorded job is checked
+            // on its own, and those GitLab no longer has are concluded.
+            Err(GitLabError::NotFound) => {
+                tracing::warn!(connection_id = %connection.id, "GitLab no longer has this connection's group");
+                Vec::new()
+            }
             Err(error) => {
                 // With no project list there is no pending answer at all, so
                 // no recorded job can be judged no longer pending.
@@ -173,6 +177,12 @@ async fn poll_connection(
             }
             Err(GitLabError::RateLimited { retry_after }) => {
                 return Err(Interrupted::RateLimited(retry_after));
+            }
+            // GitLab no longer has the project (or the token can no longer
+            // see it): that is an answer, not a missing one, so its recorded
+            // jobs are checked one by one like any other.
+            Err(GitLabError::NotFound) => {
+                tracing::warn!(connection_id = %connection.id, project_id = project.get(), "GitLab no longer has a polled project");
             }
             Err(error) => {
                 tracing::warn!(connection_id = %connection.id, project_id = project.get(), error = %error, "could not list a GitLab project's pending jobs");
@@ -225,6 +235,8 @@ struct StaleJob {
 /// ones first, then the other waiting ones, then `running` ones, each least
 /// recently checked first. Jobs of a project whose pending list could not be
 /// read are left alone: they are only missing from an answer that is missing.
+/// A project or group GitLab answers `NotFound` for is an answer: its jobs
+/// are checked, and each one GitLab no longer has is concluded.
 ///
 /// Each job's `updated_at` is set before it is asked about, so it is not asked
 /// about again within the age whatever the answer. The answer is recorded as
@@ -255,9 +267,11 @@ async fn check_stale_jobs(
     .fetch_all(&app.database)
     .await?;
     for row in stale {
-        let (Some(project_id), Some(job_id)) =
-            (external_id(row.project_id), external_id(row.job_id))
-        else {
+        let (Some(project_id), Some(job_id), Some(pipeline_id)) = (
+            external_id(row.project_id),
+            external_id(row.job_id),
+            external_id(row.pipeline_id),
+        ) else {
             tracing::warn!(connection_id = %connection.id, job_id = row.job_id, "a recorded GitLab job has an invalid id; not checking it");
             continue;
         };
@@ -292,9 +306,9 @@ async fn check_stale_jobs(
             Some(job) => observation(&connection.id, job, checked_at),
             None => JobObservation {
                 connection_id: &connection.id,
-                project_id: project_id.get(),
-                job_id: job_id.get(),
-                pipeline_id: u64::try_from(row.pipeline_id).unwrap_or_default(),
+                project_id,
+                job_id,
+                pipeline_id,
                 status: JobStatus::Canceled,
                 status_changed_at: checked_at,
                 retries_count: None,
@@ -333,12 +347,12 @@ async fn record_check(app: &Reconciler, checked: &JobObservation<'_>) -> Result<
             .bind(runner_id)
             .bind(pool_id)
             .bind(format!("GitLab job {}", checked.status.as_str()))
-            .bind(format!("Job · pipeline {}", checked.pipeline_id))
+            .bind(format!("Job · pipeline {}", checked.pipeline_id.get()))
             .bind(
                 json!({
-                    "jobId": checked.job_id,
-                    "projectId": checked.project_id,
-                    "pipelineId": checked.pipeline_id,
+                    "jobId": checked.job_id.get(),
+                    "projectId": checked.project_id.get(),
+                    "pipelineId": checked.pipeline_id.get(),
                     "connectionId": checked.connection_id,
                 })
                 .to_string(),
@@ -351,7 +365,7 @@ async fn record_check(app: &Reconciler, checked: &JobObservation<'_>) -> Result<
         anyhow::Ok((outcome.status, freed.map(|(runner_id, _)| runner_id)))
     })
     .await?;
-    tracing::info!(connection_id = checked.connection_id, job_id = checked.job_id, answer = checked.status.as_str(), status = %written.0, freed_runner = ?written.1, "checked a GitLab job");
+    tracing::info!(connection_id = checked.connection_id, job_id = checked.job_id.get(), answer = checked.status.as_str(), status = %written.0, freed_runner = ?written.1, "checked a GitLab job");
     Ok(())
 }
 
@@ -360,9 +374,9 @@ async fn record_check(app: &Reconciler, checked: &JobObservation<'_>) -> Result<
 fn observation<'a>(connection_id: &'a str, job: &'a Job, seen_at: i64) -> JobObservation<'a> {
     JobObservation {
         connection_id,
-        project_id: job.project_id.get(),
-        job_id: job.id.get(),
-        pipeline_id: job.pipeline_id.get(),
+        project_id: job.project_id,
+        job_id: job.id,
+        pipeline_id: job.pipeline_id,
         status: job.status,
         status_changed_at: seen_at,
         retries_count: None,
@@ -396,76 +410,88 @@ fn external_id(value: i64) -> Option<ExternalId> {
         .and_then(|value| ExternalId::new(value).ok())
 }
 
-/// The reconciler's GitLab client until #146's real one is wired in: every
-/// call fails as `Upstream`, so the poll logs and skips each connection.
-pub(crate) struct UnavailableGitLab;
+#[cfg(test)]
+pub(crate) use placeholder::UnavailableGitLab;
 
-impl UnavailableGitLab {
-    fn unavailable() -> GitLabError {
-        GitLabError::Upstream("GitLab client not available yet".into())
-    }
-}
+#[cfg(test)]
+mod placeholder {
+    use async_trait::async_trait;
+    use gridops_core::fleet::ExternalId;
+    use gridops_core::gitlab::{
+        CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, Scope, ScopeKind,
+    };
 
-#[async_trait]
-impl GitLabApi for UnavailableGitLab {
-    async fn create_runner(
-        &self,
-        _credentials: &GitLabCredentials,
-        _scope: &Scope,
-        _tags: &[String],
-        _run_untagged: bool,
-        _description: &str,
-    ) -> Result<CreatedRunner, GitLabError> {
-        Err(Self::unavailable())
+    /// A GitLab client that refuses every call as `Upstream`, for tests that need
+    /// a reconciler with no GitLab. Production uses #146's `GitLabClient`.
+    pub(crate) struct UnavailableGitLab;
+
+    impl UnavailableGitLab {
+        fn unavailable() -> GitLabError {
+            GitLabError::Upstream("GitLab client not available yet".into())
+        }
     }
 
-    async fn delete_runner(
-        &self,
-        _credentials: &GitLabCredentials,
-        _runner_id: ExternalId,
-    ) -> Result<(), GitLabError> {
-        Err(Self::unavailable())
-    }
+    #[async_trait]
+    impl GitLabApi for UnavailableGitLab {
+        async fn create_runner(
+            &self,
+            _credentials: &GitLabCredentials,
+            _scope: &Scope,
+            _tags: &[String],
+            _run_untagged: bool,
+            _description: &str,
+        ) -> Result<CreatedRunner, GitLabError> {
+            Err(Self::unavailable())
+        }
 
-    async fn job(
-        &self,
-        _credentials: &GitLabCredentials,
-        _project_id: ExternalId,
-        _job_id: ExternalId,
-    ) -> Result<Job, GitLabError> {
-        Err(Self::unavailable())
-    }
+        async fn delete_runner(
+            &self,
+            _credentials: &GitLabCredentials,
+            _runner_id: ExternalId,
+        ) -> Result<(), GitLabError> {
+            Err(Self::unavailable())
+        }
 
-    async fn pending_jobs(
-        &self,
-        _credentials: &GitLabCredentials,
-        _project_id: ExternalId,
-    ) -> Result<Vec<Job>, GitLabError> {
-        Err(Self::unavailable())
-    }
+        async fn job(
+            &self,
+            _credentials: &GitLabCredentials,
+            _project_id: ExternalId,
+            _job_id: ExternalId,
+        ) -> Result<Job, GitLabError> {
+            Err(Self::unavailable())
+        }
 
-    async fn group_projects(
-        &self,
-        _credentials: &GitLabCredentials,
-        _group_id: ExternalId,
-    ) -> Result<Vec<ExternalId>, GitLabError> {
-        Err(Self::unavailable())
-    }
+        async fn pending_jobs(
+            &self,
+            _credentials: &GitLabCredentials,
+            _project_id: ExternalId,
+        ) -> Result<Vec<Job>, GitLabError> {
+            Err(Self::unavailable())
+        }
 
-    async fn resolve_scope(
-        &self,
-        _credentials: &GitLabCredentials,
-        _kind: ScopeKind,
-        _path: &str,
-    ) -> Result<Scope, GitLabError> {
-        Err(Self::unavailable())
-    }
+        async fn group_projects(
+            &self,
+            _credentials: &GitLabCredentials,
+            _group_id: ExternalId,
+        ) -> Result<Vec<ExternalId>, GitLabError> {
+            Err(Self::unavailable())
+        }
 
-    async fn verify_access(
-        &self,
-        _credentials: &GitLabCredentials,
-        _scope: &Scope,
-    ) -> Result<(), GitLabError> {
-        Err(Self::unavailable())
+        async fn resolve_scope(
+            &self,
+            _credentials: &GitLabCredentials,
+            _kind: ScopeKind,
+            _path: &str,
+        ) -> Result<Scope, GitLabError> {
+            Err(Self::unavailable())
+        }
+
+        async fn verify_access(
+            &self,
+            _credentials: &GitLabCredentials,
+            _scope: &Scope,
+        ) -> Result<(), GitLabError> {
+            Err(Self::unavailable())
+        }
     }
 }

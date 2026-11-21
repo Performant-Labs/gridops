@@ -1,0 +1,225 @@
+# Decision journal - #145 platform-neutral UI
+
+## D (Design) - 2026-11-20
+- **Decided:** Generated a low-fi HTML wireframe (`docs/handoffs/145/wireframe.html`, frames A-G). One flat Connections list with a platform badge per row; an Add connection dialog that asks for the platform first, then renders only that descriptor's fields, with a separate one-time reveal dialog that cannot be dismissed by a backdrop click; GitHub add is a link-out because it has no create endpoint; GitHub App sections moved onto the Connections page as the GitHub descriptor's settings slot. Targets is one grouped multi-select: group heading "Platform · Target kind", incompatible options shown disabled with a reason (not hidden), organization runner group is single-select with a manual runner-group-ID fallback row, per-group status rows for loading/error/not-connected. Platform options is a collapsed disclosure rendered only when a targeted platform has options content; label-rule errors surface in the Additional labels row. Shared rows (Tart base VM, Additional labels) are made neutral. Runner badge from the registry with a dashed fallback badge for unknown ids. Handoffs live under `docs/handoffs/145/` per the run context (the brief's `145-platform-neutral-ui/` path was overridden by the run instruction).
+- **Assumed:** (1) Bitbucket targets in pool settings are display-only, preserving the old save payload. (2) Runner link builder surfaces as an actions-menu item. (3) A runner badge on every row is acceptable (none shown today). (4) `supportsPriority` descriptor flag drives the Priority section. (5) User-account installations keep the manual runner-group-ID fallback. (6) Per-platform load failure should not hide other platforms on the Connections page.
+- **Hedged:** The wireframe carries copy for new states (reveal dialog, group status rows, "Add a connection first") that has no existing equivalent; wording is a proposal. Dark theme and narrow widths were not drawn. Open questions are recorded in handoff-D.md with the defaults drawn; no operator answered them.
+- **Evidence:** Read `docs/handoffs/145-brief.md`, `src/routes/settings.integrations.tsx`, `settings.github.tsx`, `settings.tsx`, `_app/runner-pools.new.tsx`, `_app/runner-pools.$poolId.settings.tsx`, `features/runner-pools/tart-base-vm-row.tsx`, `features/runners/runner-row.tsx`, `components/settings-ui.tsx`, `components/ui/searchable-multi-select.tsx`, `components/pool-plan-preview.tsx`, `src/styles/app.css` tokens. `docs/handoffs/145-platform-neutral-ui/survey.md` does not exist yet (no survey available to D). Rendered headlessly with Chrome `--screenshot` and inspected every frame.
+
+## A (Architecture review, up front) - 2026-11-20T11:18:11-08:00
+- **Decided:** BLOCK, with 3 block findings and 8 warns (docs/handoffs/145/handoff-A.md).
+  - Block 1: the one-time reveal must extend the existing `SecretDialog` (src/features/fleet/api-tokens-section.tsx:182-226, which ignores Escape and is tested at tests/api-tokens-section.test.ts:147) through a spec'd extraction to src/components/. Wireframe C4's "(or Esc)" conflicts with it.
+  - Block 2: no Reuse map exists, and the descriptor label validator would duplicate `validateBitbucketConnections` (schemas.ts:168-183). The brief needs a Reuse map with EXTEND/NEW per surface, a scope line that allows src/features/runner-pools/schemas.ts edits, and the survey.md path fixed to docs/handoffs/145/.
+  - Block 3: the target-kind contract needs a namespaced key, per-platform create and update payload partials with GitHub defaults, a requires/standalone rule (Bitbucket-only pools fail the createRunnerPoolSchema installationId/scope checks), per-kind limits and cardinality, and context-taking loaders.
+  - Warns: module placement for the Targets row and Platform options; SearchableMultiSelect stays generic (a global maxSelected would regress the separate per-kind caps); per-platform descriptor modules; import-direction rules; Connections loading and descriptor injection; tests/runner-pool-tart-image.test.ts breaks; webhooks.tsx:83 and ReadOnlyPool are outside the baseline; the forward-compat table must list schemas.ts and the API.
+- **Assumed:** The brief's "Codebase starting points" and "Operating rules" stand in for the absent survey Reuse map. GitHub's default runner group id is 1 in every organization (it matches the form's and schema's `runnerGroupId` default of 1). The up-front review is "Phase 4", as numbered in workflow-coding-pipeline.md.
+- **Hedged:** Block 2 could be read as procedural. It is kept as a block because, without named analogous objects, the Phase 7 gate has nothing to hold F to, and the label-rule duplication is concrete. The feature-level import cycle (finding 7) is a warn, not a block: no file-level cycle is required, and the codebase has no written frontend layering rule.
+- **Evidence:** Read the brief, both brief-review results, handoff-D.md and the wireframe text (frames A-G). Read in full: settings.integrations.tsx, settings.github.tsx, settings.tsx, settings.index.tsx, _app/platform-connections.tsx, settings.api-tokens.tsx, runner-pools.new.tsx, runner-pools.$poolId.settings.tsx, runner-pools/schemas.ts, runner-pools.functions.ts, tart-base-vm-row.tsx, pool-plan-preview.tsx, runners/runner-row.tsx, ui/searchable-multi-select.tsx, settings-ui.tsx, operations.functions.ts, platform-connections.functions.ts and fleet/api-tokens-section.tsx (lines 1-230). Also read tests/runner-pool-tart-image.test.ts (lines 1-150), the head of ui/searchable-select.tsx and the vitest config, and grepped tests/api-tokens-section.test.ts. Mapped cross-feature imports with grep over src/features.
+Rigor/brief gate: round 3 passed; 7 completeness finding(s) recorded as advisory, not blocking (from round 3, #2296): [new, completeness] The acceptance criterion for payload equality requires Vitest `toEqual` comparison of `data` objects where "keys set to `undefined` count as absent (as `JSON.stringify` drops it)." The brief correctly notes that `toEqual` treats `{ repositoryIds: undefined }` as equal to `{}`. However, the acceptance criterion for the payload-equality cases states: "The expected objects are the frozen old-form constants described in 'Payload-equality reference (frozen old-form output)' below." The brief's "Payload-equality reference" section specifies T captures these constants by rendering the old forms at commit `5550cf5`. The "Sequencing gate" section then lays out a detailed procedure (steps 1-5) for capturing from a pre-change tree. This resolves the circular dependency identified in earlier rounds. However, the acceptance criterion itself ("Vitest payload-equality cases… The expected objects are the frozen old-form constants described in 'Payload-equality reference (frozen old-form output)' below, not values computed by the new code") does not actually require the comparison to use `toEqual` with the `undefined`-as-absent semantics. The "Payload-equality reference" section says "Comparison is Vitest `toEqual` on the `data` object (keys set to `undefined` count as absent, as Required design 3 states)." But the acceptance criterion text does not mention `toEqual`, nor does it state the `undefined`-as-absent rule. An implementer reading only the acceptance criteria could reasonably substitute `toStrictEqual` (which treats `{ repositoryIds: undefined }` and `{}` as different) and fail the test incorrectly. — Must add to the payload-equality acceptance criterion: "Comparison is Vitest `toEqual` (not `toStrictEqual`), because `JSON.stringify` drops keys set to `undefined`; a key set to `undefined` counts as absent."; [new, completeness] The accept
+
+## D (Design, revision 2) - 2026-11-20
+- **Decided:** Amended `docs/handoffs/145/wireframe.html` in place (revision 2, `REV2` tags) after the Phase-4 BLOCK and the brief amendments: C4 closes only via the Done button (shared extracted `SecretDialog`; Escape and outside clicks ignored); Bitbucket options disabled-with-reason until a GitHub repository or runner group is selected (D2b); D7 shows the last-GitHub-target-removed state (workspace stays selected, submit enabled, schema error in the "Could not create the pool" callout, no request); D5 restored to today's two empty states with descriptor-supplied copy and a "no GitHub installation" gate; added B5b partial failure, E3 read-only pool targets and the webhooks empty-state link; notes on namespaced keys, separate per-kind caps, installation pinned from the first repository, plan-preview contract, label rule reuse from `schemas.ts`.
+- **Assumed:** (1) The brief wins over the wireframe where they differ, so the wireframe is edited rather than left as a historical record (the brief's "not edited in this story" line is read as binding on F/T, not on this Phase-3 re-run, because the re-run exists to correct it). (2) E3 shows a Bitbucket line when the pool has workspaces. (3) The D7 callout text is whatever the schema parse throws. (4) The platform name appears in the per-platform error title on the Connections page.
+- **Hedged:** The new copy (B5b title, disabled-reason strings, E3 layout) is a proposal. Frames G and F2-F4 were not re-rendered or re-inspected this pass; dark theme and narrow widths remain undrawn. No operator answered the open questions (handoff-D.md lists eight, each with its default).
+- **Evidence:** Read the amended `docs/handoffs/145-brief.md` in full, `handoff-A.md` (findings 1-3 and the required wireframe amendments), the prior `handoff-D.md` and `wireframe.html`, `runner-pools.new.tsx` (empty-state copy lines 53-77, error callout and submit button lines 484-499), `schemas.ts` (parse function lines 155-170), `webhooks.tsx` (lines 74-92), `runner-pools.$poolId.settings.tsx` (`ReadOnlyPool`). Rendered with Chrome headless to a PNG in the scratchpad and viewed the changed frames.
+
+## A (Architecture review, up front, round 2) - 2026-11-20T11:56:02-08:00
+- **Decided:** BLOCK, with 1 block finding and 5 warns (docs/handoffs/145/handoff-A.md, which replaces the round-1 file from commit 3a1a84b).
+  - The round-1 blocks are resolved: the SecretDialog extraction, the Reuse map with the label rule exported from schemas.ts, and the target-kind contract with payload partials.
+  - New block: the brief's binding "Connections page loading" is internally inconsistent. It combines a route loader using Promise.allSettled over the production platforms with a page component that takes descriptors as a prop, and with a per-platform Retry that "re-runs only that load" (acceptance criterion; wireframe B5b). router.invalidate() reloads every match, including the /settings layout loader, and has no per-platform pending state. Injected descriptors would never be loaded, and T would have to invent the loaderData shape. The codebase's pattern for a list retried on its own is component-level: useQuery with refetch (api-tokens-section.tsx) or a LoadState with an attempt counter (settings.ai.tsx, runner-pools.new.tsx). The fix: move loading into src/features/platform-connections/connections-section.tsx, with one load state per platform and a thin route, following settings.api-tokens.tsx.
+  - Warns:
+    - Target-kind load ownership, and a field for the manual runner-group-ID entry; name requiresProviders and planNote in the contract.
+    - The builder calls every descriptor's partials; priority values reach GitHub's update partial through context.
+    - The "type-only schemas.ts" import rule conflicts with the exported label predicate; descriptor types belong in their own module to avoid a registry back-edge.
+    - Two GitHub couplings in shared rows are missing from the baseline (Maximum floor; Create disabled gate).
+    - Wireframe B note 5 (settingsSection slot) conflicts with the brief's route composition.
+- **Assumed:** The brief's "Architecture decisions → Reuse map" section stands in for survey.md. Wireframe revision 2 is the approved wireframe. "Phase 4" is the workflow's number for this gate (the role doc says Phase 3). T's Connections tests use the existing harness, either a mocked router or a feature component rendered directly.
+- **Hedged:** Block 1 corrects my own round-1 warn 8, which recommended the route-loader + allSettled design. The conflict appeared once the per-platform Retry criterion was added. I kept it as a block because it decides how T writes three Connections tests, and the brief marks it as binding. The target-contract gaps are warns, not blocks: the forward-compat survey and the Phase 8 gate still guard them, and the wireframe already names requiresProviders and planNote.
+- **Evidence:** Read the brief in full, handoff-D.md, decisions.md, the round-1 handoff-A.md, 145-brief-result-r3.md and the wireframe notes (grep of B5/B5b, B note 5, D notes 3/6/8). Confirmed with `git diff 5550cf5 HEAD --stat` that src/ and tests/ are unchanged. Read in full: settings.integrations.tsx, settings.github.tsx, settings.tsx, settings.index.tsx, settings.api-tokens.tsx, _app/platform-connections.tsx, platform-connections.functions.ts, fleet/api-tokens-section.tsx, ui/searchable-multi-select.tsx, tart-base-vm-row.tsx, use-action.ts. Read in part: runner-pools.new.tsx (lines 29-512), runner-pools.$poolId.settings.tsx (lines 1-130 and 145-399), schemas.ts (lines 1-40 and 90-194), runner-pools.functions.ts (lines 1-70), runner-row.tsx (lines 100-160), async-action-button.tsx, settings.ai.tsx (head and 455-500), router.tsx, vite.config.ts, vitest.config.ts, eslint.config.js, tests/runner-pool-tart-image.test.ts (lines 1-110) and tests/api-tokens-section.test.ts (lines 1-40 and 140-182). Grepped src/ for useQuery, allSettled, onRetry, router.invalidate, platform branches and non-Route exports in src/routes.
+
+## D (Design, revision 3) - 2026-11-20
+- **Decided:** Amended `docs/handoffs/145/wireframe.html` in place (REV3 tags) to match the brief as amended after the Phase-4 round-2 BLOCK: the GitHub App section is composed by the route (no descriptor `settingsSection` slot); Connections loading is per platform inside the connections list component with no route loader, so Retry and post-mutation refresh touch only that platform; C4's close button is the extracted dialog's default `I’ve stored it, close` and its text fields are the `PostCreateReveal` fields; the `?appError=` redirect carries no search and the message is a toast. Frames D-G stand as in revision 2.
+- **Assumed:** (1) Revision 2 is otherwise still correct; I checked the new brief text (target-kind contract, plan-preview contract, remaining GitHub couplings, other sites) against the D, E and F frames and found no further contradiction, but did not re-render those frames. (2) The eight open questions in handoff-D.md keep their drawn defaults. (3) The brief's rigor change to in-session review does not affect the design.
+- **Hedged:** The "Maximum" floor derived from `targets.ts` (today's `max(1, repositories)`) and the Create-button gate are behaviours, not layout, so they are not drawn. New copy remains a proposal; dark theme and narrow widths remain undrawn.
+- **Evidence:** Read the amended `docs/handoffs/145-brief.md` (lines 1-223 and 683-752), `handoff-A.md` (round 2), `decisions.md`, `handoff-D.md` (revision 2) and the wireframe's text for the affected notes (grep of settingsSection, Done, loader, appError, invalidate). Re-rendered with Chrome headless to a PNG in the scratchpad and inspected the legend, A, B2-B4, B7, C1 and C4 crops.
+
+## A (Architecture review, up front, round 3) - 2026-11-20T13:03:24-08:00
+- **Decided:** BLOCK, with 1 block finding (correctness) and 6 warns (docs/handoffs/145/handoff-A.md, which replaces the round-2 file).
+  - The round-2 block is resolved. Connections loading is now per-platform: a `useQuery` child with an `InlineError` retry (api-tokens-section.tsx pattern), a thin route and an injectable `ConnectionsSection`. All five round-2 warns are folded in.
+  - New block: the brief plans a parallel path. GitHub installations are listed as rows in `ConnectionsSection` (brief line 183). The Reuse map also moves the old GitHub page's Installations section (settings.github.tsx:71-102) verbatim into `GitHubAppSection` with an `installations` prop (lines 127, 198), so the installation list and its row logic would exist twice. Wireframe B1 and B note 5 draw it once, but the brief wins over the wireframe, so the duplicate would pass Phase 8 as brief-justified. "Verbatim" also cannot hold for Refresh access, which is the old page's SettingsLayout action. Fix: installation rows live only in `ConnectionsSection`; `GitHubAppSection` keeps the checks, endpoints, `CreateAppSection` and the callout, with Refresh/Install/Manage App as SettingsSection actions; state member visibility explicitly.
+  - Warns:
+    - `selection` and the `load` return type are undefined, while the GitHub create partial needs the loaded list (installationId of the first selected repository in list order) and the Priority section needs repository labels.
+    - Runner-group `nativeId` collides across org installations; manual entry is kind-level but must be per installation.
+    - `TargetContext` mixes stable loaded data with submit-time form values.
+    - The `minMaxCount` example formula counts workspaces; `planNote` needs count/max inputs and an empty-selection default; several descriptor fields are unnamed.
+    - Create/edit through `useAction` would drop their inline errors; `getBitbucketConnections` lacks a signal.
+    - The import-rule wording omits libraries and UI primitives; the new option fields belong on a multi-select option type.
+- **Assumed:** The brief's Reuse map stands in for survey.md. Wireframe revision 3 is the approved wireframe. This is the gate the workflow doc calls Phase 4 (the role doc's "Phase 3"). Because this may be the arch gate's third review, only a correctness finding should block, and the one block is a correctness finding. The task text carried no earlier BLOCK findings to mark, so the round-2 block's status is recorded in the handoff's status table.
+- **Hedged:**
+  - The block could be read as a wording slip that F would resolve against the wireframe. It is kept as a block because the brief says it wins over the wireframe, and a brief-justified duplicate cannot be blocked at Phase 8.
+  - Warn 2 (the selection/loaded-data seam) affects payload equality. It stays a warn because no binding text prevents the correct design, and T's rendered-form cases guard it, provided T adds a two-installation, reverse-order case.
+  - Member visibility of the GitHub App section (brief trace (c) vs wireframe B4 / B note 5) is a spec choice. Today's behaviour is recommended, not decided.
+- **Evidence:**
+  - Confirmed `git diff 5550cf5 HEAD --stat -- src tests` is empty at 19a2d72, and that branch claude/gitlab-137-contract-fa3bbe has no src/ or tests/ changes against master.
+  - Read the brief in full (751 lines), handoff-D.md (revision 3), decisions.md, the round-2 handoff-A.md and the wireframe text for B1, B4, B note 5 and D notes 3 and 8.
+  - Read in full or in the relevant ranges: settings.github.tsx (26-112), settings.integrations.tsx (1-130), settings.tsx (1-70), use-action.ts, async-action-button.tsx, api-tokens-section.tsx (1-80, 160-300), runner-pools.new.tsx (29-392, 440-452), runner-pools.$poolId.settings.tsx (28-121, 155-215, 295-399), searchable-multi-select.tsx (60-140), runner-row.tsx (1-40, 100-170), badge.tsx, settings-ui.tsx (SettingsLayout/SettingsSection), tart-base-vm-row.tsx, schemas.ts (155-194), runner-pools.functions.ts (110-126) and tests/runner-pool-tart-image.test.ts (1-110).
+  - Grepped src/ for useQuery, QueryClientProvider, InlineError, LoadingRows and cross-feature imports; mapped the imports of the modules descriptors will depend on.
+
+## D (Design, revision 4) - 2026-11-20
+- **Decided:** Amended `docs/handoffs/145/wireframe.html` in place (REV4 tags) to match the brief as amended after the Phase-4 round-3 BLOCK. (1) Installations render once, as GitHub rows in the connections list; `GitHubAppSection` holds only the checks, endpoints, Create form and callout, with Refresh access / Install / Manage App (admin only) as header actions (B1, new B1b for the empty text, B note 5). (2) B4 redrawn for members: one Read-only callout, list, App section with checks, endpoints, Refresh access and Install; no Create, no Manage App. (3) Add and Edit keep inline errors, only Remove toasts; create success copy restored to today's `Bitbucket workspace connected.` (B note 3, C3). (4) D notes record: unique option keys per kind across connections, per-installation manual runner-group entry, first selected repository in loaded-list order, repository-only Maximum floor (`raisesMinMaxCount`), empty-form plan sentence. (5) Named the descriptor fields the frames rely on (`externalLinks`, `prerequisiteEmptyState`, `offeredIn`, `readOnlySummary`, `labelsPlaceholder`).
+- **Assumed:** Frames A, C1, C2, C4, D1-D3, D5-D7, E and G stand as in revision 3. The brief's "preserves today's page" means members keep the ungated Refresh access, Install and "Adding another GitHub account" callout. The three App actions sit in the Connection section's header.
+- **Hedged:** Three new open questions (9-11 in handoff-D.md) carry defaults that preserve today's behaviour: what a wholly empty list shows when the App is configured, member visibility of Refresh/Install/the callout, and which SettingsSection holds the App actions. Selection-shape types, context and payload builders are contracts, not layout, so they appear only as annotations.
+- **Evidence:** Read the brief diff `8341b5e..HEAD` (the Reuse-map row, GitHub App wiring, and the round-3 decisions block), `handoff-A.md` (round 3), `handoff-D.md` (revision 3), the wireframe frames A-G, and the sources `settings.github.tsx`, `settings.integrations.tsx` (copy, toasts, error handling) and `runner-pools.new.tsx` lines 440-452 (labels row). Rendered B and the legend with Chrome headless to PNG in the scratchpad and inspected them; fixed one wrapping defect in the B1 App header and re-inspected it. Div/section/li/p tag balance verified (470/470 div).
+
+## A (Architecture review, up front, round 4) - 2026-11-20T13:15:30-08:00
+- **Decided:** PASS, with 0 block findings and 5 warns (docs/handoffs/145/handoff-A.md, which replaces the round-3 file).
+  - The round-3 block is resolved. Installations render once, as GitHub rows in `ConnectionsSection` (brief line 127). `GitHubAppSection` takes `configuration`, `githubApp` and `user`, and its Refresh access, Install and Manage App controls are `SettingsSection` actions. Line 198 and trace (d) match, and wireframe REV4 draws the same split. All six round-3 warns are folded into the binding "Round-3 architecture decisions" block (lines 754-760).
+  - Warns:
+    - The selection must carry both orders. `repositoryIds` is in click order (`searchable-multi-select.tsx:84`), and `installationId` comes from loaded-list order (`runner-pools.new.tsx:172, 233-235`). `TargetOption` has no load position, so add `loadIndex` and make the reverse-order case a frozen constant.
+    - A static `offeredIn` can't express "the settings form offers only the pool's own kind" (brief line 143, wireframe E1/E2). Replace it with `offered(context)`. Gate both Priority sections on it, and add `ReadOnlyPool`'s `pool.scope` test (settings :388) to the baseline.
+    - `manualEntry.parse` needs the connection.
+    - Connections split leftovers: one owner for the single Read-only callout; the Installations section's description; a neutral page-data prop instead of `installations`; which `SettingsSection` holds the actions.
+    - Stale text the round-3 block supersedes (lines 145, 147, 149, 151, 171, 185 and 696).
+- **Assumed:** The brief's Reuse map plus the round-3 block stand in for survey.md. Wireframe revision 4 is the approved wireframe. This is the gate the workflow doc calls Phase 4 (the role doc's "Phase 3"). The round-3 block's explicit precedence clause makes the stale earlier sentences non-binding.
+- **Hedged:**
+  - Findings 1 and 2 are contract gaps that could produce the wrong payload or the wrong settings UI. They are warns, not blocks: the frozen old-form payload constants catch finding 1, provided the reverse-order case is captured as a constant. The brief already fixes the behaviour for finding 2 (line 143, "its GitHub kind is fixed by `pool.scope`"), so S's audit against wireframe E1/E2 catches it. Neither is a parallel path or layering drift.
+  - A fourth BLOCK would have escalated to the operator for one-line amendments that T and F can apply as the reading of the binding block.
+- **Evidence:**
+  - Confirmed `git diff 5550cf5 HEAD --stat -- src tests` is empty at 4fdd6c8, and `git diff 5550cf5 master -- src tests` is empty.
+  - Checked local branches for overlapping src/ or tests/ changes: `claude/gitlab-137-contract-fa3bbe` has none. `fix/134-exclusive-pools` touches only fleet/admin-contracts.ts and tests/fleet-admin-api.test.ts.
+  - Read the brief diff 19a2d72..HEAD, brief lines 1-234 and 683-760, the round-3 handoff-A.md, decisions.md and handoff-D.md (revision 4). Extracted the wireframe text for click order, Read-only, `raisesMinMaxCount`, manual runner-group entry and resolved selection.
+  - Read in full: settings.github.tsx, settings.integrations.tsx, platform-connections.functions.ts and use-action.ts.
+  - Read in the relevant ranges: runner-pools.new.tsx (29-80, 125-400, 440-500), runner-pools.$poolId.settings.tsx (28-215, 260-399), searchable-multi-select.tsx (1-140), api-tokens-section.tsx (1-80), runner-pools.functions.ts (1-60, 110-140) and lib/api.ts (1-45).
+  - Grepped the settings file for `pool.scope`.
+
+## T (Tester, Phase 4 RED) - 2026-11-20T13:40:00-08:00
+- **Decided:**
+  - Authored 9 new test files and updated `tests/runner-pool-tart-image.test.ts`, all listed in `docs/handoffs/145/handoff-T-red.md`. RED is valid: 45 new or updated tests fail on the missing feature, the 4 files that import only new modules fail on those modules, and every pre-existing test still passes apart from the 9 tart-image cases that now go through Targets.
+  - Captured the frozen old-form payloads at tip `ef65745` (`git diff 5550cf5 ef65745 -- src tests` empty) with a one-off harness, then deleted it. There are 6 constants: the brief's 5, with the repository case using two installations clicked in reverse list order (A finding 1), plus a manual runner-group-ID case (A finding 3).
+  - Pinned the names the brief leaves to D/F that the tests need. This is the "Test contract" in the handoff:
+    - descriptor fields `targetKinds`, `connections.list` (`{ kind: "fetch", load }`), `connections.create`, `platformOptions` (`{ help, Component }`) and `labelRules.validate`;
+    - function signatures `targetPlanCheck(descriptors, selection, { maxCount })` and `anyStandaloneKindAvailable(descriptors, context)`;
+    - component props for `TargetsRow`, `PlatformOptionsSection`, `ConnectionsSection` and `GitHubAppSection`;
+    - the DOM names the tests find: the `Targets` trigger, the `Platform options` disclosure, and the disabled reasons.
+  - Encoded the brief's grep criteria as `tests/platform-neutral-source.test.ts`, so `npm test` enforces them.
+- **Assumed:**
+  - Where the brief and the wireframe differ, the brief wins. So the generic Tart script stays in the Tart base VM row, and only the Bitbucket script moves to Platform options.
+  - A fetching list binding resolves the platform's own records (`{ canManage, items }`), and the descriptor describes each row (wireframe B note 1, `describeConnection`).
+  - A successful create closes the Add dialog (wireframe C note 3).
+  - A member sees exactly one Read-only callout, owned by the route (A finding 4a).
+- **Hedged:**
+  - Four test files can only fail at import until the modules exist. I checked their code instead with `tsc` (exit 0) and `eslint` (exit 0) against a declaration-only sketch of the contract in a scratch worktree, which I then removed. Their runtime mechanics (Radix dialogs, react-query retries) are unproven until F's code exists; T repairs any test-side defect in Phase 6.
+  - Five tests pass before and after the change on purpose (characterization guards; see the handoff).
+- **Evidence:**
+  - `npm ci`, then `npx vitest run` gave a baseline of 364/364.
+  - The capture command and its verbatim output, and the harness source, are in the handoff.
+  - After the change, `npx vitest run --reporter=json` gave 405 tests, 360 passed and 45 failed, summarised per test in the handoff.
+  - `npm run lint` exited 0.
+  - `npx vite build`, then `tsc --noEmit`, failed only with TS2307 for the new modules and the implicit-`any` errors that follow from them.
+
+## F (Feature Implementor, Phase 6) - 2026-11-20T14:02:00-08:00
+- **Decided:**
+  - Implemented the whole story in one pass, without proposing a scope-cap split. The work spans about 26 production files and three surfaces (the Connections page, the pool forms and the runner row), but:
+    - T's RED suite is one contract over all of them;
+    - A passed the plan as one unit;
+    - the brief is fully specified.
+    A split would have left part of the suite RED at the Phase-7 GREEN gate. This is judgment under the role doc's "use judgment" clause, recorded here for O.
+  - Followed the brief's Reuse map: EXTEND `SearchableMultiSelect` (optional fields plus a `groups` prop), extract `SecretDialog` into `SecretRevealDialog`, export `bitbucketLabelError` from `schemas.ts`, and move the Bitbucket and GitHub page logic. NEW only where the map says NEW.
+  - Applied the round-4 A warns as the reading of the binding round-3 block:
+    - `TargetOption.loadIndex` (two orders);
+    - `TargetKind.offered(context)` in place of a static `offeredIn`;
+    - `manualEntry.parse(input, connectionId)`;
+    - the route owns the single member-only Read-only callout;
+    - the Installations description is kept in the GitHub App section;
+    - neutral `TargetUpdateValues` (`priorityKeys`, `priorityWaitMinutes`).
+  - `TargetKind.limit` takes `TargetLimits` (`{ maxCount }`, the live Maximum field) rather than `context`, because `TargetContext` holds loaded data only.
+- **Assumed:**
+  - On settings, Bitbucket targets are locked chips that are not listed in the picker (the test pins that they are not options).
+  - The settings labels row stays as today: the old settings form never varied it by platform.
+  - The `tart` auto-add applies on the create form only, as before.
+- **Hedged:**
+  - These are verified under Vitest/jsdom only, with no browser run: the per-kind picker statuses, the Add connection dialog's Back button and the runner details "CI platform" link. The Playwright walkthrough criterion is still open for T/U.
+- **Evidence:**
+  - `npm run build`, `npm run lint` and `npm run typecheck` all exit 0.
+  - `npx vitest run` gives 46 files, 445/445 passing.
+  - The brief's redirect grep, the `appError` grep and the generic-files grep print nothing beyond what is allowed.
+  - `git diff b8cbf8d --stat -- tests` is empty.
+  - Handoff: `docs/handoffs/145/handoff-F.md`. Evidence: `docs/handoffs/145/evidence.md`. Survey: `docs/handoffs/145/survey.md`.
+
+## T-green (Phase 7)
+- **Decided:** repaired one test line in `tests/pool-target-payloads.test.ts` (the Bitbucket list URL as a regex) so the brief's independence grep prints nothing; constants untouched. Returned PASS: suite 445/445, build/lint/typecheck clean, three mutation checks fail as expected.
+- **Assumed:** no Playwright suite exists in this project, so the browser walkthrough is U's.
+- **Hedged:** jsdom-only surfaces (picker load states, Back button, runner "CI platform" link, SPA nav, old-URL redirects) are not verified in a browser.
+- **Evidence:** `docs/handoffs/145/handoff-T-green.md`.
+
+## A (anti-duplication gate, Phase 7) — 2026-11-20
+- **Decided:** PASS. F extended the objects the Reuse map named (`SearchableMultiSelect`, `SecretDialog` extracted, `validateBitbucketConnections`, moved Bitbucket/GitHub page logic) and built no parallel path; old pages are redirect-only.
+- **Hedged:** two warns, neither blocking: the pool list/detail pages still branch on `pool.scope` (out of scope, follow-up for #141), and `bitbucket.tsx` imports a rule from `runner-pools/schemas` (acyclic).
+- **Evidence:** `docs/handoffs/145/handoff-A-dup.md`.
+
+## T (Tester, Phase 4 RED, round 4) - 2026-11-20T14:48:58-08:00
+- **Decided:**
+  - Wrote 16 tests for the round-4 operator decisions, in the files that already own these surfaces: `tests/connections-page.test.ts` (W1 chooser x4, W2 empty states x5, `postCreate` toast x2), `tests/platform-registry.test.ts` (chooserDescription/no externalLinks x2, `expectTypeOf` contract, survey names) and `tests/runner-row-platform.test.ts` (runner link `title`/`aria-label`).
+  - Two W2 cases ("GitHub row only while the App is configured", and "no generic state while loading or failed") pair the guard half with a positive half in the same test, so each test is a real RED and not a guard that already passes.
+  - Added a test for the W4 clause ("F must render `runnerLink().label` as the link's title or aria-label"), because the brief makes it binding and nothing read the label.
+- **Assumed:**
+  - The round-4 section is binding without a fresh A pass, because it is an operator decision recorded in the brief.
+  - The chooser entries render as `button`, `[role=radio]` or `label`, as the existing helper already assumed. The disabled install control is a `button[disabled]` or `aria-disabled="true"` with no `href`.
+  - The admin generic state's CTA is an "Add connection" button. The test clicks the last one.
+- **Hedged:**
+  - Test #12 (types) is checked only by `npm run typecheck`, like the existing `PostCreateReveal` assertion.
+  - The survey check reads a handoff doc from the test suite. It is cheap, but it couples the suite to `docs/handoffs/145/survey.md`.
+- **Evidence:**
+  - Full suite: 15 failed | 446 passed (461), with every failure a round-4 behavioural assertion.
+  - Typecheck errors appear only on the new contract names.
+  - A scratch-copy implementation sketch made all 461 pass, except `build-info`, which needs `Cargo.toml` and is an artifact of the scratch copy.
+  - Handoff: `docs/handoffs/145/handoff-T-red.md`, section "Round 4".
+
+## F (Feature Implementor, Phase 5, round 4) - 2026-11-20T15:05:00-08:00
+- **Decided:**
+  - `ConnectionBindings` gains `chooserDescription` and `connectLink`; `emptyText` returns `string | null`; `PlatformDescriptor.externalLinks` and GitHub's implementation are deleted. GitHub's `emptyText` is null while `page.data?.githubApp` is absent (the old "Sign in to see GitHub installations." branch goes with it, since no App also means no page data).
+  - The parent section now observes every fetching list (not only creatable ones) to know, per platform, loading / error / ready. The chooser lists descriptors with `create` or `connectLink` whose ready list says `canManage`; `create` wins when a descriptor has both.
+  - The generic empty state shows only when every list is ready and empty. Fetching platforms stay mounted underneath it (rendering nothing) so their queries stay active and `invalidateQueries` after a create refetches them.
+  - Add connection is one controlled dialog owned by the section, opened by the header button or the empty-state CTA. The header button is hidden while the generic empty state shows, so only one "Add connection" button is on screen.
+  - `postCreate` runs in a try/catch after the dialog has closed; a throw or rejection becomes `toast.error(message)`. The dialog's `submit` now only catches `create` errors, so nothing after close lands in dialog state.
+  - The runner details link carries `title={runnerLink().label}`; the visible platform name stays its accessible name.
+- **Assumed:**
+  - "A user who can manage at least one platform" is read as "at least one platform is addable" (has `create` or `connectLink` and `canManage`), so the admin copy always comes with its Add connection button. With the production registry the two readings are the same.
+- **Hedged:**
+  - None of the round-4 surfaces were run in a browser here (jsdom only); U's walkthrough covers them.
+- **Evidence:** full suite 461/461, `tsc`, `eslint --max-warnings=0` and `vite build` clean; `docs/handoffs/145/handoff-F.md`, section "Round 4".
+
+## T (Tester, Phase 7 GREEN, round 4) - 2026-11-20T15:15:00-08:00
+- **Decided:** Round 4 is GREEN with no blocking issue. I changed no test; F flagged none as wrong.
+- **Assumed:** F's reading of "can manage at least one platform" as "at least one addable platform" is acceptable, since with the production registry the two readings match.
+- **Hedged:** Client-visual behaviour (layout, new-tab link, SPA navigation) is not covered by jsdom; U's walkthrough owns it.
+- **Evidence:** full suite 461/461, typecheck, lint and build clean; four mutations (empty state, connectLink in chooser, toast, per-platform empty text) each failed the matching tests and were reverted; `docs/handoffs/145/handoff-T-green.md`, section "Round 4".
+
+## A (Architecture Reviewer, Phase 7 anti-duplication gate, round 4) - 2026-11-20T15:30:00-08:00
+- **Decided:** PASS. Round 4 (932879f..14fc5b7) only modifies existing objects: `ConnectionsSection` and its dialog, the descriptor contract, the GitHub and Bitbucket descriptors, the registry fallback and `runner-row.tsx`. No new files, no parallel add-connection path, no platform names in shared components.
+- **Assumed:** The brief's round-4 decisions justify the `connectLink` contract field and the GitHub App section's separate Install link remaining as a different surface.
+- **Hedged:** Two warn findings (duplicate install entry point; GitHub-shaped `scope === "repository"` branches in pool pages) are follow-ups, not blocks.
+- **Evidence:** `git diff --name-status 932879f HEAD`, platform-name grep on shared components, `externalLinks` grep, empty diff on `crates`/`migrations`/`docs/openapi`; `docs/handoffs/145/handoff-A-dup.md`.
+
+
+## F (Feature Implementor, Phase 6 S rework, round 5) - 2026-11-20T15:45:00-08:00
+- **Decided:**
+  - D2 is fixed in the shared `SettingsSection`: the header wraps (`flex-wrap`) and the title block has a 12rem basis, so actions move below the heading only when they don't fit; the actions block can wrap its own buttons (`max-w-full flex-wrap`).
+  - D1 and D1b are fixed in `ConnectionRow`: below `sm` the aside and actions move to their own right-aligned line, and the badges wrap under the name.
+  - The Targets dropdown clip is not folded in. It is pre-existing and needs a portal or a card-overflow change across shared selects; it needs a follow-up issue.
+- **Assumed:** S's direction to fix in `SettingsSection` (after grepping its users) makes this a spec'd shared edit, not a drive-by.
+- **Hedged:** Member Bitbucket rows at 360 gain about 8 px of empty space under the text (the descriptor hides its aside on phones). Left as is.
+- **Evidence:**
+  - Lint, `tsc`, vitest 461/461 and build are clean.
+  - Headless render against S's repro setup: names are unclipped at 360, there is no member overlap, and "Manage App" is on screen.
+  - A pixel AE compare against a pre-fix `HEAD` build shows only footer and port-string differences at 768 and 1280, and on every non-Connections surface at 360.
+  - `docs/handoffs/145/handoff-F.md`, section "Round 5".
+
+## T (Phase 7, round 5 GREEN)
+- **Decided:** No new test for D1/D2. The defects are layout at 360 px, invisible to jsdom; class assertions would be mock-shaped. Left to U's rendered re-walk.
+- **Assumed:** F's pixel-identical 768/1280 comparison for the shared `SettingsSection` change holds; T did not re-render.
+- **Hedged:** Verified by mutation (`showActions = false`) that the restructured trailing wrapper is still pinned by 3 tests, then reverted.
+- **Evidence:** vitest 461/461, lint clean, `tsc` exit 0, build OK at `d21be14`; `git diff dd934c3 HEAD -- tests` empty.
+
+## A-dup round 5 (2026-11-20)
+- Reviewed 14fc5b7..1124233: two modified files (`settings-ui.tsx`, `connections-section.tsx`), layout classes only. The fix was made in the shared `SettingsSection` and `ConnectionRow`, not in a local copy. No parallel path. Verdict PASS; prior warns carried over; `SettingsSection` edit is spec'd by S's REWORK.

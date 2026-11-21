@@ -25,12 +25,14 @@ export function SettingsSection({ title, description, actions, children, classNa
   return (
     <section className={className}>
       {title ? (
-        <div className="mb-3 flex items-end justify-between gap-3">
-          <div>
+        // The actions wrap below the heading only when they would squeeze it under 12rem
+        // (narrow screens, several actions); headers that fit lay out as one row.
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0 flex-[1_1_12rem]">
             <h2 className="text-base font-medium text-foreground">{title}</h2>
             {description ? <p className="mt-0.5 text-sm text-muted-foreground">{description}</p> : null}
           </div>
-          {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+          {actions ? <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
         </div>
       ) : null}
       <div className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-panel">{children}</div>

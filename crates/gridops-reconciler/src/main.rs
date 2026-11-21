@@ -7,6 +7,8 @@ mod tart_lane;
 #[cfg(test)]
 mod gitlab_poll_tests;
 #[cfg(test)]
+mod jit_conflict_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tart_outage_tests;
@@ -379,8 +381,7 @@ async fn main() -> Result<()> {
         database,
         github,
         bitbucket,
-        // #146's client replaces the placeholder once it lands.
-        gitlab: Arc::new(gitlab_poll::UnavailableGitLab),
+        gitlab: Arc::new(gridops_core::gitlab::GitLabClient::new()?),
         vault,
         http: reqwest::Client::builder()
             .user_agent("GridOps reconciler/0.1")

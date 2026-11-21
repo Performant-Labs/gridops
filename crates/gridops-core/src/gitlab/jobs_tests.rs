@@ -29,6 +29,7 @@ use anyhow::{Context as _, Result};
 use sqlx::SqlitePool;
 
 use crate::connect_database_path;
+use crate::fleet::ExternalId;
 use crate::gitlab::JobStatus;
 use crate::gitlab::jobs::{
     JobObservation, JobWrite, JobWriteOutcome, record_gitlab_job, set_gitlab_runner_busy,
@@ -155,12 +156,16 @@ impl Fixture {
         gitlab_runner_id: u64,
         busy: bool,
         now: i64,
-    ) -> Result<Option<(String, Option<String>)>> {
+    ) -> Result<Option<(String, String)>> {
         let mut connection = self.database.acquire().await?;
-        Ok(
-            set_gitlab_runner_busy(&mut connection, connection_id, gitlab_runner_id, busy, now)
-                .await?,
+        Ok(set_gitlab_runner_busy(
+            &mut connection,
+            connection_id,
+            ext(gitlab_runner_id)?,
+            busy,
+            now,
         )
+        .await?)
     }
 }
 
@@ -200,18 +205,23 @@ struct RunnerRow {
 }
 
 /// A `conn-a` observation of project 11 and pipeline 1 with nothing optional.
-fn observe(job_id: u64, status: JobStatus, at: i64) -> JobObservation<'static> {
-    JobObservation {
+fn observe(job_id: u64, status: JobStatus, at: i64) -> Result<JobObservation<'static>> {
+    Ok(JobObservation {
         connection_id: "conn-a",
-        project_id: 11,
-        job_id,
-        pipeline_id: 1,
+        project_id: ext(11)?,
+        job_id: ext(job_id)?,
+        pipeline_id: ext(1)?,
         status,
         status_changed_at: at,
         retries_count: None,
         tag_list: None,
         gitlab_runner_id: None,
-    }
+    })
+}
+
+/// A GitLab id for these tests.
+fn ext(value: u64) -> Result<ExternalId> {
+    Ok(ExternalId::new(value)?)
 }
 
 /// The outcome kind, named, so a wrong one reads clearly in a failure.
@@ -261,8 +271,8 @@ async fn a_status_write_applies_only_upward_or_at_the_same_tier_when_newer_and_n
                 let before = fixture.seed(job_id, stored.as_str(), stored_at, "").await?;
                 let outcome = fixture
                     .record(&JobObservation {
-                        pipeline_id: 2,
-                        ..observe(job_id as u64, incoming, incoming_at)
+                        pipeline_id: ext(2)?,
+                        ..observe(job_id as u64, incoming, incoming_at)?
                     })
                     .await?;
                 let after = fixture.row(job_id).await?.context("still recorded")?;
@@ -302,17 +312,17 @@ async fn a_new_row_gets_a_uuid_and_the_given_values_or_the_defaults() -> Result<
     let given = tags(&["docker", "Gpu"]);
     let outcome = fixture
         .record(&JobObservation {
-            pipeline_id: 7,
+            pipeline_id: ext(7)?,
             retries_count: Some(2),
             tag_list: Some(&given),
-            gitlab_runner_id: Some(55),
-            ..observe(101, JobStatus::Running, 400)
+            gitlab_runner_id: Some(ext(55)?),
+            ..observe(101, JobStatus::Running, 400)?
         })
         .await?;
     assert_eq!(kind(&outcome), "Inserted");
     assert_eq!(outcome.previous_status, None);
     assert_eq!(outcome.status, "running");
-    assert_eq!(outcome.gitlab_runner_id, Some(55));
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(55)?));
     let row = fixture.row(101).await?.context("101 is recorded")?;
     assert_eq!(uuid::Uuid::parse_str(&row.id)?.get_version_num(), 4);
     assert_eq!(
@@ -344,7 +354,7 @@ async fn a_new_row_gets_a_uuid_and_the_given_values_or_the_defaults() -> Result<
 
     // Nothing optional given: no tags, no retries, no runner.
     let outcome = fixture
-        .record(&observe(102, JobStatus::Pending, 400))
+        .record(&observe(102, JobStatus::Pending, 400)?)
         .await?;
     assert_eq!(kind(&outcome), "Inserted");
     assert_eq!(outcome.gitlab_runner_id, None);
@@ -364,7 +374,7 @@ async fn a_new_row_gets_a_uuid_and_the_given_values_or_the_defaults() -> Result<
     fixture
         .record(&JobObservation {
             tag_list: Some(&empty),
-            ..observe(103, JobStatus::Pending, 400)
+            ..observe(103, JobStatus::Pending, 400)?
         })
         .await?;
     let row = fixture.row(103).await?.context("103 is recorded")?;
@@ -377,21 +387,23 @@ async fn a_new_row_gets_a_uuid_and_the_given_values_or_the_defaults() -> Result<
 async fn unknown_writes_nothing() -> Result<()> {
     let fixture = Fixture::new().await?;
     let offered = tags(&["gpu"]);
-    let unknown = |job_id| JobObservation {
-        retries_count: Some(4),
-        tag_list: Some(&offered),
-        gitlab_runner_id: Some(9),
-        ..observe(job_id, JobStatus::Unknown, 900)
+    let unknown = |job_id| -> Result<JobObservation<'_>> {
+        Ok(JobObservation {
+            retries_count: Some(4),
+            tag_list: Some(&offered),
+            gitlab_runner_id: Some(ext(9)?),
+            ..observe(job_id, JobStatus::Unknown, 900)?
+        })
     };
 
     // No row: none is created.
-    let outcome = fixture.record(&unknown(201)).await?;
+    let outcome = fixture.record(&unknown(201)?).await?;
     assert_eq!(kind(&outcome), "Ignored");
     assert_eq!(fixture.row(201).await?, None);
 
     // A row with room for every fill: nothing is filled either.
     let before = fixture.seed(202, "pending", 100, "tag_list='[]'").await?;
-    let outcome = fixture.record(&unknown(202)).await?;
+    let outcome = fixture.record(&unknown(202)?).await?;
     assert_eq!(kind(&outcome), "Ignored");
     assert_eq!(fixture.row(202).await?, Some(before));
 
@@ -400,7 +412,7 @@ async fn unknown_writes_nothing() -> Result<()> {
     let outcome = fixture
         .record(&JobObservation {
             status: JobStatus::Pending,
-            ..unknown(201)
+            ..unknown(201)?
         })
         .await?;
     assert_eq!(kind(&outcome), "Inserted");
@@ -429,11 +441,11 @@ async fn a_terminal_row_never_changes_in_any_column() -> Result<()> {
                 .await?;
             let outcome = fixture
                 .record(&JobObservation {
-                    pipeline_id: 9,
+                    pipeline_id: ext(9)?,
                     retries_count: Some(3),
                     tag_list: Some(&offered),
-                    gitlab_runner_id: Some(77),
-                    ..observe(job_id as u64, incoming, 900)
+                    gitlab_runner_id: Some(ext(77)?),
+                    ..observe(job_id as u64, incoming, 900)?
                 })
                 .await?;
             assert_eq!(kind(&outcome), "Ignored", "{stored} <- {incoming:?}");
@@ -452,11 +464,11 @@ async fn a_terminal_row_never_changes_in_any_column() -> Result<()> {
         .await?;
     let outcome = fixture
         .record(&JobObservation {
-            pipeline_id: 9,
+            pipeline_id: ext(9)?,
             retries_count: Some(3),
             tag_list: Some(&offered),
-            gitlab_runner_id: Some(77),
-            ..observe(399, JobStatus::Failed, 900)
+            gitlab_runner_id: Some(ext(77)?),
+            ..observe(399, JobStatus::Failed, 900)?
         })
         .await?;
     assert_eq!(kind(&outcome), "StatusApplied");
@@ -481,14 +493,14 @@ async fn the_runner_id_is_filled_once_and_never_cleared_or_overwritten() -> Resu
     let before = fixture.seed(401, "running", 100, "").await?;
     let outcome = fixture
         .record(&JobObservation {
-            gitlab_runner_id: Some(55),
-            ..observe(401, JobStatus::Running, 50)
+            gitlab_runner_id: Some(ext(55)?),
+            ..observe(401, JobStatus::Running, 50)?
         })
         .await?;
     assert_eq!(kind(&outcome), "FilledOnly");
     assert_eq!(outcome.previous_status.as_deref(), Some("running"));
     assert_eq!(outcome.status, "running");
-    assert_eq!(outcome.gitlab_runner_id, Some(55));
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(55)?));
     assert_eq!(
         fixture.row(401).await?,
         Some(Row {
@@ -502,12 +514,12 @@ async fn the_runner_id_is_filled_once_and_never_cleared_or_overwritten() -> Resu
     // An applied write with another runner id keeps the first one.
     let outcome = fixture
         .record(&JobObservation {
-            gitlab_runner_id: Some(66),
-            ..observe(401, JobStatus::Running, 200)
+            gitlab_runner_id: Some(ext(66)?),
+            ..observe(401, JobStatus::Running, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "StatusApplied");
-    assert_eq!(outcome.gitlab_runner_id, Some(55));
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(55)?));
     let row = fixture.row(401).await?.context("401")?;
     assert_eq!(
         (row.status_changed_at, row.gitlab_runner_id),
@@ -516,12 +528,12 @@ async fn the_runner_id_is_filled_once_and_never_cleared_or_overwritten() -> Resu
 
     // An applied write with no runner id does not clear it.
     let outcome = fixture
-        .record(&observe(401, JobStatus::Success, 300))
+        .record(&observe(401, JobStatus::Success, 300)?)
         .await?;
     assert_eq!(kind(&outcome), "StatusApplied");
     assert_eq!(outcome.previous_status.as_deref(), Some("running"));
     assert_eq!(outcome.status, "success");
-    assert_eq!(outcome.gitlab_runner_id, Some(55));
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(55)?));
     let row = fixture.row(401).await?.context("401")?;
     assert_eq!(
         (row.status.as_str(), row.gitlab_runner_id),
@@ -532,12 +544,12 @@ async fn the_runner_id_is_filled_once_and_never_cleared_or_overwritten() -> Resu
     fixture.seed(402, "pending", 100, "").await?;
     let outcome = fixture
         .record(&JobObservation {
-            gitlab_runner_id: Some(66),
-            ..observe(402, JobStatus::Running, 200)
+            gitlab_runner_id: Some(ext(66)?),
+            ..observe(402, JobStatus::Running, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "StatusApplied");
-    assert_eq!(outcome.gitlab_runner_id, Some(66));
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(66)?));
     let row = fixture.row(402).await?.context("402")?;
     assert_eq!(row.gitlab_runner_id, Some(66));
 
@@ -547,8 +559,8 @@ async fn the_runner_id_is_filled_once_and_never_cleared_or_overwritten() -> Resu
         .await?;
     let outcome = fixture
         .record(&JobObservation {
-            gitlab_runner_id: Some(66),
-            ..observe(403, JobStatus::Pending, 200)
+            gitlab_runner_id: Some(ext(66)?),
+            ..observe(403, JobStatus::Pending, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "Ignored");
@@ -575,7 +587,7 @@ async fn tags_are_replaced_only_by_non_empty_tags_and_filled_on_a_rejected_write
         let outcome = fixture
             .record(&JobObservation {
                 tag_list: offered,
-                ..observe(501, JobStatus::Running, at)
+                ..observe(501, JobStatus::Running, at)?
             })
             .await?;
         assert_eq!(kind(&outcome), "StatusApplied", "{offered:?}");
@@ -588,7 +600,7 @@ async fn tags_are_replaced_only_by_non_empty_tags_and_filled_on_a_rejected_write
     let outcome = fixture
         .record(&JobObservation {
             tag_list: Some(&docker),
-            ..observe(502, JobStatus::Pending, 200)
+            ..observe(502, JobStatus::Pending, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "FilledOnly");
@@ -614,7 +626,7 @@ async fn tags_are_replaced_only_by_non_empty_tags_and_filled_on_a_rejected_write
         let outcome = fixture
             .record(&JobObservation {
                 tag_list: Some(offered),
-                ..observe(job_id as u64, JobStatus::Pending, 200)
+                ..observe(job_id as u64, JobStatus::Pending, 200)?
             })
             .await?;
         assert_eq!(kind(&outcome), "Ignored", "{job_id}");
@@ -632,8 +644,8 @@ async fn retries_count_and_pipeline_move_only_with_an_applied_status_write() -> 
     fixture.seed(601, "pending", 100, "retries_count=2").await?;
     let outcome = fixture
         .record(&JobObservation {
-            pipeline_id: 3,
-            ..observe(601, JobStatus::Running, 200)
+            pipeline_id: ext(3)?,
+            ..observe(601, JobStatus::Running, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "StatusApplied");
@@ -643,9 +655,9 @@ async fn retries_count_and_pipeline_move_only_with_an_applied_status_write() -> 
     // `Some` moves with the status.
     fixture
         .record(&JobObservation {
-            pipeline_id: 4,
+            pipeline_id: ext(4)?,
             retries_count: Some(4),
-            ..observe(601, JobStatus::Success, 300)
+            ..observe(601, JobStatus::Success, 300)?
         })
         .await?;
     let row = fixture.row(601).await?.context("601")?;
@@ -655,9 +667,9 @@ async fn retries_count_and_pipeline_move_only_with_an_applied_status_write() -> 
     let before = fixture.seed(602, "running", 100, "retries_count=2").await?;
     let outcome = fixture
         .record(&JobObservation {
-            pipeline_id: 6,
+            pipeline_id: ext(6)?,
             retries_count: Some(5),
-            ..observe(602, JobStatus::Pending, 200)
+            ..observe(602, JobStatus::Pending, 200)?
         })
         .await?;
     assert_eq!(kind(&outcome), "Ignored");
@@ -706,11 +718,11 @@ async fn set_gitlab_runner_busy_matches_the_runner_id_on_any_connection_of_the_s
     };
 
     let changed = fixture.set_busy("conn-a", 55, true, 2_000).await?;
-    assert_eq!(changed, Some(("sibling".to_owned(), Some("p1".to_owned()))));
+    assert_eq!(changed, Some(("sibling".to_owned(), "p1".to_owned())));
     assert_eq!(fixture.runners().await?, with_sibling(true, "busy", 2_000));
 
     let changed = fixture.set_busy("conn-a", 55, false, 3_000).await?;
-    assert_eq!(changed, Some(("sibling".to_owned(), Some("p1".to_owned()))));
+    assert_eq!(changed, Some(("sibling".to_owned(), "p1".to_owned())));
     assert_eq!(
         fixture.runners().await?,
         with_sibling(false, "online", 3_000)
@@ -723,6 +735,42 @@ async fn set_gitlab_runner_busy_matches_the_runner_id_on_any_connection_of_the_s
         fixture.runners().await?,
         with_sibling(false, "online", 3_000)
     );
+
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn the_outcome_reports_the_runner_stored_before_the_call() -> Result<()> {
+    let fixture = Fixture::new().await?;
+
+    // An insert has no previous runner.
+    let outcome = fixture
+        .record(&JobObservation {
+            gitlab_runner_id: Some(ext(55)?),
+            ..observe(701, JobStatus::Running, 100)?
+        })
+        .await?;
+    assert_eq!(kind(&outcome), "Inserted");
+    assert_eq!(outcome.previous_gitlab_runner_id, None);
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(55)?));
+
+    // A later write sees the stored runner as the previous one.
+    let outcome = fixture
+        .record(&observe(701, JobStatus::Success, 200)?)
+        .await?;
+    assert_eq!(kind(&outcome), "StatusApplied");
+    assert_eq!(outcome.previous_gitlab_runner_id, Some(ext(55)?));
+
+    // A row seeded with no runner and filled: previous None, after Some.
+    fixture.seed(702, "pending", 100, "tag_list='[]'").await?;
+    let outcome = fixture
+        .record(&JobObservation {
+            gitlab_runner_id: Some(ext(66)?),
+            ..observe(702, JobStatus::Running, 200)?
+        })
+        .await?;
+    assert_eq!(outcome.previous_gitlab_runner_id, None);
+    assert_eq!(outcome.gitlab_runner_id, Some(ext(66)?));
 
     fixture.finish().await
 }

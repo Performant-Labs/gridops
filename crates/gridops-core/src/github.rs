@@ -265,22 +265,61 @@ impl GitHubClient {
         Ok(response.token)
     }
 
+    /// Asks GitHub for a just-in-time runner configuration.
+    ///
+    /// A runner's name is unique to its row, so a same-named registration that
+    /// makes GitHub answer 409 is the leftover of an earlier attempt that
+    /// registered upstream and then never started (a restart or an error
+    /// between the two steps). Retrying with the same name can never succeed,
+    /// so an offline, idle leftover is removed and the request is made again
+    /// once. A leftover that is online or busy is a live runner and is left
+    /// alone; the conflict is reported.
     pub async fn generate_jit_config(
         &self,
         target: RunnerTarget<'_>,
         token: &str,
         request: &JitRequest,
     ) -> Result<JitResponse> {
-        let path = match target {
-            RunnerTarget::Repository { owner, repository } => {
-                format!("/repos/{owner}/{repository}/actions/runners/generate-jitconfig")
-            }
-            RunnerTarget::Organization { organization } => {
-                format!("/orgs/{organization}/actions/runners/generate-jitconfig")
-            }
+        let (collection, runners) = match target {
+            RunnerTarget::Repository { owner, repository } => (
+                format!("/repos/{owner}/{repository}/actions/runners/generate-jitconfig"),
+                format!("/repos/{owner}/{repository}/actions/runners"),
+            ),
+            RunnerTarget::Organization { organization } => (
+                format!("/orgs/{organization}/actions/runners/generate-jitconfig"),
+                format!("/orgs/{organization}/actions/runners"),
+            ),
         };
-        self.post(&path, token, serde_json::to_value(request)?)
-            .await
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .api_request(Method::POST, &collection, token)
+            .json(&body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return response.json().await.context("invalid GitHub response");
+        }
+        let status = response.status();
+        let details = response.text().await.unwrap_or_default();
+        if status == StatusCode::CONFLICT
+            && let Some(leftover) = self.runner_by_name(target, token, &request.name).await?
+            && leftover.status != "online"
+            && !leftover.busy
+            && self
+                .remove_runner(&format!("{runners}/{}", leftover.id), token)
+                .await?
+        {
+            tracing::warn!(
+                runner = %request.name,
+                github_runner_id = leftover.id,
+                "removed a stale GitHub registration that blocked this runner"
+            );
+            return self.post(&collection, token, body).await;
+        }
+        bail!(
+            "GitHub API request failed ({status}): {}",
+            details.chars().take(500).collect::<String>()
+        );
     }
 
     pub async fn generate_registration_token(

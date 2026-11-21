@@ -715,6 +715,51 @@ async fn rows_of_a_project_whose_pending_jobs_failed_are_not_concluded() -> Resu
 }
 
 #[tokio::test]
+async fn a_project_gitlab_no_longer_has_still_has_its_recorded_jobs_concluded() -> Result<()> {
+    // Project 11 was deleted (or the token lost access): `pending_jobs` and
+    // `job` both answer NotFound. That is an answer, so the stale row is
+    // concluded instead of counting as demand forever.
+    let harness = Harness::new(&format!(
+        "{}{}",
+        pool("gl", "conn-a"),
+        row("conn-a", 11, 861, "pending", stale(0)),
+    ))
+    .await?;
+    harness.fake.fail_next(
+        &url(BASE_A)?,
+        FakeMethod::PendingJobs,
+        GitLabError::NotFound,
+    );
+
+    poll_once(&harness.app, &mut HashMap::new(), Instant::now()).await?;
+
+    assert_eq!(harness.status("conn-a", 861).await?, "canceled");
+    assert_eq!(harness.calls(BASE_A, FakeMethod::Job)?, 1);
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn a_group_gitlab_no_longer_has_still_has_its_recorded_jobs_concluded() -> Result<()> {
+    let harness = Harness::new(&format!(
+        "{}{}",
+        pool("gl", "conn-g"),
+        row("conn-g", 21, 871, "pending", stale(0)),
+    ))
+    .await?;
+    harness.fake.fail_next(
+        &url(BASE_G)?,
+        FakeMethod::GroupProjects,
+        GitLabError::NotFound,
+    );
+
+    poll_once(&harness.app, &mut HashMap::new(), Instant::now()).await?;
+
+    assert_eq!(harness.status("conn-g", 871).await?, "canceled");
+    assert_eq!(harness.calls(BASE_G, FakeMethod::PendingJobs)?, 0);
+    harness.finish().await
+}
+
+#[tokio::test]
 async fn gitlab_credentials_reads_the_base_url_and_unseals_the_access_token() -> Result<()> {
     let harness = Harness::new("").await?;
 
