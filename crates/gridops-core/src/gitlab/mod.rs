@@ -17,6 +17,9 @@ use crate::fleet::{CiTarget, ExternalId, GitlabConnectionId};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod http;
+
+pub use http::GitLabClient;
 
 /// The GitLab instance and the access token one connection calls it with.
 pub struct GitLabCredentials {
