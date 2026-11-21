@@ -118,7 +118,7 @@
 <p class="lede">GitLab adds <b>no page, nav item or pool-form row</b>. Every frame below is an <i>existing</i> #145 surface (Settings &rarr; Connections, the Targets row, Platform options, the runner details panel, the deliveries list) drawn with GitLab content, plus the generic descriptor-contract gaps (frame I). Structure, labels, controls and per-state copy only; no final visuals. Icons are Unicode glyphs; the real GitLab badge uses the registry descriptor&rsquo;s <code>icon</code> (lucide <code>Gitlab</code>, if the installed lucide has it, else a generic fallback) and was not rendered here.</p>
 
 <div class="legend" style="border-color:#ecd98a;background:#fff9e2">
-  <b>Revision 2 (after architecture review round 1 and the amended brief):</b> path label is now static (&ldquo;Project or group path&rdquo;); tag cap is the shared 64 characters (not 255); gaps renumbered to the brief (frame I); a GitLab pool&rsquo;s settings no longer show a locked GitHub chip (gap 4); delivery platform lookup moved to the registry (gap 7); registry order pinned (gap 6).
+  <b>Revision 3 (after architecture review round 2 and the brief amended in 9b9f6ff):</b> E5 redrawn: on a GitLab pool&rsquo;s settings the GitLab options are fetched (loading, error, ready), and GitHub and Bitbucket options do <i>not appear</i> there; a GitHub pool&rsquo;s settings never show a GitLab group (E6). H2: no new Platform row, the badge sits in the sheet header. B: the create toast stays, and the select is the existing <code>SearchableSelect</code>. G: the runner link now has a backend source. <br><b>Revision 2 (after architecture review round 1 and the amended brief):</b> path label is now static (&ldquo;Project or group path&rdquo;); tag cap is the shared 64 characters (not 255); gaps renumbered to the brief (frame I); a GitLab pool&rsquo;s settings no longer show a locked GitHub chip (gap 4); delivery platform lookup moved to the registry (gap 7); registry order pinned (gap 6).
 </div>
 
 <div class="legend">
@@ -229,10 +229,10 @@
 
 </div>
 <ol class="notes">
-  <li><span class="n">1</span><b>Why a Project/Group choice:</b> the API needs <code>scopeKind</code> and it cannot be derived from the path. It is served by generic gap 5 (frame I): <code>select</code> field type, <code>defaultValue</code>, <code>validate</code>. The edit form never shows it.</li>
+  <li><span class="n">1</span><b>Why a Project/Group choice:</b> the API needs <code>scopeKind</code> and it cannot be derived from the path. It is served by generic gap 5 (frame I): <code>select</code> field type (the existing <code>SearchableSelect</code>, search box off, <code>aria-label</code> = the field label, so it looks like the other selects in the app), <code>defaultValue</code>, <code>validate</code>. The edit form never shows it.</li>
   <li><span class="n">2</span><b>Order</b> = name, address, kind, path, token. The address defaults to <code>https://gitlab.com</code> (pre-filled, editable).</li>
   <li><span class="n">3</span><b>Help text</b> names exactly <code>create_runner</code> + <code>read_api</code> and the <b>Owner</b> role (issue text). Copy above is final wording.</li>
-  <li><span class="n">4</span><b>Success</b> closes this dialog and opens the reveal in frame C; toast is not used for create.</li>
+  <li><span class="n">4</span><b>Success</b> closes this dialog, shows the existing success toast (<span class="copy">GitLab connection added.</span>, the shared default, <code>{name} connection added.</code>) and then opens the reveal in frame C. The toast and the reveal do not conflict.</li>
   <li><span class="n">5</span>Client validation (B3) is each field&rsquo;s <code>validate</code> (gap 5c): <code>aria-invalid</code> plus a <code>text-danger</code> line, like the labels row; it blocks submit. URL and scope path only; everything else is checked by the server (B4).</li>
 </ol></div>
 </section>
@@ -337,7 +337,7 @@
 
 <!-- ============================ E ============================ -->
 <section class="frame" id="E">
-<h2>E &middot; Targets row &mdash; GitLab project and group kinds <small>existing row on New pool and Pool settings; states: none &middot; selected &middot; excluded &middot; not connected &middot; settings</small></h2>
+<h2>E &middot; Targets row &mdash; GitLab project and group kinds <small>existing row on New pool and Pool settings; states: none &middot; selected &middot; excluded &middot; not connected &middot; settings (loaded, loading, error) &middot; non-GitLab pool</small></h2>
 <div class="cols"><div class="screens">
 
   <div><p class="sub-h">E1 &middot; New pool, listbox open, nothing selected (GitLab groups appear as two more kinds, no new row)</p>
@@ -389,17 +389,43 @@
   </div></div>
   <p class="faint" style="margin:6px 0 0">If a platform has nothing connected, its groups show the status instead of options (same as Bitbucket). The new-pool page&rsquo;s &ldquo;connect something first&rdquo; empty state is unchanged and still driven by the GitHub descriptor (GitLab does not add one: GitLab kinds are standalone, so once a connection exists the form appears).</p></div>
 
-  <div><p class="sub-h">E5 &middot; Pool settings for a GitLab pool (scope is fixed: still GitLab only)</p>
+  <div><p class="sub-h">E5 &middot; Pool settings for a GitLab pool &mdash; listbox open (scope is fixed; options are <b>fetched</b>, so a second connection can be added)</p>
   <div class="screen tight"><div class="panel"><div class="row top stack" style="display:flex">
     <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut">2 GitLab targets selected.</div></div>
-    <div class="trigger"><div><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Mobile app <i>&#x2715;</i></span><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Platform group <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+    <div class="trigger"><div><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Mobile app <i>&#x2715;</i></span><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Platform group <i>&#x2715;</i></span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="lb-s">&#x1F50D; Search by platform, account or name&hellip;</div>
+      <div class="gh-h"><span>GitLab &middot; Project</span><span class="faint">1 of 5</span></div>
+      <div class="opt sel"><span class="ck">&#x2713;</span><div>Mobile app<div class="d">https://gitlab.com/acme/platform/mobile-app</div></div></div>
+      <div class="opt"><span class="ck"></span><div>Docs site<div class="d copy">https://gitlab.com/acme/docs</div></div></div>
+      <div class="gh-h"><span>GitLab &middot; Group</span><span class="faint">1 of 5</span></div>
+      <div class="opt sel"><span class="ck">&#x2713;</span><div>Platform group<div class="d">https://git.example.com/platform</div></div></div>
+      <div class="lb-f"><span>&uarr;&darr; navigate &middot; Enter select &middot; Esc close</span><span>Max 5 per kind</span></div>
+    </div>
   </div></div></div>
-  <p class="faint" style="margin:6px 0 0">Offered on settings like on create; saving sends the full set (<code>gitlabConnectionIds</code>), which replaces the stored one. GitHub and Bitbucket options are disabled with E2&rsquo;s reason, since a pool never changes between GitLab and other scopes. Read-only summary (members, or the pool header): <span class="copy">Mobile app, Platform group</span> (connection names). A non-GitLab pool never sends <code>gitlabConnectionIds</code>. <b>No locked GitHub runner-group chip</b> appears here: GitHub&rsquo;s descriptor returns empty values for any scope other than repository or organization (gap 4), so the GitLab options stay selectable.</p></div>
+  <p class="faint" style="margin:6px 0 0"><b>&ldquo;Docs site&rdquo; is a connection this pool does not use yet</b>: the settings form has only the pool, and the pool&rsquo;s own <code>gitlabConnections</code> lists just the connections it already has, so <code>gitlab.tsx</code> fetches every connection (<code>getGitlabConnections</code>) for the options. Selected chips match the loaded options (same keys). Saving sends the full set (<code>gitlabConnectionIds</code>), which replaces the stored one. <b>GitHub and Bitbucket options do not appear at all</b> on a GitLab pool&rsquo;s settings (their kinds are not offered and nothing of theirs is selected); the pool never changes between GitLab and other scopes. Read-only summary (members, or the pool header): <span class="copy">Mobile app, Platform group</span> (connection names). A non-GitLab pool never sends <code>gitlabConnectionIds</code>. <b>No locked GitHub runner-group chip</b> appears: GitHub&rsquo;s descriptor returns empty values for any scope other than repository or organization (gap 4).</p></div>
+
+  <div><p class="sub-h">E5b &middot; Settings option states while the connections are fetched (existing load states, no picker change)</p>
+  <div class="screen tight"><div class="listbox" style="margin:0">
+    <div class="gh-h"><span>GitLab &middot; Project</span></div>
+    <div class="gstatus">&#x27F3; Loading&hellip;</div>
+    <div class="gh-h"><span>GitLab &middot; Group</span></div>
+    <div class="gstatus" style="color:var(--bad)">Couldn&rsquo;t load gitlab group options &nbsp;<span class="faint">{server message}</span> &nbsp;<u>Retry</u></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">Each kind loads on its own and Retry reloads only that kind. A selected connection missing from the list (still loading, or the fetch failed) keeps its chip. When the fetch succeeds with none of that scope kind, the group shows the shared <span class="faint">No {kind} options</span> status. The GitLab list is readable by any signed-in user, and the editor renders only for pool managers.</p></div>
+
+  <div><p class="sub-h">E6 &middot; Pool settings for a GitHub or Bitbucket pool: no GitLab group at all</p>
+  <div class="screen tight"><div class="listbox" style="margin:0">
+    <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">1 of 5</span></div>
+    <div class="opt sel"><span class="ck">&#x2713;</span><div>acme/web<div class="d">acme &middot; Private</div></div></div>
+    <div class="faint" style="padding:6px 10px">(no &ldquo;GitLab &middot; Project&rdquo; or &ldquo;GitLab &middot; Group&rdquo; heading, and no &ldquo;No GitLab &hellip; connected yet&rdquo; status)</div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">GitLab kinds are offered only on create and on a GitLab pool&rsquo;s settings (<code>offered</code>), so the &ldquo;Add one in Settings &rarr; Connections&rdquo; status from E4 appears only on the new-pool form.</p></div>
 
 </div>
 <ol class="notes">
   <li><span class="n">1</span><b>No new row.</b> Everything is options inside the existing Targets listbox, chips and plan sentence from #145.</li>
-  <li><span class="n">2</span><b>Option identity:</b> key <code>gitlab.project:&lt;connection id&gt;</code> / <code>gitlab.group:&lt;connection id&gt;</code>; options come from the <code>gitlabConnections</code> already loaded with the pool options (no extra request, no loading state). If the server predates #138, the list is empty and E4 shows.</li>
+  <li><span class="n">2</span><b>Option identity:</b> key <code>gitlab.project:&lt;connection id&gt;</code> / <code>gitlab.group:&lt;connection id&gt;</code>. <b>Where the options come from:</b> on the new-pool form, from the pool options&rsquo; <code>gitlabConnections</code> (already loaded, no extra request); on settings, fetched with <code>getGitlabConnections</code> (E5, E5b). Both filter by <code>scopeKind</code>. On create the kind is <i>available</i> when its scope kind has a connection (else E4 shows, also when the server predates #138); on settings it is available for a GitLab pool only.</li>
   <li><span class="n">3</span><b>Priority</b> and <b>manual entry</b> sections do not apply to GitLab kinds (no <code>supportsPriority</code>, no <code>manualEntry</code>).</li>
   <li><span class="n">4</span><b>Chip glyph</b> is the registry badge icon (&#x25C8; here), so mixed pools read at a glance.</li>
 </ol></div>
@@ -470,7 +496,7 @@
     <dl class="kv"><dt>Status</dt><dd>Busy</dd><dt>CI platform</dt><dd><u class="copy">GitLab</u> <span class="faint">&#x2197; opens gitlab.com/acme/platform/mobile-app/-/runners/42</span></dd><dt>Pool</dt><dd>mobile-macos</dd></dl>
     <dl class="kv"><dt>CI platform</dt><dd>GitLab <span class="faint">(no link: runner id, address or path not reported by the server)</span></dd></dl>
   </div>
-  <p class="faint" style="margin:6px 0 0">Existing behaviour: the platform name becomes a new-tab link, tooltip <span class="copy">Open on GitLab</span>, when the descriptor builds a URL. Link = <code>&lt;baseUrl&gt;/&lt;scopePath&gt;/-/runners/&lt;id&gt;</code>. Until #138 sends the three optional runner fields, the plain name shows (second variant) and nothing is broken or empty. Pool and Repository rows are unchanged; the repository column shows the scope path when the server provides one, else is blank as today.</p></div>
+  <p class="faint" style="margin:6px 0 0">Existing behaviour: the platform name becomes a new-tab link, tooltip <span class="copy">Open on GitLab</span>, when the descriptor builds a URL. Link = <code>&lt;baseUrl&gt;/&lt;scopePath&gt;/-/runners/&lt;id&gt;</code>. The runners list gains <code>gitlabRunnerId</code>, <code>gitlabBaseUrl</code> and <code>gitlabScopePath</code> (one narrow backend edit in this change; null for a GitHub or Bitbucket runner or a deleted connection). When any of the three is missing, the plain name shows (second variant) and nothing is broken or empty. Pool and Repository rows are unchanged; the repository column shows the scope path when the server provides one, else is blank as today.</p></div>
 
 </div>
 <ol class="notes">
@@ -492,15 +518,16 @@
     <div class="rr"><span class="dot b"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">Job Hook</b><span class="badge bad">&#x26A0; Invalid signature</span><span style="flex:1"></span><span class="badge gl">&#x25C8; GitLab</span><span class="faint">9m</span></div>
     <div class="rr"><span class="dot"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">installation</b><span class="badge">created</span><span style="flex:1"></span><span class="badge gh">&#x25C9; GitHub</span><span class="faint copy">GitHub App</span><span class="faint">2h</span></div>
   </div>
-  <p class="faint" style="margin:6px 0 0">The platform is derived generically from the delivery id by <code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> (an id prefix equal to a registered descriptor id, e.g. <code>gitlab:&lt;connection id&gt;:&lt;key&gt;</code>, else GitHub); <code>webhooks.tsx</code> holds no platform comparison. The badge is the registry badge, placed just before the destination text, hidden below <code>lg</code> with it. <b>The fallback destination text is a descriptor value</b> (GitHub: &ldquo;GitHub App&rdquo;; others none, rendered &ldquo;&mdash;&rdquo;); a GitLab row with no repository shows the badge and no destination text, because the list has no project field. Status, event, action, retry, relative time and the inspect-payload sheet are untouched.</p></div>
+  <p class="faint" style="margin:6px 0 0">The platform is derived generically from the delivery id by <code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> (an id prefix equal to a registered descriptor id, e.g. <code>gitlab:&lt;connection id&gt;:&lt;key&gt;</code>, else GitHub); <code>webhooks.tsx</code> holds no platform comparison. The badge is the exported <code>PlatformBadge</code> (icon and name, the one the Connections list uses; no third badge component), placed just before the destination text, hidden below <code>lg</code> with it. <b>The fallback destination text is a descriptor value</b> (GitHub: &ldquo;GitHub App&rdquo;; others none, rendered &ldquo;&mdash;&rdquo;); a GitLab row with no repository shows the badge and no destination text, because the list has no project field. Status, event, action, retry, relative time and the inspect-payload sheet are untouched.</p></div>
 
-  <div><p class="sub-h">H2 &middot; Detail sheet for a GitLab delivery</p>
-  <div class="screen tight"><dl class="kv"><dt>Status</dt><dd>Processed</dd><dt>Platform</dt><dd class="copy"><span class="badge gl">&#x25C8; GitLab</span></dd><dt>Signature</dt><dd>Verified</dd><dt>Destination</dt><dd class="copy">&mdash;</dd><dt>Received</dt><dd>Nov 20, 2026, 10:14 AM</dd></dl></div>
-  <p class="faint" style="margin:6px 0 0">One new <i>Platform</i> row in the existing summary grid. Destination shows an em dash when a non-GitHub delivery has no repository (instead of &ldquo;GitHub App&rdquo;, which would be wrong). &ldquo;Invalid signature&rdquo; keeps its meaning for GitLab&rsquo;s secret-token check.</p></div>
+  <div><p class="sub-h">H2 &middot; Detail sheet for a GitLab delivery &mdash; the badge is in the sheet header; no new row</p>
+  <div class="screen tight"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><b class="mono" style="font-family:ui-monospace,monospace;font-size:13px">Job Hook</b><span class="badge gl">&#x25C8; GitLab</span></div>
+  <dl class="kv"><dt>Status</dt><dd>Processed</dd><dt>Signature</dt><dd>Verified</dd><dt>Destination</dt><dd class="copy">&mdash;</dd><dt>Received</dt><dd>Nov 20, 2026, 10:14 AM</dd></dl></div>
+  <p class="faint" style="margin:6px 0 0">The existing summary grid keeps its rows (Status, Signature, Destination, Received, Processed); <b>nothing is added to it</b>. The platform badge in the list row (H1) and beside the sheet heading carries the platform. Destination shows an em dash when a non-GitHub delivery has no repository (the descriptor&rsquo;s fallback text, instead of &ldquo;GitHub App&rdquo;, which would be wrong). &ldquo;Invalid signature&rdquo; keeps its meaning for GitLab&rsquo;s secret-token check.</p></div>
 
 </div>
 <ol class="notes">
-  <li><span class="n">1</span><b>No new list, column, filter or page.</b> One badge in the existing row and one row in the sheet; nothing else moves.</li>
+  <li><span class="n">1</span><b>No new list, column, filter or page.</b> One badge in the existing row and one beside the sheet heading; nothing else moves.</li>
   <li><span class="n">2</span><b>Polling errors are out of scope</b>: #148 only logs them and no API lists them, so nothing is drawn (frame I).</li>
   <li><span class="n">3</span>GitHub rows gain the GitHub badge too, so the badge column is consistent; this is the only visible change to existing rows.</li>
 </ol></div>
@@ -515,9 +542,11 @@
 <tr><td>2</td><td><code>platformOptions.Component</code> gets no props, so the toggle has no way into the payload.</td><td><code>initialValues?(pool?)</code>; <code>Component</code> takes <code>{values, onChange}</code>; forms hold <code>platformOptions: Record&lt;platformId, unknown&gt;</code> seeded by <code>initialPlatformOptionValues(descriptors, pool?)</code> in <code>targets.ts</code>; values travel inside <code>TargetUpdateValues</code> (update) and a matching values argument (create). The two routes stay platform-free.</td><td>F</td></tr>
 <tr><td>3</td><td>Reveal has one secret value; GitLab shows URL + secret + a setting.</td><td><b>No change needed</b>: <code>SecretRevealDialog.details</code> is a <code>ReactNode</code> and <code>CopyButton</code> can sit inside it.</td><td>C</td></tr>
 <tr><td>4</td><td>GitHub descriptor assumes two scopes: a <code>scope:"gitlab"</code> pool would get a locked GitHub runner-group chip that disables every GitLab option.</td><td><code>github.tsx</code> <code>initialSelection</code>, <code>initialPriorityKeys</code>, <code>readOnlySummary</code>, <code>toUpdatePayload</code> branch on <code>"repository"</code> and <code>"organization"</code> and return the empty value for any other scope. No GitLab string; repository and organization output unchanged.</td><td>E5</td></tr>
-<tr><td>5</td><td>Create form needs a Project/Group choice, a pre-filled address and inline field errors; <code>ConnectionField</code> has none of them.</td><td>(a) <code>type:"select"</code> with <code>options: {value,label}[]</code>; (b) <code>defaultValue?</code> seeding create values; (c) <code>validate?(value): string|null</code> rendered by <code>FieldInput</code> with <code>aria-invalid</code> and a <code>text-danger</code> line, blocking submit. Static labels only.</td><td>B</td></tr>
+<tr><td>5</td><td>Create form needs a Project/Group choice, a pre-filled address and inline field errors; <code>ConnectionField</code> has none of them.</td><td>(a) <code>type:"select"</code> with <code>options: {value,label}[]</code>; (b) <code>defaultValue?</code> seeding create values; (c) <code>validate?(value): string|null</code> rendered by <code>FieldInput</code> (the <code>select</code> branch uses <code>SearchableSelect</code> with <code>searchable={false}</code>; <code>src/</code> has no native <code>&lt;select&gt;</code>) with <code>aria-invalid</code> and a <code>text-danger</code> line, blocking submit. Static labels only.</td><td>B</td></tr>
 <tr><td>6</td><td>Registry order: <code>buildCreatePayload</code> merges with <code>Object.assign</code> in registry order, and GitHub always sends <code>scope</code>, <code>installationId</code>, <code>repositoryIds</code>, <code>runnerGroupId</code>.</td><td>Register GitLab last, with a comment; pin with a Vitest on the real registry (GitLab-only selection &rarr; <code>scope:"gitlab"</code>, positive <code>installationId</code>, <code>repositoryIds:[]</code>, <code>runnerGroupId:1</code>).</td><td>F4</td></tr>
-<tr><td>7</td><td>Deliveries have no platform field; &ldquo;GitHub App&rdquo; is hard-wired as the fallback destination.</td><td><code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> beside <code>getPlatform</code>; fallback destination text is a descriptor value (GitHub &ldquo;GitHub App&rdquo;, others none &rarr; &ldquo;&mdash;&rdquo;). <code>webhooks.tsx</code> is added to <code>platform-neutral-source.test.ts</code>.</td><td>H</td></tr>
+<tr><td>7</td><td>Deliveries have no platform field; &ldquo;GitHub App&rdquo; is hard-wired as the fallback destination.</td><td><code>platformForDeliveryId(id)</code> in <code>registry.tsx</code> beside <code>getPlatform</code>; fallback destination text is a descriptor value (GitHub &ldquo;GitHub App&rdquo;, others none &rarr; &ldquo;&mdash;&rdquo;). <code>webhooks.tsx</code> shows the exported <code>PlatformBadge</code> and is added to <code>platform-neutral-source.test.ts</code> with the runner-row style assertion (no platform-id comparison), not a blanket &ldquo;GitHub&rdquo; ban: the page&rsquo;s existing &ldquo;Verified GitHub App deliveries&hellip;&rdquo; and &ldquo;GitHub settings&rdquo; copy stays.</td><td>H</td></tr>
+<tr><td>&ndash;</td><td>The runners list JSON has no GitLab runner fields (#138 merged without them), so the runner link (frame G) has no source.</td><td>One narrow backend edit: the runners list in <code>resources.rs</code> adds <code>gitlabRunnerId</code>, <code>gitlabBaseUrl</code>, <code>gitlabScopePath</code> (null when absent) and an API test. The frontend reads them as optional and builds no link when any is missing.</td><td>G</td></tr>
+<tr><td>&ndash;</td><td>Target options on a GitLab pool&rsquo;s settings: the pool detail lists only the pool&rsquo;s own connections.</td><td>Inside <code>gitlab.tsx</code> only: <code>offered</code> (create, or a GitLab pool), <code>available</code> (create: the scope kind has a connection; update: GitLab pool), <code>load</code> (create: pool options; update: fetch). No change to <code>TargetContext</code> or the settings route.</td><td>E5, E5b, E6</td></tr>
 <tr><td>&ndash; <span class="tag rm">OUT</span></td><td>Polling errors (#148) are logged only; no API lists them.</td><td>Nothing is built; recorded as a gap for #148/#140.</td><td>H</td></tr>
 <tr><td>&ndash; <span class="tag rm">OUT</span></td><td>Pool list destination (<code>runner-pools.index.tsx</code>) and pool detail Account row still show a GitLab pool as its installation&rsquo;s GitHub account.</td><td>Tracked as #159 in epic #136; not drawn, not changed.</td><td>&ndash;</td></tr>
 </table>
