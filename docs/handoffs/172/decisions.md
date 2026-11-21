@@ -56,3 +56,9 @@
   - api: bin 130, contracts 36, fleet_http 143/144 (the baseline failure).
   - `cargo fmt --check` clean.
   - Source facts with file:line are in `evidence.md`.
+
+## Phase 7 Tester (T, GREEN + Tier 2) — 2026-11-21
+- **Decided:** GREEN confirmed with no blocking issue and no test edits. vitest 623/623, `gitlab_tests` 39/39, core 307 + 5, api 130 + 36, tsc/eslint/fmt clean. Two mutations (drop `!gitlab` in `models.rs`; drop `!dockerImageOptional` in `validateProvider`) each turned the matching tests RED, then were reverted.
+- **Assumed:** The `fleet_http` release-preflight failure and the two rustc-1.99.1 clippy lints are environmental and pre-existing, so they are not blockers for #172.
+- **Hedged:** No Playwright suite was run in this phase, and the live UI behaviour is not covered by anything I ran; U must walk the GitLab-empty-image create, the settings save and the GitHub-unchanged form.
+- **Evidence:** Verbatim-checked all 7 `evidence.md` entries against source at the cited lines. See `handoff-T-green.md`.
