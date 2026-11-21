@@ -260,3 +260,15 @@
     - `cargo fmt --all -- --check` (0);
     - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (0);
     - `cargo test --workspace --locked --no-fail-fast` (882 passed, 12 failed; all 12 fail identically on base `b22c451`).
+
+## T (Phase 7, GREEN)
+- **Decided:**
+  - GREEN with no blocking Tier 2 issue, so no production change is required of F.
+  - Changed no tests: none was wrong.
+- **Assumed:** The 12 workspace failures (11 `SUN_LEN` in `gridops-manager`, 1 macOS-ARM64 preflight in `gridops-api`) are host-environment failures. My signatures match those F recorded against base `b22c451`; I did not run base myself.
+- **Hedged:** The 30 s request-timeout path stays undriven (declared hole since T-red). I checked it by reading the code.
+- **Evidence:**
+  - Ran `gitlab::jobs_tests` (9/9), `autoscaling gitlab` (53/53), gridops-core lib (281), gridops-reconciler (84), fmt, and CI clippy: all exit 0.
+  - Ran `gridops-api` and `gridops-manager` and got the same failures F reported.
+  - Two mutations were caught, then reverted: the same-tier/newer rule in `status_write_applies`, and the poll's busy-clear flag.
+  - Read `jobs.rs` in full and grepped the poll for direct `gitlab_jobs` SQL (only the check mark, line 269).
