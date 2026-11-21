@@ -52,6 +52,10 @@ const ROTATE: &str = "/api/v1/platform-connections/gitlab/{connection_id}/webhoo
 const TOKEN: &str = "glpat-first-token-0123456789abcdef";
 const REPLACEMENT_TOKEN: &str = "glpat-second-token-0123456789abcdef";
 
+/// #171: the 400 for a token without `manage_runner`, as `error_text` reads it
+/// (lower-cased). The API's existing `MissingScope` message, unchanged.
+const MISSING_MANAGE_RUNNER: &str = "the gitlab access token is missing the manage_runner scope.";
+
 const CONNECTION_1: &str = "a1000000-0000-4000-8000-000000000001";
 const CONNECTION_2: &str = "a1000000-0000-4000-8000-000000000002";
 const UNKNOWN_CONNECTION: &str = "a1000000-0000-4000-8000-0000000000ff";
@@ -708,7 +712,7 @@ async fn gitlab_refusals_on_create_are_400s_that_name_the_reason_and_store_nothi
     let base = url(GITLAB)?;
     h.gitlab.with_scope(&base, project(42, "acme/app")?);
     // (case, the failure GitLab answers with, the path, what the error names)
-    let cases: [RefusalCase; 6] = [
+    let cases: [RefusalCase; 7] = [
         (
             "bad token",
             Some((FakeMethod::ResolveScope, GitLabError::Unauthorized)),
@@ -723,6 +727,16 @@ async fn gitlab_refusals_on_create_are_400s_that_name_the_reason_and_store_nothi
             )),
             "acme/app",
             "create_runner",
+        ),
+        // #171: a token without manage_runner cannot delete its runners.
+        (
+            "missing manage_runner",
+            Some((
+                FakeMethod::VerifyAccess,
+                GitLabError::MissingScope("manage_runner".into()),
+            )),
+            "acme/app",
+            MISSING_MANAGE_RUNNER,
         ),
         (
             "missing role",
@@ -970,6 +984,25 @@ async fn patch_with_a_new_token_verifies_it_against_the_stored_scope_before_stor
     assert!(error_text(&body).contains("create_runner"), "{body}");
     assert_eq!(h.secret(&token_key).await?.as_deref(), Some(TOKEN));
 
+    // #171: nor is one without manage_runner.
+    h.gitlab.fail_next(
+        &base,
+        FakeMethod::VerifyAccess,
+        GitLabError::MissingScope("manage_runner".into()),
+    );
+    let (status, body) = h
+        .as_admin(
+            Method::PATCH,
+            &path(CONNECTION, &id),
+            Some(json!({"accessToken": REPLACEMENT_TOKEN})),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    openapi_schema::check_response(CONNECTION, "patch", 400, &body)?;
+    assert_eq!(error_text(&body), MISSING_MANAGE_RUNNER, "{body}");
+    assert!(!body.to_string().contains(REPLACEMENT_TOKEN), "{body}");
+    assert_eq!(h.secret(&token_key).await?.as_deref(), Some(TOKEN));
+
     let resolves_before = h.calls(FakeMethod::ResolveScope).len();
     let verifies_before = h.calls(FakeMethod::VerifyAccess).len();
     let (status, body) = h
@@ -1019,6 +1052,11 @@ async fn verify_answers_204_or_a_400_naming_what_the_token_lacks() -> Result<()>
     for (error, named) in [
         (GitLabError::Unauthorized, "rejected the access token"),
         (GitLabError::MissingScope("read_api".into()), "read_api"),
+        // #171: Verify names the scope GitLab needs to delete runners.
+        (
+            GitLabError::MissingScope("manage_runner".into()),
+            MISSING_MANAGE_RUNNER,
+        ),
         (GitLabError::MissingRole, "maintainer"),
     ] {
         h.gitlab

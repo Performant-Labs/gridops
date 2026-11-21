@@ -1126,18 +1126,32 @@ async fn access_mock(scopes: &[&str], is_admin: bool, access_level: Option<u64>)
     .await
 }
 
+/// #171: GitLab 17.1+ needs `manage_runner` to delete a runner, so a token
+/// must hold `create_runner`, `manage_runner` and `read_api`, checked in that
+/// order; `api` stands in for each. The first one missing is named.
 #[tokio::test]
 async fn verify_access_reports_the_first_scope_the_token_lacks() -> Result<()> {
     let missing = |scope: &str| Err(GitLabError::MissingScope(scope.to_owned()));
-    let cases: [(&[&str], Result<(), GitLabError>); 8] = [
+    let cases: [(&[&str], Result<(), GitLabError>); 12] = [
         (&["api"], Ok(())),
-        (&["create_runner", "read_api"], Ok(())),
+        (&["create_runner", "manage_runner", "read_api"], Ok(())),
         (&["api", "read_user"], Ok(())),
+        // The token that orphaned every runner of pipeline 3097773323.
+        (&["create_runner", "read_api"], missing("manage_runner")),
         (&[], missing("create_runner")),
         (&["read_api"], missing("create_runner")),
+        (&["manage_runner", "read_api"], missing("create_runner")),
         (&["read_user", "read_repository"], missing("create_runner")),
-        (&["create_runner"], missing("read_api")),
-        (&["create_runner", "read_repository"], missing("read_api")),
+        (&["create_runner"], missing("manage_runner")),
+        (
+            &["create_runner", "read_repository"],
+            missing("manage_runner"),
+        ),
+        (&["create_runner", "manage_runner"], missing("read_api")),
+        (
+            &["create_runner", "manage_runner", "read_repository"],
+            missing("read_api"),
+        ),
     ];
     let api = client()?;
     for (scopes, expected) in cases {
