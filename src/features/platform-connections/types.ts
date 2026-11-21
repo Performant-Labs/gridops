@@ -284,6 +284,11 @@ export type PlatformDescriptor = {
   targetKinds: readonly TargetKind[];
   /** "Additional labels" help, placeholder and validator while the pool targets this platform. */
   labelRules?: { help?: ReactNode; placeholder?: string; validate?: (labels: string[]) => string | null };
+  /**
+   * The image a Docker runner of this platform's pools runs when the pool leaves its Docker image
+   * empty (the server resolves the same value at provisioning). Unset: a Docker pool needs an image.
+   */
+  defaultDockerImage?: string;
   /** Content of the Platform options section while the pool targets this platform. */
   platformOptions?: {
     help: readonly ReactNode[];

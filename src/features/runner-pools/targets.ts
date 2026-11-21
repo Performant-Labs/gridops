@@ -113,6 +113,28 @@ export function labelRules(descriptors: Descriptors, selection: ResolvedSelectio
   return targetedPlatforms(descriptors, selection).map((platform) => platform.labelRules).find((rules) => rules?.help) ?? null;
 }
 
+/**
+ * The default Docker image of the targeted platforms (the first that declares one), or null: while
+ * there is one, a new pool's Docker image may be left empty.
+ */
+export function defaultDockerImage(descriptors: Descriptors, selection: ResolvedSelection): string | null {
+  return targetedPlatforms(descriptors, selection).map((platform) => platform.defaultDockerImage).find(Boolean) ?? null;
+}
+
+/** The Docker image row's help: today's, plus what an empty value runs when the platform has a default. */
+export function dockerImageHelp(defaultImage?: string | null): string {
+  const help = "OCI image for each Linux runner.";
+  return defaultImage ? `${help} Leave empty to use ${defaultImage}.` : help;
+}
+
+/**
+ * A pool's Docker image as the read-only views show it: the stored one, or "Default (image)" when
+ * it is empty and the pool's platform has a default Docker image (`platformForPool(pool)`'s).
+ */
+export function shownDockerImage(stored: string, defaultImage?: string | null): string {
+  return !stored && defaultImage ? `Default (${defaultImage})` : stored;
+}
+
 /** The first label problem any targeted platform reports, or null. */
 export function labelError(descriptors: Descriptors, selection: ResolvedSelection, labels: string[]): string | null {
   for (const platform of targetedPlatforms(descriptors, selection)) {

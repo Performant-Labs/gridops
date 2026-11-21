@@ -67,6 +67,7 @@ function validateProvider(
     image: string; dockerImage: string; tartImage: string;
   },
   context: z.RefinementCtx,
+  dockerImageOptional = false,
 ) {
   if (new Set(value.providers).size !== value.providers.length || value.providers[0] !== value.provider) {
     context.addIssue({ code: "custom", path: ["providers"], message: "Choose unique providers with the primary provider first." });
@@ -85,9 +86,11 @@ function validateProvider(
   }
   // A provider added to a pool brings its own image; none is filled in from a
   // default (issue #103). `image` stands in for the primary provider's, as on
-  // the server. Native execution clones no VM, so it needs no base VM.
+  // the server. Native execution clones no VM, so it needs no base VM. When
+  // the caller says the Docker image is optional, an empty one is sent empty
+  // and the server runs the pool platform's default image (issue #172).
   const imageOf = (kind: "docker" | "tart", configured: string) => configured || (value.provider === kind ? value.image : "");
-  if (value.providers.includes("docker") && !imageOf("docker", value.dockerImage)) {
+  if (value.providers.includes("docker") && !dockerImageOptional && !imageOf("docker", value.dockerImage)) {
     context.addIssue({ code: "custom", path: ["dockerImage"], message: "Docker image (dockerImage) is required for a pool that uses Linux · Docker." });
   }
   if (includesTart && value.macosRuntime !== "native" && !imageOf("tart", value.tartImage)) {
@@ -95,7 +98,11 @@ function validateProvider(
   }
 }
 
-export const updateRunnerPoolSchema = z
+/**
+ * The update schema. The body carries no scope, so the caller says whether the pool's Docker image
+ * may be empty (the settings route asks the pool's platform descriptor).
+ */
+const updateRunnerPoolSchemaFor = (dockerImageOptional: boolean) => z
   .object({
     repositoryIds: repositoryIds.optional(),
     priorityRepositoryIds: repositoryIds.optional(),
@@ -124,8 +131,11 @@ export const updateRunnerPoolSchema = z
     validateBitbucketConnections(value, context);
     validateGitlabConnections(value, context);
     validateCapacity(value, context);
-    validateProvider(value, context);
+    validateProvider(value, context, dockerImageOptional);
   });
+
+/** The update schema with today's rules: a Docker pool needs a Docker image. */
+export const updateRunnerPoolSchema = updateRunnerPoolSchemaFor(false);
 
 export const createRunnerPoolSchema = z
   .object({
@@ -164,7 +174,9 @@ export const createRunnerPoolSchema = z
     validateGitlabTargets(value, context);
     validateGitlabConnections(value, context);
     validateCapacity(value, context);
-    validateProvider(value, context);
+    // A GitLab pool with no Docker image runs the GitLab runner image (the
+    // server's `docker_runner_image`), so its image may be left empty.
+    validateProvider(value, context, value.scope === "gitlab");
   });
 
 export function parseCreateRunnerPoolInput(input: unknown) {
@@ -254,8 +266,9 @@ export function bitbucketLabelError(labels: readonly string[]): string | null {
     : null;
 }
 
-export function parseUpdateRunnerPoolInput(input: unknown) {
-  const result = updateRunnerPoolSchema.safeParse(input);
+/** `dockerImageOptional` left out means `false`: the Docker image is required, as for a GitHub pool. */
+export function parseUpdateRunnerPoolInput(input: unknown, { dockerImageOptional = false }: { dockerImageOptional?: boolean } = {}) {
+  const result = (dockerImageOptional ? updateRunnerPoolSchemaFor(true) : updateRunnerPoolSchema).safeParse(input);
   if (!result.success) {
     throw new Error(result.error.issues[0]?.message ?? "Runner pool configuration is invalid.");
   }

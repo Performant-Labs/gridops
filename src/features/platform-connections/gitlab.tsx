@@ -385,6 +385,8 @@ export const gitlabPlatform: PlatformDescriptor = {
     placeholder: "build, ios",
     validate: (labels) => gitlabLabelError(labels),
   },
+  // GITLAB_RUNNER_IMAGE in crates/gridops-core/src/provisioning.rs (#172); a test pins the two equal.
+  defaultDockerImage: "gitlab/gitlab-runner:ubuntu-v19.6.0",
   platformOptions: {
     help: [
       "Labels on a GitLab pool become the runner’s tags. A tag may contain any character except a comma and is at most 64 characters.",

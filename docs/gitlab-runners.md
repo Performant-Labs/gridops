@@ -105,6 +105,17 @@ one or more GitLab connections. A pool with GitLab targets can't also target
 GitHub repositories, organizations or Bitbucket. GridOps starts the runners of
 such a pool from the reconciler, not from the request that created it.
 
+**The Docker image may be left empty.** A GitLab pool that uses Linux ·
+Docker runs `gitlab/gitlab-runner:ubuntu-v19.6.0` when its **Docker image**
+field is empty, and the pool's settings and detail pages show it as
+`Default (gitlab/gitlab-runner:ubuntu-v19.6.0)`. An image you enter instead
+must be a GitLab runner image too. The new-pool form does not fill in the
+GitHub runner image for a GitLab pool.
+
+**A GitLab pool has no runner group.** A runner group is a GitHub setting. The
+API accepts a GitLab pool with `runnerGroupId` left out, 0 or any other value,
+and ignores it.
+
 **Pool labels become the runner's GitLab tags.** Every pool has its own name
 as a label, plus the labels you add (at most 20 in all). A GitLab tag can't
 contain a comma and is at most 64 characters. GridOps adds no other tags: no
@@ -159,7 +170,8 @@ longer live in GridOps. It never touches runners GridOps didn't create.
 ## Linux runners need the Docker socket
 
 A Linux GitLab runner is a container of the official `gitlab-runner` image
-(`gitlab/gitlab-runner:ubuntu-v19.6.0` when the pool sets no image) using
+(`gitlab/gitlab-runner:ubuntu-v19.6.0` when the pool's Docker image is empty)
+using
 GitLab's Docker executor. That executor starts each job's containers on the
 host's Docker daemon, so the runner needs the host's Docker socket:
 

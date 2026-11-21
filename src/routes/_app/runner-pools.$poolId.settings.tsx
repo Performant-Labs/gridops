@@ -12,7 +12,7 @@ import { Input } from "~/components/ui/input";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import { SearchableSelect } from "~/components/ui/searchable-select";
 import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
-import { platforms } from "~/features/platform-connections/registry";
+import { platformForPool, platforms } from "~/features/platform-connections/registry";
 import type { ResolvedSelection, TargetContext } from "~/features/platform-connections/types";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
@@ -23,8 +23,8 @@ import type { UpdateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
 import { type RunnerPoolDetail, updateRunnerPoolAction } from "~/features/runner-pools/runner-pools.functions";
 import {
-  buildUpdatePayload, initialPlatformOptionValues, initialPriorityKeys, initialSelection, minMaxCount, priorityCandidates, prioritySupported, readOnlySummaries,
-  targetPlanCheck,
+  buildUpdatePayload, dockerImageHelp, initialPlatformOptionValues, initialPriorityKeys, initialSelection, minMaxCount, priorityCandidates, prioritySupported, readOnlySummaries,
+  shownDockerImage, targetPlanCheck,
 } from "~/features/runner-pools/targets";
 import { TargetsRow } from "~/features/runner-pools/targets-row";
 
@@ -49,6 +49,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   // Adding a provider asks for its image: it starts empty rather than with
   // anything the pool may still hold for a provider it did not use (#103).
   const [dockerImage, setDockerImage] = useState(() => startingImage(poolProviders, "docker", pool.dockerImage));
+  // A platform with a default Docker image lets the pool leave its own empty (#172).
+  const platformDockerImage = platformForPool(pool).defaultDockerImage;
   const [tartImage, setTartImage] = useState(() => startingImage(poolProviders, "tart", pool.tartImage));
   const [macosRuntime, setMacosRuntime] = useState<"vm" | "native">(pool.macosRuntime ?? "vm");
   // Built once and handed, as the same object, to every target kind and payload partial.
@@ -85,6 +87,9 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
       await updateRunnerPoolAction({
         data: {
           poolId: pool.id,
+          // Like poolId, read by updateRunnerPoolAction and never sent. Left out (not false) for a
+          // platform without a default image, so the data is today's.
+          dockerImageOptional: platformDockerImage ? true : undefined,
           // Each platform's own fields (repositories, priority, runner group …); the schema in
           // updateRunnerPoolAction stays the submit-time authority.
           ...(buildUpdatePayload(platforms, selection, pool, {
@@ -107,7 +112,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           idleTimeoutMinutes: Number(form.get("idleTimeoutMinutes")),
           cpuLimit: Number(form.get("cpuLimit")),
           memoryLimitMb: Number(form.get("memoryLimitMb")),
-        } as UpdateRunnerPoolInput & { poolId: string },
+        } as UpdateRunnerPoolInput & { poolId: string; dockerImageOptional?: boolean },
       });
       await navigate({ to: "/runner-pools/$poolId", params: { poolId: pool.id } });
     } catch (cause) {
@@ -168,8 +173,19 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             />
           </SettingsRow>
           {providers.includes("docker") ? (
-            <SettingsRow description="OCI image for each Linux runner." htmlFor="docker-image" label="Docker image">
-              <Input className="font-mono text-xs" id="docker-image" onChange={(event) => setDockerImage(event.target.value)} required value={dockerImage} />
+            <SettingsRow
+              description={dockerImageHelp(platformDockerImage)}
+              htmlFor="docker-image"
+              label={platformDockerImage ? <>Docker image <span className="ml-1 text-xs font-normal text-muted-foreground">optional</span></> : "Docker image"}
+            >
+              <Input
+                className="font-mono text-xs"
+                id="docker-image"
+                onChange={(event) => setDockerImage(event.target.value)}
+                placeholder={platformDockerImage}
+                required={!platformDockerImage}
+                value={dockerImage}
+              />
             </SettingsRow>
           ) : null}
           {includesTart ? (
@@ -250,8 +266,9 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           </SettingsRow>
         </SettingsSection>
 
-        {/* Older Docker pools keep their image in `image`. */}
-        <FleetExecutionSection builtinHostEnabled={builtinHostOn(pool.builtinRunnerHostEnabled)} dockerImage={pool.dockerImage || (pool.provider === "docker" ? pool.image : "")} poolId={pool.id} />
+        {/* Older Docker pools keep their image in `image`. A pool with neither runs its platform's
+            default Docker image, so a new fleet Docker platform starts from that raw reference. */}
+        <FleetExecutionSection builtinHostEnabled={builtinHostOn(pool.builtinRunnerHostEnabled)} dockerImage={pool.dockerImage || (pool.provider === "docker" ? pool.image : "") || (platformDockerImage ?? "")} poolId={pool.id} />
 
         {error ? <Callout title="Could not save" tone="danger">{error}</Callout> : null}
       </SettingsLayout>
@@ -294,7 +311,7 @@ function ReadOnlyPool({ pool }: { pool: RunnerPoolDetail }) {
       <SettingsSection title="Runner definition">
         <SettingsValue label="Providers" value={providers.map((provider) => providerLabel(provider, pool.macosRuntime)).join(" + ")} />
         <SettingsValue label="Mode" value={pool.mode} />
-        {providers.includes("docker") ? <SettingsValue label="Docker image" mono value={pool.dockerImage} /> : null}
+        {providers.includes("docker") ? <SettingsValue label="Docker image" mono value={shownDockerImage(pool.dockerImage, platformForPool(pool).defaultDockerImage)} /> : null}
         {providers.includes("tart") && pool.macosRuntime !== "native" ? <SettingsValue label="Tart base VM" mono value={pool.tartImage} /> : null}
       </SettingsSection>
       <SettingsSection title="Capacity">

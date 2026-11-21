@@ -30,3 +30,29 @@
 - **Assumed:** It is T's job to update the existing test callers of `UpdateRunnerPool::validate`: the `#[cfg(test)]` module in `models.rs` (13 calls → `validate(false)`) and `gitlab_pools.rs` (→ `validate(true)`), because F writes no tests. No production line changed. The wireframe's help, placeholder and "Default (…)" copy is the approved text, so the tests pin it exactly.
 - **Hedged:** Some tests are guards (they pass before F's change by design): GitHub unchanged, a given GitLab image still validated, the A-W2 ordering, and the source-neutrality checks. Each is labelled in `handoff-T-red.md`. The existing `pool-target-payloads.test.ts:394,402` pin means the settings form must pass `dockerImageOptional` as `undefined` (not `false`) for a pool without a default image. F was told. `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` (fleet_http) fails on the unmodified baseline on this Mac host, so it is unrelated to #172.
 - **Evidence:** API RED: 4 failed, 35 passed (422≠400; 400≠201 "Docker image … required"; 400≠200; 400≠404). Core compile RED: E0061 ×13 in the `models.rs` test module and ×1 in `gitlab_pools.rs:71`. Vitest: 10 failed, 613 passed; the only failures are the new RED tests. Throwaway reference implementations, reverted and never staged: vitest 623/623 and a clean tsc; cargo core 307+5 and api 130+36+143/144 (the one failure is pre-existing on the baseline).
+
+## Phase 6 Feature Implementor (F) — 2026-11-21T09:33-08:00
+- **Decided:** Implemented the brief as decided. Rust:
+  - `validate_pool_configuration(.., gitlab: bool)`. GitLab allows an empty Docker image, but a given image is still checked, and it skips the runner-group rule.
+  - Create derives `gitlab` from `scope`. `UpdateRunnerPool::validate(gitlab)` takes it as an argument.
+  - `runner_group_id` is `#[serde(default)]` on both structs.
+  - The update handler validates after `pool_access` and before `assert_pool_admin`.
+
+  TS:
+  - `PlatformDescriptor.defaultDockerImage`, set only by GitLab.
+  - Pure `targets.ts` helpers: `defaultDockerImage`, `dockerImageHelp` and `shownDockerImage`.
+  - `validateProvider(.., dockerImageOptional)`, through an update-schema factory. The exported `updateRunnerPoolSchema` keeps the GitHub rules.
+  - `updateRunnerPoolAction` destructures `dockerImageOptional` beside `poolId`.
+  - The new-pool image state holds only typed text.
+  - Settings, read-only settings and detail read `platformForPool(pool).defaultDockerImage`.
+  - The fleet editor gets the raw default as its fallback.
+  - Docs and CHANGELOG updated.
+- **Assumed:** GitLab's `toCreatePayload` keeps `runnerGroupId: 1`, because option A allows it, nothing changes on the wire, and #171/#174 are also editing `gitlab.tsx`. The wireframe's "optional" tag is a muted inline span, because no shared component exists.
+- **Hedged:** Workspace `cargo clippy -- -D warnings` fails on rustc 1.99.1, but only on two new lints (`unused_async_trait_impl`, `assert_is_empty`) in files #172 does not touch. With those two allowed, the workspace is clean. I did not fix them, because that would be a drive-by edit. The `fleet_http` release-preflight failure is the baseline environmental one T recorded.
+- **Evidence:**
+  - vitest 623/623; `tsc` and eslint clean.
+  - `gitlab_tests` 39/39.
+  - core: lib 307, every integration binary ok.
+  - api: bin 130, contracts 36, fleet_http 143/144 (the baseline failure).
+  - `cargo fmt --check` clean.
+  - Source facts with file:line are in `evidence.md`.

@@ -77,6 +77,10 @@ pub struct CreateRunnerPool {
     pub idle_timeout_minutes: i64,
     pub cpu_limit: f64,
     pub memory_limit_mb: i64,
+    /// A GitHub setting: GitLab pools have no runner group, so it may be left
+    /// out (issue #172). A GitHub pool without one still gets the
+    /// "Runner group ID must be positive." error.
+    #[serde(default)]
     pub runner_group_id: i64,
 }
 
@@ -216,6 +220,7 @@ impl CreateRunnerPool {
             self.cpu_limit,
             self.memory_limit_mb,
             self.runner_group_id,
+            self.scope == "gitlab",
         )
     }
 }
@@ -258,6 +263,10 @@ pub struct UpdateRunnerPool {
     pub idle_timeout_minutes: i64,
     pub cpu_limit: f64,
     pub memory_limit_mb: i64,
+    /// A GitHub setting: GitLab pools have no runner group, so it may be left
+    /// out (issue #172). A GitHub pool without one still gets the
+    /// "Runner group ID must be positive." error.
+    #[serde(default)]
     pub runner_group_id: i64,
     /// Pool repositories whose queued jobs get the next runner first. Left
     /// out, the pool keeps the ones it has.
@@ -299,7 +308,9 @@ impl UpdateRunnerPool {
         )
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    /// `gitlab` is whether the pool being updated is a GitLab pool, which the
+    /// body does not say: the caller reads it from the stored pool.
+    pub fn validate(&self, gitlab: bool) -> Result<(), String> {
         if self.repository_ids.as_ref().is_some_and(|repositories| {
             repositories.is_empty()
                 || repositories.len() > 1_000
@@ -361,10 +372,15 @@ impl UpdateRunnerPool {
             self.cpu_limit,
             self.memory_limit_mb,
             self.runner_group_id,
+            gitlab,
         )
     }
 }
 
+/// `gitlab` relaxes the GitHub-only rules for a GitLab pool, as
+/// `macos_runtime` relaxes the Tart image rule: its Docker image may be empty
+/// (provisioning then runs `GITLAB_RUNNER_IMAGE`, see
+/// `fleet::targets::docker_runner_image`), and it has no runner group.
 #[allow(clippy::too_many_arguments)]
 fn validate_pool_configuration(
     name: &str,
@@ -384,6 +400,7 @@ fn validate_pool_configuration(
     cpu_limit: f64,
     memory_limit_mb: i64,
     runner_group_id: i64,
+    gitlab: bool,
 ) -> Result<(), String> {
     if name.len() < 2 || name.len() > 48 || !valid_pool_name(name) {
         return Err("Use 2-48 lowercase letters, numbers, and hyphens for the pool name.".into());
@@ -444,14 +461,15 @@ fn validate_pool_configuration(
     let selected_tart_image = selected_image("tart", provider, providers, image, tart_image);
     if selected.iter().any(|provider| provider == "docker") {
         // A provider added to a pool brings its own image: none is filled in
-        // from a default (issue #103).
-        if selected_docker_image.is_empty() {
+        // from a default (issue #103). A GitLab pool's empty image is stored
+        // empty and runs the GitLab runner image (issue #172).
+        if selected_docker_image.is_empty() && !gitlab {
             return Err(
                 "Docker image (dockerImage) is required for a pool that uses Linux · Docker."
                     .into(),
             );
         }
-        if !valid_image(&selected_docker_image) {
+        if !selected_docker_image.is_empty() && !valid_image(&selected_docker_image) {
             return Err("Docker image must contain 1-300 non-padding characters.".into());
         }
     }
@@ -468,7 +486,7 @@ fn validate_pool_configuration(
             return Err("Tart base VM must contain 1-300 non-padding characters.".into());
         }
     }
-    if runner_group_id <= 0 {
+    if runner_group_id <= 0 && !gitlab {
         return Err("Runner group ID must be positive.".into());
     }
     Ok(())
