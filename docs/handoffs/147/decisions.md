@@ -140,3 +140,12 @@
   - NV-6: the registry manifest for `ubuntu-v19.6.0` amd64. It has `LABEL org.opencontainers.image.version=24.04`, layer 1 has `usr/bin/bash` and layer 2 has `usr/bin/curl`.
   - Docker Hub lists `ubuntu-v19.6.0` (same digests as `v19.6.0`) and `alpine:3.24.4` as active.
   - Tier 1 results: script 11/11, `docker_gitlab` 10/10, dispatch 8/8, manager 111/111, and 610/0 across core, host agent, manager, Tart agent and reconciler. CI's clippy and `cargo fmt --check` are clean. `fleet_http` is 143/144; the 1 failure is environmental (macOS workstation).
+
+## T (Phase 7, verify GREEN + Tier 2): 2026-11-20
+- **Decided:** the suite is GREEN and Tier 2 is clean, so the verdict is PASS (`handoff-T-green.md`). No test was changed: F flagged none as wrong and I found none.
+  - I re-ran the core script, host agent, manager, Tart agent and reconciler suites, and `fleet_http`. Everything passes except one `fleet_http` case, `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine`.
+  - CI's clippy command and `cargo fmt --check` are clean.
+  - A mutation (idle-expiry diagnostic replaced by `None`) fails `an_exited_gitlab_runner_inspects_as_gone_saying_why`, and I reverted it.
+- **Assumed:** the `release_preflight` failure is environmental. The native backend reports the OS from `cfg!(target_os)` (`native.rs:199-206`), and #147 changes `native.rs` only to add `diagnostic: None`. I did not run that test on a pre-#147 build.
+- **Hedged:** the real `gitlab-runner` image, a real GitLab and a real daemon were not exercised. That is the manual check deferred to #143, and the PR must say so.
+- **Evidence:** the run outputs in `handoff-T-green.md`; `evidence.md` already lists the unchanged-code facts the tests rely on.
