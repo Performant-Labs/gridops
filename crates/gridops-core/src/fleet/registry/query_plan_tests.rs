@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::super::commands::{NEXT_DELIVERY, UNDELIVERABLE, UNRECEIVED};
 use super::*;
+use crate::fleet::retry::LAST_FAILURE;
 use crate::fleet::{
     ids::{AuthoritySessionId, CommandId, HostEpoch, OperationId},
     protocol::{
@@ -61,6 +62,30 @@ async fn hot_path_command_statements_read_only_open_commands_through_the_poll_in
         unbounded.join("\n")
     );
     history.f.close().await
+}
+
+/// The reconciler's start retry reads a placement's newest failure event
+/// under the write lock. `fleet_events` has no index on `placement_id`, so the
+/// read must name the placement's host: without it the plan is a scan of every
+/// machine's events. A host-bounded read through an index is the intended
+/// bound here, so `(host_id=?)` is expected (unlike the command statements).
+#[tokio::test]
+async fn the_start_retry_reads_one_hosts_events_not_the_whole_table() -> Result<()> {
+    let f = Fixture::new(NOW).await?;
+    let plan = plan(&f.pool, LAST_FAILURE).await?;
+    assert!(
+        plan.iter()
+            .any(|step| step.starts_with("SEARCH fleet_events USING INDEX")
+                && step.contains("host_id=?")),
+        "the failure lookup must search fleet_events by host: {plan:?}"
+    );
+    assert!(
+        !plan
+            .iter()
+            .any(|step| step.starts_with("SCAN fleet_events")),
+        "the failure lookup must not scan fleet_events: {plan:?}"
+    );
+    f.close().await
 }
 
 /// The bounded statements choose exactly what the unbounded ones chose: the

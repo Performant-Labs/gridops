@@ -133,3 +133,9 @@
   - The brief's grep: 25 hits, each in the sweep table.
   - Full run: 33 binaries, 887 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`: the agent's OS is `cfg!(target_os)`, so the test fails on macOS dev machines only.
   - Facts outside the diff are in docs/handoffs/179/evidence.md.
+
+## Phase 7 Tester GREEN (T) - 2026-11-21
+- **Decided:** Suite GREEN. Added one test, `the_start_retry_reads_one_hosts_events_not_the_whole_table`, for the swept `LAST_FAILURE` statement, as F's handoff asked. Returning PASS.
+- **Assumed:** `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` is a macOS-only environment failure unrelated to #179 (agent OS is `cfg!(target_os)`); I did not run it on master.
+- **Hedged:** The `LAST_FAILURE` assertion accepts any host-bounded index search and rejects a scan, so it does not pin the planner's choice between `fleet_events_host_cursor_idx` and `fleet_events_host_kind_time_idx`.
+- **Evidence:** Mutations (drop the state conjunct, un-host `LAST_FAILURE`, remove the in-session resend) each made the matching tests fail and were reverted. Four-crate run: 888 passed, 1 failed (the macOS one). fmt and CI-toolchain clippy clean.
