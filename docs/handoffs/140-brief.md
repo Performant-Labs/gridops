@@ -288,3 +288,75 @@ A `pending` delivery whose tag fetch fails leaves no `gitlab_jobs` row, and a la
 ### Outside #140 (added, NIT-2)
 
 When one delivery matches two candidate connections, it produces two `webhook_deliveries` rows (`gitlab:<connection_a>:<key>` and `gitlab:<connection_b>:<key>`) as well as the two `gitlab_jobs` rows recorded above. The deliveries list then shows that delivery twice. That is by design under W-4 option (a), and #140 does not deduplicate it.
+
+## Amendments (contract decision D18: one shared `gitlab_jobs` writer)
+
+Epic #136 records D18, agreed with #148. #140 and #148 write `gitlab_jobs` through **one function in `gridops-core`** that #140 writes and #148 calls. This **supersedes** the round-3 "Where the rule lives (W-2): no shared helper in wave 1" decision. The tier table, the guarded upsert and the column rules of rounds 2 and 3 move out of `webhooks/gitlab.rs` into this module, and `webhooks/gitlab.rs` calls it.
+
+### Exception to "Do not change shared contract types" (D18)
+
+#140 adds the new file `crates/gridops-core/src/gitlab/jobs.rs` and the one line `pub mod jobs;` in `crates/gridops-core/src/gitlab/mod.rs`. No existing contract type, trait, migration or spec text changes beyond that and the B-1 sentence. The stop-and-report rule still covers anything else.
+
+### The API (exact signatures; #148 codes against them)
+
+    pub struct JobObservation<'a> {
+        pub connection_id: &'a str,
+        pub project_id: u64,
+        pub job_id: u64,
+        pub pipeline_id: u64,
+        pub status: JobStatus,
+        pub status_changed_at: i64,          // epoch ms
+        pub retries_count: Option<u32>,      // None = keep stored (0 on insert); the poll passes None
+        pub tag_list: Option<&'a [String]>,  // Some only when the writer has GitLab's job tags
+        pub gitlab_runner_id: Option<u64>,   // Some only when the writer knows the runner
+    }
+    pub enum JobWrite { Inserted, StatusApplied, FilledOnly, Ignored }
+    pub struct JobWriteOutcome { pub write: JobWrite, pub previous_status: Option<String>, pub status: String, pub gitlab_runner_id: Option<u64> }
+    pub fn status_tier(status: &str) -> Option<u8>;
+    pub fn status_write_applies(stored_status: &str, stored_at: i64, incoming: JobStatus, incoming_at: i64) -> bool;
+    pub async fn record_gitlab_job(conn: &mut SqliteConnection, obs: &JobObservation<'_>, now_ms: i64) -> sqlx::Result<JobWriteOutcome>;
+    pub async fn set_gitlab_runner_busy(conn: &mut SqliteConnection, connection_id: &str, gitlab_runner_id: u64, busy: bool, now_ms: i64) -> sqlx::Result<Option<(String, Option<String>)>>;
+
+The module is not behind `test-support`: production code in both crates calls it.
+
+### Rules (one SQL statement per `record_gitlab_job` call, `INSERT ... ON CONFLICT(connection_id, job_id) DO UPDATE ... WHERE ...`)
+
+- **Tiers** (`status_tier`): 0 = `created`, `waiting_for_resource`, `preparing`, `manual`, `scheduled`; 1 = `pending`; 2 = `running`; 3 = `success`, `failed`, `canceled`, `skipped`; `None` = `unknown`. An `unknown` status writes nothing and returns `Ignored`.
+- **New row:** a new UUID v4 `id`, `tag_list` = the given tags (serde JSON) or `[]`, `gitlab_runner_id` as given, `pool_id` NULL. The function never writes `pool_id`.
+- **Status:** `status` and `status_changed_at` (with `pipeline_id` and `retries_count`) change only when the stored row is not terminal **and** either the incoming tier is higher, or the tiers are equal and `incoming_at > stored_at` (`status_write_applies`). Result: `StatusApplied`.
+- **`gitlab_runner_id`:** `COALESCE(stored, incoming)`. Whichever writer learns it first sets it, and nothing clears or overwrites it. It is filled even when the status write is rejected, as long as the stored row is not terminal. Result: `FilledOnly` when only a fill happened.
+- **`tag_list`:** replaced only by `Some` non-empty tags, never overwritten with `[]`. It is filled the same way on a rejected status write when the stored value is `[]` and the row is not terminal.
+- **A terminal row never changes**, in any column.
+- `updated_at` = `now_ms` whenever anything changed; `Ignored` writes nothing. `previous_status` is the stored status before the call (None when inserted), `status` the stored status after it, and `gitlab_runner_id` the stored runner id after it.
+- **`set_gitlab_runner_busy`** matches `gitlab_runner_id` among live (`deleted_at IS NULL`) `ci_platform = 'gitlab'` runners whose `gitlab_connection_id` is a connection with the same `base_url` as `connection_id`. It writes only `busy`, `status` (`busy` / `online`), `last_heartbeat_at` and `updated_at`, and returns `(runner id, pool id)` of the runner it changed, or None.
+- Callers own transactions, `retry_when_busy`, `runner_events` rows, and when to set or clear busy.
+
+### How #140 uses it
+
+- `pending`: the pre-fetch check is `status_write_applies` against the stored row (or no row). When it applies, fetch the tags with `GitLabApi::job` and pass them as `tag_list`. Otherwise call `record_gitlab_job` without tags (so a fill can still happen) and make no `GitLabApi::job` call.
+- `running` with `runner.id`: pass `gitlab_runner_id`. When the outcome is `StatusApplied` or `FilledOnly`, `status = running`, and the outcome's `gitlab_runner_id` was newly set by this call, mark that runner busy and write the `runner_events` row.
+- **`running` without `runner.id` (brief W-1):** upsert by the status rule with `gitlab_runner_id` None. There is no busy effect and no `runner_events` row. A Done-when test covers it: the row is `running`, `gitlab_runner_id` stays NULL, no runner changes, and no `runner_events` row is written.
+- Terminal events: when the outcome is `StatusApplied` into a terminal status and the row has a `gitlab_runner_id`, clear that runner's busy flag and write the `runner_events` row.
+- Other statuses: upsert by the rule, with no busy effect.
+
+### `runner_events.message` (NIT-1)
+
+`"{build_name} · pipeline {pipeline_id}"`, where `build_name` is the payload's `build_name` string. When the payload has none, the literal text `Job` is used.
+
+### Tests
+
+The module has its own unit tests in `gridops-core`, against an in-memory migrated database. They cover each rule above:
+- every tier transition and the terminal freeze;
+- the equal-tier timestamp rule;
+- the runner fill on a rejected status write;
+- tag preservation and the no-empty-overwrite rule;
+- `unknown` being ignored;
+- the `base_url` busy match, with a runner on a sibling connection that has the same `base_url`, and none on a different `base_url`.
+
+The webhook tests in `gridops-api` still cover the Done-when list end to end.
+
+### #148
+
+#148 calls `record_gitlab_job` and `set_gitlab_runner_busy` and keeps no SQL of its own for these writes. Until #140 merges, #148 may stub against these exact signatures. Whichever merges second removes its local copy.
+
+- The poll concludes a job only from a  lookup (a  answer concludes it ), and clears busy through .
