@@ -1,0 +1,24 @@
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-21T14:25:35-08:00
+- **Decided:** BLOCK, with 2 block and 6 warn findings (docs/handoffs/179/handoff-A.md).
+  - Block 1, Part 2 is a no-op at the wrong seam. sqlx-core 0.9.0 already defaults slow statements to WARN at 1 s. The event's target is `sqlx::query`, which the api's (`gridops=info,tower_http=info`) and the reconciler's (`gridops_reconciler=info`) default EnvFilter drop, and compose sets no RUST_LOG. The manager never opens the DB. Fix: admit `sqlx::query=warn` in those two filters, choose the threshold against the measured 176/375 ms, and require a test that fails today.
+  - Block 2, Part 3 retries the command poll in-session. The poll has no replay rule: a delivered command is offered again only after 60 s. A lost poll reply is settled today by ending the session and running the handshake's `settle_unreceived`, pinned by `fleet_http/recovery.rs` `host_recovers_when_a_delivered_command_never_reaches_it`. An in-session retry leaves the start delivered, then uncertain at its deadline; the placement goes uncertain, authority is withheld at the next inventory, and no reconnect happens. That is the 2026-10-14 21:05 lockout. The brief's own "no replay rule, keep today's behaviour" clause covers this, but its Scope list and its Agent-test done-when name the poll.
+  - Warns:
+    - (3) logs and output already never end the session;
+    - (4) one retry helper in supervisor.rs next to `backoff()`, wrapping only the client call (`Unavailable` also carries local `internal()` errors), with the lease kept in `Authority`;
+    - (5) the agent and held-lock tests belong with the real `Supervisor` in `fleet_http/agent.rs` or `recovery.rs` (`Proxy`/`Faults`), and the existing poll and cancel tests live in the api crate, not core;
+    - (6) `pub(super)` SQL consts and an in-crate registry plan-test module, on the `tests/retention.rs` shape;
+    - (7) no migration uses `IF NOT EXISTS`, and the sweep may need no new index;
+    - (8) the sweep table should say whether `uncertain` counts as open (`settle_unreceived` reads it at every handshake).
+- **Assumed:**
+  - Mars's `GRIDOPS_ENV_FILE` does not set `RUST_LOG`. `.env.example` and compose do not; I did not read the host's env file. Block 1 holds either way, because the proposed call equals sqlx's default.
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+- **Hedged:**
+  - The lockout in block 2 is traced through code (`commands.rs:91-97`, `:769-777`; `inventory.rs:207`, `:1081-1095`), not run. The pinned recovery test would fail against an in-session poll retry, which T's RED run would show.
+  - Warn 8 is a sweep-contract gap, not a defect.
+- **Evidence:**
+  - Read: the brief and the brief gate result; `registry/commands.rs` in full; `registry/inventory.rs:77-380` and `:1081-1150`; `registry/mod.rs` begin and the test wiring; `db.rs` in full; host-agent `supervisor.rs` and `client.rs` in full, and the error handling in `output.rs`; api `fleet/commands.rs`; `fleet_http/agent.rs`, `recovery.rs:1-120`, `:212-266`, `:388-436` and `:589-675`; `fleet_http/inventory.rs:793-811`; `tests/retention.rs`.
+  - Migrations: the index list on the history tables; the 0026 triggers; the 0041 and 0045 index migrations.
+  - Third-party source: `sqlx-core-0.9.0` `connection.rs:201-219` and `logger.rs`; `sqlx-sqlite-0.9.0` `worker.rs:213-238`; `tracing-subscriber-0.3.23` `directive.rs:242-249`.
+  - Config and deploy: `compose.yaml`, `.env.example`, `deploy/` `RUST_LOG`.
+  - `git worktree list` and the status of the other worktrees.
+  - `git diff --stat origin/master HEAD` shows only the brief.
