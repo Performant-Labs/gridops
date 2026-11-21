@@ -1,9 +1,9 @@
 import { builtinHostOn, showsBuiltinGuardrails } from "~/features/runner-pools/builtin-host";
 import { Link, createFileRoute, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { LoaderCircle } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useMemo, useState } from "react";
 
-import { Callout, InlineError } from "~/components/page";
+import { Callout } from "~/components/page";
 import { PoolPlanPreview } from "~/components/pool-plan-preview";
 import { SettingsLayout, SettingsRow, SettingsSection, SettingsValue, Switch, UnitField } from "~/components/settings-ui";
 import { Badge } from "~/components/ui/badge";
@@ -12,19 +12,20 @@ import { Input } from "~/components/ui/input";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import { SearchableSelect } from "~/components/ui/searchable-select";
 import { FleetExecutionSection } from "~/features/fleet/fleet-profile-section";
+import { platforms } from "~/features/platform-connections/registry";
+import type { ResolvedSelection, TargetContext } from "~/features/platform-connections/types";
 import { providerLabel } from "~/features/runner-pools/pool-actions";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
 import { hostResourceWarning } from "~/features/runner-pools/resource-risk";
 import { poolImages, startingImage } from "~/features/runner-pools/pool-images";
+import { PlatformOptionsSection } from "~/features/runner-pools/platform-options-section";
+import type { UpdateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
+import { type RunnerPoolDetail, updateRunnerPoolAction } from "~/features/runner-pools/runner-pools.functions";
 import {
-  type RepositoryOption,
-  type RunnerGroupOption,
-  type RunnerPoolDetail,
-  getInstallationRunnerGroups,
-  getRunnerPoolRepositories,
-  updateRunnerPoolAction,
-} from "~/features/runner-pools/runner-pools.functions";
+  buildUpdatePayload, initialPriorityKeys, initialSelection, minMaxCount, priorityCandidates, prioritySupported, readOnlySummaries, targetPlanCheck,
+} from "~/features/runner-pools/targets";
+import { TargetsRow } from "~/features/runner-pools/targets-row";
 
 export const Route = createFileRoute("/_app/runner-pools/$poolId/settings")({
   component: PoolSettingsTab,
@@ -36,11 +37,6 @@ function PoolSettingsTab() {
   const pool = poolRoute.useLoaderData();
   return pool.canManage ? <RunnerPoolEditor key={`${pool.id}:${pool.configurationVersion}`} pool={pool} /> : <ReadOnlyPool pool={pool} />;
 }
-
-type LoadState<T> =
-  | { status: "idle" | "loading"; items: T[]; error: null }
-  | { status: "ready"; items: T[]; error: null }
-  | { status: "error"; items: T[]; error: string };
 
 function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   const navigate = useNavigate();
@@ -54,23 +50,16 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
   const [dockerImage, setDockerImage] = useState(() => startingImage(poolProviders, "docker", pool.dockerImage));
   const [tartImage, setTartImage] = useState(() => startingImage(poolProviders, "tart", pool.tartImage));
   const [macosRuntime, setMacosRuntime] = useState<"vm" | "native">(pool.macosRuntime ?? "vm");
-  const [repositoryIds, setRepositoryIds] = useState(pool.repositoryIds);
-  const [priorityRepositoryIds, setPriorityRepositoryIds] = useState(pool.priorityRepositoryIds);
+  // Built once and handed, as the same object, to every target kind and payload partial.
+  const context = useMemo<TargetContext>(() => ({ form: "update", pool }), [pool]);
+  const [selection, setSelection] = useState<ResolvedSelection>(() => initialSelection(platforms, pool));
+  const [priorityKeys, setPriorityKeys] = useState(() => initialPriorityKeys(platforms, pool));
   const [maxCount, setMaxCount] = useState(pool.maxCount);
   const [desiredCount, setDesiredCount] = useState(pool.desiredCount);
   const [cpuLimit, setCpuLimit] = useState(pool.cpuLimit);
   const [memoryLimitMb, setMemoryLimitMb] = useState(pool.memoryLimitMb);
   const [poolName, setPoolName] = useState(pool.name);
   const [labels, setLabels] = useState(pool.labels.join(", "));
-  const [runnerGroupId, setRunnerGroupId] = useState(pool.runnerGroupId);
-  const shouldLoadRepositories = pool.scope === "repository";
-  const [repositoryLoad, setRepositoryLoad] = useState<LoadState<RepositoryOption>>(
-    shouldLoadRepositories ? { status: "loading", items: pool.repositories, error: null } : { status: "idle", items: [], error: null },
-  );
-  const shouldLoadRunnerGroups = pool.scope === "organization";
-  const [runnerGroupLoad, setRunnerGroupLoad] = useState<LoadState<RunnerGroupOption>>(
-    shouldLoadRunnerGroups ? { status: "loading", items: [], error: null } : { status: "idle", items: [], error: null },
-  );
   const primaryProvider = providers[0] ?? "docker";
   const includesTart = providers.includes("tart");
   const resourceWarning = hostResourceWarning({
@@ -80,37 +69,8 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
     cpuBudget: pool.maxCpuLimit ?? 0,
     memoryBudgetMb: pool.maxMemoryLimitMb ?? 0,
   });
-  const repositorySeed = pool.repositories;
-  const [repositoryAttempt, setRepositoryAttempt] = useState(0);
-  const [runnerGroupAttempt, setRunnerGroupAttempt] = useState(0);
-
-  useEffect(() => {
-    if (!shouldLoadRunnerGroups) return;
-    const controller = new AbortController();
-    void getInstallationRunnerGroups(pool.installationId, controller.signal)
-      .then(({ items }) => setRunnerGroupLoad({ status: "ready", items, error: null }))
-      .catch((cause: unknown) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setRunnerGroupLoad({ status: "error", items: [], error: cause instanceof Error ? cause.message : "Runner groups could not be loaded." });
-      });
-    return () => controller.abort();
-  }, [pool.installationId, runnerGroupAttempt, shouldLoadRunnerGroups]);
-
-  useEffect(() => {
-    if (!shouldLoadRepositories) return;
-    const controller = new AbortController();
-    void getRunnerPoolRepositories(controller.signal)
-      .then(({ items }) => setRepositoryLoad({ status: "ready", items, error: null }))
-      .catch((cause: unknown) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setRepositoryLoad({ status: "error", items: repositorySeed, error: cause instanceof Error ? cause.message : "Repositories could not be loaded." });
-      });
-    return () => controller.abort();
-  }, [repositoryAttempt, repositorySeed, shouldLoadRepositories]);
-
-  const runnerGroups = runnerGroupLoad.items;
-  const selectedRepositories = repositoryLoad.items.filter((repository) => repositoryIds.includes(repository.id));
-  const selectedAccounts = [...new Set(selectedRepositories.map((repository) => repository.accountLogin))];
+  const showPriority = prioritySupported(platforms, context);
+  const prioritisable = priorityCandidates(platforms, selection);
   const labelList = labels.split(",").map((label) => label.trim()).filter(Boolean);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -122,9 +82,12 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
       await updateRunnerPoolAction({
         data: {
           poolId: pool.id,
-          repositoryIds: pool.scope === "repository" ? repositoryIds : undefined,
-          priorityRepositoryIds: pool.scope === "repository" ? priorityRepositoryIds.filter((id) => repositoryIds.includes(id)) : undefined,
-          priorityWaitMinutes: pool.scope === "repository" ? Number(form.get("priorityWaitMinutes")) : undefined,
+          // Each platform's own fields (repositories, priority, runner group …); the schema in
+          // updateRunnerPoolAction stays the submit-time authority.
+          ...(buildUpdatePayload(platforms, selection, pool, {
+            priorityKeys,
+            priorityWaitMinutes: showPriority ? Number(form.get("priorityWaitMinutes")) : undefined,
+          }) as Partial<UpdateRunnerPoolInput>),
           name: poolName,
           mode,
           provider: primaryProvider,
@@ -140,8 +103,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
           idleTimeoutMinutes: Number(form.get("idleTimeoutMinutes")),
           cpuLimit: Number(form.get("cpuLimit")),
           memoryLimitMb: Number(form.get("memoryLimitMb")),
-          runnerGroupId: pool.scope === "organization" ? runnerGroupId || pool.runnerGroupId : 1,
-        },
+        } as UpdateRunnerPoolInput & { poolId: string },
       });
       await navigate({ to: "/runner-pools/$poolId", params: { poolId: pool.id } });
     } catch (cause) {
@@ -158,59 +120,12 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
         title="Configuration"
       >
         <SettingsSection description="Where this pool’s runners register." title="Destination">
-          <SettingsRow label={pool.scope === "repository" ? "GitHub accounts" : "Installation"}>
-            <span className="text-sm text-foreground">{pool.scope === "repository" ? selectedAccounts.join(", ") || pool.accountLogin : pool.accountLogin}</span>
+          <SettingsRow description="The pool keeps its kind of target. Targets shown without a remove button stay as they are." label="Targets" stacked>
+            <TargetsRow context={context} descriptors={platforms} limits={{ maxCount }} onSelectionChange={setSelection} selection={selection} />
           </SettingsRow>
-          {pool.scope === "repository" ? (
-            <SettingsRow description={`${repositoryIds.length} selected · the maximum runner count must cover every repository.`} label="Repositories" stacked>
-              <SearchableMultiSelect
-                ariaLabel="Pool repositories"
-                emptyMessage="No repositories match this search"
-                loading={repositoryLoad.status === "loading"}
-                maxSelected={maxCount}
-                onValueChange={setRepositoryIds}
-                options={repositoryLoad.items.map((repository) => ({
-                  value: repository.id,
-                  label: repository.fullName,
-                  description: `${repository.accountLogin} · ${repository.private ? "Private" : "Public"}`,
-                  keywords: [repository.accountLogin, repository.accountType],
-                }))}
-                placeholder="Choose one or more repositories…"
-                searchPlaceholder="Search by owner or repository name…"
-                selectedNoun="repositories"
-                values={repositoryIds}
-              />
-              {repositoryLoad.status === "error" ? (
-                <InlineError onRetry={() => { setRepositoryLoad({ status: "loading", items: repositorySeed, error: null }); setRepositoryAttempt((attempt) => attempt + 1); }} title="Couldn’t load repositories">{repositoryLoad.error}</InlineError>
-              ) : null}
-            </SettingsRow>
-          ) : (
-            <SettingsRow
-              description={runnerGroupLoad.status === "loading" ? "Loading runner groups from GitHub…" : runnerGroups.length ? "Repository access is controlled by this GitHub runner group." : "Enter the GitHub runner group ID."}
-              label="Runner group"
-            >
-              {runnerGroupLoad.status === "loading" ? (
-                <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />Loading…</div>
-              ) : runnerGroups.length ? (
-                <SearchableSelect
-                  ariaLabel="GitHub runner group"
-                  onValueChange={(next) => setRunnerGroupId(next ?? pool.runnerGroupId)}
-                  options={runnerGroups.map((group) => ({ value: group.id, label: group.name, description: group.isDefault ? "Default runner group" : `${group.visibility} visibility` }))}
-                  placeholder="Choose runner group…"
-                  searchPlaceholder="Search runner groups…"
-                  value={runnerGroupId}
-                />
-              ) : (
-                <>
-                  <Input min="1" name="runnerGroupId" onChange={(event) => setRunnerGroupId(Number(event.target.value))} required type="number" value={runnerGroupId} />
-                  {runnerGroupLoad.status === "error" ? (
-                    <InlineError onRetry={() => { setRunnerGroupLoad({ status: "loading", items: [], error: null }); setRunnerGroupAttempt((attempt) => attempt + 1); }} title="Couldn’t load runner groups">{runnerGroupLoad.error}</InlineError>
-                  ) : null}
-                </>
-              )}
-            </SettingsRow>
-          )}
         </SettingsSection>
+
+        <PlatformOptionsSection descriptors={platforms} selection={selection} />
 
         <SettingsSection description="What each runner is and how jobs find it." title="Runner definition">
           <SettingsRow description="Also registered as a runner label." htmlFor="pool-name" label="Pool name">
@@ -268,7 +183,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             </SettingsRow>
           ) : null}
           {includesTart && macosRuntime === "vm" ? (
-            <TartBaseVmRow bitbucket={pool.bitbucketConnectionIds.length > 0} onChange={setTartImage} value={tartImage} />
+            <TartBaseVmRow onChange={setTartImage} value={tartImage} />
           ) : null}
           <SettingsRow description="Comma-separated. self-hosted, OS, architecture, and the pool name are added automatically." htmlFor="pool-labels" label="Additional labels">
             <Input id="pool-labels" name="labels" onChange={(event) => setLabels(event.target.value)} placeholder="gpu, large" value={labels} />
@@ -280,7 +195,7 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             <div className="grid grid-cols-3 gap-3">
               <NumberInput label="Target" onChange={setDesiredCount} name="desiredCount" value={desiredCount} />
               <NumberInput defaultValue={pool.minCount} label="Minimum" name="minCount" />
-              <NumberInput label="Maximum" min={Math.max(1, repositoryIds.length)} name="maxCount" onChange={setMaxCount} value={maxCount} />
+              <NumberInput label="Maximum" min={minMaxCount(platforms, selection)} name="maxCount" onChange={setMaxCount} value={maxCount} />
             </div>
           </SettingsRow>
           <SettingsRow description={includesTart ? "Whole cores, because this pool includes macOS." : "Applied to each Docker runner."} htmlFor="cpu-limit" label="CPU per runner">
@@ -295,27 +210,22 @@ function RunnerPoolEditor({ pool }: { pool: RunnerPoolDetail }) {
             </div>
           ) : null}
           <div className="px-4 py-3.5">
-            <PoolPlanPreview desiredCount={desiredCount} labels={labelList} maxCount={maxCount} name={poolName} providers={providers} repositoryCount={repositoryIds.length} scope={pool.scope} />
+            <PoolPlanPreview desiredCount={desiredCount} labels={labelList} maxCount={maxCount} name={poolName} providers={providers} targetCheck={targetPlanCheck(platforms, selection, { maxCount }, context)} />
           </div>
         </SettingsSection>
 
-        {pool.scope === "repository" ? (
+        {showPriority ? (
           <SettingsSection description="Which repositories get the next runner when the pool is busy." title="Priority">
             <SettingsRow description="Their queued jobs get the next runner ahead of the pool’s other repositories, on machines and on this host." label="Prioritised repositories" stacked>
               <SearchableMultiSelect
                 ariaLabel="Prioritised repositories"
                 emptyMessage="No pool repositories match this search"
-                onValueChange={setPriorityRepositoryIds}
-                options={selectedRepositories.map((repository) => ({
-                  value: repository.id,
-                  label: repository.fullName,
-                  description: repository.accountLogin,
-                  keywords: [repository.accountLogin],
-                }))}
+                onValueChange={setPriorityKeys}
+                options={prioritisable.map((target) => ({ value: target.key, label: target.label, description: target.description }))}
                 placeholder="None — every repository takes its turn"
                 searchPlaceholder="Search the pool’s repositories…"
                 selectedNoun="repositories"
-                values={priorityRepositoryIds.filter((id) => repositoryIds.includes(id))}
+                values={priorityKeys.filter((key) => prioritisable.some((target) => target.key === key))}
               />
             </SettingsRow>
             <SettingsRow description="A job from any repository that waits this long goes ahead too, so prioritised work can’t hold every runner." htmlFor="priority-wait" label="Fair-share wait">
@@ -371,10 +281,13 @@ function NumberInput({ label, name, value, defaultValue, onChange, min = 0 }: { 
 
 function ReadOnlyPool({ pool }: { pool: RunnerPoolDetail }) {
   const providers = pool.providers?.length ? pool.providers : [pool.provider];
+  const context: TargetContext = { form: "update", pool };
   return (
     <SettingsLayout actions={<Badge variant="outline">Read only</Badge>} description="An installation administrator manages this pool." title="Configuration">
+      <SettingsSection title="Destination">
+        {readOnlySummaries(platforms, pool).map(({ platform, value }) => <SettingsValue key={platform.id} label={platform.name} value={value} />)}
+      </SettingsSection>
       <SettingsSection title="Runner definition">
-        <SettingsValue label="Destination" value={pool.scope === "repository" ? `${pool.repositoryIds.length} repositories` : pool.accountLogin} />
         <SettingsValue label="Providers" value={providers.map((provider) => providerLabel(provider, pool.macosRuntime)).join(" + ")} />
         <SettingsValue label="Mode" value={pool.mode} />
         {providers.includes("docker") ? <SettingsValue label="Docker image" mono value={pool.dockerImage} /> : null}
@@ -385,7 +298,7 @@ function ReadOnlyPool({ pool }: { pool: RunnerPoolDetail }) {
         <SettingsValue label="Per runner" value={`${pool.cpuLimit} cores · ${pool.memoryLimitMb} MB`} />
         <SettingsValue label="Autoscaling" value={pool.autoscalingEnabled ? `On · ${pool.queueScaleFactor} per queued job · idle after ${pool.idleTimeoutMinutes}m` : "Off"} />
       </SettingsSection>
-      {pool.scope === "repository" ? (
+      {prioritySupported(platforms, context) ? (
         <SettingsSection title="Priority">
           <SettingsValue
             label="Prioritised"
