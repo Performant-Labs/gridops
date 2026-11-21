@@ -19,3 +19,26 @@
   - the migrations `0001`/`0047`, covering the `runner_events` foreign keys, the cascade from runners to pools, and the connection index.
 
   I grepped for `DELETE FROM runners` and found none. I grepped for the level spellings and for every GitLab scope mention in `crates`, `src`, `docs`, `README` and `CHANGELOG`. I checked the reconciler's `Cargo.toml` dependencies and checked every live worktree branch for overlapping files (none). `git diff origin/master HEAD -- src tests crates` is empty.
+
+## Phase 4 Tests, RED (T) - 2026-11-21T09:05:45-08:00
+- **Decided:** RED is valid (docs/handoffs/171/handoff-T-red.md). It pins:
+  - the scope rule in the `http_tests.rs` table (12 cases);
+  - the refused-deletion warning on all four per-runner deletion paths plus the orphan sweep, in `gitlab_lifecycle_tests.rs` (5 new tests, and the 502 test extended);
+  - the token help text in `tests/gitlab-descriptor.test.ts` (2 tests).
+
+  It extends the API refusal tests in place, for create, PATCH and Verify. They pin the 400 message and that nothing is saved. They **pass before the feature**, because they inject the error through the fake. A ruled the fake unchanged, so they are contract pins and not RED. The rule's RED is the core table. The sweep dedup is tested by back-dating `runner_events.created_at`. The key is per pool, connection and reason, and one sweep with two refused orphans must write one row.
+- **Assumed:**
+  - The brief's example remediation sentence is wording S judges. The tests assert only: the connection name, the GitLab runner id (as a whole number), the reason (`manage_runner` or "GitLab request failed"), level `warning`, and that no `glpat-`/`glrt-` token appears.
+  - A 502 warning must not mention `manage_runner` (A W5).
+  - Metadata keys are not asserted (D: illustrative).
+- **Hedged:**
+  - No docs test: prose is S's to judge, and T-green greps it.
+  - No pool-events UI test: the existing `level === "warning"` tone covers it, and U walks it.
+  - The fleet-rollback test asserts the delete was attempted, not that the GitLab runner survives. I first assumed the runner survives, but `delete_runner` later removes it successfully, which is behavior this brief does not change. I corrected the test.
+- **Evidence:**
+  - Ran `cargo test -p gridops-core --lib gitlab::http::tests` (1 failed: `["create_runner","read_api"]` gives `Ok(())` where `MissingScope("manage_runner")` is expected).
+  - Ran `cargo test -p gridops-reconciler gitlab_lifecycle_tests` (6 failed, each at the refusal-count assertion, with setup assertions passing).
+  - Ran `npx vitest run tests/gitlab-descriptor.test.ts` (2 failed on the feature text).
+  - Ran `cargo test -p gridops-api --bins gitlab_tests` (64 passed).
+  - `cargo fmt --check` and `npx eslint` are clean. `npm run typecheck` is clean after `vite build` generated `src/routeTree.gen.ts`.
+  - `cargo +1.98.1 clippy -p gridops-core -p gridops-api -p gridops-reconciler --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` is clean. The default local clippy 0.1.99 fails on untouched files; CI pins 1.98.1 (`ci.yml:93,113`).
