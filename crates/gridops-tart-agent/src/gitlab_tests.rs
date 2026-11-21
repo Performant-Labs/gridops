@@ -375,7 +375,14 @@ impl Guest {
             .kill_on_drop(true)
             .spawn()?;
         let mut stdin = child.stdin.take().context("script stdin")?;
-        stdin.write_all(format!("{TOKEN}\n").as_bytes()).await?;
+        // A script that stops before reading its token (the missing-binary
+        // exit 78) can close its stdin before this write lands; that race is
+        // not the behaviour under test, so a broken pipe here is ignored and
+        // the script's own exit status decides the result.
+        match stdin.write_all(format!("{TOKEN}\n").as_bytes()).await {
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            result => result?,
+        }
         drop(stdin);
         let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
             .await
