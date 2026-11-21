@@ -48,3 +48,9 @@
 - **Assumed:** the `release_preflight` failure is environmental (fixture reports compile OS on a Mac), not a #159 regression, because the script has no reference to `/runner-pools` and the diff does not touch preflight or fleet code.
 - **Hedged:** "single batched query" is verified by reading `pools_gitlab_connections` (one `json_each(?)` query, early return on empty page), not by a query counter, as A agreed. The live UI path is left to U.
 - **Evidence:** vitest 52 files / 582 passed; eslint clean; `npm run build` + tsc exit 0; cargo fmt exit 0; `cargo test -p gridops-api` 123 + 36 + 143 passed, 1 pre-existing environment failure; clippy shows no finding in the changed Rust files.
+
+## Phase 7 Anti-duplication (A) - 2026-11-21
+- **Decided:** PASS. F extended `PlatformDescriptor`, the registry and `resources/gitlab.rs`; no parallel path, and `RepositoryList` moved as the brief's named refactor-to-extend.
+- **Assumed:** two similar chip renderings (GitHub `RepositoryList`, GitLab connection chip) are not duplication: they are in separate descriptors with different shapes.
+- **Hedged:** the runner-row and dashboard siblings (A Phase 3 finding 5) remain open and untracked by this diff; recorded as warn for O.
+- **Evidence:** `git diff e022a5d HEAD` over src, crates and tests; handoff-F.md; handoff-A.md.
