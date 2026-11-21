@@ -3465,6 +3465,7 @@ mod tests {
 
     /// D15: a Tart agent's `exitReason` survives the manager's re-parse of
     /// its runner list, and a runner without one gets no `exitReason` key.
+    /// #173: that includes `runner_missing`, which only a Tart agent reports.
     #[test]
     fn a_runners_exit_reason_survives_the_managers_reparse() -> Result<(), serde_json::Error> {
         let runner = |exit_reason: Option<&str>| {
@@ -3483,10 +3484,12 @@ mod tests {
             }
             runner
         };
-        let relisted = serde_json::to_value(serde_json::from_value::<ManagedRunner>(runner(
-            Some("idle_expired"),
-        ))?)?;
-        assert_eq!(relisted["exitReason"], "idle_expired", "{relisted}");
+        for reason in ["idle_expired", "runner_missing"] {
+            let relisted = serde_json::to_value(serde_json::from_value::<ManagedRunner>(runner(
+                Some(reason),
+            ))?)?;
+            assert_eq!(relisted["exitReason"], reason, "{relisted}");
+        }
         let relisted =
             serde_json::to_value(serde_json::from_value::<ManagedRunner>(runner(None))?)?;
         assert!(relisted.get("exitReason").is_none(), "{relisted}");

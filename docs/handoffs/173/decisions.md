@@ -52,3 +52,24 @@
   - a scratchpad reproduction of INT-trap resume under `/bin/bash` 3.2.57 and `/bin/zsh`.
 
   `git diff origin/master HEAD -- crates scripts src tests .github` is empty.
+
+## Phase 4 Tests RED (T) - 2026-11-21T09:29:48-08:00
+- **Decided:** RED is valid. 1 new script driver and 11 Rust tests were added or changed across 4 crates (docs/handoffs/173/handoff-T-red.md).
+  - `scripts/test-prepare-tart-runner-images.sh`: POSIX `sh`, both prep scripts run as `/bin/bash`, a fake `tart` that keeps one timeline log. 39 of its 55 checks fail today.
+  - Core and Tart: the table pins `(78, "runner_missing")` (slice compare, so both array lengths compile). Collision-guard tests: core with a stand-in runner exiting 69/75/77/78; Tart with a new `exit-78` behaviour that must give 70.
+  - Tart: the missing-binary guest status goes through `exit_reason`, and the listing reports `runner_missing`. The manager re-parse case is green by design.
+  - Reconciler: `assert_runner_missing`, beside an unchanged `assert_readable`, and `a_tart_runner_without_gitlab_runner_counts_once_with_a_readable_reason`. Today it fails with (1, false) != (2, false), which is the live #143 bug.
+- **Assumed:**
+  - The driver keeps the brief's Done-when name (A warn 3 allowed either), with a header that says what it covers.
+  - The success line stays `Prepared <target>…`, and the agent wait stays a counted `sleep` loop.
+  - CI wiring, the docs and the CHANGELOG are F's, not test files.
+  - The typed `"runner_missing"` fixture in the reconciler test (checked against the table at the end) is a fair exception to that file's "fixtures from the contract" rule: it lets the pass, not the lookup, be what fails at RED.
+- **Hedged:**
+  - Pinning `GITLAB_EXIT_RUNNER_MISSING` by name in `gitlab_runner_constants_are_pinned` waits for Phase 6. Naming a constant that does not exist would break core's whole lib test binary.
+  - The interrupt cases send TERM, not INT, because a backgrounded job ignores SIGINT in a non-interactive `sh`. A returning trap on TERM resumes bash the same way, and the mutation run showed the A-warn-1 trap is caught.
+- **Evidence:**
+  - A throwaway production draft turned every Rust RED green: core all, Tart 52/52, manager 111/111, reconciler `gitlab_lifecycle` 27/27. It was then reverted; `git diff` shows test hunks only.
+  - Scratchpad prototypes of both scripts gave `all passed`, and all 9 mutations failed the driver.
+  - Full `--no-fail-fast` runs on the reverted tree: core 1+1 RED, Tart 5 RED, manager 0, reconciler 1 RED. No collateral failures.
+  - `cargo fmt --check` and `shellcheck` on the driver are clean. Clippy with the draft was clean apart from two lints on untouched lines (rustc 1.99.1): `unused_async_trait_impl` at manager `main.rs:233` and `assert_is_empty` at reconciler `builtin_host.rs:119`.
+  - The manager's tests need a short TMPDIR in this session (`SUN_LEN`).

@@ -568,16 +568,19 @@ mod tests {
     }
 
     /// The exit status to `exitReason` table both runner-manager listings use
-    /// (the Tart agent keeps a copy, pinned by the same literals).
+    /// (the Tart agent keeps a copy, pinned by the same literals). 78
+    /// (`EX_CONFIG`) is a Tart image without `gitlab-runner` (#173).
     #[test]
     fn gitlab_exit_reasons_map_each_exit_status_once() {
         assert_eq!(
-            GITLAB_EXIT_REASONS,
+            GITLAB_EXIT_REASONS.as_slice(),
             [
                 (0, "completed"),
                 (75, "idle_expired"),
-                (77, "registration_refused")
+                (77, "registration_refused"),
+                (78, "runner_missing"),
             ]
+            .as_slice()
         );
     }
 

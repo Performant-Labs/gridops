@@ -3486,12 +3486,14 @@ admin     tart run
     #[test]
     fn gitlab_exit_reasons_match_the_core_table() {
         assert_eq!(
-            GITLAB_EXIT_REASONS,
+            GITLAB_EXIT_REASONS.as_slice(),
             [
                 (0, "completed"),
                 (75, "idle_expired"),
-                (77, "registration_refused")
+                (77, "registration_refused"),
+                (78, "runner_missing"),
             ]
+            .as_slice()
         );
     }
 
@@ -3574,7 +3576,8 @@ admin     tart run
         for (ending, recorded, reason) in [
             ("77", Some(77), Some("registration_refused")),
             ("0", Some(0), Some("completed")),
-            ("78", Some(78), None),
+            // #173: an image without gitlab-runner.
+            ("78", Some(78), Some("runner_missing")),
             ("killed", None, None),
         ] {
             let tart = FakeTart::new(Duration::from_secs(30)).await?;

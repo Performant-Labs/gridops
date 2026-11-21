@@ -315,6 +315,50 @@ async fn assert_readable(setup: &Setup, pool_id: &str, outcome: &str) -> Result<
     Ok(())
 }
 
+/// #173, beside `assert_readable`: the runner row of a GitLab runner whose
+/// Tart image has no `gitlab-runner` holds a `failure_reason` that names the
+/// outcome, the missing `gitlab-runner` and the script that prepares the
+/// image, and the pool has exactly one `error` event for it, carrying the
+/// outcome and the runner, whose message names that script too. Neither
+/// holds a runner token.
+async fn assert_runner_missing(
+    setup: &Setup,
+    pool_id: &str,
+    runner_id: &str,
+    outcome: &str,
+) -> Result<()> {
+    const SCRIPT: &str = "prepare-tart-gitlab-runner-image.sh";
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT failure_reason FROM runners WHERE id=?")
+            .bind(runner_id)
+            .fetch_one(&setup.app.database)
+            .await?;
+    let reason = reason.context("the runner row has no failure_reason")?;
+    let lower = reason.to_lowercase();
+    assert!(
+        lower.contains(outcome) && lower.contains("gitlab-runner") && reason.contains(SCRIPT),
+        "the failure_reason does not name {outcome}, gitlab-runner and {SCRIPT}: {reason:?}"
+    );
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message,metadata FROM runner_events WHERE pool_id=? AND level='error' AND json_extract(metadata,'$.outcome')=?",
+    )
+    .bind(pool_id)
+    .bind(outcome)
+    .fetch_all(&setup.app.database)
+    .await?;
+    let [(message, metadata)] = events.as_slice() else {
+        anyhow::bail!("expected one {outcome} error event on {pool_id}, got {events:?}");
+    };
+    let metadata: Value = serde_json::from_str(metadata)?;
+    assert_eq!(metadata["runnerId"], runner_id, "{metadata}");
+    assert!(message.contains(SCRIPT), "{message:?}");
+    assert!(
+        !reason.contains("glrt-") && !message.contains("glrt-"),
+        "{reason:?} {message:?}"
+    );
+    Ok(())
+}
+
 /// Token secrecy: no `glrt-` token in any column of any runner row, in a
 /// runner or pool event, a pool's wait reason or an audit event.
 async fn assert_no_token_stored(setup: &Setup) -> Result<()> {
@@ -821,6 +865,104 @@ async fn a_refused_registration_counts_once_with_a_readable_diagnostic() -> Resu
     assert_eq!((failures, open), (1, false), "still one refusal");
     assert_eq!(gitlab_calls(&setup, FakeMethod::CreateRunner).len(), 1);
     assert_no_token_stored(&setup).await?;
+    setup.finish().await
+}
+
+/// #173 (manager path): a Tart GitLab runner whose image has no
+/// `gitlab-runner` exits 78, which the Tart agent lists as `runner_missing`.
+/// That is a provisioning failure, as a refusal is: the runner fails with a
+/// reason naming the problem and its fix, the pool gets an error event, and
+/// its failure count rises by one and backs off, once however many passes
+/// see the exit, keeping the failures counted before it. A runner that
+/// completes later still clears them.
+#[tokio::test]
+async fn a_tart_runner_without_gitlab_runner_counts_once_with_a_readable_reason() -> Result<()> {
+    // Typed here, not looked up, so that before #173 the pass, not the
+    // lookup, is what fails; the lookup at the end ties it to the table.
+    let missing = "runner_missing";
+    let setup = gitlab_setup(&format!(
+        "{} UPDATE runner_pools SET provision_failure_count=1 WHERE id='pool-gl-mac';",
+        gitlab_pool("pool-gl-mac", "tart", "", "gitlab-macos-runner", 1)
+    ))
+    .await?;
+    ACME.add(&setup, &["pool-gl-mac"]).await?;
+    pass(&setup).await?;
+    setup.tart_start_reached_manager().await?;
+    setup.manager.tart_gate.add_permits(1);
+    setup.tart_start_ended().await?;
+    let first = live(&setup, "pool-gl-mac").await?;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(setup.manager.exit(&first[0].id, Some(missing)));
+
+    pass(&setup).await?;
+
+    let (failures, open, retry_at, state) = circuit(&setup, "pool-gl-mac").await?;
+    assert_eq!(
+        (failures, open),
+        (2, false),
+        "one failure more, the one before it kept"
+    );
+    assert_eq!(state, "backoff", "the counting pass ends in backoff");
+    assert!(
+        retry_at.is_some_and(|at| at > now_millis()),
+        "a retry time ahead: {retry_at:?}"
+    );
+    assert_eq!(live(&setup, "pool-gl-mac").await?.len(), 0);
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?,
+        Vec::<i64>::new(),
+        "deregistered"
+    );
+    assert_runner_missing(&setup, "pool-gl-mac", &first[0].id, missing).await?;
+
+    for _ in 0..2 {
+        pass(&setup).await?;
+    }
+    assert_eq!(
+        circuit(&setup, "pool-gl-mac").await?.0,
+        2,
+        "later passes seeing the same exit count nothing more"
+    );
+    assert_eq!(
+        gitlab_calls(&setup, FakeMethod::CreateRunner).len(),
+        1,
+        "and start nothing while the backoff holds"
+    );
+    assert_runner_missing(&setup, "pool-gl-mac", &first[0].id, missing).await?;
+    assert_no_token_stored(&setup).await?;
+
+    // Once the pause is over, a runner that completes clears the count.
+    end_backoff(&setup, "pool-gl-mac").await?;
+    pass(&setup).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while setup.manager.starts("tart").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("the second Tart start did not reach the manager")?;
+    setup.manager.tart_gate.add_permits(1);
+    setup.tart_start_ended().await?;
+    let second = live(&setup, "pool-gl-mac").await?;
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(
+        setup
+            .manager
+            .exit(&second[0].id, Some(exit_reason(GITLAB_EXIT_COMPLETED)?))
+    );
+    pass(&setup).await?;
+    let (failures, open, retry_at, _) = circuit(&setup, "pool-gl-mac").await?;
+    assert_eq!(
+        (failures, open, retry_at),
+        (0, false, None),
+        "a completed runner clears the failures"
+    );
+
+    assert_eq!(
+        exit_reason(78)?,
+        missing,
+        "the published name of exit 78 (EX_CONFIG)"
+    );
     setup.finish().await
 }
 
