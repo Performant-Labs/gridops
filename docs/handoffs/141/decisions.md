@@ -186,3 +186,6 @@
   - `npm run build`, `npm run lint` and `npx tsc --noEmit`: exit 0.
   - `cargo test -p gridops-api gitlab` (34 + 3) and `runner` (11 + 2 + 19): passed.
   - `cargo fmt --check -p gridops-api`: exit 0.
+
+## A phase 7 (anti-duplication gate), 2026-11-20
+PASS. GitLab extends the existing descriptor, registry, connections section, targets and webhooks objects; no parallel path. One warn: hardcoded `OTHER_PLATFORM_KINDS` in `gitlab.tsx`, consistent with the Bitbucket pattern.
