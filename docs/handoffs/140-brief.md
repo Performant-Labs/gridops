@@ -322,8 +322,8 @@ The module is not behind `test-support`: production code in both crates calls it
 ### Rules (one SQL statement per `record_gitlab_job` call, `INSERT ... ON CONFLICT(connection_id, job_id) DO UPDATE ... WHERE ...`)
 
 - **Tiers** (`status_tier`): 0 = `created`, `waiting_for_resource`, `preparing`, `manual`, `scheduled`; 1 = `pending`; 2 = `running`; 3 = `success`, `failed`, `canceled`, `skipped`; `None` = `unknown`. An `unknown` status writes nothing and returns `Ignored`.
-- **New row:** a new UUID v4 `id`, `tag_list` = the given tags (serde JSON) or `[]`, `gitlab_runner_id` as given, `pool_id` NULL. The function never writes `pool_id`.
-- **Status:** `status` and `status_changed_at` (with `pipeline_id` and `retries_count`) change only when the stored row is not terminal **and** either the incoming tier is higher, or the tiers are equal and `incoming_at > stored_at` (`status_write_applies`). Result: `StatusApplied`.
+- **New row:** a new UUID v4 `id`, `retries_count` = the given value or 0, `tag_list` = the given tags (serde JSON) or `[]`, `gitlab_runner_id` as given, `pool_id` NULL. The function never writes `pool_id`.
+- **Status:** `status` and `status_changed_at` (with `pipeline_id`, and `retries_count` when it is `Some`) change only when the stored row is not terminal **and** either the incoming tier is higher, or the tiers are equal and `incoming_at > stored_at` (`status_write_applies`). Result: `StatusApplied`.
 - **`gitlab_runner_id`:** `COALESCE(stored, incoming)`. Whichever writer learns it first sets it, and nothing clears or overwrites it. It is filled even when the status write is rejected, as long as the stored row is not terminal. Result: `FilledOnly` when only a fill happened.
 - **`tag_list`:** replaced only by `Some` non-empty tags, never overwritten with `[]`. It is filled the same way on a rejected status write when the stored value is `[]` and the row is not terminal.
 - **A terminal row never changes**, in any column.
@@ -359,4 +359,4 @@ The webhook tests in `gridops-api` still cover the Done-when list end to end.
 
 #148 calls `record_gitlab_job` and `set_gitlab_runner_busy` and keeps no SQL of its own for these writes. Until #140 merges, #148 may stub against these exact signatures. Whichever merges second removes its local copy.
 
-- The poll concludes a job only from a  lookup (a  answer concludes it ), and clears busy through .
+- The poll concludes a job only from a `GitLabApi::job` lookup (a `NotFound` answer concludes it `canceled`), and clears busy through `set_gitlab_runner_busy`.
