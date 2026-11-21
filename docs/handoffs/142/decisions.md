@@ -170,3 +170,16 @@ Verdict PASS: gitlab.rs and the image script are brief-mandated; all other chang
   - `handoff-T-red.md`: the mutation tables;
   - `evidence.md`, "T (Phase 4, RED, second run)": `persist_record`'s `.json.tmp`, the waiter's `code()` guard, and the `std` doc on signal exits;
   - the test runs: `cargo test -p gridops-tart-agent` 52/52 on 4 runs, `cargo fmt --check` clean, and CI's 1.98.1 clippy line clean.
+
+## F (Phase 5, implement against RED, second run): 2026-11-20T17:18:44-08:00
+- **Decided:** I made no production change. Every behaviour T's second-run additions pin is already in the existing implementation:
+  - `gitlab.rs:94-101` refuses `"` and `\`.
+  - `gitlab.rs:167` matches the "received" line.
+  - `main.rs:1899-1901` quotes with `'\''`.
+  - `main.rs:1843` records a code only when `code()` returns one.
+  - `main.rs:1861-1870` logs a persist failure and carries on, so `tart stop` still runs.
+
+  Following A's finding 8, nothing was rewritten.
+- **Assumed:** T's mutation table is a valid RED for this run, given that the code already exists (handoff-T-red.md).
+- **Hedged:** none. NV-1 and the 300 s mid-run refusal delay are carried over unchanged as known issues.
+- **Evidence:** `cargo test -p gridops-tart-agent` passed 52/52 on 3 consecutive runs. `cargo fmt --check` is clean, CI's 1.98.1 clippy line is clean, and `bash -n` and shellcheck pass on the image script.
