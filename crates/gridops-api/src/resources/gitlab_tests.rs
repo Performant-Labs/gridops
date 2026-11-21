@@ -2184,3 +2184,124 @@ async fn the_pool_list_carries_each_pools_gitlab_connections_in_detail_order_and
     );
     Ok(())
 }
+
+/// #169: the runners list says which pool scope each runner's pool has and,
+/// for a GitLab runner, its connection's name, so the runner row can take its
+/// destination from the platform that owns the pool's scope. A GitHub
+/// runner's connection name is an explicit null.
+#[tokio::test]
+async fn the_runners_list_carries_each_runners_pool_scope_and_gitlab_connection_name() -> Result<()>
+{
+    let h = harness().await?;
+    h.seed_connection(CONNECTION_1, GITLAB, group(7, "acme/platform")?)
+        .await?;
+    h.seed_pool(GITLAB_POOL, "gitlab-pool", "gitlab", &[CONNECTION_1])
+        .await?;
+    h.seed_runner("runner-gitlab", GITLAB_POOL, Some(CONNECTION_1), Some(77))
+        .await?;
+    h.seed_pool(ORG_POOL, "org-pool", "organization", &[])
+        .await?;
+    sqlx::query("INSERT INTO runners (id,pool_id,name,provider,status,busy,ci_platform,github_runner_id,created_at,updated_at) VALUES ('runner-github',?,'runner-github','docker','idle',0,'github',5,2,2)")
+        .bind(ORG_POOL)
+        .execute(&h.database)
+        .await?;
+
+    let (status, body) = h.as_admin(Method::GET, "/api/v1/runners", None).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"]
+        .as_array()
+        .context("the runners list has items")?;
+    let runner = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .cloned()
+            .with_context(|| format!("{id} is listed: {body}"))
+    };
+
+    let gitlab = runner("runner-gitlab")?;
+    assert_eq!(gitlab.get("poolScope"), Some(&json!("gitlab")), "{gitlab}");
+    assert_eq!(
+        gitlab.get("gitlabConnectionName"),
+        Some(&json!(format!("seeded {CONNECTION_1}"))),
+        "{gitlab}"
+    );
+
+    let github = runner("runner-github")?;
+    assert_eq!(
+        github.get("poolScope"),
+        Some(&json!("organization")),
+        "{github}"
+    );
+    assert_eq!(
+        github.get("gitlabConnectionName"),
+        Some(&Value::Null),
+        "gitlabConnectionName is present and null on a GitHub runner: {github}"
+    );
+    Ok(())
+}
+
+/// #169: the pool list's `totalRunners` counts a pool's live runners only: 0
+/// for a pool with no runners (the LEFT JOIN's NULL row is not a runner), and
+/// a deleted runner is not counted.
+#[tokio::test]
+async fn the_pool_list_counts_no_runners_for_an_empty_pool_and_only_live_runners_otherwise()
+-> Result<()> {
+    const EMPTY_POOL: &str = "c1000000-0000-4000-8000-000000000010";
+    const TWO_RUNNER_POOL: &str = "c1000000-0000-4000-8000-000000000011";
+    const DELETED_RUNNER_POOL: &str = "c1000000-0000-4000-8000-000000000012";
+    let h = harness().await?;
+    for (pool_id, name) in [
+        (EMPTY_POOL, "empty-pool"),
+        (TWO_RUNNER_POOL, "two-runner-pool"),
+        (DELETED_RUNNER_POOL, "deleted-runner-pool"),
+    ] {
+        h.seed_pool(pool_id, name, "organization", &[]).await?;
+    }
+    for (runner_id, pool_id, deleted_at) in [
+        ("runner-a", TWO_RUNNER_POOL, None),
+        ("runner-b", TWO_RUNNER_POOL, None),
+        ("runner-live", DELETED_RUNNER_POOL, None),
+        ("runner-gone", DELETED_RUNNER_POOL, Some(3_i64)),
+    ] {
+        sqlx::query("INSERT INTO runners (id,pool_id,name,provider,status,busy,ci_platform,deleted_at,created_at,updated_at) VALUES (?,?,?,'docker','idle',0,'github',?,2,2)")
+            .bind(runner_id)
+            .bind(pool_id)
+            .bind(runner_id)
+            .bind(deleted_at)
+            .execute(&h.database)
+            .await?;
+    }
+
+    let (status, body) = h
+        .as_admin(Method::GET, "/api/v1/runner-pools", None)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"]
+        .as_array()
+        .context("the pool list has items")?;
+    let total_runners = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .map(|item| item["totalRunners"].clone())
+            .with_context(|| format!("{id} is listed: {body}"))
+    };
+
+    assert_eq!(
+        total_runners(EMPTY_POOL)?,
+        json!(0),
+        "a pool with no runners"
+    );
+    assert_eq!(
+        total_runners(TWO_RUNNER_POOL)?,
+        json!(2),
+        "a pool with two live runners"
+    );
+    assert_eq!(
+        total_runners(DELETED_RUNNER_POOL)?,
+        json!(1),
+        "a pool with one live and one deleted runner"
+    );
+    Ok(())
+}
