@@ -857,7 +857,15 @@ pub async fn pool_targets(pool: &SqlitePool, pool_id: &str) -> Result<Vec<String
         .fetch_optional(pool)
         .await?
         .ok_or(FleetError::NotFound)?;
-    if row.get::<String, _>("scope") == "repository" {
+    let scope = row.get::<String, _>("scope");
+    if scope == "gitlab" {
+        // A GitLab pool's `installation_id` anchors ownership and access only:
+        // it never makes a GitHub target. GitLab targets are admitted by #139,
+        // which fills this arm with the pool's `gitlab_project`/`gitlab_group`
+        // targets; until then a GitLab pool has none.
+        return Ok(Vec::new());
+    }
+    if scope == "repository" {
         let repositories = sqlx::query(
             "SELECT r.id,r.installation_id FROM runner_pool_repositories pr
                JOIN repositories r ON r.id=pr.repository_id WHERE pr.pool_id=?",
