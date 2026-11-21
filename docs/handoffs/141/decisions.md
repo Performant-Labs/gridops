@@ -174,3 +174,15 @@
   - `cargo fmt --check -p gridops-api`: exit 0.
   - `cargo clippy -p gridops-api -- -D warnings` (with `-A clippy::unused_async_trait_impl`): clean.
   - Source facts are in docs/handoffs/141/evidence.md.
+
+## T (Tester, Phase 7 GREEN) - 2026-11-20
+- **Decided:**
+  - Repaired the wrong test stub myself (test-only): in `tests/connections-page.test.ts` the GitLab list stub now follows `bitbucketList.canManage`. Production was correct.
+  - Verdict PASS: no production change is needed.
+- **Assumed:** the `release_preflight` failure in `cargo test -p gridops-api` is environmental (the test needs a host with no macOS ARM64 machine, and this host is one). The change touches nothing it reads.
+- **Hedged:** no live-browser check was run (headless-first, and U owns it). jsdom tests cannot see real client init, so U should walk the connection form, the reveal, both pool forms and the deliveries page.
+- **Evidence:**
+  - `npx vitest run`: 51 files, 548 tests, all passed.
+  - `npm run build`, `npm run lint` and `npx tsc --noEmit`: exit 0.
+  - `cargo test -p gridops-api gitlab` (34 + 3) and `runner` (11 + 2 + 19): passed.
+  - `cargo fmt --check -p gridops-api`: exit 0.

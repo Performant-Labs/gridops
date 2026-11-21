@@ -79,8 +79,9 @@ let bitbucketList: { canManage: boolean; items: BitbucketConnection[] };
 function apiFetch(url: string, init?: RequestInit) {
   const method = init?.method ?? "GET";
   if (method === "GET" && url === BITBUCKET_URL) return Response.json(bitbucketList);
-  // GitLab (#141) is registered too; these tests keep its list empty.
-  if (method === "GET" && url === "/api/v1/platform-connections/gitlab") return Response.json({ canManage: true, items: [] });
+  // GitLab (#141) is registered too; these tests keep its list empty and give it the same per-role
+  // permission as the Bitbucket list, since the server reports canManage per user, not per platform.
+  if (method === "GET" && url === "/api/v1/platform-connections/gitlab") return Response.json({ canManage: bitbucketList.canManage, items: [] });
   if (method === "POST" && url === BITBUCKET_URL) return Response.json({ id: "new-1", provider: "bitbucket", name: "Web platform", workspace: "acme-web", workspaceUuid: "{acme-web}" }, { status: 201 });
   if ((method === "PUT" || method === "DELETE") && url === `${BITBUCKET_URL}/${MOBILE.id}`) return method === "PUT" ? Response.json(MOBILE) : new Response(null, { status: 204 });
   if (method === "POST" && url === "/api/v1/repositories/sync") return Response.json({ repositories: 4 });
