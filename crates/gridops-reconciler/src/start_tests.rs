@@ -427,6 +427,7 @@ impl Setup {
             config,
             database,
             bitbucket: BitbucketClient::new()?,
+            gitlab: Arc::new(crate::gitlab_poll::UnavailableGitLab),
             vault,
             http: reqwest::Client::new(),
             pass: Arc::default(),

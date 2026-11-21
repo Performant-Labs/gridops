@@ -75,6 +75,17 @@ macro_rules! pool_platforms {
     };
 }
 
+/// A pool's room for queued jobs: `max_count` less its busy runners, counted
+/// as the reconciler counts them (not deleted and in an active status).
+/// Correlated on the pool as `candidate`; binds nothing.
+macro_rules! pool_room {
+    () => {
+        "candidate.max_count-(SELECT COUNT(*) FROM runners runner
+            WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
+              AND runner.status IN ('starting','online','idle','busy','paused','stopped'))"
+    };
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderCapacity {
     pub provider: String,
@@ -214,21 +225,30 @@ pub fn scale_up_target(desired: i64, busy: i64, queued: i64, factor: i64, maximu
     maximum.min(desired.max(busy.saturating_add(queued.saturating_mul(factor))))
 }
 
+/// How many queued jobs this pool owns, GitHub and GitLab alike: the demand
+/// the scaler sizes the pool for. See [`queued_job_owners`].
 pub async fn assigned_queued_jobs(
     database: &SqlitePool,
     pool_id: &str,
 ) -> Result<i64, sqlx::Error> {
-    let owned = owned_queued_jobs(database, pool_id).await?;
-    Ok(i64::try_from(owned.len()).unwrap_or(i64::MAX))
+    let owned = queued_job_owners(database)
+        .await?
+        .into_iter()
+        .filter(|owner| owner.pool_id == pool_id)
+        .count();
+    Ok(i64::try_from(owned).unwrap_or(i64::MAX))
 }
 
-/// Ids of the queued jobs this pool owns, oldest first; see
-/// [`queued_job_owners`].
+/// Ids of the queued GitHub jobs this pool owns, oldest first; see
+/// [`queued_job_owners`]. GitLab jobs it owns are left out: every view built
+/// from this is keyed by GitHub job and repository ids.
 async fn owned_queued_jobs(database: &SqlitePool, pool_id: &str) -> Result<Vec<i64>, sqlx::Error> {
     Ok(queued_job_owners(database)
         .await?
         .into_iter()
-        .filter_map(|owner| (owner.pool_id == pool_id).then_some(owner.job_id))
+        .filter(|owner| owner.pool_id == pool_id)
+        .filter_map(KeyedJobOwner::github)
+        .map(|owner| owner.job_id)
         .collect())
 }
 
@@ -242,14 +262,53 @@ pub struct QueuedJobOwner {
     pub over_capacity: bool,
 }
 
-/// The owner of every queued job that has one, oldest job first. A queued job
-/// missing from the result has no unpaused autoscaling pool that serves its
-/// repository and can run its labels. This is the ownership the scaler uses
-/// ([`queued_job_owners`]); read it rather than matching labels again.
+/// The owner of every queued GitHub job that has one, oldest job first. A
+/// queued job missing from the result has no unpaused autoscaling pool that
+/// serves its repository and can run its labels. This is the ownership the
+/// scaler uses ([`queued_job_owners`]); read it rather than matching labels
+/// again. GitLab jobs are owned the same way (and use up room ahead of later
+/// GitHub jobs) but are not listed here.
 pub async fn queued_job_ownership(
     database: &SqlitePool,
 ) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
-    queued_job_owners(database).await
+    Ok(queued_job_owners(database)
+        .await?
+        .into_iter()
+        .filter_map(KeyedJobOwner::github)
+        .collect())
+}
+
+/// A queued job's identity across platforms. GitHub job ids and GitLab job
+/// ids are separate id spaces, and a GitLab job id is unique only on its
+/// GitLab instance, so a GitLab job is keyed by its instance's `base_url`.
+/// One job recorded under two connections of one instance (a project's and
+/// its group's) is one key. The derived order (GitHub before GitLab, then the
+/// id) breaks ties between jobs queued at the same moment.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+enum QueuedJobKey {
+    Github(i64),
+    Gitlab { base_url: String, job_id: i64 },
+}
+
+/// The pool that counts a queued job of either platform.
+struct KeyedJobOwner {
+    job: QueuedJobKey,
+    pool_id: String,
+    over_capacity: bool,
+}
+
+impl KeyedJobOwner {
+    /// The public owner of a GitHub job; `None` for a GitLab job.
+    fn github(self) -> Option<QueuedJobOwner> {
+        match self.job {
+            QueuedJobKey::Github(job_id) => Some(QueuedJobOwner {
+                job_id,
+                pool_id: self.pool_id,
+                over_capacity: self.over_capacity,
+            }),
+            QueuedJobKey::Gitlab { .. } => None,
+        }
+    }
 }
 
 /// The one pool that counts each queued job, oldest job first. Every view of
@@ -274,7 +333,12 @@ pub async fn queued_job_ownership(
 /// an older one; a pool near its limit only gains or loses jobs when its own
 /// busy count, the queue or a pool's settings change, so ownership can't
 /// alternate between ticks on its own.
-async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<QueuedJobOwner>, sqlx::Error> {
+///
+/// Pending GitLab jobs are owned by the same rule, in the same ordered list
+/// (see [`queued_job_candidates`]), so they take room in a pool they share
+/// with GitHub jobs. Only [`assigned_queued_jobs`] counts them; every other
+/// view lists GitHub jobs only.
+async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<KeyedJobOwner>, sqlx::Error> {
     let candidates = queued_job_candidates(database, false).await?;
     Ok(assign_queued_jobs(
         candidates
@@ -386,30 +450,48 @@ pub struct WaitingJobPools {
 /// starts a runner for it. A job missing from the result, or with no owner,
 /// has no pool that will run it: none has its labels, or every one that does
 /// is paused or has an open circuit.
+///
+/// GitLab jobs waiting to start (`pending`, and for display `created`,
+/// `waiting_for_resource` and `preparing`) take room as GitHub jobs do, so a
+/// GitHub job behind them is shown under the pool that will run it, but they
+/// are not listed.
 pub async fn waiting_job_pools(database: &SqlitePool) -> Result<Vec<WaitingJobPools>, sqlx::Error> {
     let candidates = queued_job_candidates(database, true).await?;
     let mut owners = assign_queued_jobs(
         candidates
             .iter()
             .filter(|candidate| candidate.standing == PoolStanding::Scales)
-            .map(|candidate| (candidate.job, candidate.pool.clone(), candidate.room)),
+            .map(|candidate| {
+                (
+                    candidate.job.clone(),
+                    candidate.pool.clone(),
+                    candidate.room,
+                )
+            }),
     )
     .into_iter()
-    .map(|owner| (owner.job_id, owner))
+    .map(|owner| (owner.job.clone(), owner))
     .collect::<std::collections::HashMap<_, _>>();
     let mut jobs = Vec::<WaitingJobPools>::new();
     for candidate in candidates {
-        if jobs.last().is_none_or(|last| last.job_id != candidate.job) {
+        // GitLab jobs took their room above; the list itself is GitHub's.
+        let QueuedJobKey::Github(job_id) = candidate.job else {
+            continue;
+        };
+        if jobs.last().is_none_or(|last| last.job_id != job_id) {
             jobs.push(WaitingJobPools {
-                job_id: candidate.job,
-                owner: owners.remove(&candidate.job).map(WaitingJobOwner::Scaling),
+                job_id,
+                owner: owners
+                    .remove(&candidate.job)
+                    .and_then(KeyedJobOwner::github)
+                    .map(WaitingJobOwner::Scaling),
                 matching: Vec::new(),
             });
         }
         let Some(job) = jobs.last_mut() else { continue };
         if job.owner.is_none() && candidate.standing == PoolStanding::Manual {
             job.owner = Some(WaitingJobOwner::Manual {
-                job_id: candidate.job,
+                job_id,
                 pool_id: candidate.pool.clone(),
             });
         }
@@ -437,27 +519,69 @@ pub async fn waiting_job_ownership(
 
 /// A pool that could run a queued job, with the room it has left.
 struct QueuedJobCandidate {
-    job: i64,
+    job: QueuedJobKey,
+    /// When the job was queued: the list is ordered by it first.
+    queued_at: i64,
     pool: String,
     room: i64,
     standing: PoolStanding,
 }
 
-/// Every (job, pool) pair where the pool serves the job's repository and can
-/// run its labels, whatever its mode or pause, each job's pools together in
-/// the order [`queued_job_owners`] prefers them. With
-/// `every_waiting_status`, jobs that are `waiting`, `pending` or `requested`
-/// are included as well as `queued` ones.
+impl QueuedJobCandidate {
+    fn from_row(job: QueuedJobKey, row: &sqlx::sqlite::SqliteRow) -> Self {
+        Self {
+            job,
+            queued_at: row.get::<i64, _>("queued_at"),
+            pool: row.get::<String, _>("pool_id"),
+            room: row.get::<i64, _>("room"),
+            standing: PoolStanding::of(
+                row.get::<bool, _>("paused"),
+                row.get::<bool, _>("autoscaling_enabled"),
+                row.get::<bool, _>("circuit_open"),
+            ),
+        }
+    }
+}
+
+/// Every (job, pool) pair where the pool serves the job's repository (for a
+/// GitLab job, its connection) and can run its labels, whatever its mode or
+/// pause, each job's pools together in the order [`queued_job_owners`]
+/// prefers them. GitHub and GitLab jobs form one list, ordered by when they
+/// were queued, then GitHub before GitLab, then by job ([`QueuedJobKey`]).
+///
+/// GitHub jobs are `queued`; with `every_waiting_status`, jobs that are
+/// `waiting`, `pending` or `requested` are included as well. GitLab jobs are
+/// `pending`; with `every_waiting_status`, `created`, `waiting_for_resource`
+/// and `preparing` ones as well (see [`gitlab_job_candidates`]).
 async fn queued_job_candidates(
     database: &SqlitePool,
     every_waiting_status: bool,
 ) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
+    let mut candidates = github_job_candidates(database, every_waiting_status).await?;
+    let gitlab = gitlab_job_candidates(database, every_waiting_status).await?;
+    if !gitlab.is_empty() {
+        candidates.extend(gitlab);
+        // Stable, so each job's pools keep their order and stay together.
+        candidates.sort_by(|left, right| {
+            left.queued_at
+                .cmp(&right.queued_at)
+                .then_with(|| left.job.cmp(&right.job))
+        });
+    }
+    Ok(candidates)
+}
+
+/// [`queued_job_candidates`] for GitHub jobs, ordered as it orders them.
+async fn github_job_candidates(
+    database: &SqlitePool,
+    every_waiting_status: bool,
+) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
     let rows = sqlx::query(concat!(
-        r#"SELECT wj.id AS job_id,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
+        r#"SELECT wj.id AS job_id,wj.created_at AS queued_at,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
           candidate.paused,candidate.autoscaling_enabled,
-          candidate.max_count-(SELECT COUNT(*) FROM runners runner
-            WHERE runner.pool_id=candidate.id AND runner.deleted_at IS NULL AND runner.busy=1
-              AND runner.status IN ('starting','online','idle','busy','paused','stopped')) AS room
+          "#,
+        pool_room!(),
+        r#" AS room
           FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
@@ -498,16 +622,87 @@ async fn queued_job_candidates(
     .fetch_all(database)
     .await?;
     Ok(rows
-        .into_iter()
-        .map(|row| QueuedJobCandidate {
-            job: row.get::<i64, _>("job_id"),
-            pool: row.get::<String, _>("pool_id"),
-            room: row.get::<i64, _>("room"),
-            standing: PoolStanding::of(
-                row.get::<bool, _>("paused"),
-                row.get::<bool, _>("autoscaling_enabled"),
-                row.get::<bool, _>("circuit_open"),
-            ),
+        .iter()
+        .map(|row| QueuedJobCandidate::from_row(QueuedJobKey::Github(row.get("job_id")), row))
+        .collect())
+}
+
+/// [`queued_job_candidates`] for GitLab jobs (#148), ordered as it orders
+/// them.
+///
+/// - Only the active statuses are read, with the `IN` list of the partial
+///   index `gitlab_jobs_active_created_idx` verbatim, so the scan uses it;
+///   `manual`, `scheduled`, `unknown` and finished jobs are never read.
+/// - One job recorded under several connections of one GitLab instance (a
+///   project connection and its group's) is one job, keyed by the
+///   instance's `base_url` and the job id. It was queued when it was first
+///   recorded, it carries the tags any of its rows has, and its status is the
+///   furthest along of its rows: `running` (#140 has marked its runner busy,
+///   which room counts), then `pending`, then the waiting statuses.
+/// - Scaler demand is `pending` only; with `every_waiting_status`, `created`,
+///   `waiting_for_resource` and `preparing` jobs are included for display.
+/// - A job's pools are those linked to any of its connections through
+///   `runner_pool_gitlab_connections`, that run on some platform, and whose
+///   configured labels include every job tag, ignoring case. GitLab runners
+///   are registered with exactly their pool's configured labels, so no
+///   system, platform or catch-all label is implied, and an exclusive pool is
+///   matched like any other. An untagged job matches only pools that run
+///   untagged jobs.
+async fn gitlab_job_candidates(
+    database: &SqlitePool,
+    every_waiting_status: bool,
+) -> Result<Vec<QueuedJobCandidate>, sqlx::Error> {
+    let rows = sqlx::query(concat!(
+        r#"WITH job AS (
+            SELECT connection.base_url,gj.job_id,MIN(gj.created_at) AS queued_at,
+              MAX(CASE gj.status WHEN 'running' THEN 2 WHEN 'pending' THEN 1 ELSE 0 END) AS tier,
+              COALESCE(MAX(CASE WHEN gj.tag_list<>'[]' THEN gj.tag_list END),'[]') AS tag_list,
+              json_group_array(gj.connection_id) AS connections
+            FROM gitlab_jobs gj
+            JOIN gitlab_connections connection ON connection.id=gj.connection_id
+            WHERE gj.status IN ('created','waiting_for_resource','preparing','pending','running')
+            GROUP BY connection.base_url,gj.job_id
+          )
+          SELECT job.base_url,job.job_id,job.queued_at,candidate.id AS pool_id,candidate.provision_circuit_open AS circuit_open,
+          candidate.paused,candidate.autoscaling_enabled,
+          "#,
+        pool_room!(),
+        r#" AS room
+          FROM job
+          JOIN runner_pools candidate ON EXISTS (
+              SELECT 1 FROM runner_pool_gitlab_connections link
+              WHERE link.pool_id=candidate.id
+                AND link.connection_id IN (SELECT value FROM json_each(job.connections))
+            ) AND EXISTS (SELECT 1 FROM ("#,
+        pool_platforms!(),
+        r#") platform)
+            AND CASE WHEN json_array_length(job.tag_list)=0 THEN candidate.run_untagged=1
+              ELSE NOT EXISTS (
+                SELECT 1 FROM json_each(job.tag_list) requested
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM json_each(candidate.labels) assigned
+                  WHERE lower(CAST(assigned.value AS TEXT))=lower(CAST(requested.value AS TEXT))
+                )
+              ) END
+          WHERE job.tier=1 OR (? AND job.tier=0)
+          ORDER BY job.queued_at,job.base_url,job.job_id,
+            CASE WHEN candidate.scope='repository' THEN 0 ELSE 1 END,
+            candidate.created_at,candidate.id"#
+    ))
+    .bind(runner_arch_label())
+    .bind(every_waiting_status)
+    .fetch_all(database)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            QueuedJobCandidate::from_row(
+                QueuedJobKey::Gitlab {
+                    base_url: row.get("base_url"),
+                    job_id: row.get("job_id"),
+                },
+                row,
+            )
         })
         .collect())
 }
@@ -562,10 +757,10 @@ pub async fn pool_platform_labels(
 /// `candidates` holds `(job, pool, room)` with each job's rows together, jobs
 /// oldest first and each job's pools in order.
 fn assign_queued_jobs(
-    candidates: impl IntoIterator<Item = (i64, String, i64)>,
-) -> Vec<QueuedJobOwner> {
+    candidates: impl IntoIterator<Item = (QueuedJobKey, String, i64)>,
+) -> Vec<KeyedJobOwner> {
     let mut room = std::collections::HashMap::<String, i64>::new();
-    let mut jobs = Vec::<(i64, Vec<String>)>::new();
+    let mut jobs = Vec::<(QueuedJobKey, Vec<String>)>::new();
     for (job, pool, pool_room) in candidates {
         room.entry(pool.clone()).or_insert(pool_room);
         match jobs.last_mut() {
@@ -583,8 +778,8 @@ fn assign_queued_jobs(
             if let Some(room) = room.get_mut(&owner) {
                 *room -= 1;
             }
-            Some(QueuedJobOwner {
-                job_id: job,
+            Some(KeyedJobOwner {
+                job,
                 pool_id: owner,
                 over_capacity,
             })
@@ -1794,3 +1989,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "autoscaling_gitlab_tests.rs"]
+mod gitlab_tests;
