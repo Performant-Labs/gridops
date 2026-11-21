@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>#141 GitLab in the shared connections and targets UI - low-fi wireframe</title>
+<style>
+  :root { --bg:#f4f4f6; --panel:#fff; --sub:#f7f7f9; --fg:#1b1c1f; --mut:#6b6f76; --faint:#9b9ea4; --bd:#e7e7ea; --bd2:#d9d9dd; --hover:#efeff2; --ok:#3da873; --warn:#d99a18; --bad:#e5484d; --info:#3b8fe8; --note:#fff7d6; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 32px 80px; background:#e9eaee; color:var(--fg); font:13px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .lede { color:var(--mut); max-width:900px; margin:0 0 18px; }
+  .toc { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 24px; }
+  .toc a { color:var(--fg); background:#fff; border:1px solid var(--bd2); border-radius:12px; padding:2px 10px; text-decoration:none; font-size:12px; }
+  .frame { margin:0 0 40px; }
+  .frame > h2 { font-size:15px; margin:0 0 8px; padding-bottom:4px; border-bottom:2px solid #c9cad1; }
+  .frame > h2 small { color:var(--mut); font-weight:400; margin-left:8px; }
+  .cols { display:grid; grid-template-columns:minmax(0,760px) minmax(260px,1fr); gap:20px; align-items:start; }
+  .screens { display:flex; flex-direction:column; gap:16px; }
+  .sub-h { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:0 0 4px; font-weight:600; }
+  .screen { background:var(--bg); border:1px solid var(--bd2); border-radius:8px; padding:20px 24px; position:relative; }
+  .screen.tight { padding:14px; }
+  .notes { margin:0; padding:0; list-style:none; font-size:12px; color:#333; }
+  .notes li { position:relative; padding:0 0 8px 28px; }
+  .notes li > .n { position:absolute; left:0; top:0; }
+  .notes b { font-weight:600; }
+  .n { display:inline-flex; align-items:center; justify-content:center; width:17px; height:17px; border-radius:50%; background:#c2410c; color:#fff; font-size:10px; font-weight:700; vertical-align:middle; flex:none; }
+  .copy { background:var(--note); box-shadow:0 0 0 1px #ecd98a; border-radius:2px; }
+  .empty .t.copy, .empty .d.copy { display:block; width:fit-content; margin-left:auto; margin-right:auto; }
+  h3.pt { font-size:22px; margin:0 0 4px; font-weight:600; letter-spacing:-.015em; }
+  p.pd { margin:0 0 16px; color:var(--mut); max-width:58ch; }
+  .head { display:flex; justify-content:space-between; align-items:flex-end; gap:12px; margin-bottom:20px; }
+  .sec { margin-bottom:22px; }
+  .sec > .st { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:6px; }
+  .sec > .st h4 { margin:0; font-size:14px; font-weight:600; }
+  .sec > .st p { margin:1px 0 0; color:var(--mut); font-size:12px; }
+  .panel { background:var(--panel); border:1px solid var(--bd); border-radius:8px; overflow:visible; }
+  .panel > * + * { border-top:1px solid var(--bd); }
+  .panel > :first-child { border-radius:8px 8px 0 0; } .panel > :last-child { border-radius:0 0 8px 8px; }
+  .row { display:flex; align-items:center; gap:12px; padding:10px 14px; }
+  .row.top { align-items:flex-start; }
+  .row .grow { flex:1; min-width:0; }
+  .row .t { font-weight:600; font-size:13px; } .row .d { color:var(--mut); font-size:12px; margin-top:1px; }
+  .stack { flex-direction:column; align-items:stretch; gap:8px; }
+  .ctl { width:300px; flex:none; }
+  .btn { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:4px 10px; font-size:12.5px; white-space:nowrap; }
+  .btn.p { background:#1b1c1f; color:#fff; border-color:#1b1c1f; }
+  .btn.g { border-color:transparent; background:transparent; color:#333; }
+  .btn.dis { opacity:.45; }
+  .btn.sm { padding:2px 8px; font-size:12px; }
+  .input { border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:5px 9px; color:#444; font-size:12.5px; min-height:28px; }
+  .input.ph { color:var(--faint); } .input.err { border-color:var(--bad); }
+  .input.mono { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .lbl { font-size:12px; font-weight:600; margin-bottom:3px; display:block; }
+  .badge { display:inline-flex; align-items:center; gap:4px; border:1px solid var(--bd2); border-radius:5px; padding:0 6px; font-size:11px; background:#fff; white-space:nowrap; }
+  .badge.gh { background:#f0f0f3; } .badge.bb { background:#e8f0ff; border-color:#b6ccf5; color:#1d4ed8; } .badge.unk { border-style:dashed; color:var(--mut); }
+  .badge.bad { color:var(--bad); border-color:#f0b4b6; background:#fdecec; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); } .dot.w { background:var(--warn); } .dot.b { background:var(--bad); }
+  .av { width:28px; height:28px; border-radius:6px; background:#d7d8de; display:flex; align-items:center; justify-content:center; font-weight:600; color:#555; flex:none; }
+  .faint { color:var(--faint); font-size:12px; } .mut { color:var(--mut); }
+  .callout { border:1px solid var(--bd2); border-radius:6px; background:#fff; padding:8px 12px; font-size:12px; }
+  .callout b { display:block; font-size:12.5px; }
+  .callout.danger { border-color:#f0b4b6; background:#fdecec; } .callout.info { border-color:#b6ccf5; background:#eef4ff; } .callout.warn { border-color:#ecd98a; background:#fff9e2; }
+  .empty { text-align:center; padding:26px 16px; } .empty .big { font-size:24px; color:var(--faint); } .empty .t { font-weight:600; margin-top:4px; } .empty .d { color:var(--mut); max-width:46ch; margin:3px auto 12px; }
+  .chip { display:inline-flex; align-items:center; gap:5px; background:#eceef4; border:1px solid var(--bd2); border-radius:12px; padding:1px 4px 1px 8px; font-size:12px; margin:0 4px 4px 0; }
+  .chip i { font-style:normal; color:var(--mut); padding:0 3px; }
+  .chip.lock { background:#f3f3f5; color:var(--mut); padding-right:8px; }
+  .trigger { border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:5px 9px; display:flex; justify-content:space-between; align-items:flex-start; min-height:32px; }
+  .listbox { border:1px solid var(--bd2); background:#fff; border-radius:8px; box-shadow:0 6px 18px rgb(0 0 0 / .12); margin-top:4px; overflow:hidden; }
+  .lb-s { padding:7px 10px; border-bottom:1px solid var(--bd); color:var(--faint); }
+  .gh-h { padding:5px 10px 3px; font-size:11px; font-weight:600; color:var(--mut); background:var(--sub); border-top:1px solid var(--bd); display:flex; justify-content:space-between; }
+  .gh-h:first-of-type { border-top:0; }
+  .opt { padding:5px 10px; display:flex; gap:8px; align-items:flex-start; }
+  .opt .ck { width:14px; color:var(--ok); font-weight:700; } .opt .d { color:var(--mut); font-size:11.5px; }
+  .opt.sel { background:#f3f6ff; } .opt.dim { opacity:.5; } .opt.act { background:var(--hover); }
+  .opt .why { color:var(--bad); font-size:11px; margin-left:auto; white-space:nowrap; }
+  .gstatus { padding:6px 10px 6px 32px; font-size:12px; color:var(--mut); display:flex; gap:8px; align-items:center; }
+  .lb-f { border-top:1px solid var(--bd); padding:5px 10px; font-size:11.5px; color:var(--mut); display:flex; justify-content:space-between; }
+  .dlg-bg { background:rgb(20 20 25 / .35); border-radius:8px; padding:26px 20px; display:flex; justify-content:center; }
+  .dlg { background:#fff; border:1px solid var(--bd2); border-radius:10px; width:470px; box-shadow:0 10px 30px rgb(0 0 0 / .2); }
+  .dlg > .dh { padding:12px 16px 4px; font-size:15px; font-weight:600; } .dlg > .dp { padding:0 16px 10px; color:var(--mut); font-size:12px; }
+  .dlg > .db { padding:6px 16px 12px; } .dlg > .df { padding:10px 16px; border-top:1px solid var(--bd); display:flex; justify-content:flex-end; gap:8px; }
+  .radio { border:1px solid var(--bd2); border-radius:8px; padding:8px 10px; display:flex; gap:10px; align-items:flex-start; margin-bottom:6px; background:#fff; }
+  .radio.on { border-color:#1b1c1f; box-shadow:0 0 0 1px #1b1c1f; } .radio .r { width:14px; height:14px; border:1.5px solid #888; border-radius:50%; margin-top:2px; flex:none; display:flex; align-items:center; justify-content:center; font-size:8px; }
+  .radio.on .r { border-color:#1b1c1f; } .radio.on .r::after { content:"●"; }
+  .secret { font-family:ui-monospace,Menlo,monospace; background:var(--sub); border:1px solid var(--bd2); border-radius:6px; padding:6px 9px; display:flex; justify-content:space-between; gap:8px; font-size:12px; }
+  .slot { border:1.5px dashed #b5b7c0; border-radius:6px; padding:8px 10px; color:var(--mut); font-size:12px; text-align:center; background:#fafafb; }
+  .disc { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; }
+  .nav { width:220px; background:#fbfbfc; border:1px solid var(--bd2); border-radius:8px; padding:8px; font-size:12.5px; }
+  .nav .g { color:var(--faint); font-size:11.5px; padding:6px 8px 2px; font-weight:600; } .nav .i { white-space:nowrap; padding:3px 8px; border-radius:5px; } .nav .i.on { background:var(--hover); font-weight:600; }
+  .nav .gone { text-decoration:line-through; color:var(--faint); }
+  .rr { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--bd); border-radius:6px; padding:7px 12px; }
+  .menu { width:230px; background:#fff; border:1px solid var(--bd2); border-radius:8px; box-shadow:0 6px 18px rgb(0 0 0 / .12); padding:4px; font-size:12.5px; }
+  .menu div { padding:4px 8px; border-radius:4px; } .menu hr { border:0; border-top:1px solid var(--bd); margin:3px 0; } .menu .new { background:var(--note); }
+  .tag { display:inline-block; font-size:10px; font-weight:700; color:#fff; background:#555; border-radius:3px; padding:0 5px; margin-left:6px; vertical-align:middle; }
+  .tag.new { background:#c2410c; } .tag.rm { background:#7c3aed; } .tag.keep { background:#4b5563; }
+  table.map { border-collapse:collapse; font-size:12px; background:#fff; } table.map td, table.map th { border:1px solid var(--bd2); padding:4px 8px; text-align:left; vertical-align:top; }
+  table.map th { background:var(--sub); }
+  .legend { background:#fff; border:1px solid var(--bd2); border-radius:8px; padding:10px 14px; max-width:900px; margin-bottom:22px; font-size:12px; }
+  .legend code, .notes code { font-family:ui-monospace,Menlo,monospace; font-size:11px; background:#eef; padding:0 3px; border-radius:3px; }
+  .sp { display:inline-block; animation:none; }
+  .badge.gl { background:#fff1e6; border-color:#f3c39a; color:#b45309; }
+  .toast { background:#1b1c1f; color:#fff; border-radius:8px; padding:9px 14px; font-size:12.5px; width:max-content; max-width:100%; box-shadow:0 6px 18px rgb(0 0 0 / .25); }
+  .toast.err { background:#3b1214; border:1px solid #7f1d1d; }
+  .toast.ok::before { content:"\2713  "; color:#6ee7a8; } .toast.err::before { content:"\2715  "; color:#fca5a5; }
+  .fe { color:var(--bad); font-size:11.5px; margin-top:3px; }
+  .sw { display:inline-block; width:30px; height:16px; border-radius:8px; background:#cfd0d6; position:relative; vertical-align:middle; }
+  .sw::after { content:""; position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:#fff; }
+  .sw.on { background:#1b1c1f; } .sw.on::after { left:16px; }
+  .sel-box { border:1px solid var(--bd2); background:#fff; border-radius:6px; padding:5px 9px; display:flex; justify-content:space-between; font-size:12.5px; }
+  .sel-box.dis { background:#f3f3f5; color:var(--mut); }
+  .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 12px; font-size:12.5px; } .kv dt { color:var(--mut); margin:0; } .kv dd { margin:0; }
+  .tag.gap { background:#0f766e; }
+</style>
+</head>
+<body>
+
+<h1>#141 &middot; GitLab in the shared connections and targets UI &mdash; low-fi wireframe</h1>
+<p class="lede">GitLab adds <b>no page, nav item or pool-form row</b>. Every frame below is an <i>existing</i> #145 surface (Settings &rarr; Connections, the Targets row, Platform options, the runner details panel, the deliveries list) drawn with GitLab content, plus the generic descriptor-contract gaps (frame I). Structure, labels, controls and per-state copy only; no final visuals. Icons are Unicode glyphs; the real GitLab badge uses the registry descriptor&rsquo;s <code>icon</code> (lucide <code>Gitlab</code>, if the installed lucide has it, else a generic fallback) and was not rendered here.</p>
+
+<div class="legend">
+  <b>Tags:</b> <span class="tag new">NEW</span> new element for GitLab &nbsp; <span class="tag keep">KEEP</span> existing element, unchanged &nbsp; <span class="tag gap">GAP</span> generic descriptor-contract extension (frame I). <span class="copy">Yellow</span> text is the exact copy to build. <b>All GitLab strings live in <code>src/features/platform-connections/gitlab.tsx</code>.</b> The brief wins on any difference.
+</div>
+
+<nav class="toc">
+  <a href="#A">A &middot; Connections list</a><a href="#B">B &middot; Add connection</a><a href="#C">C &middot; Webhook reveal + rotate</a><a href="#D">D &middot; Row actions: verify, edit, remove</a><a href="#E">E &middot; Targets row</a><a href="#F">F &middot; Platform options + labels + submit</a><a href="#G">G &middot; Runner details</a><a href="#H">H &middot; Deliveries</a><a href="#I">I &middot; Contract gaps + out of scope</a>
+</nav>
+
+<!-- ============================ A ============================ -->
+<section class="frame" id="A">
+<h2>A &middot; Settings &rarr; Connections <small>existing page; states: many &middot; one &middot; empty row &middot; read-only &middot; load error</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">A1 &middot; Many: GitHub, Bitbucket and two GitLab connections (a project and a group)</p>
+  <div class="screen"><div class="sec">
+    <div class="st"><div><h4>Connections</h4></div><span class="btn sm">&#x2B; Add connection</span></div>
+    <div class="panel">
+      <div class="row"><span class="dot"></span><div class="grow"><b>acme</b> <span class="badge gh">&#x25C9; GitHub</span><div class="d">GitHub App installation</div></div><span class="btn g sm">Configure &#x2197;</span></div>
+      <div class="row"><span class="dot"></span><div class="grow"><b>Mobile delivery</b> <span class="badge bb">&#x25C6; Bitbucket</span><div class="d">bitbucket.org/acme-mobile</div></div><span class="faint">Verified 2h ago</span><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+      <div class="row"><span class="dot"></span><div class="grow"><b>Mobile app</b> <span class="badge gl">&#x25C8; GitLab</span> <span class="badge">Project</span><div class="d copy">gitlab.com/acme/platform/mobile-app</div></div><span class="faint">Verified 5m ago</span>
+        <span class="btn g sm">Edit</span><span class="btn g sm new copy">Verify</span><span class="btn g sm copy">Rotate webhook secret</span><span class="btn g sm">Remove</span></div>
+      <div class="row"><span class="dot"></span><div class="grow"><b>Platform group</b> <span class="badge gl">&#x25C8; GitLab</span> <span class="badge">Group</span><div class="d copy">git.example.com/platform</div></div><span class="faint">Verified 1d ago</span>
+        <span class="btn g sm">Edit</span><span class="btn g sm">Verify</span><span class="btn g sm">Rotate webhook secret</span><span class="btn g sm">Remove</span></div>
+    </div></div>
+    <p class="faint" style="margin:0">Row order follows the registry (GitHub, Bitbucket, GitLab). Scope kind shows as an outline badge after the platform badge (<code>describe().badges</code>); the detail line is <code>&lt;baseUrl without scheme&gt;/&lt;scopePath&gt;</code>. Below <code>sm</code> the actions wrap under the name, as today.</p>
+  </div></div>
+
+  <div><p class="sub-h">A2 &middot; GitLab has no connections yet, another platform has some (the GitLab descriptor&rsquo;s empty row)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row"><span class="dot"></span><div class="grow"><b>Mobile delivery</b> <span class="badge bb">&#x25C6; Bitbucket</span></div><span class="btn g sm">Edit</span><span class="btn g sm">Remove</span></div>
+    <div class="row"><span class="mut copy">No GitLab projects or groups are connected yet.</span></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">While <i>every</i> platform is empty the page keeps #145&rsquo;s one generic empty state (no GitLab-specific copy there), whose Add connection button reaches GitLab through the chooser.</p></div>
+
+  <div><p class="sub-h">A3 &middot; Read-only member (<code>canManage: false</code>) &mdash; no Add, no row actions, Verify and Rotate hidden too</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row"><span class="dot"></span><div class="grow"><b>Mobile app</b> <span class="badge gl">&#x25C8; GitLab</span> <span class="badge">Project</span><div class="d">gitlab.com/acme/platform/mobile-app</div></div><span class="faint">Verified 5m ago</span></div>
+  </div></div></div>
+
+  <div><p class="sub-h">A4 &middot; GitLab list fails to load (per-platform load state, existing)</p>
+  <div class="screen tight"><div class="callout danger"><b class="copy">Could not load GitLab connections</b><span class="copy">{server message}</span> &nbsp; <span class="btn sm">Retry</span></div></div>
+  <p class="faint" style="margin:6px 0 0">Existing generic load-error treatment for a <code>fetch</code> list; other platforms still render.</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Verify</b> and <b>Rotate webhook secret</b> are the only new controls: ghost small buttons in the same cluster as Edit and Remove, in that order <i>Edit, Verify, Rotate webhook secret, Remove</i>. They come from the descriptor&rsquo;s generic row-action list (gap 1, <span class="tag gap">GAP</span>), shown only when <code>canManage</code>, hidden while the row is being edited.</li>
+  <li><span class="n">2</span><b>Row text.</b> Name = connection name. Detail = <code>host/scopePath</code> (base URL without <code>https://</code>; a self-managed host shows as is). &ldquo;Project&rdquo; or &ldquo;Group&rdquo; badge from <code>scopeKind</code>. The aside shows <span class="copy">Verified {relative updatedAt}</span> like Bitbucket (<code>updatedAt</code> is the last change, as for Bitbucket).</li>
+  <li><span class="n">3</span><b>Chooser line</b> (Add connection, step 1): <span class="copy">GitLab projects and groups with managed runners.</span></li>
+  <li><span class="n">4</span>No token, webhook secret or webhook URL is ever in the list; they appear only in the one-time reveal (frame C).</li>
+  <li><span class="n">5</span>Layout, toolbar, empty/loading states and badges are #145&rsquo;s; nothing here is a new page or nav item.</li>
+</ol></div>
+</section>
+
+<!-- ============================ B ============================ -->
+<section class="frame" id="B">
+<h2>B &middot; Add connection dialog &mdash; GitLab <small>existing dialog; chooser entry + descriptor fields; states: default &middot; inline errors &middot; server errors &middot; submitting</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">B1 &middot; Step 1, platform chooser (GitLab is one more radio; the dialog lists only platforms the user can manage)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh">Add connection</div><div class="dp">Choose a platform.</div>
+    <div class="db">
+      <div class="radio"><span class="r"></span><div><b>GitHub</b><div class="d mut">GitHub App installation</div></div></div>
+      <div class="radio"><span class="r"></span><div><b>Bitbucket</b><div class="d mut">Bitbucket Cloud workspaces with managed macOS runners for Pipelines.</div></div></div>
+      <div class="radio on"><span class="r"></span><div><b>GitLab <span class="tag new">NEW</span></b><div class="d mut copy">GitLab projects and groups with managed runners.</div></div></div>
+    </div>
+    <div class="df"><span class="btn g">Cancel</span><span class="btn p">Continue</span></div>
+  </div></div></div>
+
+  <div><p class="sub-h">B2 &middot; Step 2, GitLab form, defaults (no scope entered yet)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh copy">Connect GitLab</div>
+    <div class="dp copy">GridOps verifies the token before saving. The token is encrypted at rest and never returned to the browser. Each project or group is connected once per GitLab address; edit an existing connection to replace its token.</div>
+    <div class="db" style="display:grid;gap:10px">
+      <div><span class="lbl">Connection name</span><div class="input ph">Mobile app</div></div>
+      <div><span class="lbl copy">GitLab address</span><div class="input mono">https://gitlab.com</div><div class="d mut copy">Change it for a self-managed GitLab, for example https://git.example.com.</div></div>
+      <div><span class="lbl copy">Connect a</span><div class="sel-box"><span>Project</span><span class="mut">&#x25BE;</span></div><div class="d mut copy">A project registers a project runner; a group registers a group runner shared by its projects.</div></div>
+      <div><span class="lbl copy">Project path</span><div class="input mono ph">acme/platform/mobile-app</div><div class="d mut copy">The path in the project&rsquo;s URL, without a leading or trailing slash.</div></div>
+      <div><span class="lbl">Access token</span><div class="input ph">Paste a token</div><div class="d mut copy">The token needs the create_runner and read_api scopes, and its owner needs the Owner role on the project or group. GridOps checks both before saving.</div></div>
+    </div>
+    <div class="df"><span class="btn g">Back</span><span class="btn p copy">Connect GitLab</span></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">Field labels in the new form: <i>Connection name, GitLab address, Connect a (Project | Group), Project path / Group path (label follows the kind), Access token</i>. Submit stays disabled while a required field is empty (existing behaviour).</p></div>
+
+  <div><p class="sub-h">B3 &middot; Inline field errors (client-side; the submit is blocked and nothing is sent)</p>
+  <div class="dlg-bg"><div class="dlg"><div class="db" style="display:grid;gap:10px">
+    <div><span class="lbl">GitLab address</span><div class="input mono err">gitlab.com?x=1</div><div class="fe copy">Enter a full address starting with http:// or https://, with no query or fragment.</div></div>
+    <div><span class="lbl">Project path</span><div class="input mono err">/acme//mobile app/</div><div class="fe copy">Use a path like group/project: no leading or trailing slash, no spaces, no empty or &ldquo;..&rdquo; parts.</div></div>
+    <div><span class="lbl">Access token</span><div class="input err ph">&nbsp;</div><div class="fe">Required (browser validation, as for other platforms)</div></div>
+  </div></div></div>
+  <p class="faint" style="margin:6px 0 0">A trailing slash on the address is silently removed on submit (<code>https://gitlab.com/</code> &rarr; <code>https://gitlab.com</code>); a blank address sends the default <code>https://gitlab.com</code>. The path rule is the one authoritative regex <code>segment(/segment)*</code> (segment = non-empty, no whitespace, not <code>..</code>).</p></div>
+
+  <div><p class="sub-h">B4 &middot; Server errors (inline <b>danger callout</b> above the buttons; the dialog stays open and keeps the typed values)</p>
+  <div class="dlg-bg"><div class="dlg"><div class="db" style="display:grid;gap:8px">
+    <div class="callout danger"><b>Could not connect GitLab</b><span class="copy">GitLab rejected the access token.</span> <span class="faint">(400, bad or revoked token)</span></div>
+    <div class="callout danger"><b>Could not connect GitLab</b><span class="copy">The token is missing the create_runner scope.</span> <span class="faint">(400, missing scope)</span></div>
+    <div class="callout danger"><b>Could not connect GitLab</b><span class="copy">The token&rsquo;s owner must be an Owner of acme/platform/mobile-app.</span> <span class="faint">(400, missing role)</span></div>
+    <div class="callout danger"><b>Could not connect GitLab</b><span class="copy">This GitLab project is already connected.</span> <span class="faint">(409, duplicate address + scope)</span></div>
+    <div class="callout danger"><b>Could not connect GitLab</b><span class="copy">GitLab request failed. Try again later.</span> <span class="faint">(400, upstream error)</span></div>
+  </div></div></div>
+  <p class="faint" style="margin:6px 0 0">The message text is <b>the server&rsquo;s, verbatim</b> (<code>ApiErrorBody.message</code>); the strings above are examples built from #138&rsquo;s stable substrings (&ldquo;rejected the access token&rdquo;, the scope name, &ldquo;owner&rdquo;, the path, &ldquo;later&rdquo;, &ldquo;GitLab request failed&rdquo;). The title is the existing one-line pattern with the platform name. Tests key on substrings, not full messages.</p></div>
+
+  <div><p class="sub-h">B5 &middot; Submitting (GitLab verifies the token against its API, so this can take a moment)</p>
+  <div class="dlg-bg"><div class="dlg"><div class="df" style="border:0"><span class="btn g dis">Back</span><span class="btn p dis">&#x27F3; <span class="copy">Connecting&hellip;</span></span></div></div></div>
+  <p class="faint" style="margin:6px 0 0">Fields, Back and dialog dismissal are disabled while submitting (existing).</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Why a Project/Group choice:</b> the API needs <code>scopeKind</code> and it cannot be derived from the path. This is <b>one more generic gap</b> (frame I, gap 4: a <code>select</code> field type), listed as an open question. The edit form never shows it.</li>
+  <li><span class="n">2</span><b>Order</b> = name, address, kind, path, token. The address defaults to <code>https://gitlab.com</code> (pre-filled, editable).</li>
+  <li><span class="n">3</span><b>Help text</b> names exactly <code>create_runner</code> + <code>read_api</code> and the <b>Owner</b> role (issue text). Copy above is final wording.</li>
+  <li><span class="n">4</span><b>Success</b> closes this dialog and opens the reveal in frame C; toast is not used for create.</li>
+  <li><span class="n">5</span>Client validation (B3) uses the descriptor&rsquo;s validators from the Vitest list: URL, scope path. Everything else is checked by the server (B4).</li>
+</ol></div>
+</section>
+
+<!-- ============================ C ============================ -->
+<section class="frame" id="C">
+<h2>C &middot; One-time webhook reveal and secret rotation <small>existing <code>SecretRevealDialog</code>; built through the descriptor&rsquo;s post-create hook and a row action</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">C1 &middot; After Connect GitLab succeeds (201 <code>GitlabConnectionCreated</code>)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh copy">Set up the GitLab webhook</div>
+    <div class="dp copy">Mobile app is connected. Add a webhook in GitLab so GridOps hears about jobs. The secret is shown only once; store it now.</div>
+    <div class="db" style="display:grid;gap:10px">
+      <div><span class="lbl copy">Webhook secret</span><div class="secret"><span>9f3c1e&hellip;a47d02b5c8e6</span><span class="btn sm">Copy</span></div></div>
+      <div><span class="lbl copy">Webhook URL</span><div class="secret"><span>https://gridops.example.com/api/v1/webhooks/gitlab/&hellip;</span><span class="btn sm">Copy</span></div></div>
+      <div class="callout info"><b class="copy">In GitLab</b><span class="copy">Open the project&rsquo;s Settings &rarr; Webhooks (for a group: the group&rsquo;s Settings &rarr; Webhooks), choose Add new webhook, paste the URL and the secret into Secret token, and tick <b>Job events</b> under Trigger. Leave the other triggers off.</span></div>
+    </div>
+    <div class="df"><span class="btn p">I&rsquo;ve stored it, close</span></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">Only the button closes it (Escape and outside clicks are ignored); the secret leaves the DOM on close (existing component). The secret is the dialog&rsquo;s primary copy box (<code>value</code>, <code>secretLabel</code> = &ldquo;Webhook secret&rdquo;); the URL, its Copy button and the Job events instructions go in <code>details</code> using the shared <code>CopyButton</code>. <b>No component change needed</b> (gap 3 resolves to &ldquo;use details&rdquo;). The group wording is chosen from the created connection&rsquo;s <code>scopeKind</code>.</p></div>
+
+  <div><p class="sub-h">C2 &middot; Rotate: confirm (existing confirm dialog)</p>
+  <div class="dlg-bg"><div class="dlg" style="width:400px">
+    <div class="dh copy">Rotate the webhook secret for Mobile app?</div>
+    <div class="dp copy">The old secret stops working at once, so GitLab&rsquo;s webhook will fail until you paste the new secret into it.</div>
+    <div class="df"><span class="btn g">Cancel</span><span class="btn p copy">Rotate secret</span></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">The question becomes the title, the rest the description (existing <code>confirmAction</code> rule). The confirm label &ldquo;Rotate secret&rdquo; needs the row action to carry an optional <code>confirmLabel</code> (the verb list does not know &ldquo;Rotate&rdquo;; default would read &ldquo;Continue&rdquo;).</p></div>
+
+  <div><p class="sub-h">C3 &middot; Rotate: reveal (200 <code>GitlabWebhookSecret</code>)</p>
+  <div class="dlg-bg"><div class="dlg">
+    <div class="dh copy">New webhook secret</div>
+    <div class="dp copy">The previous secret no longer works. Paste this one into Secret token in GitLab, under Settings &rarr; Webhooks, to restore delivery. It is shown only once.</div>
+    <div class="db" style="display:grid;gap:10px">
+      <div><span class="lbl">Webhook secret</span><div class="secret"><span>b81d77&hellip;04c1e9f2a360</span><span class="btn sm">Copy</span></div></div>
+      <div><span class="lbl">Webhook URL</span><div class="secret"><span>https://gridops.example.com/api/v1/webhooks/gitlab/&hellip;</span><span class="btn sm">Copy</span></div></div>
+      <div class="d mut copy">The webhook URL is unchanged. Keep <b>Job events</b> ticked.</div>
+    </div>
+    <div class="df"><span class="btn p">I&rsquo;ve stored it, close</span></div>
+  </div></div></div>
+
+  <div><p class="sub-h">C4 &middot; Rotate fails</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px"><div class="toast err copy">GitLab connection not found.</div><div class="faint">(404, connection deleted elsewhere; other server messages appear verbatim.) The list refreshes. The old secret is unchanged because nothing was rotated.</div></div></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Built by hooks, not page code:</b> C1 is the descriptor&rsquo;s <code>postCreate(created)</code> returning a <code>PostCreateReveal</code>; C3 is the same shape returned by the row action. The Connections page renders both with the one <code>SecretRevealDialog</code>.</li>
+  <li><span class="n">2</span><b>Show once:</b> neither the secret nor the URL is kept in any query cache or list; dropping the reveal from state removes them.</li>
+  <li><span class="n">3</span>&ldquo;Job events&rdquo; is the only trigger to enable, as the issue text says; the wording names it in bold in both reveals.</li>
+  <li><span class="n">4</span>No copy button is disabled; if the clipboard is blocked the shared <code>CopyButton</code> already handles it.</li>
+</ol></div>
+</section>
+
+<!-- ============================ D ============================ -->
+<section class="frame" id="D">
+<h2>D &middot; Row actions: Verify, Edit, Remove <small>states: running &middot; success &middot; failure &middot; edit errors &middot; delete blocked</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">D1 &middot; Verify: running, then success</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
+    <div class="panel"><div class="row"><span class="dot"></span><div class="grow"><b>Mobile app</b> <span class="badge gl">&#x25C8; GitLab</span> <span class="badge">Project</span><div class="d">gitlab.com/acme/platform/mobile-app</div></div><span class="btn g sm dis">Edit</span><span class="btn g sm dis copy">&#x27F3; Verifying&hellip;</span><span class="btn g sm dis">Rotate webhook secret</span><span class="btn g sm dis">Remove</span></div></div>
+    <div class="toast ok copy">GitLab connection verified.</div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">While a row action runs, that row&rsquo;s actions are disabled; a 204 shows the success toast and refreshes the list. Verify has no confirm.</p></div>
+
+  <div><p class="sub-h">D2 &middot; Verify fails (the token was revoked, lost a scope or the owner lost the role) &mdash; server message in an error toast</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
+    <div class="toast err copy">GitLab rejected the access token.</div>
+    <div class="toast err copy">The token is missing the read_api scope.</div>
+    <div class="faint">(400; the toast is the server&rsquo;s message verbatim; the row is not changed and keeps no &ldquo;failed&rdquo; marker because the list API carries no verification status.)</div>
+  </div></div>
+
+  <div><p class="sub-h">D3 &middot; Edit (inline form below the row, existing) &mdash; name and optional token only</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row"><span class="dot"></span><div class="grow"><b>Mobile app</b> <span class="badge gl">&#x25C8; GitLab</span> <span class="badge">Project</span><div class="d">gitlab.com/acme/platform/mobile-app</div></div></div>
+    <div style="padding:10px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div><span class="lbl">Connection name</span><div class="input">Mobile app</div></div>
+      <div><span class="lbl copy">New access token</span><div class="input ph copy">Leave blank to keep the current token</div><div class="d mut copy">The token needs the create_runner and read_api scopes and the Owner role.</div></div>
+      <div style="grid-column:1/-1"><div class="callout danger"><b>Could not save</b><span class="copy">The token is missing the create_runner scope.</span> <span class="faint">(400; also: 404 &ldquo;not found&rdquo;)</span></div></div>
+      <div style="grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px"><span class="btn g">Cancel</span><span class="btn p">Save</span></div>
+    </div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">Success toasts (descriptor <code>updateSuccess</code>): <span class="copy">Connection updated.</span> or, when a token was typed, <span class="copy">Connection updated and token replaced.</span> The send is a PATCH with only the changed fields: <code>name</code>, plus <code>accessToken</code> only if non-blank. <b>Not editable: address, Project/Group, path</b>, so they are absent from the form (same &ldquo;scope is fixed&rdquo; rule as Bitbucket&rsquo;s workspace slug).</p></div>
+
+  <div><p class="sub-h">D4 &middot; Remove: confirm, success, blocked</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
+    <div class="dlg" style="width:420px"><div class="dh copy">Remove Mobile app?</div><div class="dp copy">GridOps deletes its stored token and webhook secret. Pools that use it must be changed first. The webhook in GitLab is not deleted; remove it there too.</div><div class="df"><span class="btn g">Cancel</span><span class="btn p" style="background:#e5484d;border-color:#e5484d">Remove</span></div></div>
+    <div class="toast ok copy">Mobile app removed.</div>
+    <div class="toast err copy">This connection is still used by a runner pool, a fleet target or a live runner.</div>
+    <div class="faint">(409 while referenced; the server&rsquo;s message verbatim; the row stays.)</div>
+  </div></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Failures of Verify, Rotate and Remove are toasts</b> (they have no form to hold an inline error); Add and Edit keep #145&rsquo;s inline callouts. This is the existing split, not new.</li>
+  <li><span class="n">2</span><b>No new status indicator.</b> The list API has no verification field, so &ldquo;Verified {time}&rdquo; stays the <code>updatedAt</code> caption and Verify&rsquo;s outcome lives in the toast only. Recorded in handoff open question 3.</li>
+  <li><span class="n">3</span>Verify and Rotate use the same busy treatment as Remove (disabled row actions while pending).</li>
+  <li><span class="n">4</span>All server messages come from <code>ApiErrorBody</code>; the examples are not hard-coded copy except where marked as descriptor copy.</li>
+</ol></div>
+</section>
+
+<!-- ============================ E ============================ -->
+<section class="frame" id="E">
+<h2>E &middot; Targets row &mdash; GitLab project and group kinds <small>existing row on New pool and Pool settings; states: none &middot; selected &middot; excluded &middot; not connected &middot; settings</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">E1 &middot; New pool, listbox open, nothing selected (GitLab groups appear as two more kinds, no new row)</p>
+  <div class="screen tight" style="padding:14px 14px 20px">
+    <div class="trigger"><div><span class="mut">Select repositories, a runner group, workspaces, projects or groups&hellip;</span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="lb-s">&#x1F50D; Search by platform, account or name&hellip;</div>
+      <div class="gh-h"><span>GitHub &middot; Repository</span><span class="faint">0 of 5</span></div>
+      <div class="opt act"><span class="ck"></span><div>acme/web<div class="d">acme &middot; Private</div></div></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Mobile delivery<div class="d">acme-mobile workspace</div></div><span class="why">Select a GitHub repository or runner group first</span></div>
+      <div class="gh-h"><span class="copy">GitLab &middot; Project</span><span class="faint">0 of 5</span></div>
+      <div class="opt"><span class="ck"></span><div>Mobile app<div class="d copy">https://gitlab.com/acme/platform/mobile-app</div></div></div>
+      <div class="gh-h"><span class="copy">GitLab &middot; Group</span><span class="faint">0 of 5</span></div>
+      <div class="opt"><span class="ck"></span><div>Platform group<div class="d copy">https://git.example.com/platform</div></div></div>
+      <div class="lb-f"><span>&uarr;&darr; navigate &middot; Enter select &middot; Esc close</span><span>Max 5 per kind</span></div>
+    </div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">One option per GitLab <i>connection</i> (a connection is exactly one project or group). Label = connection name; description = <code>&lt;baseUrl&gt;/&lt;scopePath&gt;</code>. The group heading is <code>GitLab &middot; Project</code> / <code>GitLab &middot; Group</code> (the #145 <code>&lt;platform&gt; &middot; &lt;kind&gt;</code> pattern). Both kinds stand alone (no &ldquo;select a GitHub target first&rdquo;, unlike Bitbucket). The cap and the &ldquo;Max N per kind&rdquo; footer are the shared ones (<code>maxCount</code>).</p></div>
+
+  <div><p class="sub-h">E2 &middot; A GitLab project and a group selected: GitHub and Bitbucket options disabled with the reason</p>
+  <div class="screen tight" style="padding:14px 14px 20px">
+    <div class="trigger"><div><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Mobile app <i>&#x2715;</i></span><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Platform group <i>&#x2715;</i></span></div><span class="mut">&#x25B4;</span></div>
+    <div class="listbox">
+      <div class="gh-h"><span>GitHub &middot; Repository</span></div>
+      <div class="opt dim"><span class="ck"></span><div>acme/web<div class="d">acme &middot; Private</div></div><span class="why copy">Can&rsquo;t combine with GitLab targets</span></div>
+      <div class="gh-h"><span>GitHub &middot; Organization runner group</span></div>
+      <div class="opt dim"><span class="ck"></span><div>acme &middot; Default runner group</div><span class="why copy">Can&rsquo;t combine with GitLab targets</span></div>
+      <div class="gh-h"><span>Bitbucket &middot; Workspace</span></div>
+      <div class="opt dim"><span class="ck"></span><div>Mobile delivery</div><span class="why copy">Can&rsquo;t combine with GitLab targets</span></div>
+      <div class="gh-h"><span>GitLab &middot; Project</span><span class="faint">1 of 5</span></div>
+      <div class="opt sel"><span class="ck">&#x2713;</span><div>Mobile app<div class="d">https://gitlab.com/acme/platform/mobile-app</div></div></div>
+      <div class="gh-h"><span>GitLab &middot; Group</span><span class="faint">1 of 5</span></div>
+      <div class="opt sel"><span class="ck">&#x2713;</span><div>Platform group<div class="d">https://git.example.com/platform</div></div></div>
+    </div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Project and group may be mixed in one pool (the server accepts both). The reason is the GitLab kinds&rsquo; shared <code>exclusionReason</code>, shown on every GitHub and Bitbucket option. Selecting a GitHub or Bitbucket target first disables the GitLab options the other way round, with that kind&rsquo;s own existing reason (e.g. <span class="copy">Can&rsquo;t combine with repositories</span>).</p></div>
+
+  <div><p class="sub-h">E3 &middot; Plan preview sentence and Providers</p>
+  <div class="screen tight"><div class="callout"><b>Plan</b><span class="copy">2 GitLab targets selected. Each registers a runner in its project or group; the maximum runner count must cover both.</span></div></div>
+  <p class="faint" style="margin:6px 0 0">Uses the existing <code>planNote</code> slot; GitLab adds no Provider requirement (no auto-added Tart), unlike Bitbucket.</p></div>
+
+  <div><p class="sub-h">E4 &middot; Group status rows when GitLab has no connection yet (existing <code>notConnected</code> rendering)</p>
+  <div class="screen tight"><div class="listbox" style="margin:0">
+    <div class="gh-h"><span>GitLab &middot; Project</span></div>
+    <div class="gstatus copy">No GitLab projects or groups are connected yet.</div>
+    <div class="gh-h"><span>GitLab &middot; Group</span></div>
+    <div class="gstatus copy">No GitLab projects or groups are connected yet.</div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0">If a platform has nothing connected, its groups show the status instead of options (same as Bitbucket). The new-pool page&rsquo;s &ldquo;connect something first&rdquo; empty state is unchanged and still driven by the GitHub descriptor (GitLab does not add one: GitLab kinds are standalone, so once a connection exists the form appears).</p></div>
+
+  <div><p class="sub-h">E5 &middot; Pool settings for a GitLab pool (scope is fixed: still GitLab only)</p>
+  <div class="screen tight"><div class="panel"><div class="row top stack" style="display:flex">
+    <div><span class="lbl" style="font-size:13px">Targets</span><div class="d mut">2 GitLab targets selected.</div></div>
+    <div class="trigger"><div><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Mobile app <i>&#x2715;</i></span><span class="chip"><span class="badge gl" style="padding:0 4px">&#x25C8;</span> Platform group <i>&#x2715;</i></span></div><span class="mut">&#x25BE;</span></div>
+  </div></div></div>
+  <p class="faint" style="margin:6px 0 0">Offered on settings like on create; saving sends the full set (<code>gitlabConnectionIds</code>), which replaces the stored one. GitHub and Bitbucket options are disabled with E2&rsquo;s reason, since a pool never changes between GitLab and other scopes. Read-only summary (members, or the pool header): <span class="copy">Mobile app, Platform group</span> (connection names). A non-GitLab pool never sends <code>gitlabConnectionIds</code>.</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>No new row.</b> Everything is options inside the existing Targets listbox, chips and plan sentence from #145.</li>
+  <li><span class="n">2</span><b>Option identity:</b> key <code>gitlab.project:&lt;connection id&gt;</code> / <code>gitlab.group:&lt;connection id&gt;</code>; options come from the <code>gitlabConnections</code> already loaded with the pool options (no extra request, no loading state). If the server predates #138, the list is empty and E4 shows.</li>
+  <li><span class="n">3</span><b>Priority</b> and <b>manual entry</b> sections do not apply to GitLab kinds (no <code>supportsPriority</code>, no <code>manualEntry</code>).</li>
+  <li><span class="n">4</span><b>Chip glyph</b> is the registry badge icon (&#x25C8; here), so mixed pools read at a glance.</li>
+</ol></div>
+</section>
+
+<!-- ============================ F ============================ -->
+<section class="frame" id="F">
+<h2>F &middot; Platform options, label rules and submit <small>existing sections of the pool forms; states: collapsed &middot; toggle &middot; tag errors &middot; submit errors</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">F1 &middot; Platform options, collapsed (GitLab targeted) and expanded</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:10px">
+    <div class="panel"><div class="disc"><div><b>&#x25B8; Platform options</b> <span class="badge gl">&#x25C8; GitLab</span></div><span class="faint">Show</span></div></div>
+    <div class="panel">
+      <div class="disc"><div><b>&#x25BE; Platform options</b></div><span class="faint">Hide</span></div>
+      <div style="padding:10px 14px"><span class="badge gl">&#x25C8; GitLab</span>
+        <ul class="d mut" style="margin:6px 0 8px;padding-left:18px">
+          <li class="copy">Labels on a GitLab pool become the runner&rsquo;s tags. A tag may contain any character except a comma and is at most 255 characters.</li>
+          <li class="copy">Jobs with no tags run on this runner only when &ldquo;Run untagged jobs&rdquo; is on.</li>
+        </ul>
+        <div class="row" style="padding:6px 0"><div class="grow"><div class="t copy">Run untagged jobs</div><div class="d copy">Let this pool&rsquo;s runners also pick up jobs that have no tags. Off by default.</div></div><span class="sw"></span> <span class="faint">Off</span></div>
+      </div>
+    </div>
+    <div class="panel"><div style="padding:10px 14px"><span class="badge gl">&#x25C8; GitLab</span><div class="row" style="padding:6px 0"><div class="grow"><div class="t">Run untagged jobs</div></div><span class="sw on"></span> <span class="faint">On</span></div></div></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">The toggle is the only GitLab control here: it renders <b>only inside Platform options</b>, <b>only while the pool targets GitLab</b> (no GitLab target &rarr; the section shows nothing of GitLab&rsquo;s). Default Off; the section stays collapsed by default with the platform badge as the collapsed summary, so an operator may not see the switch unless they expand it (the collapsed row does not show the On/Off value). The toggle is a labelled switch (<code>role=switch</code>, keyboard operable). On settings it starts from the pool&rsquo;s stored <code>runUntagged</code>; changes are sent only when different.</p></div>
+
+  <div><p class="sub-h">F2 &middot; Additional labels row while the pool targets GitLab (labels = runner tags)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top"><div class="grow"><div class="t">Additional labels</div><div class="d copy">Comma-separated tags for the GitLab runner. A tag cannot contain a comma and is at most 255 characters.</div></div><div class="ctl"><div class="input ph copy">build, ios</div></div></div>
+  </div></div></div>
+
+  <div><p class="sub-h">F3 &middot; Tag validation errors (live, row stays visible although Platform options is collapsed)</p>
+  <div class="screen tight"><div class="panel">
+    <div class="row top"><div class="grow"><div class="t">Additional labels</div></div><div class="ctl"><div class="input err">build, a-very-long-tag&hellip;(300 characters)</div><div class="fe copy">GitLab tags are at most 255 characters: &ldquo;a-very-long-tag&hellip;&rdquo; is 300.</div></div></div>
+    <div class="row top"><div class="grow"><div class="t">Additional labels</div></div><div class="ctl"><div class="input err">build, , ios</div><div class="fe copy">GitLab tags cannot be empty.</div></div></div>
+  </div></div>
+  <p class="faint" style="margin:6px 0 0"><b>The comma rule cannot be triggered from this field:</b> the field splits its text on commas, so no tag can contain one. The rule is still in the validator (<code>gitlabLabelError</code>, unit-tested with <code>["a,b"]</code>) as a defence for payloads that do not come through the field. See open question 2.</p></div>
+
+  <div><p class="sub-h">F4 &middot; Submit: errors in the existing &ldquo;Could not create the pool&rdquo; callout</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:8px">
+    <div class="callout danger"><b>Could not create the pool</b><span class="copy">{server message, verbatim}</span> <span class="faint">e.g. 400 &ldquo;a GitLab pool cannot also use GitHub repositories&rdquo;, 400 a connection no longer exists, 403 not an admin.</span></div>
+    <div class="callout danger"><b>Could not create the pool</b><span class="copy">{the shared create schema&rsquo;s message for installationId, verbatim}</span> <span class="faint">GitLab target selected but the account has <b>no GitHub App installation</b>: the create payload has no positive <code>installationId</code> (#138 still requires one). The GitLab kinds stay offered; the failure is reported here. No new copy is drawn for this case.</span></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Body sent (create): <code>scope:"gitlab", gitlabConnectionIds:[&hellip;], runUntagged, runnerGroupId:1, installationId:&lt;first installation&gt;</code> (values per the brief&rsquo;s mocked spec, not verified against #138&rsquo;s final handler). Settings sends <code>gitlabConnectionIds</code> and <code>runUntagged</code> only for a GitLab pool.</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>Shared rows stay neutral.</b> The labels row copy in F2 comes from <code>labelRules.help/placeholder</code>; Tart base VM and the rest are not GitLab-specific (no Provider requirement).</li>
+  <li><span class="n">2</span><b>Toggle state</b> flows through gap 2 (frame I): the form owns per-platform option values, the section hands <code>{values, onChange}</code> to the descriptor&rsquo;s component, and the payload partials receive them.</li>
+  <li><span class="n">3</span><b>Tag rule</b> = any character but a comma, at most 255 characters, non-empty after trimming; stated once. The error names the offending tag.</li>
+</ol></div>
+</section>
+
+<!-- ============================ G ============================ -->
+<section class="frame" id="G">
+<h2>G &middot; Runner badge and runner link <small>existing runner row and details panel; states: link known &middot; link unknown</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">G1 &middot; Runner rows: a GitLab runner now gets a real badge (today it falls back to a dashed unknown badge)</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:6px">
+    <div class="rr"><span class="dot"></span><b>mac-runner-1</b><span class="badge gh">&#x25C9; GitHub</span><span class="faint">Idle</span><span style="flex:1"></span><span class="faint">acme/web</span><span class="faint">12s</span></div>
+    <div class="rr"><span class="dot"></span><b>mac-runner-4</b><span class="badge gl">&#x25C8; GitLab</span><span class="faint">Busy</span><span style="flex:1"></span><span class="faint copy">acme/platform/mobile-app</span><span class="faint">3s</span></div>
+  </div></div>
+
+  <div><p class="sub-h">G2 &middot; Runner details panel &mdash; &ldquo;CI platform&rdquo; row</p>
+  <div class="screen tight" style="display:grid;gap:12px">
+    <dl class="kv"><dt>Status</dt><dd>Busy</dd><dt>CI platform</dt><dd><u class="copy">GitLab</u> <span class="faint">&#x2197; opens gitlab.com/acme/platform/mobile-app/-/runners/42</span></dd><dt>Pool</dt><dd>mobile-macos</dd></dl>
+    <dl class="kv"><dt>CI platform</dt><dd>GitLab <span class="faint">(no link: runner id, address or path not reported by the server)</span></dd></dl>
+  </div>
+  <p class="faint" style="margin:6px 0 0">Existing behaviour: the platform name becomes a new-tab link, tooltip <span class="copy">Open on GitLab</span>, when the descriptor builds a URL. Link = <code>&lt;baseUrl&gt;/&lt;scopePath&gt;/-/runners/&lt;id&gt;</code>. Until #138 sends the three optional runner fields, the plain name shows (second variant) and nothing is broken or empty. Pool and Repository rows are unchanged; the repository column shows the scope path when the server provides one, else is blank as today.</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span>Badge, name and icon come from the registry; no runner-row code is GitLab-specific.</li>
+  <li><span class="n">2</span>The delete-runner confirm uses the platform name from the registry (&ldquo;&hellip;from its provider and GitLab?&rdquo;).</li>
+</ol></div>
+</section>
+
+<!-- ============================ H ============================ -->
+<section class="frame" id="H">
+<h2>H &middot; Deliveries list <small>existing Webhooks page; states: GitHub &middot; GitLab (processed, failed) &middot; detail sheet</small></h2>
+<div class="cols"><div class="screens">
+
+  <div><p class="sub-h">H1 &middot; Same list, GitLab rows mixed with GitHub rows; a platform badge now leads the destination</p>
+  <div class="screen tight" style="display:flex;flex-direction:column;gap:6px">
+    <div class="rr"><span class="dot"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">workflow_job</b><span class="badge">completed</span><span style="flex:1"></span><span class="badge gh">&#x25C9; GitHub</span><span class="faint">acme/web</span><span class="faint">1m</span></div>
+    <div class="rr"><span class="dot"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">Job Hook</b><span class="badge">running</span><span style="flex:1"></span><span class="badge gl copy">&#x25C8; GitLab</span><span class="faint">1m</span></div>
+    <div class="rr"><span class="dot b"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">Job Hook</b><span class="faint" style="color:var(--bad)">GitLab connection not found</span><span style="flex:1"></span><span class="badge gl">&#x25C8; GitLab</span><span class="faint">4m</span><span class="faint">&#x21BB;</span></div>
+    <div class="rr"><span class="dot b"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">Job Hook</b><span class="badge bad">&#x26A0; Invalid signature</span><span style="flex:1"></span><span class="badge gl">&#x25C8; GitLab</span><span class="faint">9m</span></div>
+    <div class="rr"><span class="dot"></span><b class="mono" style="font-family:ui-monospace,monospace;font-size:12px">installation</b><span class="badge">created</span><span style="flex:1"></span><span class="badge gh">&#x25C9; GitHub</span><span class="faint copy">GitHub App</span><span class="faint">2h</span></div>
+  </div>
+  <p class="faint" style="margin:6px 0 0">The platform is derived generically from the delivery id: an id prefix equal to a registered descriptor id (<code>gitlab:&lt;connection id&gt;:&lt;key&gt;</code>) means that platform, anything else is GitHub. The badge is the registry badge, placed just before the destination text, hidden below <code>lg</code> with it. <b>The &ldquo;GitHub App&rdquo; fallback text stays for GitHub rows only</b>; a GitLab row with no repository shows the badge and no destination text, because the list has no project field. Status, event, action, retry, relative time and the inspect-payload sheet are untouched.</p></div>
+
+  <div><p class="sub-h">H2 &middot; Detail sheet for a GitLab delivery</p>
+  <div class="screen tight"><dl class="kv"><dt>Status</dt><dd>Processed</dd><dt>Platform</dt><dd class="copy"><span class="badge gl">&#x25C8; GitLab</span></dd><dt>Signature</dt><dd>Verified</dd><dt>Destination</dt><dd class="copy">&mdash;</dd><dt>Received</dt><dd>Nov 20, 2026, 10:14 AM</dd></dl></div>
+  <p class="faint" style="margin:6px 0 0">One new <i>Platform</i> row in the existing summary grid. Destination shows an em dash when a non-GitHub delivery has no repository (instead of &ldquo;GitHub App&rdquo;, which would be wrong). &ldquo;Invalid signature&rdquo; keeps its meaning for GitLab&rsquo;s secret-token check.</p></div>
+
+</div>
+<ol class="notes">
+  <li><span class="n">1</span><b>No new list, column, filter or page.</b> One badge in the existing row and one row in the sheet; nothing else moves.</li>
+  <li><span class="n">2</span><b>Polling errors are out of scope</b>: #148 only logs them and no API lists them, so nothing is drawn (frame I).</li>
+  <li><span class="n">3</span>GitHub rows gain the GitHub badge too, so the badge column is consistent; this is the only visible change to existing rows.</li>
+</ol></div>
+</section>
+
+<!-- ============================ I ============================ -->
+<section class="frame" id="I">
+<h2>I &middot; Descriptor-contract gaps and what is out of reach <small>no screen; these are the generic fixes the frames above depend on</small></h2>
+<table class="map">
+<tr><th>#</th><th>Gap exposed by GitLab</th><th>Generic fix (no <code>gitlab</code> string in shared files)</th><th>Frames</th></tr>
+<tr><td>1</td><td>Row actions: only Edit and Remove exist.</td><td><code>connections.actions?(item)</code> returns <code>{label, run, confirm?, confirmLabel?, success?}[]</code>; <code>run</code> may return a <code>PostCreateReveal</code>. Rendered by <code>connections-section.tsx</code> beside Edit/Remove; a reveal opens the existing <code>SecretRevealDialog</code>.</td><td>A, C, D</td></tr>
+<tr><td>2</td><td><code>platformOptions.Component</code> gets no props, so the toggle has no way into the payload.</td><td>Forms hold per-platform option values (<code>platformOptions.initialValues(pool?)</code>); the section passes <code>{values, onChange}</code> to <code>Component</code>; partials get the values as an extra argument. Existing descriptors ignore it.</td><td>F</td></tr>
+<tr><td>3</td><td>Reveal has one secret value; GitLab shows URL + secret + a setting.</td><td><b>No change needed</b>: <code>SecretRevealDialog.details</code> is a <code>ReactNode</code> and the shared <code>CopyButton</code> can sit inside it.</td><td>C</td></tr>
+<tr><td>4 <span class="tag new">NEW</span></td><td>Create form needs a Project/Group choice; <code>ConnectionField</code> only knows <code>text</code> and <code>secret</code>.</td><td>Add <code>type: "select"</code> with <code>options: {value,label}[]</code> and optional <code>labelFor(values)</code> / <code>helpFor(values)</code> so the path label follows the kind; <code>FieldInput</code> renders a select. Not editable on update (<code>editableOnUpdate:false</code>). Alternative if the operator prefers: two chooser entries (&ldquo;GitLab project&rdquo;, &ldquo;GitLab group&rdquo;) sharing one descriptor, which needs a larger contract change.</td><td>B</td></tr>
+<tr><td>5</td><td>Deliveries have no platform field.</td><td>Derive from the id prefix against the registry (see H); <code>webhooks.tsx</code> only.</td><td>H</td></tr>
+<tr><td>6 <span class="tag rm">OUT</span></td><td>Polling errors (#148) are logged only; no API lists them.</td><td>Nothing is built; recorded as a gap for #148/#140.</td><td>H</td></tr>
+</table>
+<p class="faint" style="margin:10px 0 0">Everything GitLab-specific (labels, help, errors copy, kinds, validators wiring, runner link) is in <code>gitlab.tsx</code>; the API functions are in <code>platform-connections.functions.ts</code>; the tag rule is in <code>schemas.ts</code>.</p>
+</section>
+
+</body>
+</html>
