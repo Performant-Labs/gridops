@@ -642,8 +642,13 @@ async fn stored_connection(state: &AppState, connection_id: &str) -> ApiResult<S
         })?;
     let path = row.get::<String, _>("scope_path");
     let scope = match row.get::<&str, _>("scope_kind") {
+        "project" => Scope::Project { id, path },
         "group" => Scope::Group { id, path },
-        _ => Scope::Project { id, path },
+        other => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "GitLab connection {connection_id} has an unknown scope kind {other:?}"
+            )));
+        }
     };
     Ok(StoredConnection {
         name: row.get("name"),
