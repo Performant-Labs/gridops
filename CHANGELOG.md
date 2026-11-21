@@ -34,8 +34,8 @@ Known problems in the current release are in the README's
 
 ### Changed
 
-- Runner pool API: `runnerGroupId` may be left out. A GitHub organization pool
-  without one gets the 400 "Runner group ID must be positive." instead of a
+- Runner pool API: `runnerGroupId` may be left out. A GitHub pool without one
+  gets the 400 "Runner group ID must be positive." instead of a
   422. An invalid update sent to a pool that does not exist, or that the caller
   cannot see, is now a 404 instead of a 400. (#172)
 

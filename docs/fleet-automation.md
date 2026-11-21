@@ -360,7 +360,8 @@ A pool stores an image only for the providers it uses: `dockerImage` or
 as `""`. To add a provider to a pool, send its image with the edit: adding Tart
 without `tartImage` is refused with `400` (`Tart base VM (tartImage) is required
 for a pool that uses macOS · Tart virtual machines.`), and adding Docker without
-`dockerImage` likewise. Nothing is filled in from the server's defaults. Tart
+`dockerImage` likewise, except on a GitLab pool, whose Docker runners use
+`gitlab/gitlab-runner:ubuntu-v19.6.0` when `dockerImage` is empty. Nothing is filled in from the server's defaults. Tart
 with `"macosRuntime":"native"` clones no VM and needs no `tartImage`. The web form
 sends none for it. Pools stored by earlier versions with a default image for a
 provider they do not use read back `""` too: the upgrade clears the built-in
