@@ -303,7 +303,7 @@ Before `run-single` starts, the VM checks the token with GitLab's runner verify 
 | 75 | `idle_expired` | The wait timeout passed with no job. |
 | 77 | `registration_refused` | GitLab refused the token, at the verify call or while `run-single` asked for jobs. |
 
-Any other exit lists as `exited` with no `exitReason`. That includes 78 for an image without `gitlab-runner` at the configured path, 69 when GitLab did not answer the verify call with 200 or 403, and 70 when `run-single` stopped without taking a job or reaching its wait timeout. The runner's output, including `gitlab-runner`'s own log, is in the runner's logs.
+Any other exit lists as `exited` with no `exitReason`. That includes 78 for an image without `gitlab-runner` at the configured path, 69 when GitLab did not answer the verify call with 200 or 403, and 70 when `run-single` stopped without taking a job or reaching its wait timeout, or itself exited with 75 or 77 (so its own status cannot pass for `idle_expired` or `registration_refused`). The runner's output, including `gitlab-runner`'s own log, is in the runner's logs.
 
 ## Workflow labels
 

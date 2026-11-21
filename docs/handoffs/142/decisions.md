@@ -126,3 +126,10 @@
 
 ## A Phase 7 (anti-duplication gate), 2026-11-20
 Verdict PASS: gitlab.rs and the image script are brief-mandated; all other changes extend existing objects in place (see handoff-A-dup.md).
+
+## F (Phase 6 rework, S REWORK), 2026-11-20
+
+- **Decided:** S's blocking finding is test-only (`gitlab_tests.rs` self-deriving expectations plus missing rows). F makes no production-code change for it and hands it to T. F also fixed one advisory doc inaccuracy: the exit-70 description in `docs/macos-runners.md` now covers `run-single` itself exiting 75 or 77.
+- **Assumed:** the workflow routes a self-reported test-only S REWORK to T (playbook #678).
+- **Hedged:** S's other advisory notes are PR-body items for O: the manual check deferred to #143, the registrationToken deviation (ignored, not refused), #147 being needed for end-to-end reachability, and the crash window. They are also contract-level items for epic #136 (instance-prefixed `glrt-` tokens) or upstream behaviour (the 300 s mid-run refusal delay, gitlab-runner's shortened-token log line). None is a #142 production change.
+- **Evidence:** `handoff-S.md`; `gitlab.rs:144-178` (the exit mapping the new rows pin).

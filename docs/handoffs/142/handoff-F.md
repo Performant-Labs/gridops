@@ -160,3 +160,21 @@ Neither touches #142 code. I left them alone because they are test-fixture code.
 - crates/gridops-tart-agent/src/main.rs
 - scripts/prepare-tart-gitlab-runner-image.sh (new)
 - docs/macos-runners.md
+
+## Phase 6 rework (S REWORK, 2026-11-20): test-only, routed to T
+
+**Date:** 2026-11-20
+**Branch:** claude/gitlab-142-tart-13d6d4
+**Issue:** #142
+
+S's blocking finding (`handoff-S.md`, test-quality section 7, criterion 2) is **test-only**. `the_guest_script_exits_with_the_status_each_ending_maps_to` in `crates/gridops-tart-agent/src/gitlab_tests.rs` derives its expectations from the script's own text, and it lacks rows for the verify-500 → 69, run-single 75 → 70 and silent-0 → 70 branches. The production behaviour those rows pin is already in `gitlab.rs` (lines 144-178) and S verified it independently under bash 3.2.57. **No production-code change answers this finding.** F never edits tests, so the fix is T's:
+
+- remove the script-text probing (`gitlab_tests.rs:493-502`) and the conditionals (517, 520-527, 539-541);
+- add the three new rows, with two new `FAKE_GITLAB_RUNNER` behaviours (exit 75, silent exit 0);
+- re-run S's mutations A to E.
+
+**One production-side change this round (advisory note from S, not the blocking finding):** `docs/macos-runners.md` described exit 70 without the case where `run-single` itself exits 75 or 77. The sentence now names it, matching the script's `75|77) exit 70` guard. No code changed.
+
+**Tier 1:** no Rust source changed this round. A doc-only diff does not affect the build or the tests, so I did not re-run them.
+
+**Files changed this round:** docs/macos-runners.md
