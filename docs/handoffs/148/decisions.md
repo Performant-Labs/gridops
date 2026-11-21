@@ -224,3 +224,39 @@
     - the reference run of `cargo test -p gridops-core --lib -- gitlab::jobs_tests` (9 passed);
     - `cargo fmt --all -- --check`;
     - `cargo +1.98.1 clippy -p gridops-core --all-targets -- -D warnings -A clippy::unused_async_trait_impl` (exit 0).
+
+## F (Phase 6, implement against the RED): 2026-11-20T16:56:39-08:00
+- **Decided:**
+  - D18 local copy at `gitlab/jobs.rs` with the brief's exact API.
+    - Every rule lives in one guarded `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING`.
+    - A read beforehand works out the outcome (`previous_status`), and the upsert's `WHERE` also requires the status that was read to be unchanged. If it changed, the function reads and decides again (at most 5 attempts).
+    - `set_gitlab_runner_busy` matches on `base_url` through the runner's connection.
+  - Demand: a private `QueuedJobKey { Github(i64), Gitlab { base_url, job_id } }`.
+    - The GitLab arm dedupes D8-active rows on `(base_url, job_id)` in a CTE. The job's status is its highest-tier row, it is queued at `MIN(created_at)`, and its pools are those of any of its connections, each listed once.
+    - It merges into the GitHub list by a stable Rust sort on `(queued_at, key)`.
+    - `assigned_queued_jobs` counts both platforms. Every other public output is GitHub-only.
+  - Poll:
+    - `worker`, plus `poll_once(app, &mut HashMap<String, Instant>, now)`.
+    - The interval is the pass's `reconcileIntervalSeconds` read.
+    - Every GitLab call runs under a 30 s timeout. A rate limit stops the connection until `retry_after` (default 60 s, capped at 1 h).
+    - A failed `group_projects` skips the conclusion step, and a failed project's rows are not checked.
+    - The check mark is a one-column `UPDATE` guarded to D8 statuses.
+    - `NotFound` is written as `canceled`.
+    - The busy clear and the `runner_events` row are written in the same transaction as the conclusion.
+- **Assumed:**
+  - Writing a non-terminal `job` answer through D18 (for example `pending` → `running`) is intended ("write its status").
+  - `created_at` of a row the poll inserts is the write time (`now_ms`). T left this unpinned.
+  - Event metadata ids as JSON numbers.
+- **Hedged:**
+  - Four choices go beyond the brief's text, all following A's round-4 suggestions: the highest-tier status for a duplicated job (warning 2), the status guard on the check mark (warning 4), skipping the conclusion step on a failed `group_projects` (warning 6a), and the `Job · pipeline <id>` message (warning 5).
+  - Not fixed: a duplicate `runner_events` row per duplicated running row (warning 5, part 4). Fixing it would change #140's D18 semantics.
+  - The workspace run shows 12 failures. All are host-environment failures that reproduce on the untouched base `b22c451`: `gridops-manager` has 11 `SUN_LEN` socket-path failures, and `gridops-api` `fleet_http::release_preflight::..._without_a_macos_arm64_machine` fails because this host is macOS ARM64. Linux CI is expected to pass them; that was not run here.
+- **Evidence:**
+  - Read: the brief (271 lines), `handoff-A.md` (round 4), `handoff-T-red.md` (round 2), `140-brief.md:280-372` at `ba0a441`, `migrations/0047_gitlab.sql` in full, `autoscaling.rs:1-860`, `main.rs` (header, `main`, workers, `retry_when_busy`, the job check `2030-2225`, `runtime_secret`, event helpers, test literal), `webhooks.rs:620-655`, and all three test files in full.
+  - Commands:
+    - `cargo test -p gridops-core --lib -- gitlab::jobs_tests` (9/9);
+    - `-- autoscaling gitlab` (53/53);
+    - `cargo test -p gridops-reconciler gitlab_poll_tests` (16/16);
+    - `cargo fmt --all -- --check` (0);
+    - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (0);
+    - `cargo test --workspace --locked --no-fail-fast` (882 passed, 12 failed; all 12 fail identically on base `b22c451`).
