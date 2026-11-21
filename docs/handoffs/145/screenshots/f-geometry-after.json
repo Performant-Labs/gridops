@@ -1,0 +1,2330 @@
+{
+ "connections-populated-admin@360": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     77,
+     361,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "ada-admin": {
+    "rect": [
+     77,
+     460,
+     67,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     57,
+     559,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     57,
+     658,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     20,
+     232,
+     320,
+     104
+    ],
+    "children": [
+     [
+      20,
+      232,
+      320,
+      64
+     ],
+     [
+      20,
+      308,
+      133,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     20,
+     785,
+     320,
+     201
+    ],
+    "children": [
+     [
+      20,
+      785,
+      320,
+      125
+     ],
+     [
+      20,
+      922,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     20,
+     1559,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      1559,
+      320,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    21,
+    349,
+    318,
+    98
+   ],
+   [
+    21,
+    448,
+    318,
+    98
+   ],
+   [
+    21,
+    547,
+    318,
+    98
+   ],
+   [
+    21,
+    646,
+    318,
+    98
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-populated-member@360": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     77,
+     465,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     57,
+     554,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     57,
+     625,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     20,
+     376,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      376,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     20,
+     724,
+     320,
+     165
+    ],
+    "children": [
+     [
+      20,
+      724,
+      320,
+      125
+     ],
+     [
+      20,
+      861,
+      214,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     20,
+     1462,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      1462,
+      320,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    21,
+    453,
+    318,
+    88
+   ],
+   [
+    21,
+    542,
+    318,
+    70
+   ],
+   [
+    21,
+    613,
+    318,
+    70
+   ]
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-admin@360": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     20,
+     232,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      232,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     20,
+     626,
+     320,
+     84
+    ],
+    "children": [
+     [
+      20,
+      626,
+      320,
+      84
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     20,
+     1283,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      1283,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Create the GitHub AppGridOps needs a pri",
+    "rect": [
+     20,
+     1566,
+     320,
+     104
+    ],
+    "children": [
+     [
+      20,
+      1566,
+      320,
+      104
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    21,
+    1869,
+    318,
+    132
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-member@360": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     20,
+     376,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      376,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     20,
+     718,
+     320,
+     84
+    ],
+    "children": [
+     [
+      20,
+      718,
+      320,
+      84
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     20,
+     1375,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      1375,
+      320,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-repository@360": {
+  "names": {
+   "Acme Bitbucket": {
+    "rect": [
+     213,
+     495,
+     83,
+     16
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     20,
+     276,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      276,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     20,
+     658,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      658,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     20,
+     1657,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      1657,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "PriorityWhich repositories get the next ",
+    "rect": [
+     20,
+     2446,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      2446,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     20,
+     2873,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      2873,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     20,
+     3331,
+     320,
+     84
+    ],
+    "children": [
+     [
+      20,
+      3331,
+      258,
+      84
+     ],
+     [
+      290,
+      3387,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    21,
+    3539,
+    318,
+    339
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-organization@360": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     20,
+     276,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      276,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     20,
+     540,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      540,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     20,
+     1324,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      1324,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     20,
+     2113,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      2113,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     20,
+     2571,
+     320,
+     84
+    ],
+    "children": [
+     [
+      20,
+      2571,
+      258,
+      84
+     ],
+     [
+      290,
+      2627,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    21,
+    2779,
+    318,
+    339
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "new-pool@360": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     20,
+     376,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      376,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     20,
+     648,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      648,
+      320,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     20,
+     1432,
+     320,
+     64
+    ],
+    "children": [
+     [
+      20,
+      1432,
+      320,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     20,
+     2197,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      2197,
+      320,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "settings-general@360": {
+  "names": {},
+  "headers": [
+   {
+    "text": "Provisioning",
+    "rect": [
+     20,
+     232,
+     320,
+     22
+    ],
+    "children": [
+     [
+      20,
+      232,
+      320,
+      22
+     ]
+    ]
+   },
+   {
+    "text": "RetentionOlder records are pruned automa",
+    "rect": [
+     20,
+     954,
+     320,
+     44
+    ],
+    "children": [
+     [
+      20,
+      954,
+      320,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-populated-admin@768": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     113,
+     317,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "ada-admin": {
+    "rect": [
+     113,
+     380,
+     67,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     93,
+     443,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     93,
+     506,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     56,
+     228,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      228,
+      511,
+      64
+     ],
+     [
+      579,
+      264,
+      133,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     56,
+     597,
+     656,
+     125
+    ],
+    "children": [
+     [
+      56,
+      597,
+      307,
+      125
+     ],
+     [
+      375,
+      694,
+      337,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     56,
+     1130,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1130,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    57,
+    305,
+    654,
+    62
+   ],
+   [
+    57,
+    368,
+    654,
+    62
+   ],
+   [
+    57,
+    431,
+    654,
+    62
+   ],
+   [
+    57,
+    494,
+    654,
+    62
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-populated-member@768": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     113,
+     401,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     93,
+     464,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     93,
+     527,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     56,
+     332,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      332,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     56,
+     618,
+     656,
+     105
+    ],
+    "children": [
+     [
+      56,
+      618,
+      430,
+      105
+     ],
+     [
+      498,
+      695,
+      214,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     56,
+     1131,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1131,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    57,
+    389,
+    654,
+    62
+   ],
+   [
+    57,
+    452,
+    654,
+    62
+   ],
+   [
+    57,
+    515,
+    654,
+    62
+   ]
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-admin@768": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     56,
+     228,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      228,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     56,
+     582,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      582,
+      656,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     56,
+     1054,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1054,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Create the GitHub AppGridOps needs a pri",
+    "rect": [
+     56,
+     1337,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      1337,
+      656,
+      64
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    57,
+    1536,
+    654,
+    60
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-member@768": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     56,
+     332,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      332,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     56,
+     634,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      634,
+      656,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     56,
+     1106,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1106,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-repository@768": {
+  "names": {
+   "Acme Bitbucket": {
+    "rect": [
+     396,
+     441,
+     83,
+     16
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     56,
+     272,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      272,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     56,
+     604,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      604,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     56,
+     1269,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1269,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "PriorityWhich repositories get the next ",
+    "rect": [
+     56,
+     1878,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1878,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     56,
+     2201,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      2201,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     56,
+     2551,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      2551,
+      594,
+      64
+     ],
+     [
+      662,
+      2587,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    57,
+    2719,
+    654,
+    187
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-organization@768": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     56,
+     272,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      272,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     56,
+     516,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      516,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     56,
+     1030,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1030,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     56,
+     1639,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1639,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     56,
+     1989,
+     656,
+     64
+    ],
+    "children": [
+     [
+      56,
+      1989,
+      594,
+      64
+     ],
+     [
+      662,
+      2025,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    57,
+    2157,
+    654,
+    187
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "new-pool@768": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     56,
+     352,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      352,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     56,
+     584,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      584,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     56,
+     1118,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1118,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     56,
+     1703,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      1703,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "settings-general@768": {
+  "names": {},
+  "headers": [
+   {
+    "text": "Provisioning",
+    "rect": [
+     56,
+     228,
+     656,
+     22
+    ],
+    "children": [
+     [
+      56,
+      228,
+      656,
+      22
+     ]
+    ]
+   },
+   {
+    "text": "RetentionOlder records are pruned automa",
+    "rect": [
+     56,
+     778,
+     656,
+     44
+    ],
+    "children": [
+     [
+      56,
+      778,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-populated-admin@1280": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     487,
+     282,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "ada-admin": {
+    "rect": [
+     487,
+     345,
+     67,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     467,
+     408,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     467,
+     471,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     430,
+     193,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      193,
+      511,
+      64
+     ],
+     [
+      953,
+      229,
+      133,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     430,
+     562,
+     656,
+     125
+    ],
+    "children": [
+     [
+      430,
+      562,
+      307,
+      125
+     ],
+     [
+      749,
+      659,
+      337,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     430,
+     1095,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1095,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    431,
+    270,
+    654,
+    62
+   ],
+   [
+    431,
+    333,
+    654,
+    62
+   ],
+   [
+    431,
+    396,
+    654,
+    62
+   ],
+   [
+    431,
+    459,
+    654,
+    62
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-populated-member@1280": {
+  "names": {
+   "acme-labs": {
+    "rect": [
+     487,
+     366,
+     66,
+     20
+    ],
+    "clipped": false
+   },
+   "Acme Bitbucket": {
+    "rect": [
+     467,
+     429,
+     98,
+     20
+    ],
+    "clipped": false
+   },
+   "Platform Team": {
+    "rect": [
+     467,
+     492,
+     90,
+     20
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     430,
+     297,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      297,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     430,
+     583,
+     656,
+     105
+    ],
+    "children": [
+     [
+      430,
+      583,
+      430,
+      105
+     ],
+     [
+      872,
+      660,
+      214,
+      28
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     430,
+     1096,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1096,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    431,
+    354,
+    654,
+    62
+   ],
+   [
+    431,
+    417,
+    654,
+    62
+   ],
+   [
+    431,
+    480,
+    654,
+    62
+   ]
+  ],
+  "ownerOverlapsOrg": false,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-admin@1280": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     430,
+     193,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      193,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     430,
+     547,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      547,
+      656,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     430,
+     1019,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1019,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Create the GitHub AppGridOps needs a pri",
+    "rect": [
+     430,
+     1302,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      1302,
+      656,
+      64
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    431,
+    1501,
+    654,
+    60
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "connections-empty-member@1280": {
+  "names": {},
+  "headers": [
+   {
+    "text": "ConnectionsEvery CI platform GridOps run",
+    "rect": [
+     430,
+     297,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      297,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "GitHub AppGridOps signs in with OAuth an",
+    "rect": [
+     430,
+     599,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      599,
+      656,
+      64
+     ]
+    ]
+   },
+   {
+    "text": "EndpointsConfigure these on the GitHub A",
+    "rect": [
+     430,
+     1071,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1071,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-repository@1280": {
+  "names": {
+   "Acme Bitbucket": {
+    "rect": [
+     770,
+     450,
+     83,
+     16
+    ],
+    "clipped": false
+   }
+  },
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     430,
+     281,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      281,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     430,
+     613,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      613,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     430,
+     1278,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1278,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "PriorityWhich repositories get the next ",
+    "rect": [
+     430,
+     1887,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1887,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     430,
+     2210,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      2210,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     430,
+     2560,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      2560,
+      594,
+      64
+     ],
+     [
+      1036,
+      2596,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    431,
+    2728,
+    654,
+    187
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "pool-settings-organization@1280": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     430,
+     281,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      281,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     430,
+     525,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      525,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     430,
+     1039,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1039,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     430,
+     1648,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1648,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Fleet executionThe built-in runner host ",
+    "rect": [
+     430,
+     1998,
+     656,
+     64
+    ],
+    "children": [
+     [
+      430,
+      1998,
+      594,
+      64
+     ],
+     [
+      1036,
+      2034,
+      50,
+      28
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [
+   [
+    431,
+    2166,
+    654,
+    187
+   ]
+  ],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "new-pool@1280": {
+  "names": {},
+  "headers": [
+   {
+    "text": "DestinationWhere this pool’s runners reg",
+    "rect": [
+     430,
+     361,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      361,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "Runner definitionWhat each runner is and",
+    "rect": [
+     430,
+     593,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      593,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "CapacityHow many runners GridOps keeps a",
+    "rect": [
+     430,
+     1127,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1127,
+      656,
+      44
+     ]
+    ]
+   },
+   {
+    "text": "AutoscalingGrow from the queue, shrink w",
+    "rect": [
+     430,
+     1712,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      1712,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ },
+ "settings-general@1280": {
+  "names": {},
+  "headers": [
+   {
+    "text": "Provisioning",
+    "rect": [
+     430,
+     193,
+     656,
+     22
+    ],
+    "children": [
+     [
+      430,
+      193,
+      656,
+      22
+     ]
+    ]
+   },
+   {
+    "text": "RetentionOlder records are pruned automa",
+    "rect": [
+     430,
+     743,
+     656,
+     44
+    ],
+    "children": [
+     [
+      430,
+      743,
+      656,
+      44
+     ]
+    ]
+   }
+  ],
+  "offscreen": [
+   "Skip to content"
+  ],
+  "rows": [],
+  "ownerOverlapsOrg": null,
+  "overflow": false,
+  "consoleErrors": []
+ }
+}

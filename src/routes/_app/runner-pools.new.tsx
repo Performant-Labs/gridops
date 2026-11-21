@@ -1,9 +1,9 @@
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Boxes, Github, LoaderCircle, Plus } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { Boxes, LoaderCircle, Plus } from "lucide-react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { Callout, EmptyState, InlineError, PageBody, PageHeader } from "~/components/page";
+import { EmptyState, Callout, PageBody, PageHeader } from "~/components/page";
 import { PoolPlanPreview } from "~/components/pool-plan-preview";
 import { ResourcePageLoading } from "~/components/resource-page-loading";
 import { SettingsLayout, SettingsRow, SettingsSection, Switch, UnitField } from "~/components/settings-ui";
@@ -11,20 +11,25 @@ import { Button, buttonVariants } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { SearchableMultiSelect } from "~/components/ui/searchable-multi-select";
 import { SearchableSelect } from "~/components/ui/searchable-select";
+import { platforms } from "~/features/platform-connections/registry";
+import type { ResolvedSelection, TargetContext } from "~/features/platform-connections/types";
 import {
-  type RepositoryOption,
-  type RunnerGroupOption,
+  type RunnerPoolOptions,
   createRunnerPoolAction,
   getCreateRunnerPoolOptions,
-  getInstallationRunnerGroups,
-  getRunnerPoolRepositories,
 } from "~/features/runner-pools/runner-pools.functions";
 import { BuiltinHostOffNotice } from "~/features/runner-pools/builtin-host-off-notice";
 import { builtinHostOn } from "~/features/runner-pools/builtin-host";
 import { HostCapacityWarning } from "~/features/runner-pools/host-capacity-warning";
-import { type RunnerHost, hostResourceWarning } from "~/features/runner-pools/resource-risk";
+import { PlatformOptionsSection } from "~/features/runner-pools/platform-options-section";
+import { hostResourceWarning } from "~/features/runner-pools/resource-risk";
 import { poolImages } from "~/features/runner-pools/pool-images";
+import type { CreateRunnerPoolInput } from "~/features/runner-pools/schemas";
 import { TartBaseVmRow } from "~/features/runner-pools/tart-base-vm-row";
+import {
+  anyStandaloneKindAvailable, buildCreatePayload, labelError, labelRules, minMaxCount, prerequisiteEmptyState, requiredProviders, targetPlanCheck,
+} from "~/features/runner-pools/targets";
+import { TargetsRow } from "~/features/runner-pools/targets-row";
 
 export const Route = createFileRoute("/_app/runner-pools/new")({
   loader: () => getCreateRunnerPoolOptions(),
@@ -34,6 +39,8 @@ export const Route = createFileRoute("/_app/runner-pools/new")({
 
 function NewRunnerPoolPage() {
   const options = Route.useLoaderData();
+  // Built once and handed, as the same object, to every target kind and payload partial.
+  const context = useMemo<TargetContext>(() => ({ form: "create", options }), [options]);
 
   useEffect(() => {
     const search = new URLSearchParams(window.location.search);
@@ -50,26 +57,15 @@ function NewRunnerPoolPage() {
 
   const header = <PageHeader breadcrumbs={[{ label: "Runner pools", to: "/runner-pools" }]} title="New pool" />;
 
-  if (!options.authenticated || !options.defaults) {
+  // A pool needs a standalone target; until one is available the descriptor says what to connect first.
+  if (!options.authenticated || !options.defaults || !anyStandaloneKindAvailable(platforms, context)) {
+    const blocker = prerequisiteEmptyState(platforms, context);
     return (
       <>
         {header}
         <PageBody>
-          <EmptyState description="GridOps needs an authorized GitHub App installation before it can create a repository or organization runner pool." icon={Github} title="Connect GitHub first">
-            <a className={buttonVariants()} href="/auth/github?returnTo=/runner-pools/new"><Github />Connect GitHub</a>
-          </EmptyState>
-        </PageBody>
-      </>
-    );
-  }
-
-  if (options.installations.length === 0) {
-    return (
-      <>
-        {header}
-        <PageBody>
-          <EmptyState description="Choose the account and repositories GridOps may operate, then come back here and refresh GitHub access." icon={Github} title="Install the GitHub App">
-            <a className={buttonVariants()} href={options.installUrl}><Github />Install GridOps on GitHub</a>
+          <EmptyState description={blocker?.description ?? "Connect a CI platform before creating a runner pool."} icon={blocker?.icon ?? Boxes} title={blocker?.title ?? "Connect a platform first"}>
+            {blocker?.action ? <a className={buttonVariants()} href={blocker.action.href}><blocker.icon />{blocker.action.label}</a> : null}
           </EmptyState>
         </PageBody>
       </>
@@ -80,72 +76,23 @@ function NewRunnerPoolPage() {
     <>
       {header}
       <PageBody>
-        <RunnerPoolForm options={options} />
+        <RunnerPoolForm context={context} options={options} />
       </PageBody>
     </>
   );
 }
 
-type RunnerPoolFormOptions = {
-  authenticated: true;
-  installations: Array<{ id: number; accountLogin: string; accountType: string }>;
-  repositories: Array<{
-    id: number;
-    installationId: number;
-    fullName: string;
-    private: boolean;
-  }>;
-  runnerGroups: Array<{
-    installationId: number;
-    id: number;
-    name: string;
-    visibility: string;
-    isDefault: boolean;
-  }>;
-  bitbucketConnections: Array<{ id: string; name: string; workspace: string; workspaceUuid: string }>;
-  defaults: {
-    provider: "docker" | "tart";
-    providers: Array<"docker" | "tart">;
-    image: string;
-    dockerImage: string;
-    tartImage: string;
-    macosRuntime?: "vm" | "native";
-    labels: string[];
-    cpuLimit: number;
-    memoryLimitMb: number;
-    desiredCount: number;
-    minCount: number;
-    maxCount: number;
-    autoscalingEnabled: boolean;
-    queueScaleFactor: number;
-    idleTimeoutMinutes: number;
-    runnerGroupId: number;
-    maxCpuLimit: number;
-    maxMemoryLimitMb: number;
-    runnerHost?: RunnerHost;
-  };
-  installUrl: string;
-  /** Off: a pool runs on enrolled machines only, so it needs fleet execution before it can start runners. */
-  builtinRunnerHostEnabled?: boolean;
-};
+type RunnerPoolFormOptions = Extract<RunnerPoolOptions, { authenticated: true }>;
 
 type RunnerProvider = "docker" | "tart";
 
-type AsyncOptions<T> =
-  | { status: "loading"; items: T[]; error: null }
-  | { status: "ready"; items: T[]; error: null }
-  | { status: "error"; items: T[]; error: string };
-
-function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
+function RunnerPoolForm({ options, context }: { options: RunnerPoolFormOptions; context: TargetContext }) {
   const createPool = createRunnerPoolAction;
   const navigate = useNavigate();
   const hostOn = builtinHostOn(options.builtinRunnerHostEnabled);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scope, setScope] = useState<"repository" | "organization">("repository");
-  const [installationId, setInstallationId] = useState(options.installations[0]?.id ?? 0);
-  const [repositoryIds, setRepositoryIds] = useState<number[]>([]);
-  const [bitbucketConnectionIds, setBitbucketConnectionIds] = useState<string[]>([]);
+  const [selection, setSelection] = useState<ResolvedSelection>({});
   const [mode, setMode] = useState<"ephemeral" | "persistent">("ephemeral");
   const [providers, setProviders] = useState<RunnerProvider[]>(options.defaults.providers);
   const provider = providers[0] ?? options.defaults.provider;
@@ -159,23 +106,6 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
   const [memoryLimitMb, setMemoryLimitMb] = useState(options.defaults.memoryLimitMb);
   const [poolName, setPoolName] = useState("");
   const [labels, setLabels] = useState(options.defaults.labels.join(", "));
-  const initialInstallation = options.installations.find((installation) => installation.id === installationId);
-  const [repositoryLoad, setRepositoryLoad] = useState<AsyncOptions<RepositoryOption>>(
-    { status: "loading", items: [], error: null },
-  );
-  const [runnerGroupLoad, setRunnerGroupLoad] = useState<AsyncOptions<RunnerGroupOption>>(
-    initialInstallation?.accountType === "Organization"
-      ? { status: "loading", items: [], error: null }
-      : { status: "ready", items: [], error: null },
-  );
-  const repositories = repositoryLoad.items;
-  const selectedRepositories = repositories.filter((repository) => repositoryIds.includes(repository.id));
-  const selectedAccounts = [...new Set(selectedRepositories.map((repository) => repository.accountLogin))];
-  const runnerGroups = runnerGroupLoad.items;
-  const defaultRunnerGroup = runnerGroups.find((group) => group.isDefault) ?? runnerGroups[0];
-  const [runnerGroupId, setRunnerGroupId] = useState(options.defaults.runnerGroupId);
-  const [repositoryAttempt, setRepositoryAttempt] = useState(0);
-  const [runnerGroupAttempt, setRunnerGroupAttempt] = useState(0);
   const resourceWarning = hostResourceWarning({
     runnerCount: desiredCount,
     cpuLimit,
@@ -184,42 +114,12 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
     memoryBudgetMb: options.defaults.maxMemoryLimitMb,
   });
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void getRunnerPoolRepositories(controller.signal)
-      .then(({ items }) => setRepositoryLoad({ status: "ready", items, error: null }))
-      .catch((cause: unknown) => {
-        if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setRepositoryLoad({
-          status: "error",
-          items: [],
-          error: cause instanceof Error ? cause.message : "Repositories could not be loaded.",
-        });
-      });
-    return () => controller.abort();
-  }, [repositoryAttempt]);
-
-  useEffect(() => {
-    if (!installationId || scope !== "organization") return;
-    const controller = new AbortController();
-    const installation = options.installations.find((candidate) => candidate.id === installationId);
-    if (installation?.accountType === "Organization") {
-      void getInstallationRunnerGroups(installationId, controller.signal)
-        .then(({ items }) => {
-          setRunnerGroupLoad({ status: "ready", items, error: null });
-          setRunnerGroupId(items.find((group) => group.isDefault)?.id ?? items[0]?.id ?? options.defaults.runnerGroupId);
-        })
-        .catch((cause: unknown) => {
-          if (cause instanceof DOMException && cause.name === "AbortError") return;
-          setRunnerGroupLoad({
-            status: "error",
-            items: [],
-            error: cause instanceof Error ? cause.message : "Runner groups could not be loaded.",
-          });
-        });
-    }
-    return () => controller.abort();
-  }, [installationId, options.defaults.runnerGroupId, options.installations, runnerGroupAttempt, scope]);
+  function changeTargets(next: ResolvedSelection) {
+    setSelection(next);
+    // A kind that needs a provider adds it, as picking a workspace added macOS · Tart before.
+    const missing = requiredProviders(platforms, next).filter((required) => !providers.includes(required));
+    if (missing.length) setProviders((current) => [...current, ...missing.filter((required) => !current.includes(required))]);
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -228,41 +128,34 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
     const form = new FormData(event.currentTarget);
 
     try {
-      const created = await createPool({
-        data: {
-          installationId: scope === "repository"
-            ? selectedRepositories[0]?.installationId ?? 0
-            : installationId,
-          repositoryIds: scope === "repository" ? repositoryIds : [],
-          bitbucketConnectionIds,
-          name: poolName,
-          scope,
-          mode,
-          provider,
-          providers,
-          labels: labels
-            .split(",")
-            .map((label) => label.trim())
-            .filter(Boolean),
-          // Native execution clones no VM and hides the field, so the prefilled
-          // default is not sent either: the pool stores no base VM, and
-          // switching it to Virtual machine later asks for one. (Settings keeps
-          // the base VM a native pool already has.)
-          ...poolImages({ provider, providers, dockerImage, tartImage: macosRuntime === "native" ? "" : tartImage }),
-          macosRuntime,
-          desiredCount: Number(form.get("desiredCount")),
-          minCount: Number(form.get("minCount")),
-          maxCount: Number(form.get("maxCount")),
-          autoscalingEnabled: form.get("autoscalingEnabled") === "on",
-          queueScaleFactor: Number(form.get("queueScaleFactor")),
-          idleTimeoutMinutes: Number(form.get("idleTimeoutMinutes")),
-          cpuLimit: Number(form.get("cpuLimit")),
-          memoryLimitMb: Number(form.get("memoryLimitMb")),
-          runnerGroupId: scope === "organization"
-            ? runnerGroupId || defaultRunnerGroup?.id || 1
-            : 1,
-        },
-      });
+      const data = {
+        // installationId, scope, repositoryIds, runnerGroupId and each platform's own fields.
+        ...buildCreatePayload(platforms, selection, context),
+        name: poolName,
+        mode,
+        provider,
+        providers,
+        labels: labels
+          .split(",")
+          .map((label) => label.trim())
+          .filter(Boolean),
+        // Native execution clones no VM and hides the field, so the prefilled
+        // default is not sent either: the pool stores no base VM, and
+        // switching it to Virtual machine later asks for one. (Settings keeps
+        // the base VM a native pool already has.)
+        ...poolImages({ provider, providers, dockerImage, tartImage: macosRuntime === "native" ? "" : tartImage }),
+        macosRuntime,
+        desiredCount: Number(form.get("desiredCount")),
+        minCount: Number(form.get("minCount")),
+        maxCount: Number(form.get("maxCount")),
+        autoscalingEnabled: form.get("autoscalingEnabled") === "on",
+        queueScaleFactor: Number(form.get("queueScaleFactor")),
+        idleTimeoutMinutes: Number(form.get("idleTimeoutMinutes")),
+        cpuLimit: Number(form.get("cpuLimit")),
+        memoryLimitMb: Number(form.get("memoryLimitMb")),
+      };
+      // The schema in createRunnerPoolAction is the submit-time authority for the target fields.
+      const created = await createPool({ data: data as CreateRunnerPoolInput });
       // With the built-in host off the new pool has nowhere to run until it is given fleet execution.
       if (created.cannotRun) await navigate({ params: { poolId: created.id }, to: "/runner-pools/$poolId/settings" });
       else await navigate({ to: "/runner-pools" });
@@ -274,117 +167,24 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
   }
 
   const labelList = labels.split(",").map((label) => label.trim()).filter(Boolean);
+  const rules = labelRules(platforms, selection);
+  const labelProblem = labelError(platforms, selection, labelList);
 
   return (
     <form className="contents" onSubmit={submit}>
       <SettingsLayout description="Choose where runners register, what they run on, and how far the pool may scale." title="New runner pool">
         {hostOn ? null : <BuiltinHostOffNotice />}
         <SettingsSection description="Where this pool’s runners register." title="Destination">
-          <SettingsRow description={scope === "repository" ? "Capacity shared across repositories, even from different accounts." : "Runners shared across one organization through a runner group."} label="Scope">
-            <SearchableSelect
-              ariaLabel="Runner pool scope"
-              onValueChange={(nextScope) => setScope(nextScope ?? "repository")}
-              options={[
-                { value: "repository", label: "Repositories", description: "Shared capacity across repositories and accounts" },
-                { value: "organization", label: "Organization", description: "Shared runners across one organization" },
-              ]}
-              searchable={false}
-              value={scope}
-            />
-          </SettingsRow>
-          {scope === "organization" ? (
-            <SettingsRow label="Installation">
-              <SearchableSelect
-                ariaLabel="GitHub installation"
-                onValueChange={(nextInstallationId) => {
-                  const nextId = nextInstallationId ?? 0;
-                  const nextInstallation = options.installations.find((installation) => installation.id === nextId);
-                  setInstallationId(nextId);
-                  setRunnerGroupLoad(
-                    nextInstallation?.accountType === "Organization"
-                      ? { status: "loading", items: [], error: null }
-                      : { status: "ready", items: [], error: null },
-                  );
-                  setRunnerGroupId(options.defaults.runnerGroupId);
-                }}
-                options={options.installations.map((installation) => ({ value: installation.id, label: installation.accountLogin, description: `${installation.accountType} installation` }))}
-                placeholder="Choose installation…"
-                searchPlaceholder="Search installations…"
-                value={installationId}
-              />
-            </SettingsRow>
-          ) : (
-            <SettingsRow
-              description={`${repositoryIds.length} selected across ${selectedAccounts.length} ${selectedAccounts.length === 1 ? "account" : "accounts"} · ${repositories.length} available · the maximum runner count must cover every repository.`}
-              label="Repositories"
-              stacked
-            >
-              <SearchableMultiSelect
-                ariaLabel="Repositories"
-                emptyMessage="No repositories match this search"
-                loading={repositoryLoad.status === "loading"}
-                maxSelected={maxCount}
-                onValueChange={setRepositoryIds}
-                options={repositories.map((repository) => ({
-                  value: repository.id,
-                  label: repository.fullName,
-                  description: `${repository.accountLogin} · ${repository.private ? "Private" : "Public"}`,
-                  keywords: [repository.accountLogin, repository.accountType, repository.private ? "private" : "public"],
-                }))}
-                placeholder="Choose one or more repositories…"
-                searchPlaceholder="Search by owner or repository name…"
-                selectedNoun="repositories"
-                values={repositoryIds}
-              />
-              {repositoryLoad.status === "error" ? (
-                <InlineError onRetry={() => { setRepositoryLoad({ status: "loading", items: [], error: null }); setRepositoryAttempt((attempt) => attempt + 1); }} title="Couldn’t load repositories">{repositoryLoad.error}</InlineError>
-              ) : null}
-            </SettingsRow>
-          )}
-          {scope === "organization" ? (
-            <SettingsRow description={runnerGroupLoad.status === "loading" ? "Loading runner groups from GitHub…" : runnerGroups.length ? "Groups available to this installation." : "Enter the GitHub runner group ID."} label="Runner group">
-              {runnerGroupLoad.status === "loading" ? (
-                <div className="flex h-8 items-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />Loading…</div>
-              ) : runnerGroups.length ? (
-                <SearchableSelect
-                  ariaLabel="GitHub runner group"
-                  onValueChange={(nextRunnerGroupId) => setRunnerGroupId(nextRunnerGroupId ?? defaultRunnerGroup?.id ?? 1)}
-                  options={runnerGroups.map((group) => ({ value: group.id, label: group.name, description: group.isDefault ? "Default runner group" : `${group.visibility} visibility` }))}
-                  placeholder="Choose runner group…"
-                  searchPlaceholder="Search runner groups…"
-                  value={runnerGroupId}
-                />
-              ) : (
-                <Input min="1" name="runnerGroupId" onChange={(event) => setRunnerGroupId(Number(event.target.value))} required type="number" value={runnerGroupId} />
-              )}
-              {runnerGroupLoad.status === "error" ? (
-                <InlineError onRetry={() => { setRunnerGroupLoad({ status: "loading", items: [], error: null }); setRunnerGroupAttempt((attempt) => attempt + 1); }} title="Couldn’t load runner groups">{runnerGroupLoad.error}</InlineError>
-              ) : null}
-            </SettingsRow>
-          ) : null}
           <SettingsRow
-            description={options.bitbucketConnections.length
-              ? "Optional. Each workspace shares this pool’s capacity with a managed macOS runner for Bitbucket Pipelines."
-              : <>Optional. Connect a workspace first in <Link className="text-foreground underline-offset-2 hover:underline" to="/settings/integrations">Settings → Integrations</Link>.</>}
-            label="Bitbucket workspaces"
+            description="Repositories from different accounts can share capacity. Targets that cannot share a pool are disabled, with the reason. The maximum runner count must cover every repository."
+            label="Targets"
             stacked
           >
-            <SearchableMultiSelect
-              ariaLabel="Bitbucket Cloud workspaces"
-              emptyMessage="No Bitbucket connections are configured"
-              maxSelected={maxCount}
-              onValueChange={(nextConnections) => {
-                setBitbucketConnectionIds(nextConnections);
-                if (nextConnections.length && !providers.includes("tart")) setProviders((current) => [...current, "tart"]);
-              }}
-              options={options.bitbucketConnections.map((connection) => ({ value: connection.id, label: connection.name, description: `${connection.workspace} workspace`, keywords: [connection.workspace, "bitbucket", "workspace"] }))}
-              placeholder="Choose connected Bitbucket workspaces…"
-              searchPlaceholder="Search Bitbucket workspaces…"
-              selectedNoun="workspaces"
-              values={bitbucketConnectionIds}
-            />
+            <TargetsRow context={context} descriptors={platforms} limits={{ maxCount }} onSelectionChange={changeTargets} selection={selection} />
           </SettingsRow>
         </SettingsSection>
+
+        <PlatformOptionsSection descriptors={platforms} selection={selection} />
 
         <SettingsSection description="What each runner is and how jobs find it." title="Runner definition">
           <SettingsRow description="Lowercase letters, numbers, and hyphens. Also registered as a runner label." htmlFor="pool-name" label="Pool name">
@@ -443,10 +243,11 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             </SettingsRow>
           ) : null}
           {includesTart && macosRuntime === "vm" ? (
-            <TartBaseVmRow bitbucket={bitbucketConnectionIds.length > 0} onChange={setTartImage} value={tartImage} />
+            <TartBaseVmRow onChange={setTartImage} value={tartImage} />
           ) : null}
-          <SettingsRow description={bitbucketConnectionIds.length ? "Comma-separated. Bitbucket labels may use lowercase letters, numbers, and dots." : "Comma-separated. OS and architecture labels are added automatically."} htmlFor="pool-labels" label="Additional labels">
-            <Input id="pool-labels" name="labels" onChange={(event) => setLabels(event.target.value)} placeholder={bitbucketConnectionIds.length ? "build, release.ios" : providers.length > 1 ? "build, release" : provider === "tart" ? "xcode, apple-silicon" : "docker, build"} value={labels} />
+          <SettingsRow description={rules?.help ?? "Comma-separated. OS and architecture labels are added automatically."} htmlFor="pool-labels" label="Additional labels">
+            <Input aria-invalid={labelProblem ? true : undefined} id="pool-labels" name="labels" onChange={(event) => setLabels(event.target.value)} placeholder={rules?.placeholder ?? (providers.length > 1 ? "build, release" : provider === "tart" ? "xcode, apple-silicon" : "docker, build")} value={labels} />
+            {labelProblem ? <p className="mt-1.5 text-left text-xs leading-5 text-danger">{labelProblem}</p> : null}
           </SettingsRow>
         </SettingsSection>
 
@@ -455,7 +256,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             <div className="grid grid-cols-3 gap-3">
               <CountInput label="Target" name="desiredCount" onChange={setDesiredCount} value={desiredCount} />
               <CountInput defaultValue={options.defaults.minCount} label="Minimum" name="minCount" />
-              <CountInput label="Maximum" min={Math.max(1, repositoryIds.length)} name="maxCount" onChange={setMaxCount} value={maxCount} />
+              <CountInput label="Maximum" min={minMaxCount(platforms, selection)} name="maxCount" onChange={setMaxCount} value={maxCount} />
             </div>
           </SettingsRow>
           <SettingsRow description={includesTart ? "Whole cores, because this pool includes macOS." : "Applied to each Docker runner."} htmlFor="cpu-limit" label="CPU per runner">
@@ -470,7 +271,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
             </div>
           ) : null}
           <div className="px-4 py-3.5">
-            <PoolPlanPreview desiredCount={desiredCount} labels={labelList} maxCount={maxCount} name={poolName} providers={providers} repositoryCount={repositoryIds.length} scope={scope} />
+            <PoolPlanPreview desiredCount={desiredCount} labels={labelList} maxCount={maxCount} name={poolName} providers={providers} targetCheck={targetPlanCheck(platforms, selection, { maxCount }, context)} />
           </div>
         </SettingsSection>
 
@@ -491,7 +292,7 @@ function RunnerPoolForm({ options }: { options: RunnerPoolFormOptions }) {
       <div className="sticky bottom-0 z-20 border-t border-border bg-panel/90 backdrop-blur">
         <div className="mx-auto flex max-w-[720px] items-center justify-end gap-2 px-5 py-3 sm:px-8">
           <Link className={buttonVariants({ variant: "ghost" })} to="/runner-pools">Cancel</Link>
-          <Button disabled={submitting || options.installations.length === 0} type="submit">
+          <Button disabled={submitting || !anyStandaloneKindAvailable(platforms, context)} type="submit">
             {submitting ? <LoaderCircle className="animate-spin" /> : <Plus />}
             {submitting ? "Creating…" : "Create pool"}
           </Button>
