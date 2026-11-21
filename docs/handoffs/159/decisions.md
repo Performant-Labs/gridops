@@ -42,3 +42,9 @@
   - `cargo test -p gridops-api the_pool_list_carries`: 1 passed. Full `gridops-api` suite: 123 + 36 + 143 passed, plus the 1 environment-dependent failure above.
   - `cargo fmt --check`: exit 0.
   - clippy: no finding in the changed Rust files.
+
+## Phase 7 Verify (T) - 2026-11-21
+- **Decided:** GREEN, no blocking Tier 2 issue. No test needed repair (F flagged none).
+- **Assumed:** the `release_preflight` failure is environmental (fixture reports compile OS on a Mac), not a #159 regression, because the script has no reference to `/runner-pools` and the diff does not touch preflight or fleet code.
+- **Hedged:** "single batched query" is verified by reading `pools_gitlab_connections` (one `json_each(?)` query, early return on empty page), not by a query counter, as A agreed. The live UI path is left to U.
+- **Evidence:** vitest 52 files / 582 passed; eslint clean; `npm run build` + tsc exit 0; cargo fmt exit 0; `cargo test -p gridops-api` 123 + 36 + 143 passed, 1 pre-existing environment failure; clippy shows no finding in the changed Rust files.
