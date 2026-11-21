@@ -2,8 +2,9 @@
 //! verify the token can manage its runners, create a project runner, then
 //! delete it (twice: the second delete finds it gone, which is success).
 //!
-//! Ignored by default. With a token that has the `create_runner` and
-//! `read_api` scopes (or `api`) and Maintainer on the project, run:
+//! Ignored by default. With a token that has the `create_runner`,
+//! `manage_runner` and `read_api` scopes (or `api`) and Maintainer on the
+//! project, run:
 //!
 //! ```text
 //! GITLAB_TEST_TOKEN=glpat-... GITLAB_TEST_PROJECT=group/project \

@@ -258,7 +258,7 @@ Before a release, `scripts/release-preflight.sh` checks that GridOps sees this M
 
 The release's control plane images (repository variable `RELEASE_IMAGES`) do not use the macOS runner: they are built on a Linux runner ([Releasing](releasing.md#runner-requirements)).
 
-Besides the release, the **Tart installer** workflow (`.github/workflows/tart-installer.yml`) runs on this runner whenever a push to `master` or a pull request changes `scripts/install-tart-agent.sh`, its test `scripts/test-install-tart-agent.sh`, the plist template or the `gridops-tart-agent` crate. It runs that test with the guest's own zsh, `sed` and python3, needs nothing else, and fails if the test skips.
+Besides the release, the **Tart installer** workflow (`.github/workflows/tart-installer.yml`) runs on this runner whenever a push to `master` or a pull request changes `scripts/install-tart-agent.sh`, its test `scripts/test-install-tart-agent.sh`, the plist template, the GitLab and Bitbucket image scripts (`scripts/prepare-tart-gitlab-runner-image.sh`, `scripts/prepare-tart-bitbucket-runner-image.sh`), their test `scripts/test-prepare-tart-runner-images.sh` or the `gridops-tart-agent` crate. It runs the installer test with the guest's own zsh, `sed` and python3, needs nothing else, and fails if the test skips. It runs the image scripts' test under the guest's system `/bin/bash` (3.2) against a fake `tart`, so no VM boots, and fails unless that test's last line is `all passed`.
 
 ## Bitbucket Cloud workspaces
 
@@ -275,7 +275,7 @@ Prepare a stopped Tart base image containing the Bitbucket runner. In Bitbucket 
   'https://product-downloads.atlassian.com/.../atlassian-bitbucket-pipelines-runner-<version>.tar.gz'
 ```
 
-The guest needs the Java version currently required by Bitbucket and Git. The preparation script checks both rather than installing packages implicitly. Configure `GRIDOPS_TART_BITBUCKET_RUNNER_ROOT` only if the runner is installed somewhere other than `/Users/admin/atlassian-bitbucket-pipelines-runner`.
+The guest needs the Java version currently required by Bitbucket and Git. The preparation script checks both rather than installing packages implicitly. After the install it flushes the guest's disk, stops the target VM and waits for it, then checks the image in a fresh clone of it: the clone must have an executable `bin/start.sh` under the runner root. It prints that the image is prepared only after that check, and always deletes the clone. If the runner is missing from the clone, the script exits non-zero, names the missing path and deletes the target, so no broken image is left under its name. If the run is interrupted, or the clone's guest agent never answers, the target is stopped and kept. Only one VM runs at a time. Configure `GRIDOPS_TART_BITBUCKET_RUNNER_ROOT` only if the runner is installed somewhere other than `/Users/admin/atlassian-bitbucket-pipelines-runner`.
 
 In **System → Platform connections**, add an API token restricted to the target workspace with workspace read and Pipelines runner read/write permissions. GridOps verifies the workspace before storing the token encrypted at rest. In the pool form, select the workspace under **Bitbucket Cloud workspaces** and choose the prepared Bitbucket Tart image. Bitbucket adds its own `self.hosted` and `macos` labels; GridOps adds `gridops.<pool-name>` plus the pool's dot-separated custom labels.
 
@@ -291,7 +291,7 @@ Prepare a stopped Tart base image containing `gitlab-runner`:
   gridops-macos-tahoe-gitlab
 ```
 
-The script installs the gitlab-runner release pinned in it (19.5.3), downloaded over HTTPS and checked against the SHA-256 GitLab publishes for it, at `/Users/admin/gitlab-runner/bin/gitlab-runner`, and prints its version. It takes no token: each runner's `glrt-` token reaches its VM only when the runner starts, on the agent's stdin channel. It never appears on a command line or in a log, and inside the VM only `gitlab-runner` receives it, as `CI_SERVER_TOKEN`. The guest needs a working Git, which the script checks rather than installing. To install `gitlab-runner` elsewhere, set `GRIDOPS_TART_GITLAB_RUNNER_BINARY` to the same absolute guest path for both the script and the Tart agent.
+The script installs the gitlab-runner release pinned in it (19.5.3), downloaded over HTTPS and checked against the SHA-256 GitLab publishes for it, at `/Users/admin/gitlab-runner/bin/gitlab-runner`, and prints its version. It takes no token: each runner's `glrt-` token reaches its VM only when the runner starts, on the agent's stdin channel. It never appears on a command line or in a log, and inside the VM only `gitlab-runner` receives it, as `CI_SERVER_TOKEN`. The guest needs a working Git, which the script checks rather than installing. After the install it flushes the guest's disk, stops the target VM and waits for it, then checks the image in a fresh clone of it: `gitlab-runner` must be executable at its path and `gitlab-runner --version` must run. It prints that the image is prepared only after that check, and always deletes the clone. If the check fails, the script exits non-zero, names the missing path and deletes the target, so no broken image is left under its name. If the run is interrupted, or the clone's guest agent never answers, the target is stopped and kept. Only one VM runs at a time. To install `gitlab-runner` elsewhere, set `GRIDOPS_TART_GITLAB_RUNNER_BINARY` to the same absolute guest path for both the script and the Tart agent.
 
 The shell executor ignores a job's `image:`. A macOS GitLab job runs on the base VM's own toolchain, so install what the jobs need in the image. The runner's tags are the ones it is given when it is created in GitLab; the VM adds none.
 
@@ -302,8 +302,11 @@ Before `run-single` starts, the VM checks the token with GitLab's runner verify 
 | 0 | `completed` | The runner took its one job, whatever the job's result. |
 | 75 | `idle_expired` | The wait timeout passed with no job. |
 | 77 | `registration_refused` | GitLab refused the token, at the verify call or while `run-single` asked for jobs. |
+| 78 | `runner_missing` | The image has no executable `gitlab-runner` at the configured path. Prepare it with `scripts/prepare-tart-gitlab-runner-image.sh`. |
 
-Any other exit lists as `exited` with no `exitReason`. That includes 78 for an image without `gitlab-runner` at the configured path, 69 when GitLab did not answer the verify call with 200 or 403, and 70 when `run-single` stopped without taking a job or reaching its wait timeout, or itself exited with 75 or 77 (so its own status cannot pass for `idle_expired` or `registration_refused`). The runner's output, including `gitlab-runner`'s own log, is in the runner's logs.
+GridOps counts `registration_refused` and `runner_missing` as provisioning failures: the runner's failure reason says what went wrong and how to fix it, the pool records an error event, and the pool's failure count and backoff go up.
+
+Any other exit lists as `exited` with no `exitReason`. That includes 69 when GitLab did not answer the verify call with 200 or 403, and 70 when `run-single` stopped without taking a job or reaching its wait timeout, or itself exited with 75, 77 or 78 (so its own status cannot pass for `idle_expired`, `registration_refused` or `runner_missing`). The runner's output, including `gitlab-runner`'s own log, is in the runner's logs.
 
 ## Workflow labels
 

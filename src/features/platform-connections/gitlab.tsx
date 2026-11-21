@@ -339,7 +339,7 @@ export const gitlabPlatform: PlatformDescriptor = {
         type: "secret",
         required: true,
         placeholder: "Paste a token",
-        help: "The token needs the create_runner and read_api scopes, and its owner needs the Owner role on the project or group. GridOps checks both before saving.",
+        help: "The token needs the create_runner, manage_runner and read_api scopes (or api), and its user needs the Maintainer role or higher on a project, or the Owner role on a group. GridOps checks both before saving.",
         editableOnUpdate: true,
         updateLabel: "New access token",
         updatePlaceholder: "Leave blank to keep the current token",

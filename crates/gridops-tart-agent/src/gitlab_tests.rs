@@ -187,7 +187,10 @@ fn exit_statuses_map_to_the_exit_reason_table() {
     assert_eq!(exit_reason(0), Some("completed"));
     assert_eq!(exit_reason(75), Some("idle_expired"));
     assert_eq!(exit_reason(77), Some("registration_refused"));
-    for other in [-1, 1, 2, 74, 76, 78, 143, 255] {
+    // #173: an image without gitlab-runner (`EX_CONFIG`) is a provisioning
+    // failure the reconciler counts, so it is listed.
+    assert_eq!(exit_reason(78), Some("runner_missing"));
+    for other in [-1, 1, 2, 69, 70, 74, 76, 79, 143, 255] {
         assert_eq!(exit_reason(other), None, "{other}");
     }
 }
@@ -212,8 +215,8 @@ fn the_default_runner_binary_is_a_guest_path_the_image_script_and_docs_name() {
 /// and exits 0 both after its one job (whatever the job's result) and when
 /// the wait timeout passes with no job. A refused token is logged as
 /// "Checking for jobs... forbidden" and then also waits out the timeout.
-/// It can also exit with a status of its own (75 or 77, colliding with the
-/// table) or exit 0 having logged none of those lines, as when it is stopped
+/// It can also exit with a status of its own (75, 77 or 78, colliding with
+/// the table) or exit 0 having logged none of those lines, as when it is stopped
 /// by a signal. It records each invocation's arguments and its whole
 /// environment.
 const FAKE_GITLAB_RUNNER: &str = r#"#!/bin/sh
@@ -261,6 +264,9 @@ case "$(cat "$dir/runner-behaviour" 2>/dev/null)" in
   exit-77)
     echo 'FATAL: the fake runner stopped' >&2
     exit 77 ;;
+  exit-78)
+    echo 'FATAL: the fake runner stopped' >&2
+    exit 78 ;;
   silent)
     exit 0 ;;
 esac
@@ -546,6 +552,9 @@ async fn the_guest_script_exits_with_the_status_each_ending_maps_to() -> Result<
         // run-single's own status colliding with the table must leave it.
         ("run-single itself exiting 75", "200", "exit-75", 70),
         ("run-single itself exiting 77", "200", "exit-77", 70),
+        // #173: 78 now lists as runner_missing, which only the script's own
+        // check of the binary may report.
+        ("run-single itself exiting 78", "200", "exit-78", 70),
         // Exit 0 with no job, no build limit and no timeout line (a signal
         // stop) must not list as completed.
         (
@@ -577,15 +586,24 @@ async fn the_guest_script_exits_with_the_status_each_ending_maps_to() -> Result<
     Ok(())
 }
 
+/// #173: an image without `gitlab-runner` ends with the status the listing
+/// reports as `runner_missing`, which the reconciler counts as a
+/// provisioning failure, and says which path it looked at.
 #[tokio::test]
-async fn a_guest_without_gitlab_runner_exits_78_and_says_where_it_looked() -> Result<()> {
+async fn a_guest_without_gitlab_runner_exits_runner_missing_naming_the_path() -> Result<()> {
     let guest = Guest::new().await?;
     let missing = format!("{}/no-such-gitlab-runner", guest.bin().display());
     assert!(valid_guest_path(&missing), "{missing}");
     let run = guest
         .run(&runner_script(&missing, &bootstrap(URL, WAIT_TIMEOUT)))
         .await?;
-    assert_eq!(run.status, Some(78), "{}", run.output);
+    assert_eq!(
+        run.status.and_then(exit_reason),
+        Some("runner_missing"),
+        "exited {:?}: {}",
+        run.status,
+        run.output
+    );
     assert!(run.output.contains(&missing), "{}", run.output);
     assert_eq!(
         guest.invocations("runner-argv").await,

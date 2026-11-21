@@ -39,6 +39,29 @@ Known problems in the current release are in the README's
   422. An invalid update sent to a pool that does not exist, or that the caller
   cannot see, is now a 404 instead of a 400. (#172)
 
+### Fixed
+
+- The GitLab and Bitbucket Tart image scripts
+  (`scripts/prepare-tart-gitlab-runner-image.sh`,
+  `scripts/prepare-tart-bitbucket-runner-image.sh`) flush the guest's disk
+  before stopping the VM, so the runner they install is kept, and check the
+  finished image in a fresh clone before reporting success. An image whose
+  clone has no runner is deleted, and the script exits non-zero. (#173)
+- A Tart GitLab runner whose image has no `gitlab-runner` now fails with the
+  exit reason `runner_missing`: its failure reason says to prepare the image
+  with `scripts/prepare-tart-gitlab-runner-image.sh`, the pool records an
+  error event, and the pool's provisioning failure count and backoff go up,
+  where before the pool kept starting VMs and reported each one provisioned.
+  (#173)
+- **A GitLab connection now needs the `manage_runner` scope.** GitLab 17.1 and
+  later refuse to delete a runner without it, so a token with only
+  `create_runner` and `read_api` left every runner registered in GitLab.
+  Saving a connection, replacing its token and **Verify** now refuse such a
+  token, and a runner deletion GitLab refuses shows as a **GitLab runner not
+  deleted** warning in the pool's events. The token help now asks for the
+  Maintainer role or higher on a project and the Owner role on a group.
+  (#171, #174)
+
 ## 0.2.0 - 2026-11-04
 
 ### Upgrading

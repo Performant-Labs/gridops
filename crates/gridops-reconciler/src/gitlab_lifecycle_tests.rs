@@ -315,6 +315,50 @@ async fn assert_readable(setup: &Setup, pool_id: &str, outcome: &str) -> Result<
     Ok(())
 }
 
+/// #173, beside `assert_readable`: the runner row of a GitLab runner whose
+/// Tart image has no `gitlab-runner` holds a `failure_reason` that names the
+/// outcome, the missing `gitlab-runner` and the script that prepares the
+/// image, and the pool has exactly one `error` event for it, carrying the
+/// outcome and the runner, whose message names that script too. Neither
+/// holds a runner token.
+async fn assert_runner_missing(
+    setup: &Setup,
+    pool_id: &str,
+    runner_id: &str,
+    outcome: &str,
+) -> Result<()> {
+    const SCRIPT: &str = "prepare-tart-gitlab-runner-image.sh";
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT failure_reason FROM runners WHERE id=?")
+            .bind(runner_id)
+            .fetch_one(&setup.app.database)
+            .await?;
+    let reason = reason.context("the runner row has no failure_reason")?;
+    let lower = reason.to_lowercase();
+    assert!(
+        lower.contains(outcome) && lower.contains("gitlab-runner") && reason.contains(SCRIPT),
+        "the failure_reason does not name {outcome}, gitlab-runner and {SCRIPT}: {reason:?}"
+    );
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message,metadata FROM runner_events WHERE pool_id=? AND level='error' AND json_extract(metadata,'$.outcome')=?",
+    )
+    .bind(pool_id)
+    .bind(outcome)
+    .fetch_all(&setup.app.database)
+    .await?;
+    let [(message, metadata)] = events.as_slice() else {
+        anyhow::bail!("expected one {outcome} error event on {pool_id}, got {events:?}");
+    };
+    let metadata: Value = serde_json::from_str(metadata)?;
+    assert_eq!(metadata["runnerId"], runner_id, "{metadata}");
+    assert!(message.contains(SCRIPT), "{message:?}");
+    assert!(
+        !reason.contains("glrt-") && !message.contains("glrt-"),
+        "{reason:?} {message:?}"
+    );
+    Ok(())
+}
+
 /// Token secrecy: no `glrt-` token in any column of any runner row, in a
 /// runner or pool event, a pool's wait reason or an audit event.
 async fn assert_no_token_stored(setup: &Setup) -> Result<()> {
@@ -347,6 +391,67 @@ async fn assert_no_token_stored(setup: &Setup) -> Result<()> {
         "a runner token was stored: {stored:?}"
     );
     Ok(())
+}
+
+/// #171: the name of the warning a refused GitLab runner deletion records on
+/// the runner's pool, as the pool's Events list shows it.
+const DELETION_REFUSED: &str = "GitLab runner not deleted";
+
+/// What `FakeGitLab` answers a delete with when the token lacks
+/// `manage_runner`, as GitLab 17.1+ does.
+fn missing_manage_runner() -> GitLabError {
+    GitLabError::MissingScope("manage_runner".to_owned())
+}
+
+#[derive(Debug, FromRow)]
+struct RefusalEvent {
+    runner_id: Option<String>,
+    level: String,
+    message: String,
+    metadata: String,
+}
+
+/// The pool's "GitLab runner not deleted" events, oldest first.
+async fn refusals(setup: &Setup, pool_id: &str) -> Result<Vec<RefusalEvent>> {
+    Ok(sqlx::query_as(
+        "SELECT runner_id,level,message,metadata FROM runner_events
+          WHERE pool_id=? AND event=? ORDER BY created_at,rowid",
+    )
+    .bind(pool_id)
+    .bind(DELETION_REFUSED)
+    .fetch_all(&setup.app.database)
+    .await?)
+}
+
+/// Whether `text` names the number `number` as a whole number (so runner 1
+/// is not found in "runner 12").
+fn names_number(text: &str, number: i64) -> bool {
+    let number = number.to_string();
+    text.split(|character: char| !character.is_ascii_digit())
+        .any(|part| part == number)
+}
+
+/// A refused deletion as the operator reads it: a `warning` (exactly: the
+/// pool's Events list shows any other level but `error` as a success) whose
+/// message names the connection, the GitLab runner id and `reason`, and
+/// carries no access token (`glpat-`) or runner token (`glrt-`).
+fn assert_refusal(event: &RefusalEvent, connection: &str, gitlab_runner_id: i64, reason: &str) {
+    assert_eq!(event.level, "warning", "{event:?}");
+    assert!(
+        event.message.contains(connection),
+        "names the connection: {event:?}"
+    );
+    assert!(
+        names_number(&event.message, gitlab_runner_id),
+        "names GitLab runner {gitlab_runner_id}: {event:?}"
+    );
+    assert!(event.message.contains(reason), "names {reason}: {event:?}");
+    for text in [&event.message, &event.metadata] {
+        assert!(
+            !text.contains("glpat-") && !text.contains("glrt-"),
+            "no token: {event:?}"
+        );
+    }
 }
 
 /// The reconciler's own log lines (`gridops_*` targets, every level), for
@@ -749,7 +854,7 @@ async fn a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it(
     setup.gitlab.fail_next(
         &ACME.url()?,
         FakeMethod::DeleteRunner,
-        GitLabError::Upstream("502 from GitLab".to_owned()),
+        GitLabError::Upstream("502 from GitLab: internal-detail-7f3a".to_owned()),
     );
 
     pass(&setup).await?;
@@ -772,6 +877,22 @@ async fn a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it(
         [1, 2],
         "the first is left for the sweep"
     );
+    // #171: GitLab refusing the delete is shown on the pool, not only logged.
+    // A 502 is not a scope problem, so the warning does not send the operator
+    // after manage_runner.
+    let refused = refusals(&setup, "pool-gl").await?;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_refusal(&refused[0], ACME.name, 1, "GitLab request failed");
+    assert_eq!(refused[0].runner_id.as_deref(), Some(first[0].id.as_str()));
+    assert!(!refused[0].message.contains("manage_runner"), "{refused:?}");
+    // The upstream detail is free-form text: it stays in the log, as the
+    // API keeps it out of its responses, and is not in the event.
+    for text in [&refused[0].message, &refused[0].metadata] {
+        assert!(
+            !text.contains("internal-detail-7f3a") && !text.contains("502"),
+            "no upstream detail in the event: {refused:?}"
+        );
+    }
 
     // The sweep's interval has passed.
     sqlx::query("UPDATE settings SET value='0' WHERE key='lastGitlabRunnerSweepAt'")
@@ -779,6 +900,104 @@ async fn a_failed_gitlab_delete_does_not_fail_the_pass_and_the_sweep_retries_it(
         .await?;
     pass(&setup).await?;
     assert_eq!(gitlab_runner_ids(&setup, &ACME)?, [2], "swept");
+    setup.finish().await
+}
+
+/// #171: a runner leaving service whose GitLab deletion is refused for a
+/// missing `manage_runner` writes one warning on its pool, linked to the
+/// runner row, naming the connection, the GitLab runner and the scope; a
+/// runner GitLab no longer has (`NotFound`) is already gone and writes none.
+#[tokio::test]
+async fn a_refused_gitlab_delete_is_a_pool_warning_and_a_runner_already_gone_is_not() -> Result<()>
+{
+    let setup = gitlab_setup(&gitlab_pool("pool-gl", "docker", RUNNER_IMAGE, "", 1)).await?;
+    ACME.add(&setup, &["pool-gl"]).await?;
+    pass(&setup).await?;
+
+    // GitLab no longer has the first runner.
+    let first = live(&setup, "pool-gl").await?;
+    assert_eq!(first.len(), 1);
+    assert!(
+        setup
+            .manager
+            .exit(&first[0].id, Some(exit_reason(GITLAB_EXIT_COMPLETED)?))
+    );
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        GitLabError::NotFound,
+    );
+    pass(&setup).await?;
+    assert_eq!(
+        refusals(&setup, "pool-gl").await?.len(),
+        0,
+        "a runner already gone is no warning"
+    );
+
+    // The token cannot delete its replacement.
+    let second = live(&setup, "pool-gl").await?;
+    assert_eq!(second.len(), 1, "replaced");
+    assert_eq!(second[0].gitlab_runner_id, Some(2));
+    assert!(
+        setup
+            .manager
+            .exit(&second[0].id, Some(exit_reason(GITLAB_EXIT_COMPLETED)?))
+    );
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+    pass(&setup).await?;
+
+    let refused = refusals(&setup, "pool-gl").await?;
+    assert_eq!(
+        refused.len(),
+        1,
+        "one warning for the one refusal: {refused:?}"
+    );
+    assert_refusal(&refused[0], ACME.name, 2, "manage_runner");
+    assert_eq!(
+        refused[0].runner_id.as_deref(),
+        Some(second[0].id.as_str()),
+        "linked to the runner row"
+    );
+    assert!(
+        gitlab_runner_ids(&setup, &ACME)?.contains(&2),
+        "left for the sweep"
+    );
+    assert_no_token_stored(&setup).await?;
+    setup.finish().await
+}
+
+/// #171: the failed-start cleanup (the manager refused the start, so the
+/// GitLab runner just registered is deleted) records a refused deletion on
+/// the pool too, linked to the failed runner row.
+#[tokio::test]
+async fn a_refused_delete_after_a_failed_manager_start_is_a_pool_warning() -> Result<()> {
+    let setup = gitlab_setup(&gitlab_pool("pool-gl", "docker", RUNNER_IMAGE, "", 1)).await?;
+    ACME.add(&setup, &["pool-gl"]).await?;
+    setup.manager.docker_fails.store(true, Ordering::SeqCst);
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+
+    pass(&setup).await?;
+
+    let failed = rows(&setup, "pool-gl").await?;
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].status, "failed");
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?,
+        [1],
+        "GitLab refused the delete"
+    );
+    let refused = refusals(&setup, "pool-gl").await?;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_refusal(&refused[0], ACME.name, 1, "manage_runner");
+    assert_eq!(refused[0].runner_id.as_deref(), Some(failed[0].id.as_str()));
     setup.finish().await
 }
 
@@ -821,6 +1040,104 @@ async fn a_refused_registration_counts_once_with_a_readable_diagnostic() -> Resu
     assert_eq!((failures, open), (1, false), "still one refusal");
     assert_eq!(gitlab_calls(&setup, FakeMethod::CreateRunner).len(), 1);
     assert_no_token_stored(&setup).await?;
+    setup.finish().await
+}
+
+/// #173 (manager path): a Tart GitLab runner whose image has no
+/// `gitlab-runner` exits 78, which the Tart agent lists as `runner_missing`.
+/// That is a provisioning failure, as a refusal is: the runner fails with a
+/// reason naming the problem and its fix, the pool gets an error event, and
+/// its failure count rises by one and backs off, once however many passes
+/// see the exit, keeping the failures counted before it. A runner that
+/// completes later still clears them.
+#[tokio::test]
+async fn a_tart_runner_without_gitlab_runner_counts_once_with_a_readable_reason() -> Result<()> {
+    // Typed here, not looked up, so that before #173 the pass, not the
+    // lookup, is what fails; the lookup at the end ties it to the table.
+    let missing = "runner_missing";
+    let setup = gitlab_setup(&format!(
+        "{} UPDATE runner_pools SET provision_failure_count=1 WHERE id='pool-gl-mac';",
+        gitlab_pool("pool-gl-mac", "tart", "", "gitlab-macos-runner", 1)
+    ))
+    .await?;
+    ACME.add(&setup, &["pool-gl-mac"]).await?;
+    pass(&setup).await?;
+    setup.tart_start_reached_manager().await?;
+    setup.manager.tart_gate.add_permits(1);
+    setup.tart_start_ended().await?;
+    let first = live(&setup, "pool-gl-mac").await?;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(setup.manager.exit(&first[0].id, Some(missing)));
+
+    pass(&setup).await?;
+
+    let (failures, open, retry_at, state) = circuit(&setup, "pool-gl-mac").await?;
+    assert_eq!(
+        (failures, open),
+        (2, false),
+        "one failure more, the one before it kept"
+    );
+    assert_eq!(state, "backoff", "the counting pass ends in backoff");
+    assert!(
+        retry_at.is_some_and(|at| at > now_millis()),
+        "a retry time ahead: {retry_at:?}"
+    );
+    assert_eq!(live(&setup, "pool-gl-mac").await?.len(), 0);
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?,
+        Vec::<i64>::new(),
+        "deregistered"
+    );
+    assert_runner_missing(&setup, "pool-gl-mac", &first[0].id, missing).await?;
+
+    for _ in 0..2 {
+        pass(&setup).await?;
+    }
+    assert_eq!(
+        circuit(&setup, "pool-gl-mac").await?.0,
+        2,
+        "later passes seeing the same exit count nothing more"
+    );
+    assert_eq!(
+        gitlab_calls(&setup, FakeMethod::CreateRunner).len(),
+        1,
+        "and start nothing while the backoff holds"
+    );
+    assert_runner_missing(&setup, "pool-gl-mac", &first[0].id, missing).await?;
+    assert_no_token_stored(&setup).await?;
+
+    // Once the pause is over, a runner that completes clears the count.
+    end_backoff(&setup, "pool-gl-mac").await?;
+    pass(&setup).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while setup.manager.starts("tart").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("the second Tart start did not reach the manager")?;
+    setup.manager.tart_gate.add_permits(1);
+    setup.tart_start_ended().await?;
+    let second = live(&setup, "pool-gl-mac").await?;
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(
+        setup
+            .manager
+            .exit(&second[0].id, Some(exit_reason(GITLAB_EXIT_COMPLETED)?))
+    );
+    pass(&setup).await?;
+    let (failures, open, retry_at, _) = circuit(&setup, "pool-gl-mac").await?;
+    assert_eq!(
+        (failures, open, retry_at),
+        (0, false, None),
+        "a completed runner clears the failures"
+    );
+
+    assert_eq!(
+        exit_reason(78)?,
+        missing,
+        "the published name of exit 78 (EX_CONFIG)"
+    );
     setup.finish().await
 }
 
@@ -1176,6 +1493,203 @@ async fn a_failing_connection_does_not_stop_the_sweep_which_respects_its_interva
             connection.id
         );
     }
+    setup.finish().await
+}
+
+/// The sweep's interval has passed: the next pass sweeps again.
+async fn sweep_again(setup: &Setup) -> Result<()> {
+    sqlx::query("UPDATE settings SET value='0' WHERE key='lastGitlabRunnerSweepAt'")
+        .execute(&setup.app.database)
+        .await?;
+    reconcile(&setup.app).await
+}
+
+/// How many refused-deletion warnings `pool-a` and `pool-b` hold.
+async fn counts(setup: &Setup) -> Result<(usize, usize)> {
+    Ok((
+        refusals(setup, "pool-a").await?.len(),
+        refusals(setup, "pool-b").await?.len(),
+    ))
+}
+
+/// #171: the orphan sweep's refused deletions are warnings on every pool
+/// linked to the connection (no runner row to link: `runner_id` stays NULL),
+/// deduplicated to at most one per pool, connection and reason an hour, so a
+/// token that keeps failing does not write a row per runner per sweep. A new
+/// reason, or the hour passing, writes again. A warning that cannot be
+/// written never stops the sweep.
+#[tokio::test]
+async fn the_sweeps_refused_deletions_warn_each_linked_pool_once_an_hour_per_reason() -> Result<()>
+{
+    const OTHER: Connection = Connection {
+        id: "gl-other",
+        name: "Other GitLab",
+        base_url: "https://gitlab-other.example.test",
+        kind: "project",
+        scope_id: 9,
+        path: "other/project",
+        created_at: 2,
+    };
+    // Each backdating moves the warnings two hours back (more than the hour's
+    // window); it is applied twice, so the oldest rows end up four hours old.
+    const TWO_HOURS: i64 = 2 * 3_600_000;
+    let setup = gitlab_setup(&format!(
+        "{} {}",
+        gitlab_pool("pool-a", "docker", RUNNER_IMAGE, "", 0),
+        gitlab_pool("pool-b", "docker", RUNNER_IMAGE, "", 0)
+    ))
+    .await?;
+    ACME.add(&setup, &["pool-a", "pool-b"]).await?;
+    OTHER.add(&setup, &["pool-a"]).await?;
+    let orphan = |id: u64| marker(&format!("00000000-0000-4000-8000-{id:012}"));
+    seed(&setup, &ACME, 31, &orphan(31))?;
+    seed(&setup, &ACME, 32, &orphan(32))?;
+    seed(&setup, &OTHER, 41, &orphan(41))?;
+    let refuse = |connection: &Connection, times: usize, error: &GitLabError| -> Result<()> {
+        for _ in 0..times {
+            setup
+                .gitlab
+                .fail_next(&connection.url()?, FakeMethod::DeleteRunner, error.clone());
+        }
+        Ok(())
+    };
+
+    // Both of Acme's orphans and Other's one are refused for manage_runner.
+    refuse(&ACME, 2, &missing_manage_runner())?;
+    refuse(&OTHER, 1, &missing_manage_runner())?;
+    reconcile(&setup.app).await?;
+    assert_eq!(gitlab_runner_ids(&setup, &ACME)?, [31, 32]);
+    assert_eq!(gitlab_runner_ids(&setup, &OTHER)?, [41]);
+    let pool_a = refusals(&setup, "pool-a").await?;
+    let pool_b = refusals(&setup, "pool-b").await?;
+    assert_eq!(
+        (pool_a.len(), pool_b.len()),
+        (2, 1),
+        "one per pool and connection, not one per runner: {pool_a:?} {pool_b:?}"
+    );
+    for event in pool_a.iter().chain(&pool_b) {
+        assert_eq!(event.runner_id, None, "{event:?}");
+    }
+    let acme_on_a = pool_a
+        .iter()
+        .find(|event| event.message.contains(ACME.name))
+        .context("Acme's warning on pool-a")?;
+    let acme_runner = if names_number(&acme_on_a.message, 31) {
+        31
+    } else {
+        32
+    };
+    assert_refusal(acme_on_a, ACME.name, acme_runner, "manage_runner");
+    let other_on_a = pool_a
+        .iter()
+        .find(|event| event.message.contains(OTHER.name))
+        .context("Other's warning on pool-a")?;
+    assert_refusal(other_on_a, OTHER.name, 41, "manage_runner");
+    assert!(pool_b[0].message.contains(ACME.name), "{pool_b:?}");
+    assert_refusal(&pool_b[0], ACME.name, acme_runner, "manage_runner");
+
+    // The next sweep, within the hour, is refused for the same reason.
+    refuse(&ACME, 2, &missing_manage_runner())?;
+    refuse(&OTHER, 1, &missing_manage_runner())?;
+    sweep_again(&setup).await?;
+    assert_eq!(
+        gitlab_calls(&setup, FakeMethod::DeleteRunner).len(),
+        6,
+        "retried"
+    );
+    assert_eq!(counts(&setup).await?, (2, 1), "nothing new within the hour");
+
+    // Within the hour, but for another reason: a new warning per pool.
+    refuse(&ACME, 2, &GitLabError::Unauthorized)?;
+    refuse(&OTHER, 1, &missing_manage_runner())?;
+    sweep_again(&setup).await?;
+    assert_eq!(counts(&setup).await?, (3, 2), "a new reason warns again");
+
+    // An hour later the same reason warns again.
+    sqlx::query("UPDATE runner_events SET created_at=created_at-? WHERE event=?")
+        .bind(TWO_HOURS)
+        .bind(DELETION_REFUSED)
+        .execute(&setup.app.database)
+        .await?;
+    refuse(&ACME, 2, &missing_manage_runner())?;
+    refuse(&OTHER, 1, &missing_manage_runner())?;
+    sweep_again(&setup).await?;
+    assert_eq!(
+        counts(&setup).await?,
+        (5, 3),
+        "after the hour, once more per pool"
+    );
+
+    // A warning that cannot be written: the sweep still deletes what it can.
+    sqlx::query("UPDATE runner_events SET created_at=created_at-? WHERE event=?")
+        .bind(TWO_HOURS)
+        .bind(DELETION_REFUSED)
+        .execute(&setup.app.database)
+        .await?;
+    sqlx::raw_sql(
+        "CREATE TRIGGER fail_refusal_event BEFORE INSERT ON runner_events
+           WHEN NEW.event='GitLab runner not deleted'
+         BEGIN SELECT RAISE(ABORT,'disk I/O error'); END;",
+    )
+    .execute(&setup.app.database)
+    .await?;
+    refuse(&ACME, 1, &missing_manage_runner())?;
+    sweep_again(&setup).await?;
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?.len(),
+        1,
+        "the orphan after the refused one is still deleted"
+    );
+    assert_eq!(
+        gitlab_runner_ids(&setup, &OTHER)?,
+        Vec::<i64>::new(),
+        "and the next connection is swept"
+    );
+    assert_no_token_stored(&setup).await?;
+    setup.finish().await
+}
+
+/// #171: the sweep's warning for one pool that cannot be written does not
+/// keep the connection's other linked pools from being told.
+#[tokio::test]
+async fn a_pool_whose_sweep_warning_cannot_be_written_does_not_silence_the_others() -> Result<()> {
+    let setup = gitlab_setup(&format!(
+        "{} {}",
+        gitlab_pool("pool-a", "docker", RUNNER_IMAGE, "", 0),
+        gitlab_pool("pool-b", "docker", RUNNER_IMAGE, "", 0)
+    ))
+    .await?;
+    ACME.add(&setup, &["pool-a", "pool-b"]).await?;
+    seed(
+        &setup,
+        &ACME,
+        31,
+        &marker("00000000-0000-4000-8000-000000000031"),
+    )?;
+    // Pools are told in id order: pool-a, the first, is the one that fails.
+    sqlx::raw_sql(
+        "CREATE TRIGGER fail_pool_a_refusal BEFORE INSERT ON runner_events
+           WHEN NEW.event='GitLab runner not deleted' AND NEW.pool_id='pool-a'
+         BEGIN SELECT RAISE(ABORT,'disk I/O error'); END;",
+    )
+    .execute(&setup.app.database)
+    .await?;
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+
+    reconcile(&setup.app).await?;
+
+    assert_eq!(
+        gitlab_runner_ids(&setup, &ACME)?,
+        [31],
+        "left for the sweep"
+    );
+    assert_eq!(counts(&setup).await?, (0, 1), "pool-b is still told");
+    let pool_b = refusals(&setup, "pool-b").await?;
+    assert_refusal(&pool_b[0], ACME.name, 31, "manage_runner");
     setup.finish().await
 }
 
@@ -1776,6 +2290,92 @@ async fn a_failed_bootstrap_store_deletes_the_gitlab_runner_once_and_the_next_st
     assert_ne!(next, runner);
     assert_eq!(gitlab_runner_ids(setup, &ACME)?, [2]);
     assert_eq!(fleet.commands(next_placement, "start_runner").await?, 1);
+    fleet.finish().await
+}
+
+/// #171 (fleet path, `fleet_rollback`): when the start cannot be handed to the
+/// machine and GitLab refuses to delete the runner just registered, the
+/// refusal is a warning on the pool, linked to the runner row.
+#[tokio::test]
+async fn a_refused_delete_in_a_fleet_rollback_is_a_pool_warning() -> Result<()> {
+    let fleet = Fleet::new(true).await?;
+    let setup = &fleet.setup;
+    sqlx::raw_sql(
+        "CREATE TRIGGER fail_bootstrap BEFORE INSERT ON fleet_bootstrap_material
+         BEGIN SELECT RAISE(ABORT,'disk I/O error'); END;",
+    )
+    .execute(&setup.app.database)
+    .await?;
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+
+    let (runner, _) = fleet.registered().await?;
+
+    // The rollback's delete is the first; it keeps the registration on the
+    // row, so the row leaving service deletes it again.
+    assert!(
+        !gitlab_calls(setup, FakeMethod::DeleteRunner).is_empty(),
+        "the rollback asked GitLab to delete the runner"
+    );
+    let refused = refusals(setup, "pool-gl").await?;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_refusal(&refused[0], ACME.name, 1, "manage_runner");
+    assert_eq!(refused[0].runner_id.as_deref(), Some(runner.as_str()));
+    fleet.finish().await
+}
+
+/// #171 (fleet path, `fleet_material`): a runner row still holding an earlier
+/// attempt's GitLab runner deletes it before registering again; GitLab
+/// refusing that delete is a warning on the pool naming the earlier runner,
+/// and the start goes on.
+#[tokio::test]
+async fn a_refused_delete_of_an_earlier_attempts_runner_is_a_pool_warning() -> Result<()> {
+    const EARLIER: i64 = 77;
+    let fleet = Fleet::new(true).await?;
+    let setup = &fleet.setup;
+    fleet.pass().await?;
+    let (runner, placement) = fleet.newest().await?;
+    let admitted = fleet.row(&runner).await?;
+    assert_eq!(
+        (
+            admitted.gitlab_connection_id.as_deref(),
+            admitted.gitlab_runner_id
+        ),
+        (Some(ACME.id), None),
+        "admitted on the connection, not registered yet"
+    );
+    // An earlier attempt registered a GitLab runner and stopped there.
+    seed(setup, &ACME, u64::try_from(EARLIER)?, &marker(&runner))?;
+    sqlx::query("UPDATE runners SET gitlab_runner_id=? WHERE id=?")
+        .bind(EARLIER)
+        .bind(&runner)
+        .execute(&setup.app.database)
+        .await?;
+    setup.gitlab.fail_next(
+        &ACME.url()?,
+        FakeMethod::DeleteRunner,
+        missing_manage_runner(),
+    );
+
+    fleet.prepared(placement).await?;
+    fleet.pass().await?;
+
+    assert!(
+        gitlab_runner_ids(setup, &ACME)?.contains(&EARLIER),
+        "GitLab refused the delete"
+    );
+    assert_eq!(
+        fleet.commands(placement, "start_runner").await?,
+        1,
+        "the start goes on"
+    );
+    let refused = refusals(setup, "pool-gl").await?;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_refusal(&refused[0], ACME.name, EARLIER, "manage_runner");
+    assert_eq!(refused[0].runner_id.as_deref(), Some(runner.as_str()));
     fleet.finish().await
 }
 

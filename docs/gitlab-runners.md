@@ -24,9 +24,13 @@ token: a personal, project or group access token.
 | `manage_runner` | Deleting each runner when it leaves service, and the orphan sweep (`DELETE /runners/:id`). GitLab 17.1 or later. |
 | `read_api` | Resolving the project or group, the pending-jobs poll, reading single jobs, listing the scope's runners for the sweep, and checking the token. |
 
-`api` covers all three. GridOps checks `create_runner` and `read_api` (or
-`api`) when you save the connection, but not `manage_runner`. Without it,
-runners are created but never deleted from GitLab, so include it.
+`api` covers all three. GridOps checks all three (or `api`) when you save the
+connection, when you replace its token and when you choose **Verify**, and
+refuses a token that lacks one with "The GitLab access token is missing the
+`<scope>` scope." If GitLab still refuses to delete a runner at runtime, the
+pool's events show a **GitLab runner not deleted** warning naming the
+connection, the GitLab runner and the reason, and the orphan sweep retries the
+delete.
 
 **Role.** The token's user needs one of these:
 
@@ -160,8 +164,16 @@ Each runner runs `gitlab-runner run-single` for at most one job:
   GitLab.
 - If GitLab refuses its token (`registration_refused`), it is deleted and the
   pool's provisioning failure count goes up, as for any failed start.
+- If its Tart image has no `gitlab-runner` (`runner_missing`), it is deleted,
+  the runner's failure reason names the image script to run, the pool records
+  an error event, and the pool's provisioning failure count goes up, as for any
+  failed start.
 
-A delete that fails is logged and retried by the orphan sweep. Once every
+A delete that fails is logged and retried by the orphan sweep. When GitLab
+refuses it (for example, the token lacks `manage_runner`), the runner's pool
+also gets a **GitLab runner not deleted** warning in its events. The sweep's
+own refused deletes warn every pool linked to the connection, at most once an
+hour per pool, connection and reason. Once every
 `gitlabRunnerSweepIntervalSeconds` (600 by default, between 60 and 3,600), the
 sweep lists each connection's project or group runners and deletes every one
 whose description carries this deployment's marker but whose runner is no
@@ -196,8 +208,9 @@ Each job runs in the image its `.gitlab-ci.yml` names with `image:`, or in
 A GitLab pool whose provider is Tart runs each runner in a fresh macOS VM with
 the shell executor. The shell executor ignores `image:`, so install the tools
 the jobs need in the base image. Prepare the image with
-`scripts/prepare-tart-gitlab-runner-image.sh`; see
-[macOS runners](macos-runners.md#gitlab).
+`scripts/prepare-tart-gitlab-runner-image.sh`, which checks the finished image
+in a fresh clone of it and deletes the image if `gitlab-runner` is missing
+there; see [macOS runners](macos-runners.md#gitlab).
 
 ## Known limits
 

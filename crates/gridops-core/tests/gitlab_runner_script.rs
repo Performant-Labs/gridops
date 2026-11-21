@@ -282,6 +282,26 @@ fn a_runner_that_fails_by_itself_reports_no_runner_ending() -> Result<()> {
     Ok(())
 }
 
+/// `run-single` exiting with a status the script itself gives a meaning to
+/// (69, 75, 77, or 78, which the Tart agent's script exits with for an
+/// image without `gitlab-runner`, #173) must not pass for that meaning: the
+/// script exits with another status, outside `GITLAB_EXIT_REASONS`. Without
+/// that, the manager, which maps a Docker container's exit status through
+/// the same table, would list such a runner as idle, refused or missing.
+#[test]
+fn a_runner_exiting_with_a_status_of_the_scripts_own_leaves_the_table() -> Result<()> {
+    for own in [69, 75, 77, 78] {
+        let run = run_script(&Scenario::verified("FATAL: the fake runner stopped\n", own))?;
+        ensure!(
+            run.status
+                .is_some_and(|status| status != own && status != 0 && !is_reported(status)),
+            "run-single exiting {own}: the script exited {:?}\n{run}",
+            run.status
+        );
+    }
+    Ok(())
+}
+
 /// GitLab refuses the token (403): registration refused, before anything
 /// says ready and without starting the runner.
 #[test]
