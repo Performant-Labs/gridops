@@ -93,8 +93,15 @@ OUTPUT SHAPE:
 num_code_suggestions = 4
 summarize = true
 extra_instructions = """
-Only suggest changes that fix correctness issues, contract violations, security problems,
-or breaches of the rules in the extra instructions above. Every suggestion must say which it is.
+Only suggest changes that fix one of these, and say which:
+- correctness bugs or runtime regressions (races, leaks, unbounded loops or queries);
+- scope: a change outside the linked issue's "Owns" list;
+- SQLite lock risk (#179): long or unbatched write transactions, or queries over
+  workflow_jobs, host_samples, webhook_deliveries or fleet_inventory_snapshots not bounded
+  by an indexed time or state column;
+- tests that don't pin values, or were weakened or skipped;
+- migration safety, SQL built from request data, or a secret reaching logs, env or args;
+- a call to an API that doesn't exist, or a duplicate of an existing helper. Every suggestion must say which it is.
 Do not suggest refactors or alternative patterns unless the current pattern is demonstrably broken.
 """
 
