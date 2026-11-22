@@ -118,3 +118,15 @@
 - **Assumed:** None.
 - **Hedged:** None.
 - **Evidence:** `git diff 9e357e0..HEAD` read in full for `fleet.rs`, `failure.rs`, `start_health.rs`, the test modules, and the TS / OpenAPI / CHANGELOG surfaces. Written to `handoff-A-dup.md`.
+
+## S (Phase 8, spec audit)
+
+- **Decided:** PASS (`docs/handoffs/130/handoff-S.md`). Every brief item is met: the 10-minute cap on `registering`, the give-up through `abandon_unstarted` with the new `registration_timed_out` reason and the truncated last error, no retry or start-gate count, upstream cleanup through the existing `delete_runner`, GitLab covered by the platform-agnostic cap, the sweep of every exit, both required tests plus the no-authority test, CHANGELOG and `docs/fleet-api.md`. No visual surface, so no HTML report.
+- **Assumed:** The `docs/fleet-api.md` note satisfies the brief's "closest fleet doc" clause, since `fleet-automation.md` has no placement-failure text.
+- **Hedged:**
+  - Advisory only: a 119-character reflowed line in `docs/fleet-api.md`; a transient first failure after a long reconciler outage gives a placement up at once; no test pins the upstream by-name removal after a give-up; no GitLab reconciler test (by design).
+  - Five pre-existing clippy findings on master still fail `check:rust` (flagged by T).
+- **Evidence:**
+  - Independent re-run: `cargo test -p gridops-reconciler` 128 passed; `cargo test -p gridops-core --lib -- fleet::failure fleet::start_health` 9 passed; `npx vitest run tests/placement-failures.test.ts` 9 passed. My first compile used a stale core artifact from a sibling worktree via the shared target dir; touching the changed sources fixed it.
+  - Grepped every `UPDATE workload_placements` writer to confirm `updated_at` is a reliable `registering` entry time, and grepped the sibling reason `operator_released` to confirm all six contract surfaces carry the new code.
+  - Read `register_and_start`, `start_with_material`, `abandon_unstarted`, `finish` and the GitLab `fleet_material` error paths to confirm no secret reaches the recorded message.
