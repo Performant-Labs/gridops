@@ -75,9 +75,11 @@ jobs:
     name: Rust format, lint, and tests
     # The same runner rule as the web job, but the trusted label is
     # self-hosted-linux-fast: the full Rust build takes about 28 minutes on the
-    # slow light pool and hits the 30 minute timeout (#134).
+    # slow light pool and hits the 30 minute timeout (#134). Even on the fast
+    # pool, several PRs at once pushed it past 30 minutes (PR #188, 2026-11-22),
+    # so the limit is 45.
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux-fast' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
