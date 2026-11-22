@@ -72,3 +72,39 @@
   - **Schema tests:** the upgrade tests in `tests/fleet_schema.rs` compare only the objects that existed before migrating, so the new index does not affect them.
   - **Tokio:** the workspace pulls it in with `full` features.
   - **Branches:** a scan of every local and remote branch found no `migrations/0049_` or later.
+
+## Phase 4 Tester (T, RED) - 2026-11-22T11:03:39-08:00
+- **Decided:** RED is valid; F may implement (`docs/handoffs/152/handoff-T-red.md`).
+  - **Core** (`registry/snapshot_retention_tests.rs`, new; `query_plan_tests.rs`, one test added):
+    - the retention rule (brief test 1);
+    - the batch bounds and oldest-first order (test 2);
+    - the decided consts (500, 40, at least 25 ms);
+    - the plan of `PRUNE_BATCH` (test 5, with A's warn 1 applied: the sessions step is matched by its alias `s` and no sessions index is named).
+  - **Reconciler** (`snapshot_retention_tests.rs`, new): through `cleanup_retention`, the setting with default 7, clamped to 1 and to 3650, and the open session's current row always kept (test 4). Plus a guard: a failing prune doesn't stop the rest of the cleanup.
+  - **API** (`fleet_http/snapshot_retention_setting.rs`, new):
+    - default 7;
+    - a value is stored as a JSON number and audited;
+    - an omitted field is left alone;
+    - 0, -1 and 3651 answer 400;
+    - 1 and 3650 are accepted (test 3).
+  - **The contract names F must provide:** `snapshot_retention::{PRUNE_BATCH, BATCH_SIZE, MAX_BATCHES, BATCH_PAUSE, prune_inventory_snapshots}`, and the index `fleet_inventory_snapshots_received_idx`.
+- **Assumed:**
+  - A compile RED for the new core module is accepted, as in #140, #146, #148 and #179. A throwaway stub of today's behaviour supplied the runtime RED behind it.
+  - `PRUNE_BATCH` binds `(cutoff, batch_size)` in that order, following the brief's statement.
+- **Hedged:**
+  - **Lock release between batches is not unit-tested.** That covers the autocommit per batch and the sleep. A concurrent-writer test would depend on timing, so it is left to code review in Phase 6 and to F's timing measurements.
+  - The `info` log of rows deleted per pass is not asserted.
+  - The guard test passes before the feature by design. It is a guard, not a RED.
+- **Evidence:**
+  - **Compile RED:** `unresolved import crate::fleet::registry::snapshot_retention`, in 2 places.
+  - **Runtime RED with the stub:**
+    - the plan contains `SCAN snap`;
+    - the batch test fails `left: 0 right: 4`;
+    - the rule test fails with all 9 rows kept.
+  - **Reconciler RED:** `left: [1, 2, 100] right: [2, 100]`.
+  - **API RED:** `left: Null right: Number(7)`.
+  - **Throwaway correct implementations pass every test.** Mutations M1 to M12 each fail at least one test. Two examples: dropping `ended_at IS NULL` fails the rule test, and `?` instead of a warn fails the guard.
+  - **The full `gridops-core` suite passes** with the throwaway implementation and 0049, including `fleet_schema` (17 tests).
+  - **CI's clippy (1.98.1, `-D warnings`) is clean.**
+  - **All throwaway code is reverted.** Only test files are staged.
+  - **A seed correction:** a first reconciler seed failed with a setup error, because the credential verifier format trigger rejected it. I fixed it before declaring RED.
