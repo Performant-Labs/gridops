@@ -27,3 +27,33 @@
   - `gridops-core/tests/gitlab_pool_fleet.rs` and `docs/gitlab-runners.md`.
 
   `git diff master -- crates src` is empty, and `git worktree list` shows no live overlap.
+
+## Phase 3 Architecture (A, re-review of the amended brief) - 2026-11-21T18:16:53-08:00
+- **Decided:** PASS, with 0 block and 2 warn findings (`docs/handoffs/181/handoff-A.md`, which replaces the earlier BLOCK review in 233dac5).
+  - **Earlier block A-B1 resolved:** the amended brief (a19e9e6) names the seam.
+    - The public GitHub-only views and `QueuedJob` stay unchanged.
+    - One `pub(crate)` accessor with a single `queued_job_owners` call.
+    - The job type stays internal to attribution.
+    - `platform_jobs` filters GitLab entries out after attribution.
+    - Only A-B2's "fleet placement is untouched" clause is superseded.
+    - The gridops-api fleet tests are in Scope 3.
+  - The earlier warns 2-6 are all in the brief.
+  - **Warn 1:** the job type crosses from `autoscaling.rs` to `fleet/targets.rs`, so it must be `pub(crate)` beside the accessor. Prefer an enum that wraps `QueuedJob` (`Github(QueuedJob)` / `Gitlab`) and a `github()`-style filter like `KeyedJobOwner::github`. Avoid a struct that copies `QueuedJob`'s fields, or a second mapping type in `targets.rs`.
+  - **Warn 2:** the shared helper returns rows in SQL order and can leave out owned ids, so the accessor must place GitHub rows in owner order by id and skip missing ids. For a GitHub-only pool, owner order already equals the helper's order (`github_job_candidates` orders by `wj.created_at, wj.id`), so byte-identity holds.
+- **Assumed:** with no `survey.md`, the brief's named analogue serves as the Reuse map (GitHub fleet demand through `attribute_queued_jobs`, `choose_platform` and `platform_jobs`, with ownership from `queued_job_owners`). This is a fresh run on an amended brief, not a resumed one.
+- **Hedged:**
+  - Warn 1 is a warn and not a block: the brief allows either shape, and the type is not public, so T can't pin it.
+  - Warn 2 is guidance that A will check at Phase 7, not a change to the brief.
+- **Evidence:** I re-read:
+  - the amended brief, and its diff against 048c53a;
+  - `autoscaling.rs`: ownership, candidates and their ordering, `assign_queued_jobs`, the queue views, and the `QueuedJob` definition;
+  - `fleet/targets.rs:1290-1561`;
+  - reconciler `fleet.rs:50-200`, and `main.rs` (the pass loop, `maybe_scale_up`, `provision`/`NoDemand`);
+  - the `Fleet` fixture and `gitlab_pool`;
+  - the pending `row` seeder in `gitlab_poll_tests.rs`;
+  - `tests/gitlab_pool_fleet.rs`;
+  - the `queue_scale_factor` default (`migrations/0003_autoscaling.sql:2`, DEFAULT 1);
+  - #148's A-B2 text;
+  - every caller of `choose_platform` and `platform_jobs`.
+
+  `git diff master -- crates src` is empty. No live worktree overlaps: `cool-davinci` is clean, and `gridops-134` is stale (its work landed as 80e6f1b).
