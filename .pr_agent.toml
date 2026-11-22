@@ -1,0 +1,15 @@
+# PR-Agent configuration for GridOps.
+# From playbook/pipelines/pr-reviewer/templates/pr_agent.toml; only the
+# extra_instructions and [ignore]
+# Lockfiles and build output only. Do NOT add docs/** or *.md here: docs/design and
+# docs/handoffs hold real specs. Patterns are anchored at the start of the path.
+glob = [
+  'package-lock.json',
+  'Cargo.lock',
+  'dist/**',
+  'target/**',
+  'coverage/**',
+  'docs/openapi/gridops-v1.json',
+  '*.min.js',
+  '*.min.css',
+]
