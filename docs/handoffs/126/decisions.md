@@ -1,0 +1,42 @@
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T10:47:18-08:00
+- **Decided:** BLOCK, with 2 block and 8 warn findings (docs/handoffs/126/handoff-A.md).
+  - **Block 1: the runner root inside the work folder rebuilds the bug.**
+    - Runner v2.338.2 translates host paths to container paths with a List checked in this order: Work (`/__w`), Tools (`/__t`), Externals (`/__e`). The first prefix wins (`ContainerInfo.cs:54-56`, `:164-190`).
+    - The node path (`NodeScriptActionHandler.cs:129`, `:168`) and the destination of the externals mount (`ContainerOperationProvider.cs:304`) are both translated.
+    - So `<work>/<root>/externals` reaches the job container as `/__w/<root>/externals`. That is our symlink to a host-only path, never `/__e`.
+    - Fix: put the root outside the work folder, at `/var/lib/gridops-agent/runners/<env>`, mounted at the same path. Extend the cleanup so it removes both folders.
+  - **Block 2: the once-per-image externals copy (about 600 MB) is planned for Start.**
+    - Start has 30 s, or 25 s after the delivery margin. Commands run one at a time (`supervisor.rs:474-499`).
+    - Fix: fill the cache in `prepare`, after the pull. Prepare has a 20-minute deadline, and NativeRuntime already stages there. Start only resolves the image id and checks the cache, failing with `Runtime, true` if it is missing.
+  - **Warns:**
+    - (3) Derive the paths from the image's WorkingDir, never `/actions-runner`. The stock image uses `/home/runner`.
+    - (4) Reuse `GRIDOPS_RUNNER_ROOT`: the live-log forwarder reads `_diag/pages` there. The setup step runs in the main shell.
+    - (5) Failure codes:
+      - image content: `Configuration, false`;
+      - permission on the StateDirectory: `Configuration, false`;
+      - docker or IO errors: `Runtime, true`;
+      - no new wire variants.
+    - (6) Follow NativeRuntime's fill shape (a Mutex, staging, rename). Use `docker cp`, so the files are agent-owned. Mount with `--mount readonly`, not `-v`. Keep the cache outside `SHARED_WORK_ROOT`.
+    - (7) Create the runner container from the resolved image id.
+    - (8) Evict a cache only when its image is gone from the local store.
+    - (9) The tool cache under `<work>/_tool` is correct (the runner's default; it translates to a real `/__w/_tool`). Check the image's `.env`.
+    - (10) Factor pure builders, pass roots as `&Path`, and keep tests in-crate, with no Docker daemon.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names, plus `NativeRuntime`, serve as the Reuse map.
+  - The pool image's runner root is `/actions-runner` (the brief's read-only facts). I did not inspect it.
+  - The tag v2.338.2 on GitHub is the source of the runner on the pool.
+- **Hedged:**
+  - Block 1: whether a root inside the work folder would fail outright, or work by accident, depends on how runc resolves a mount destination that is a symlink inside the `/__w` bind. Not run. The block rests on the translation order in the runner's source, which bypasses the `/__e` mechanism either way.
+  - Block 2: the copy time was not measured. The block rests on the documented start budget and on commands running one at a time, not on a measured overrun.
+  - The stock GitHub image runs as uid 1001 and probably cannot write the agent-owned shared folders today. This was inferred, not run. It is out of scope.
+  - Whether the pool image ships a `<root>/.env` that pins a tool directory is unknown. F checks.
+- **Evidence:**
+  - Read: the brief, its gate result and issue #126 (`gh issue view`).
+  - Host agent: `docker.rs` in full; `native.rs` in full; `supervisor.rs:66-90`, `:440-520`; `dispatch.rs:70-180`, `:236-260`, `:325-372`; `main.rs:1-40`, `:240-337`.
+  - Core: `work_folder.rs` in full; `provisioning.rs:55-80`, `:280-360`; `start_health.rs:1-83`; `retry.rs:1-60`; `registry/commands.rs:236-320`, `:425-470`, `:560-600`, `:660-800`; `admission.rs:1135-1160`; `outcomes.rs:30-61`.
+  - Reconciler: `fleet.rs:40-60`.
+  - Manager: `main.rs:3215-3277`, plus greps for the socket and `_work`.
+  - Tests: `tests/docker_runtime.rs` in full; `tests/docker_gitlab.rs:490-525`.
+  - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:300-360`.
+  - actions/runner v2.338.2, fetched from raw.githubusercontent.com: `ContainerInfo.cs`, `ContainerOperationProvider.cs:290-322`, `NodeScriptActionHandler.cs`, `StepHost.cs`, `HostContext.cs:377-415`, `Runner.Listener/Program.cs:172-194`, `layoutroot/env.sh`.
+  - Coexistence: `git worktree list`. None of the 7 worktrees changes `docker.rs`, `work_folder.rs` or `provisioning.rs`.
