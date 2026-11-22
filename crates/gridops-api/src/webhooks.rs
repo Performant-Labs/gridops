@@ -1001,6 +1001,10 @@ fn array<'a>(object: &'a Map<String, Value>, key: &str) -> &'a [Value] {
 #[cfg(test)]
 mod gitlab_tests;
 
+// #190's contract test (#197-owned mount, D-3(e)).
+#[cfg(test)]
+mod category_contract_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,6 +1276,68 @@ mod tests {
         deliver(job(32, Some(3), "queued")).await?;
         assert_eq!(status(30).await?.0, "queued");
         assert_eq!(status(31).await?.0, "completed");
+
+        database.close().await;
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+    /// #197 (W-15): a new job's category is bound once, in `VALUES`; a later
+    /// event for the same job never changes the stored one, whatever the
+    /// classifier would say now.
+    #[tokio::test]
+    async fn a_later_job_event_keeps_the_stored_category() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-webhook-test-{}", uuid::Uuid::new_v4()));
+        let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO installations (id,account_id,account_login,account_type,target_type,repository_selection,created_at,updated_at)
+              VALUES (1,1,'octo','User','User','all',1,1);
+            INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+              VALUES (10,1,'octo','app','octo/app',0,'main','https://github.com/octo/app',1,1,1);
+            INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+              VALUES (20,10,'CI',1,'push','in_progress','abc','https://github.com/octo/app/actions/runs/20',1,1,1,1);
+            "#,
+        )
+        .execute(&database)
+        .await?;
+        let event = |status: &str| {
+            json!({
+                "repository": { "id": 10 },
+                "workflow_job": {
+                    "id": 30, "run_id": 20, "name": "unit tests", "status": status,
+                    "labels": ["self-hosted", "linux"],
+                    "html_url": "https://github.com/octo/app/actions/runs/20/job/30",
+                    "started_at": "2026-07-21T00:00:00Z"
+                }
+            })
+        };
+        let queued = event("queued");
+        let queued = queued
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("test payload is not an object"))?;
+        process_workflow_job(&database, Some("queued"), queued).await?;
+        sqlx::query("UPDATE workflow_jobs SET category='deploy' WHERE id=30")
+            .execute(&database)
+            .await?;
+        let mut completed = event("completed");
+        completed["workflow_job"]["conclusion"] = json!("success");
+        completed["workflow_job"]["completed_at"] = json!("2026-07-21T00:01:00Z");
+        let completed = completed
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("test payload is not an object"))?;
+        process_workflow_job(&database, Some("completed"), completed).await?;
+        let (status, category) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status,category FROM workflow_jobs WHERE id=30",
+        )
+        .fetch_one(&database)
+        .await?;
+        assert_eq!(status, "completed", "the event was applied");
+        assert_eq!(
+            category.as_deref(),
+            Some("deploy"),
+            "the stored category is kept"
+        );
 
         database.close().await;
         fs::remove_dir_all(directory)?;

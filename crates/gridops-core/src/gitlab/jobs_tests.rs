@@ -22,6 +22,15 @@
 //!   is `now_ms` whenever anything changed;
 //! - `set_gitlab_runner_busy` matches live GitLab runners on any connection
 //!   with the job connection's `base_url`.
+//!
+//! #197 (D-1, W-15, W-16) extends D18 with these rules, pinned at the end:
+//! - `job_name` and `project_path` are `COALESCE(stored, incoming)`, like the
+//!   runner id: filled once (also on a rejected status write, as `FilledOnly`)
+//!   and never overwritten or cleared;
+//! - `started_at` is set from `status_changed_at` the first time an applied
+//!   status is `running`, and `completed_at` the first time an applied status
+//!   is terminal; neither is ever overwritten;
+//! - `category` is bound on insert only: no later write changes it.
 
 use std::fs;
 
@@ -216,6 +225,8 @@ fn observe(job_id: u64, status: JobStatus, at: i64) -> Result<JobObservation<'st
         retries_count: None,
         tag_list: None,
         gitlab_runner_id: None,
+        job_name: None,
+        project_path: None,
     })
 }
 
@@ -772,5 +783,193 @@ async fn the_outcome_reports_the_runner_stored_before_the_call() -> Result<()> {
     assert_eq!(outcome.previous_gitlab_runner_id, None);
     assert_eq!(outcome.gitlab_runner_id, Some(ext(66)?));
 
+    fixture.finish().await
+}
+
+/// #197: the name, path, timing and category columns of one `conn-a` row.
+async fn health_columns(
+    fixture: &Fixture,
+    job_id: i64,
+) -> Result<(
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+)> {
+    Ok(sqlx::query_as(
+        "SELECT job_name,project_path,started_at,completed_at,category FROM gitlab_jobs
+          WHERE connection_id='conn-a' AND job_id=?",
+    )
+    .bind(job_id)
+    .fetch_one(&fixture.database)
+    .await?)
+}
+
+#[tokio::test]
+async fn names_and_paths_are_filled_once_and_never_overwritten() -> Result<()> {
+    let fixture = Fixture::new().await?;
+
+    // An insert stores what it is given.
+    fixture
+        .record(&JobObservation {
+            job_name: Some("rspec 1/4"),
+            project_path: Some("team/a"),
+            ..observe(801, JobStatus::Pending, 100)?
+        })
+        .await?;
+    let (name, path, ..) = health_columns(&fixture, 801).await?;
+    assert_eq!(
+        (name.as_deref(), path.as_deref()),
+        (Some("rspec 1/4"), Some("team/a"))
+    );
+
+    // `None` keeps the stored value; another name never replaces it.
+    fixture
+        .record(&observe(801, JobStatus::Running, 200)?)
+        .await?;
+    fixture
+        .record(&JobObservation {
+            job_name: Some("renamed"),
+            project_path: Some("team/renamed"),
+            ..observe(801, JobStatus::Running, 300)?
+        })
+        .await?;
+    let (name, path, ..) = health_columns(&fixture, 801).await?;
+    assert_eq!(
+        (name.as_deref(), path.as_deref()),
+        (Some("rspec 1/4"), Some("team/a"))
+    );
+
+    // A row written without them is filled by a write whose status is
+    // rejected (same tier, not newer): `FilledOnly`, status untouched.
+    fixture.seed(802, "running", 500, "").await?;
+    let outcome = fixture
+        .record(&JobObservation {
+            job_name: Some("lint"),
+            ..observe(802, JobStatus::Running, 400)?
+        })
+        .await?;
+    assert_eq!(kind(&outcome), "FilledOnly");
+    assert_eq!(outcome.status, "running");
+    let (name, path, ..) = health_columns(&fixture, 802).await?;
+    assert_eq!((name.as_deref(), path), (Some("lint"), None));
+    let outcome = fixture
+        .record(&JobObservation {
+            project_path: Some("team/a"),
+            ..observe(802, JobStatus::Running, 400)?
+        })
+        .await?;
+    assert_eq!(kind(&outcome), "FilledOnly");
+    assert_eq!(
+        health_columns(&fixture, 802).await?.1.as_deref(),
+        Some("team/a")
+    );
+    // Nothing left to fill and nothing newer: ignored.
+    let outcome = fixture
+        .record(&JobObservation {
+            job_name: Some("lint"),
+            project_path: Some("team/a"),
+            ..observe(802, JobStatus::Running, 400)?
+        })
+        .await?;
+    assert_eq!(kind(&outcome), "Ignored");
+
+    // A terminal row is never filled.
+    fixture.seed(803, "success", 500, "").await?;
+    let outcome = fixture
+        .record(&JobObservation {
+            job_name: Some("late"),
+            project_path: Some("team/a"),
+            ..observe(803, JobStatus::Success, 600)?
+        })
+        .await?;
+    assert_eq!(kind(&outcome), "Ignored");
+    let (name, path, ..) = health_columns(&fixture, 803).await?;
+    assert_eq!((name, path), (None, None));
+
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn start_and_finish_times_are_set_once_from_the_status_time() -> Result<()> {
+    let fixture = Fixture::new().await?;
+
+    fixture
+        .record(&observe(811, JobStatus::Pending, 100)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 811).await?;
+    assert_eq!((started, completed), (None, None));
+    fixture
+        .record(&observe(811, JobStatus::Running, 200)?)
+        .await?;
+    // A newer `running` write applies but keeps the first start.
+    fixture
+        .record(&observe(811, JobStatus::Running, 250)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 811).await?;
+    assert_eq!((started, completed), (Some(200), None));
+    fixture
+        .record(&observe(811, JobStatus::Success, 300)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 811).await?;
+    assert_eq!((started, completed), (Some(200), Some(300)));
+    // Terminal: nothing moves again.
+    fixture
+        .record(&observe(811, JobStatus::Failed, 900)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 811).await?;
+    assert_eq!((started, completed), (Some(200), Some(300)));
+
+    // Seen first when finished: finished, never started.
+    fixture
+        .record(&observe(812, JobStatus::Canceled, 400)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 812).await?;
+    assert_eq!((started, completed), (None, Some(400)));
+
+    // Inserted as running: started from its status time.
+    fixture
+        .record(&observe(813, JobStatus::Running, 500)?)
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 813).await?;
+    assert_eq!((started, completed), (Some(500), None));
+
+    // A rejected `running` write (older than the stored status) sets nothing.
+    fixture.seed(814, "pending", 700, "").await?;
+    fixture
+        .record(&JobObservation {
+            gitlab_runner_id: Some(ext(5)?),
+            ..observe(814, JobStatus::Pending, 650)?
+        })
+        .await?;
+    let (.., started, completed, _) = health_columns(&fixture, 814).await?;
+    assert_eq!((started, completed), (None, None));
+
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn a_stored_category_is_never_changed_by_a_later_write() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture
+        .seed(821, "pending", 100, "category='build'")
+        .await?;
+    fixture
+        .record(&JobObservation {
+            job_name: Some("unit tests"),
+            tag_list: Some(&tags(&["docker"])),
+            ..observe(821, JobStatus::Running, 200)?
+        })
+        .await?;
+    fixture
+        .record(&observe(821, JobStatus::Success, 300)?)
+        .await?;
+    let (.., category) = health_columns(&fixture, 821).await?;
+    assert_eq!(
+        category.as_deref(),
+        Some("build"),
+        "only #190's backfill or reclassify changes a category"
+    );
     fixture.finish().await
 }

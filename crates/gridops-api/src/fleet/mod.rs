@@ -14,6 +14,20 @@ mod profiles;
 mod query;
 mod query_boundary;
 
+// #197: the fleet health tests. The contract tests are #197's whatever issue
+// fills them in (D-3(e)): a wave-1 agent removes its markers and edits nothing
+// here.
+#[cfg(test)]
+mod health_contract_tests;
+#[cfg(test)]
+mod health_live_contract_tests;
+#[cfg(test)]
+mod health_test_support;
+#[cfg(test)]
+mod health_wiring_tests;
+#[cfg(test)]
+mod job_categories_contract_tests;
+
 use axum::{
     Router,
     extract::DefaultBodyLimit,

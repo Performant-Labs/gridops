@@ -117,3 +117,30 @@
     - `grep`: the `CREATE INDEX` listing across `migrations/`;
     - `workflow_jobs.id` is an integer primary key (`0001_initial.sql:220`);
     - `ls migrations`: 0049 is still the last.
+
+## Phase 4 Tester (T, author/RED) - 2026-11-22T15:13:02-08:00
+
+- **Decided:**
+  - The suite has two parts. #197's own tests are live now: schema 0050, shared types and fixture, `category.rs`, `merge_concerns`, the fake, the speed check and `build_week`, the wiring hooks, the guard, and the shared frontend modules. Each wave-1 "Done when" is a contract test with its issue's marker.
+  - Rust contract files sit next to their module and are mounted from #197-owned parents: api `fleet/mod.rs`, `webhooks.rs`, `resources.rs` and the reconciler `main.rs`, all done here. The core `fleet_health/mod.rs` is F's to create, with the mount lines in the handoff. Frontend contract tests are in `tests/fleet-health-<issue>-*.contract.test.ts` (D-2). The jsdom helpers are in `tests/fleet-health-dom.ts`.
+  - The rollups get a per-hour entry point, `rollup_hour(db, hour, now)`, next to `run_pass`. Without it, the tests would depend on the catch-up order.
+  - The `fleet_health_hourly` counts are pinned. `job_count` is every final-attempt job completed in the hour; `completed_count` is the ones that succeeded. Unmanaged jobs are stored as `'unmanaged'/'unmanaged'` with 0 CPU-seconds.
+  - The guard takes the PR's changed files in GitHub's list-files shape (`filename`, `status`, `previous_filename`, `patch`), so it stays a pure function.
+- **Assumed:**
+  - `upsert_workflow_job` keeps its signature and reads the workflow name and repository from the run (#190 step 3).
+  - The fleet health components use only the router's `Link`, which the tests mock.
+  - A run pass rolls up every listed hour plus at most one catch-up hour.
+- **Hedged:**
+  - The tests over types that don't exist yet were only checked as far as name resolution. Any test-side type error F finds is a test-only rework for me, not something F changes.
+  - The persisted rules version (warn 25) is left to F. The tests pin only that a re-run changes nothing and that a rule change reclassifies 7 days.
+  - Placeholder-card rendering of `/fleet/health` has no Vitest test, because a page-composition test would break when wave 1 fills the cards. It is a coverage hole for Phase 6 and U.
+- **Evidence:**
+  - Runtime RED:
+    - `cargo test -p gridops-core --test fleet_health_schema`: 0 passed, 5 failed (no `job_category_rules`, no `category`, no `completed_at` index);
+    - `--test fleet_schema`: 3 upgrade tests failed on the 0050 columns, 14 passed;
+    - the vitest navigation test failed on `/fleet/health`.
+  - Compile RED:
+    - `cargo test --no-run` for core, api and the reconciler: every error is a missing #197 item (`fleet_health`, `host_live_reads`, the `JobObservation` fields, `fixture.json`, `health_live`, `fleet_queue_breakdown`, `with_fleet_health_source`, `ApiError::Invalid`, the reconciler modules);
+    - vitest and `node --test`: missing modules.
+  - Fixed before declaring RED: `AssertSqlSafe` in the seed SQL, and 4 lines corrupted by output redaction.
+  - Clean: `eslint` on the new tests, and `cargo fmt`.

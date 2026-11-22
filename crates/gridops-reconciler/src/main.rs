@@ -5,6 +5,16 @@ mod gitlab_lifecycle;
 mod gitlab_poll;
 mod tart_lane;
 
+// #197: the fleet health tests. The contract tests are #197's whatever issue
+// fills them in (D-3(e)).
+#[cfg(test)]
+mod fleet_health_backfill_contract_tests;
+#[cfg(test)]
+mod fleet_health_rollup_contract_tests;
+#[cfg(test)]
+mod fleet_health_wiring_tests;
+#[cfg(test)]
+mod fleet_host_rollup_contract_tests;
 #[cfg(test)]
 mod gitlab_lifecycle_tests;
 #[cfg(test)]

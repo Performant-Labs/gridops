@@ -173,10 +173,14 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
 
 /// The definitions 0047 may change, each asserted by shape instead: the
 /// `runners` rebuild and its indexes, `runner_pools` (one added column), and
-/// whatever else the caller names.
+/// whatever else the caller names. 0050 (#197) appends `category` to
+/// `workflow_jobs` and five columns to `gitlab_jobs`, asserted by
+/// `assert_added_columns` and `tests/fleet_health_schema.rs`.
 fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
     name == "runners"
         || name == "runner_pools"
+        || name == "workflow_jobs"
+        || name == "gitlab_jobs"
         || RUNNERS_INDEXES.iter().any(|(index, _, _)| *index == name)
         || also.contains(&name)
 }
@@ -250,6 +254,8 @@ const LEGACY_ADDED_COLUMNS: AddedColumns = &[
         ],
     ),
     ("runner_pools", &[("run_untagged", "INTEGER", Some(0))]),
+    // #197, 0050: NULL until #190's backfill classifies the job.
+    ("workflow_jobs", &[("category", "TEXT", None)]),
 ];
 
 const FLEET_ADDED_COLUMNS: AddedColumns = &[
@@ -270,6 +276,8 @@ const FLEET_ADDED_COLUMNS: AddedColumns = &[
             ("retired_at", "INTEGER", None),
         ],
     ),
+    // #197, 0050: NULL until #190's backfill classifies the job.
+    ("workflow_jobs", &[("category", "TEXT", None)]),
 ];
 
 /// (name, upper-cased declared type, notnull, default, pk) per column, in order.
@@ -1387,12 +1395,30 @@ async fn the_0048_rebuild_keeps_every_target_and_reference() -> Result<()> {
     assert_added_columns(
         &db.pool,
         &old_columns,
-        &[("fleet_ci_targets", &[("retired_at", "INTEGER", None)])],
+        &[
+            ("fleet_ci_targets", &[("retired_at", "INTEGER", None)]),
+            // #197, 0050.
+            ("workflow_jobs", &[("category", "TEXT", None)]),
+            (
+                "gitlab_jobs",
+                &[
+                    ("category", "TEXT", None),
+                    ("job_name", "TEXT", None),
+                    ("project_path", "TEXT", None),
+                    ("started_at", "INTEGER", None),
+                    ("completed_at", "INTEGER", None),
+                ],
+            ),
+        ],
     )
     .await?;
     let new_schema = schema(&db.pool).await?;
     for (name, definition) in &old_schema {
-        if name == "fleet_ci_targets" || name == "fleet_ci_targets_immutable_identity" {
+        if name == "fleet_ci_targets"
+            || name == "fleet_ci_targets_immutable_identity"
+            || name == "workflow_jobs"
+            || name == "gitlab_jobs"
+        {
             continue;
         }
         assert_eq!(

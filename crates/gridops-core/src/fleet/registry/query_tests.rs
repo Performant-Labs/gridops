@@ -2748,3 +2748,129 @@ async fn readable_target_cte_handles_catalogs_larger_than_a_page() -> Result<()>
     ));
     fixture.close().await
 }
+
+/// #197 (D-3(f), A warn 23): `host_live_reads` is the principal-free,
+/// fleet-wide host read #201's `collect_live(db, now)` uses. It must give
+/// every approved, non-deleted host, in id order, with exactly the counts,
+/// budget, allocation, latest root measurement, last-hour placement failures
+/// and start gate `list_hosts` gives an administrator, because it is built
+/// from the same helpers.
+#[tokio::test]
+async fn host_live_reads_match_what_list_hosts_gives_an_admin() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let now = 5_000_000_i64;
+    let service = RegistryService::with_clock(
+        fixture.pool.clone(),
+        Vault::test_with_secret(b"query-test-secret"),
+        QueryClock::new(now),
+    );
+    // A pending host and a deleted host: neither is read.
+    sqlx::query("INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at) VALUES ('10000000-0000-4000-8000-0000000000aa','Pending host','linux','x64','pending','paused','unverified',1,1)")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query("INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at,deleted_at) VALUES ('10000000-0000-4000-8000-0000000000bb','Deleted host','linux','x64','approved','active','verified',1,1,2)")
+        .execute(&fixture.pool)
+        .await?;
+    for id in [
+        "10000000-0000-4000-8000-0000000000aa",
+        "10000000-0000-4000-8000-0000000000bb",
+    ] {
+        sqlx::query("INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes) VALUES (?,?,NULL,'root',1000,1024,1000)")
+            .bind(format!("{}-root", &id[..30]))
+            .bind(id)
+            .execute(&fixture.pool)
+            .await?;
+    }
+    // The Windows host has a sample and three start failures in the last
+    // hour; the Mac host has neither.
+    sqlx::query("INSERT INTO host_samples (host_id,domain_id,host_epoch,observed_at,received_at,cpu_used_millis,memory_used_mib,disk_free_bytes,uptime_seconds,coverage) VALUES ('20000000-0000-4000-8000-000000000001','21000000-0000-4000-8000-000000000001',1,?,?,1500,4096,50000,60,'complete')")
+        .bind(now - 20_000)
+        .bind(now - 19_000)
+        .execute(&fixture.pool)
+        .await?;
+    for (index, at) in [now - 60_000, now - 120_000, now - 180_000]
+        .into_iter()
+        .enumerate()
+    {
+        sqlx::query("INSERT INTO fleet_events (id,host_id,kind,detail_json,created_at) VALUES (?,'20000000-0000-4000-8000-000000000001','placement_failed','{\"reason\":\"start_deadline_expired\"}',?)")
+            .bind(format!("live-read-failure-{index}"))
+            .bind(at)
+            .execute(&fixture.pool)
+            .await?;
+    }
+
+    let reads = super::host_live_reads(&fixture.pool, now).await?;
+    let ids: Vec<String> = reads.iter().map(|read| read.id.to_string()).collect();
+    assert_eq!(
+        ids,
+        [
+            "20000000-0000-4000-8000-000000000001",
+            "30000000-0000-4000-8000-000000000001"
+        ],
+        "approved, non-deleted hosts in id order"
+    );
+
+    let page = service
+        .list_hosts(
+            &Fixture::principal(),
+            CatalogQuery {
+                limit: 100,
+                cursor: None,
+                target_id: None,
+            },
+        )
+        .await?;
+    for read in &reads {
+        let listed = page
+            .items
+            .as_slice()
+            .iter()
+            .find_map(|item| match item {
+                HostReadV1::Host {
+                    id,
+                    name,
+                    counts,
+                    physical_budget,
+                    physical_allocation,
+                    latest_root_measurement,
+                    failed_placements_last_hour,
+                    start_gate,
+                    ..
+                } if *id == read.id => Some((
+                    name,
+                    counts,
+                    physical_budget,
+                    physical_allocation,
+                    latest_root_measurement,
+                    failed_placements_last_hour,
+                    start_gate,
+                )),
+                _ => None,
+            })
+            .with_context(|| format!("list_hosts has no admin projection of {}", read.id))?;
+        assert_eq!(listed.0, &read.name, "{} name", read.id);
+        assert_eq!(listed.1, &read.counts, "{} counts", read.id);
+        assert_eq!(listed.2, &read.physical_budget, "{} budget", read.id);
+        assert_eq!(
+            listed.3, &read.physical_allocation,
+            "{} allocation",
+            read.id
+        );
+        assert_eq!(
+            listed.4, &read.latest_root_measurement,
+            "{} latest root measurement",
+            read.id
+        );
+        assert_eq!(
+            listed.5, &read.failed_placements_last_hour,
+            "{} failures",
+            read.id
+        );
+        assert_eq!(listed.6, &read.start_gate, "{} start gate", read.id);
+    }
+    assert!(reads[0].latest_root_measurement.is_some());
+    assert!(reads[1].latest_root_measurement.is_none());
+    assert!(reads[0].start_gate.is_some(), "three failures set it aside");
+    assert_eq!(reads[0].counts.scope, CountScope::Host);
+    fixture.close().await
+}

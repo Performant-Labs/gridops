@@ -91,6 +91,9 @@ mod gitlab;
 #[cfg(test)]
 mod gitlab_tests;
 mod overview_queue;
+// #197 (D-3(b)): the fleet-wide queue breakdown #201 reads.
+#[cfg(test)]
+mod fleet_queue_tests;
 mod tart_host;
 pub(crate) use self::gitlab::credentials as gitlab_credentials;
 pub use self::gitlab::{
