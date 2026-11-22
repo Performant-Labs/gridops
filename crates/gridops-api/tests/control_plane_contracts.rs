@@ -54,17 +54,27 @@ impl ApiFixture {
     }
 
     async fn start_with(extra_env: &[(&str, String)]) -> Result<Self> {
-        Self::start_on(None, extra_env).await
+        Self::start_on(None, 0, extra_env).await
     }
 
     /// Starts the API on `port` if it can have it, as if choosing a free
     /// port had picked `port`: the case where another process takes the
     /// chosen port before the API binds it (#124).
     async fn start_trying_port_first(port: u16) -> Result<Self> {
-        Self::start_on(Some(port), &[]).await
+        Self::start_on(Some(port), 0, &[]).await
     }
 
-    async fn start_on(first_port: Option<u16>, extra_env: &[(&str, String)]) -> Result<Self> {
+    /// Starts the API as a loaded machine does, idle for `seconds` after it
+    /// is spawned and before it binds: longer than a fixture used to wait.
+    async fn start_slow_to_bind(seconds: u64) -> Result<Self> {
+        Self::start_on(None, seconds, &[]).await
+    }
+
+    async fn start_on(
+        first_port: Option<u16>,
+        idle_seconds: u64,
+        extra_env: &[(&str, String)],
+    ) -> Result<Self> {
         let database_path =
             env::temp_dir().join(format!("gridops-api-test-{}.sqlite", Uuid::new_v4()));
         // Unique to this fixture, so no other API knows it (#124). The
@@ -83,10 +93,21 @@ impl ApiFixture {
                     .into_iter()
                     .map(Some)
                     .chain(std::iter::repeat(None)),
-                Duration::from_secs(3),
                 &cookie,
                 |base_url| {
-                    Command::new(binary)
+                    let mut command = if idle_seconds == 0 {
+                        Command::new(binary)
+                    } else {
+                        // The same process becomes the API once the shell
+                        // execs it, so the fixture sees one live child.
+                        let mut shell = Command::new("/bin/sh");
+                        shell
+                            .arg("-c")
+                            .arg(format!("sleep {idle_seconds}; exec \"$0\""))
+                            .arg(binary);
+                        shell
+                    };
+                    command
                         .env("GRIDOPS_BASE_URL", base_url)
                         .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
                         .env("GRIDOPS_API_BIND", base_url.trim_start_matches("http://"))
@@ -283,6 +304,22 @@ async fn the_fixture_moves_off_a_port_another_server_answers_on() -> Result<()> 
         StatusCode::OK,
         "the fixture's own API knows its session"
     );
+    Ok(())
+}
+
+/// On a loaded CI runner the API can take seconds to bind (2026-11-22: three
+/// fixtures in a row gave up at 3 s). A fixture whose API is still running
+/// waits for it; giving up only moves it to another port that is as slow.
+#[tokio::test]
+async fn a_fixture_waits_for_its_own_api_however_slow_it_is_to_bind() -> Result<()> {
+    let fixture = ApiFixture::start_slow_to_bind(4).await?;
+    let me = fixture
+        .client
+        .get(format!("{}/api/v1/auth/me", fixture.base_url))
+        .header(header::COOKIE, fixture.session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(me.status(), StatusCode::OK);
     Ok(())
 }
 

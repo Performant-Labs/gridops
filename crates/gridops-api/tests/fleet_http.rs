@@ -22,9 +22,6 @@ use uuid::Uuid;
 
 const SESSION_SECRET: &str = "fleet-http-test-session-key";
 
-/// How long one start of the API may take to be healthy.
-const HEALTH_WAIT: Duration = Duration::from_secs(5);
-
 #[path = "support/api_process.rs"]
 mod api_process;
 
@@ -171,15 +168,12 @@ impl Fixture {
         let database = connect_database_path(&directory.join("db.sqlite")).await?;
         Self::seed(&database, &session).await?;
         let client = Client::new();
-        let (child, origin) = api_process::start(
-            &client,
-            std::iter::repeat(None),
-            HEALTH_WAIT,
-            &cookie,
-            |origin| start_api(&directory, origin, manager.as_deref(), &env),
-        )
-        .await
-        .with_context(|| format!("see {}", directory.join("api.log").display()))?;
+        let (child, origin) =
+            api_process::start(&client, std::iter::repeat(None), &cookie, |origin| {
+                start_api(&directory, origin, manager.as_deref(), &env)
+            })
+            .await
+            .with_context(|| format!("see {}", directory.join("api.log").display()))?;
         Ok(Self {
             process: ApiProcess(child),
             database,
@@ -205,13 +199,9 @@ impl Fixture {
             .rsplit_once(':')
             .and_then(|(_, port)| port.parse().ok())
             .with_context(|| format!("no port in {}", self.origin))?;
-        let (child, _) = api_process::start(
-            &self.client,
-            [Some(port)],
-            HEALTH_WAIT,
-            &self.cookie,
-            |origin| start_api(&self.directory, origin, self.manager.as_deref(), &self.env),
-        )
+        let (child, _) = api_process::start(&self.client, [Some(port)], &self.cookie, |origin| {
+            start_api(&self.directory, origin, self.manager.as_deref(), &self.env)
+        })
         .await
         .with_context(|| {
             format!(

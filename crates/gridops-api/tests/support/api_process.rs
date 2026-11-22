@@ -13,6 +13,13 @@
 //! started still running and a `GET /api/v1/auth/me` with a session only the
 //! fixture's own database holds to answer 200. The fixture seeds that session
 //! before it starts the API, once, so an attempt on another port reuses it.
+//!
+//! How long the API takes to come up is not a reason to give up on it. On a
+//! loaded CI runner it can take many seconds, and another port is no faster.
+//! While the API the fixture started is alive and not yet healthy, an attempt
+//! keeps waiting: the API either binds and answers, or exits on its bind
+//! error, which moves the fixture to another port at once. Only
+//! [`HANG_GUARD`] bounds the wait.
 
 use std::{net::TcpListener, process::Child, time::Duration};
 
@@ -25,12 +32,18 @@ const ATTEMPTS: usize = 5;
 /// How often an attempt asks whether the API is up yet.
 const POLL: Duration = Duration::from_millis(50);
 
+/// The longest one attempt waits for the API it started to be healthy and to
+/// answer the session check. A guard against a hung API or a port that
+/// accepts and never answers, not the readiness signal: readiness is a
+/// healthy answer from a live child that knows the fixture's session, and a
+/// child that cannot bind exits and ends the attempt long before this.
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
 /// Starts the API on each port `ports` offers in turn, until one attempt is
 /// proven to be the fixture's own, and returns that API and its origin.
 ///
 /// - `ports`: each attempt's port; `None` chooses a free one. A fixture that
 ///   must keep its origin (a restart) offers only that port.
-/// - `health_wait`: how long one attempt waits for the API to be healthy.
 /// - `cookie`: the session cookie the fixture seeded in its own database.
 /// - `spawn`: starts the API with the given origin as its base URL and bind.
 ///
@@ -40,7 +53,6 @@ const POLL: Duration = Duration::from_millis(50);
 pub async fn start(
     client: &Client,
     ports: impl IntoIterator<Item = Option<u16>>,
-    health_wait: Duration,
     cookie: &str,
     mut spawn: impl FnMut(&str) -> Result<Child>,
 ) -> Result<(Child, String)> {
@@ -53,7 +65,15 @@ pub async fn start(
         let origin = format!("http://127.0.0.1:{port}");
         let mut child =
             spawn(&origin).with_context(|| format!("could not start the API on {origin}"))?;
-        match prove_own(client, &mut child, &origin, health_wait, cookie).await {
+        let proven =
+            tokio::time::timeout(HANG_GUARD, prove_own(client, &mut child, &origin, cookie))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "no healthy API of the fixture's own within {HANG_GUARD:?}"
+                    ))
+                });
+        match proven {
             Ok(()) => return Ok((child, origin)),
             Err(cause) => {
                 let _ = child.kill();
@@ -69,18 +89,11 @@ pub async fn start(
     )
 }
 
-/// Waits until something on `origin` is healthy, then proves it is `child`:
-/// `child` is still running and knows the fixture's session.
-async fn prove_own(
-    client: &Client,
-    child: &mut Child,
-    origin: &str,
-    health_wait: Duration,
-    cookie: &str,
-) -> Result<()> {
-    let polls = (health_wait.as_millis() / POLL.as_millis()).max(1);
-    let mut healthy = false;
-    for _ in 0..polls {
+/// Waits, for as long as `child` runs, until something on `origin` is
+/// healthy, then proves it is `child`: `child` is still running and knows the
+/// fixture's session. The caller bounds the whole of it with [`HANG_GUARD`].
+async fn prove_own(client: &Client, child: &mut Child, origin: &str, cookie: &str) -> Result<()> {
+    loop {
         if let Some(status) = child.try_wait()? {
             bail!("the API exited ({status}) before it was healthy");
         }
@@ -90,13 +103,9 @@ async fn prove_own(
             .await
             .is_ok_and(|response| response.status().is_success())
         {
-            healthy = true;
             break;
         }
         tokio::time::sleep(POLL).await;
-    }
-    if !healthy {
-        bail!("the API was not healthy within {health_wait:?}");
     }
     if let Some(status) = child.try_wait()? {
         bail!("another process answers on {origin}: the API exited ({status})");

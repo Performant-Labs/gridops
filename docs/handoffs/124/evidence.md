@@ -39,3 +39,24 @@
   >             .bind(&session.session_id)
   >             .execute(&state.database)
 
+
+## T (follow-up round on PR #205)
+
+- **Fact:** the API commits a command as `delivered` inside the poll transaction and only then returns it for the poll reply, so `host_commands.state='delivered'` does not prove the agent received the command (the race behind `an_api_restart_leaves_a_running_runner_alone`).
+  **Source:** `crates/gridops-core/src/fleet/registry/commands.rs:145`, `crates/gridops-core/src/fleet/registry/commands.rs:161`
+  **Verbatim excerpt:**
+  >             sqlx::query("UPDATE host_commands SET state='delivered',attempt_count=? WHERE id=?")
+  >         tx.commit().await?;
+
+- **Fact:** the agent journals a command's result before `dispatch` returns it for posting, so a `/commands/result` post carrying the inspect's command id proves the answer is journaled and will be handed over after a reconnect.
+  **Source:** `crates/gridops-host-agent/src/dispatch.rs:120`, `crates/gridops-host-agent/src/client.rs:225`
+  **Verbatim excerpt:**
+  >         self.journal.complete(&result).await?;
+  >         self.agent::<_, serde_json::Value>(host, credential, "commands/result", result)
+
+- **Fact:** an open command past its deadline is held `uncertain` only if it was delivered; one still pending is `cancelled` (so `an_administrator_repairs_a_placement_the_agent_cannot_confirm` must see the start run before its deadline passes).
+  **Source:** `crates/gridops-core/src/fleet/registry/commands.rs:778-780`
+  **Verbatim excerpt:**
+  >         let delivered = row.get::<String, _>("state") == "delivered";
+  >         sqlx::query("UPDATE host_commands SET state=? WHERE id=?")
+  >             .bind(if delivered { "uncertain" } else { "cancelled" })

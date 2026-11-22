@@ -65,3 +65,9 @@
 - **Assumed:** no survey.md exists, so the brief and handoff-A.md served as the Reuse map.
 - **Hedged:** two warns (heavier per-entry fake logger, justified by stress evidence; `session_cookie` vs `session_cookie_for` could share a body).
 - **Evidence:** diff 9e357e0..8233328 read in full for the helper, fleet_http, gitlab_runner_script, tart_outage_tests; handoff-A-dup.md.
+
+## Follow-up round on PR #205 (T) - 2026-11-22
+- **Decided:** fixed two CI flakes with test-only changes. (A) The API fixture helper waits while its own child is alive and not healthy, under one 60 s `HANG_GUARD` (a hang guard, not the readiness signal); per-caller health waits removed; new slow-bind regression test. (B) The API-restart test restarts only after the agent ran the inspect and posted its (refused) answer; the admin-repair sibling waits for the start to run, then sleeps until issue + 7.5 s.
+- **Assumed:** the agent journals before posting (`dispatch.rs:120`), so a refused result post carrying the command id proves the answer survives a restart.
+- **Hedged:** `agent.rs:215` and `:287` sleep a fixed time and expect periodic agent work. That is not the same class and they have not flaked, so I recorded them as advisory only.
+- **Evidence:** handoff-T-followup.md. 1 ms-poll repro: old 4/60 fail, new 0/120. Stress: restart 80/80, admin repair 40/40, control_plane_contracts binary 30/30, at load 8.4–12.3. fmt and CI clippy clean. Full `cargo test -p gridops-api` green except the pre-existing macOS preflight test.
