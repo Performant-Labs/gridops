@@ -210,6 +210,23 @@ async fn a_runner_container_is_created_with_the_flags_its_image_needs() -> Resul
             "ephemeral mode must invoke run.sh relative to the image's own working \
              directory, not myoung34's absolute path: {recorded}"
         );
+        // #126 item 4: a runner that does not share the socket gets none of the shared runner's
+        // folders, cache mount or variables. (The runner script itself mentions
+        // `GRIDOPS_RUNNER_ROOT`, so only what is passed with `-e` counts.)
+        for shared_only in [
+            "/var/lib/gridops-agent",
+            "--mount",
+            "-e RUNNER_TOOL_CACHE=",
+            "-e AGENT_TOOLSDIRECTORY=",
+            "-e GRIDOPS_RUNNER_ROOT=",
+            "-e GRIDOPS_RUNNER_EXTERNALS=",
+            "-e GRIDOPS_RUNNER_WORK=",
+        ] {
+            ensure!(
+                !recorded.contains(shared_only),
+                "a runner without the socket got {shared_only}: {recorded}"
+            );
+        }
         return Ok(());
     };
     let runtime = DockerRuntime::new(None, None);

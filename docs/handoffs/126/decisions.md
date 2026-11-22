@@ -1,0 +1,246 @@
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T10:47:18-08:00
+- **Decided:** BLOCK, with 2 block and 8 warn findings (docs/handoffs/126/handoff-A.md).
+  - **Block 1: the runner root inside the work folder rebuilds the bug.**
+    - Runner v2.338.2 translates host paths to container paths with a List checked in this order: Work (`/__w`), Tools (`/__t`), Externals (`/__e`). The first prefix wins (`ContainerInfo.cs:54-56`, `:164-190`).
+    - The node path (`NodeScriptActionHandler.cs:129`, `:168`) and the destination of the externals mount (`ContainerOperationProvider.cs:304`) are both translated.
+    - So `<work>/<root>/externals` reaches the job container as `/__w/<root>/externals`. That is our symlink to a host-only path, never `/__e`.
+    - Fix: put the root outside the work folder, at `/var/lib/gridops-agent/runners/<env>`, mounted at the same path. Extend the cleanup so it removes both folders.
+  - **Block 2: the once-per-image externals copy (about 600 MB) is planned for Start.**
+    - Start has 30 s, or 25 s after the delivery margin. Commands run one at a time (`supervisor.rs:474-499`).
+    - Fix: fill the cache in `prepare`, after the pull. Prepare has a 20-minute deadline, and NativeRuntime already stages there. Start only resolves the image id and checks the cache, failing with `Runtime, true` if it is missing.
+  - **Warns:**
+    - (3) Derive the paths from the image's WorkingDir, never `/actions-runner`. The stock image uses `/home/runner`.
+    - (4) Reuse `GRIDOPS_RUNNER_ROOT`: the live-log forwarder reads `_diag/pages` there. The setup step runs in the main shell.
+    - (5) Failure codes:
+      - image content: `Configuration, false`;
+      - permission on the StateDirectory: `Configuration, false`;
+      - docker or IO errors: `Runtime, true`;
+      - no new wire variants.
+    - (6) Follow NativeRuntime's fill shape (a Mutex, staging, rename). Use `docker cp`, so the files are agent-owned. Mount with `--mount readonly`, not `-v`. Keep the cache outside `SHARED_WORK_ROOT`.
+    - (7) Create the runner container from the resolved image id.
+    - (8) Evict a cache only when its image is gone from the local store.
+    - (9) The tool cache under `<work>/_tool` is correct (the runner's default; it translates to a real `/__w/_tool`). Check the image's `.env`.
+    - (10) Factor pure builders, pass roots as `&Path`, and keep tests in-crate, with no Docker daemon.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names, plus `NativeRuntime`, serve as the Reuse map.
+  - The pool image's runner root is `/actions-runner` (the brief's read-only facts). I did not inspect it.
+  - The tag v2.338.2 on GitHub is the source of the runner on the pool.
+- **Hedged:**
+  - Block 1: whether a root inside the work folder would fail outright, or work by accident, depends on how runc resolves a mount destination that is a symlink inside the `/__w` bind. Not run. The block rests on the translation order in the runner's source, which bypasses the `/__e` mechanism either way.
+  - Block 2: the copy time was not measured. The block rests on the documented start budget and on commands running one at a time, not on a measured overrun.
+  - The stock GitHub image runs as uid 1001 and probably cannot write the agent-owned shared folders today. This was inferred, not run. It is out of scope.
+  - Whether the pool image ships a `<root>/.env` that pins a tool directory is unknown. F checks.
+- **Evidence:**
+  - Read: the brief, its gate result and issue #126 (`gh issue view`).
+  - Host agent: `docker.rs` in full; `native.rs` in full; `supervisor.rs:66-90`, `:440-520`; `dispatch.rs:70-180`, `:236-260`, `:325-372`; `main.rs:1-40`, `:240-337`.
+  - Core: `work_folder.rs` in full; `provisioning.rs:55-80`, `:280-360`; `start_health.rs:1-83`; `retry.rs:1-60`; `registry/commands.rs:236-320`, `:425-470`, `:560-600`, `:660-800`; `admission.rs:1135-1160`; `outcomes.rs:30-61`.
+  - Reconciler: `fleet.rs:40-60`.
+  - Manager: `main.rs:3215-3277`, plus greps for the socket and `_work`.
+  - Tests: `tests/docker_runtime.rs` in full; `tests/docker_gitlab.rs:490-525`.
+  - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:300-360`.
+  - actions/runner v2.338.2, fetched from raw.githubusercontent.com: `ContainerInfo.cs`, `ContainerOperationProvider.cs:290-322`, `NodeScriptActionHandler.cs`, `StepHost.cs`, `HostContext.cs:377-415`, `Runner.Listener/Program.cs:172-194`, `layoutroot/env.sh`.
+  - Coexistence: `git worktree list`. None of the 7 worktrees changes `docker.rs`, `work_folder.rs` or `provisioning.rs`.
+
+## Phase 3 Architecture (A, up-front plan review, round 2) - 2026-11-22T11:19:17-08:00
+- **Decided:** PASS, with 0 block and 9 warn findings (docs/handoffs/126/handoff-A.md, which replaces the round-1 BLOCK from 449b48c).
+  - **Round-1 blocks resolved:**
+    - Block 1: the runner root is now outside the work folder (decision 1).
+    - Block 2: the externals fill now happens in Prepare, and Start only checks for the cache (decision 2, item 3).
+    - Round-1 warns 3 to 10 are now binding decisions 3 to 10.
+  - **Warns:**
+    - (1) The copy, link and `cd` go right after `IFS= read -r S`, in docker.rs's own setup strings. In persistent mode that is before `./config.sh`, which is inside setup. Core's `instrumented_runner_script` stays unchanged. The cache-path variable is `GRIDOPS_RUNNER_EXTERNALS`.
+    - (2) Prepare creates the cache folders plainly (`PermissionDenied` gives `Configuration, false`). Start creates the runner root with a generalised `create_shared_work_folder`, which keeps the move-aside.
+    - (3) Check the cache before creating either folder. On a failed `docker create` or `feed_secret`, remove both folders with the existing `remove_shared_work_folder`, or open a follow-up.
+    - (4) The fill container: named `gridops-externals-<name>`, `rm -f` before create, created with `--entrypoint ""` and a no-op command, no GridOps label, and removed on every exit path.
+    - (5) Names:
+      - the runner-root function takes `PreparedEnvironmentId`; the brief's "as shared_work_folder does" is inaccurate, because that function takes `impl Display`;
+      - the cache name is lowercase hex with no `sha256:`;
+      - staging is `<name>.partial`.
+    - (6) One predicate, shared by Prepare's fill and Start's check.
+    - (7) One private failure type carrying the code, the retryability and the reason.
+    - (8) The sweep runs under the fill's mutex guard.
+    - (9) Rename the cleanup functions and their log line so they cover both folders.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names, plus `NativeRuntime`, serve as the Reuse map.
+  - The actions/runner v2.338.2 behaviour cited in round 1 still holds. I did not fetch it again this round.
+- **Hedged:**
+  - Warn 4: whether `ghcr.io/actions/actions-runner` inherits a `Cmd` (which would let a bare `docker create` succeed) was not checked. The fix is safe either way.
+  - Warn 3: the size of the leak on a `feed_secret` failure depends on how far the script got before the container exited. Not measured.
+  - Whether a symlinked bind source resolves on the host at job-container creation is still the round-1 hedge. Not run.
+- **Evidence:**
+  - Read: the brief in full (sha256 42204bd2…c949); brief gate results r1, r2 and r3; round-1 handoff-A.md and decisions.md.
+  - Host agent: `docker.rs` in full; `native.rs:1-140` and `:470-600`; `dispatch.rs:175-300` and `:320-451`; `supervisor.rs:470-505`; `helper.rs:1-80`; `runtime.rs`; `main.rs:1-30`, `:75-95` and `:230-337`; `probe.rs`, by grep.
+  - Core: `work_folder.rs`; `fleet/mod.rs:15-30`; `ids.rs:29-95`; `provisioning.rs:280-375`; `protocol/agent.rs:255-300`; `start_health.rs:20-60`; `retry.rs:180-205`; the `is_github` and `is_gitlab` predicates.
+  - Reconciler: `fleet.rs:425-440`.
+  - Tests: `tests/docker_runtime.rs` in full.
+  - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:339-383`; `CHANGELOG.md:1-30`.
+  - Coexistence: `git worktree list` and a per-worktree diff. None of the 7 other worktrees changes the files this plan touches.
+
+## Phase 4 Tests RED (T) - 2026-11-22T11:48:14-08:00
+- **Decided:** RED is valid (docs/handoffs/126/handoff-T-red.md).
+  - **What was written:**
+    - 2 core tests in `work_folder.rs`.
+    - 18 host-agent tests in the new child module `docker::externals_tests` (`src/docker/externals_tests.rs`).
+    - 1 new parse test plus 3 renamed or extended ones in `docker.rs` `shared_work_folder_tests`.
+    - Guard extensions in `tests/docker_runtime.rs` and `tests/docker_gitlab.rs`.
+  - **The contract F must provide:**
+    - core: `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT` and `shared_runner_root(PreparedEnvironmentId)`, re-exported;
+    - docker.rs: `Refusal`, `externals_cache_name`, `externals_cache`, `uses_externals_cache`, `shared_socket_args`, `github_runner_script(mode, shared)`, `DockerRuntime::fill_externals_cache` and `parse_shared_folders_leftover` (image, folders).
+  - **Results:**
+    - Compile RED on those items only.
+    - Runtime RED with today's-behaviour stubs: 17 fail on the feature assertion; the guards are green by design.
+    - A throwaway reference implementation passes everything.
+    - 9 targeted mutations are each caught.
+    - Clippy is clean with CI 1.98.1 flags.
+    - All stubs and the reference were reverted.
+- **Assumed:**
+  - Names follow A's suggestions (warns 5, 7 and 9), including the cleanup rename. A allowed F to keep the old names. These tests fix the new ones.
+  - The pool image's ENV `AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache` is part of the container env the scripts see (the brief's facts).
+  - The runner applies its root's `.env` over its environment (A's reading of Program.cs:172-194). The tool-cache test resolves the tool directory that way.
+- **Hedged:**
+  - The symlinked-`externals` test accepts follow or refuse. It is narrowed to F's documented choice in Phase 6.
+  - Three things in Start's success path are pinned only through the pure functions, because that path needs a writable `/var/lib/gridops-agent`. The diff gate and S check the wiring by reading:
+    - the use of the builders;
+    - the container created from the resolved id;
+    - A warn 3's folder removal when `docker create` or `feed_secret` fails.
+  - Not tested:
+    - warn 8 (the sweep under the lock);
+    - a failed `rename`;
+    - the order of the secret read before the copy.
+  - Two stand-in tests skip as root or where `/var/lib/gridops-agent` exists, and the 0555 test skips as root.
+- **Evidence:**
+  - Read: the brief in full, handoff-A (round 2), decisions.md, `docker.rs` in full, `work_folder.rs`, `fleet/mod.rs:15-30`, `ids.rs:29-95` and `provisioning.rs:300-375`.
+  - Read: `native.rs:30-140` and `:475-540`, `tests/docker_runtime.rs` in full, `tests/docker_gitlab.rs:1-400` and `:470-530`, `gridops-manager/src/main.rs:3240-3280`, and `protocol/agent.rs` (RunnerMode, PreparedWorkload, ExecutionConfiguration, FixSandbox rules).
+  - Real Docker 29.8.2 on this Mac, read-only, with local images and one throwaway container (removed). It showed:
+    - the WorkingDir template error;
+    - "No such image" versus "no such object";
+    - `rm -f` of a missing container exits 0;
+    - `docker cp`'s "Could not find the file" message and its symlink and nesting behaviour.
+
+## Phase 6 Implementation (F) - 2026-11-22T12:17:25-08:00
+- **Decided:**
+  - Implemented the contract T fixed, in `docker.rs` (host agent) and `work_folder.rs` (core): `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT`, `shared_runner_root(PreparedEnvironmentId)`, `Refusal`, `externals_cache_name`, `externals_cache`, `uses_externals_cache`, `shared_socket_args`, `github_runner_script`, `DockerRuntime::fill_externals_cache` and `parse_shared_folders_leftover`.
+  - **Symlinked `externals`:** followed (`docker cp -L`). Links inside it stay links. Any link that is absolute or does not resolve inside the copy refuses the image with `Configuration, false`, so the cache never holds a dangling link.
+  - **Sweep:** runs only after a new fill, under the same `externals_lock` guard (A warn 8). It uses plain `docker inspect sha256:<hex>`, so `missing()` stays unchanged.
+  - **Image facts:** the image id and working directory come from one `docker image inspect -f '{{.Id}} {{json .Config}}'`. Docker 29 and older Docker both answer it whether or not the image has a WorkingDir.
+  - **Start's socket branch** goes through `shared_runner(socket, image, &SharedPaths)`. Its order: resolve the id, check the cache, create the work folder and then the runner root (A warn 3). The container is created from the resolved id. A failed `docker create` or `feed_secret` removes both folders with the existing `remove_shared_folder`. That function now tries a plain `remove_dir` first, so an empty folder needs no container.
+  - **Tool cache:** `-e RUNNER_TOOL_CACHE` and `-e AGENT_TOOLSDIRECTORY` are both `<work>/_tool`. The script also rewrites the root's `.env` lines for both.
+  - **The parse also rejects `.`** as a folder name, beside `..`.
+- **Assumed:**
+  - The pool image's runner directory holds what the 2.338.2 release tarball holds. The Harbor pull was unauthorized and the `ghcr.io/actions/actions-runner:2.338.2` pull failed mid-download, so the sizes were measured from the release tarball:
+    - per start: 272 files, 84,797,525 bytes (`bin` plus 6 scripts);
+    - cache fill: 9,122 files, 599,417,734 bytes, with 6 relative links, all of which resolve inside the tree.
+  - The pool image may add files to `/actions-runner` beyond the tarball. Those would add to the per-start copy.
+- **Hedged:**
+  - No real Docker daemon and no fleet host were used. The following ran only against T's stand-in and under bash on macOS:
+    - the fill (`create`/`cp`/`rm` and the rename);
+    - Start's refusal;
+    - Cleanup;
+    - the scripts.
+  - Start's success path (it writes `/var/lib/gridops-agent`) was not run.
+  - Whether `docker cp -L` on a real daemon follows only the top-level link is from Docker's documentation. Either way, the link check covers it.
+- **Evidence:**
+  - `cargo test -p gridops-host-agent` (all binaries, twice) and `cargo test -p gridops-core --lib` (313) are green.
+  - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` and `cargo fmt --all -- --check` are clean.
+  - Read the runner 2.338.2 release's `run.sh` (root = the physical dir of `run.sh`) and `env.sh` (it never writes a tool-cache variable).
+  - Facts from unchanged code are in `docs/handoffs/126/evidence.md`.
+
+## T-green (Phase 7)
+
+- **Decided:**
+  - Narrowed `a_symlinked_externals_is_followed_or_refused_never_cached_dangling` to the follow branch and renamed it `a_symlinked_externals_is_followed_and_the_cache_never_holds_a_dangling_link`, as F's `fill_externals_cache` doc comment documents the choice. A refusal now fails the test.
+  - No production file touched; no other test changed.
+- **Assumed:** the sizes F reports (per start 272 files / 84,797,525 bytes; fill 9,122 files / 599,417,734 bytes) are from the runner 2.338.2 tarball, not the pool image. I did not re-measure.
+- **Hedged:** Start's success path, `docker cp -L` and `--mount ...,readonly` on a real engine, and a host bind source resolved through the runner root's `externals` link are not exercised by any test (no daemon, no writable `/var/lib/gridops-agent`). U/S/the fleet must cover them.
+- **Evidence:**
+  - `cargo test -p gridops-core --lib` 313 passed; `cargo test -p gridops-host-agent` all binaries green.
+  - Mutation spot-checks (reverted): dropping the cache's `readonly` flag fails `a_shared_runner_gets_its_folders_at_host_paths_and_the_cache_read_only`; removing the `.env` rewrite fails `the_runner_resolves_its_tool_cache_to_the_work_folder_whatever_the_image_sets`.
+  - Facts F used from unchanged code are in `evidence.md`; I checked the Start/Prepare wiring by reading `docker.rs` `start` and `shared_runner`.
+
+## Phase 3 Architecture (A, up-front plan review, round 3: re-entry after F's archChanged) - 2026-11-22T12:41:57-08:00
+- **Decided:** PASS, with 0 block and 2 warn findings (docs/handoffs/126/handoff-A.md, which replaces the round-2 PASS from 25e34e8).
+  - **Why A ran:** the outside diff gate (r1) BLOCKed on B-1, a missing failed-rename test. F had reported `archChanged`, so the driver routed the BLOCK to Phase 4 without classifying it. The brief is unchanged (sha256 42204bd2…c949), so the plan's round-2 PASS stands. This round checked F's architecture against the plan.
+  - **F's structure stays inside the planned seams:**
+    - core gains `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT` and `shared_runner_root(PreparedEnvironmentId)`; everything else is in `docker.rs`;
+    - there are no wire, protocol, `FailureCode`, server or reconciler changes;
+    - `instrumented_runner_script` is unchanged.
+  - **Round-2 warns 1-9 are all followed** (warn 9 only partly; see warn 2).
+  - **Warns:**
+    - (1) `remove_tree` (a blocking `remove_dir_all` over trees of about 600 MB) and `std::fs::rename` run directly in async code (`docker.rs:1169`, `:1177`, `:1208`, `:1325`). `NativeRuntime`'s fill uses `tokio::fs` and `spawn_blocking` (`native.rs:486`, `:528-529`, `:551`). Fix: wrap them in `spawn_blocking` and use `tokio::fs::rename`.
+    - (2) The rename stopped halfway: `create_shared_work_folder` and the `shared_work_folder_tests` module keep "work" names while the cleanup trio became `shared_folder(s)`.
+  - **Routing note for O and T:** B-1 is test-only (a regular file pre-created at `<cache_root>/<hex>` makes the rename fail, with no production change). Nothing routes it to T this cycle, so `handoff-A.md` "Notes for O" spells it out.
+- **Assumed:**
+  - The driver's fixed "before any code exists" task text is generic. The real input is the code at 3f00753 plus the unchanged brief.
+  - The actions/runner 2.338.2 behaviour cited in round 1 still holds. I did not fetch it again.
+- **Hedged:**
+  - Warn 1's cost (one tokio worker held for the length of a delete) is inferred from the multi-threaded runtime and the agent running one command at a time. It was not measured.
+  - The diff gate's NV-1 to NV-6 (real-daemon and third-party claims) are outside A's scope and were not re-checked.
+- **Evidence:**
+  - Read: the brief (hash checked); `handoff-A.md` at 25e34e8; `handoff-F.md`; `decisions.md`; `126-diff-result-r1.md`.
+  - Code: the `docker.rs` production diff 9e357e0..3f00753 in full; the core `work_folder.rs` / `fleet/mod.rs` diff; `docker.rs`@9e357e0 log lines; `native.rs` fs usage; `main.rs:45`.
+  - Searches: a repo-wide grep for `{{.Config.Image}}` readers; the crate module-layout precedent (`webhooks.rs` with `webhooks/gitlab_tests.rs`).
+  - Workflow: the release's `coding-pipeline.workflow.mjs` Phase 4/5/7 routing and `coding-pipeline-logic.mjs` (`F_RESULT_SCHEMA`, `nextPhase`, `archCarryNote`).
+  - Coexistence: the origin/master diff 9e357e0..fbacbc2 (only `CHANGELOG.md` is shared) and `git worktree list` (#124 shares none of these files).
+
+## Phase 4 RED (T, round 2: rework after diff gate r1) - 2026-11-22T12:46:23-08:00
+- **Decided:**
+  - **B-1:** added `a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging`.
+    - A regular file pre-created at `<cache_root>/<hex>` makes the rename of the staged folder fail with `ENOTDIR`. It needs no production seam.
+    - The test asserts `(Runtime, true)`, a reason naming the tag and the path, one `cp`, no `.partial`, the file untouched, Start's check still refusing, and no container left.
+    - It is a separate test rather than a sixth loop case, because the loop asserts that `<hex>` does not exist.
+  - **W-3:** `a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache` now asserts one pair.
+    - The new helper `cache_root_creation_answer()` works the pair out from a probe in the nearest existing ancestor of `EXTERNALS_CACHE_ROOT`: `PermissionDenied` gives `Configuration, false`, any other error gives `Runtime, true`.
+    - If this user can create the probe, the test skips with a reason, which also stops the Prepare from writing a real cache.
+  - Kept round 1 of `handoff-T-red.md` below the new round. No production file was touched.
+- **Assumed:**
+  - The driver's "author the RED" task applies to the test-only findings A's round-3 "Notes for O" route to T. F's next pass is A's round-3 warns 1 and 2.
+- **Hedged:**
+  - Both tests pass against the current code, because the behaviour already exists. RED validity rests on 4 reverted mutations of `docker.rs` (M1-M4 in the handoff), each caught with the expected failing line.
+  - The `Runtime, true` branch of the probe helper (a non-permission error, such as a read-only root) is not reachable on this Mac and was not run.
+- **Evidence:**
+  - Commands, all green:
+    - `cargo test -p gridops-host-agent`: every binary passes (lib 28, of which externals_tests 19);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-host-agent --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl`.
+  - Mutations M1-M4 each failed the targeted test. `git status` after the revert shows only the test file changed.
+  - M4 also proves the Prepare test runs here rather than skipping: non-root user, `/var/lib` is `root:wheel 755`, and there is no `/var/lib/gridops-agent`.
+
+## Phase 6 Implementation (F, round 2: rework after diff gate r1) - 2026-11-22T12:51:35-08:00
+- **Decided:**
+  - **A round-3 warn 1:** `remove_tree` is now an async wrapper that runs `remove_tree_blocking` under `spawn_blocking`. The cache rename uses `tokio::fs::rename`, and the staging folder is created with `tokio::fs`. All three callers await it.
+  - **A round-3 warn 2:** `create_shared_work_folder` became `create_shared_folder`, and the test module `shared_work_folder_tests` became `shared_folder_tests`. Only the module name and its `use` line changed in test code.
+  - **Diff gate W-1:** added the `..?*` glob arm, so entries named `..x` reach the runner root.
+  - **Diff gate NV-6:** the docs mark the sizes as estimates from the runner 2.338.2 release tarball.
+  - **Diff gate NIT-1:** the `link_out_of` doc comment explains how links are checked.
+  - **Diff gate W-2 not changed:** brief decision 8 sweeps after a new fill only, and the leak is bounded (see handoff-F).
+  - **NIT-2 not changed:** A disproved it in round 3.
+- **Assumed:** A's assignment of warn 2 to F covers the test module's mechanical rename. No assertion or test body changed.
+- **Hedged:**
+  - NV-1 to NV-5 still need a real daemon or the third-party sources; none was available.
+  - The W-1 glob was checked under bash 3.2 on macOS only, not in the pool image's bash.
+- **Evidence:**
+  - Commands, all green:
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl`;
+    - `cargo test -p gridops-host-agent`: lib 28, dispatch 8, docker_gitlab 10, docker_runtime 1+1+2, version 1;
+    - `cargo test -p gridops-core --lib`: 313.
+  - T's two round-2 tests pass when run by name.
+  - A direct run of the copy loop under `/bin/bash` 3.2.57 copied `..c`, which the old arms miss.
+
+## T, Phase 7 (round 2, after diff gate r1)
+- **Decided:** added one test, `the_runner_root_gets_every_entry_of_the_image_dot_entries_included`, for diff gate W-1 (the `..?*` glob arm F added had no test). It fails with the arm removed and passes with it.
+- **Assumed:** a re-run of the full workspace is not needed: round 2 touched only private `docker.rs` items and docs. The one earlier workspace failure (`release_preflight`, macOS host) is environmental.
+- **Hedged:** the new test runs the script under the host's bash (3.2 on macOS) only, not the pool image's bash.
+- **Evidence:** `cargo test -p gridops-host-agent` (lib 29, others unchanged), `cargo test -p gridops-core --lib` (313), fmt and clippy clean. After a mid-task mistaken `git checkout` I restored HEAD and re-ran everything on the final tree; only `externals_tests.rs` differs from HEAD.
+
+## A, Phase 7 (anti-duplication gate, after diff gate r2)
+- **Decided:** PASS, 0 block and 1 warn (docs/handoffs/126/handoff-A-dup.md). F extended Prepare, Start, the shared-folder create/parse/remove functions and `work_folder.rs` in place. The inline GitHub scripts became one `github_runner_script`. No parallel path.
+- **Assumed:** with no survey.md, the brief's named objects and `NativeRuntime`'s staged fill are the Reuse map.
+- **Hedged:** runtime behaviour (NV-1 to NV-5) is outside this gate and was not checked.
+- **Evidence:** read the full `docker.rs` and `work_folder.rs` diffs against the merge-base, and grepped for other tree-removal helpers (none in the host agent).
+
+## F, Phase 6 (round 3, spec-audit rework S-1)
+- **Decided:** no production change. S-1 is test-only (S: "no `src/` change required"; "do not add a production seam in this cycle"). Flagged in handoff-F so the finding returns to T.
+- **Assumed:** T can reach the private `shared_runner`, `SharedPaths` and `SharedRunner` from the existing child module `externals_tests` (docker.rs:1469) without any visibility change.
+- **Hedged:** none.
+- **Evidence:** read docker.rs:1025-1075 (seam signature and fields, all `PathBuf` roots, so temp roots can be injected). `git diff af5f052..HEAD` touches only `docs/handoffs`, so T-green's Tier 1 results still hold.
