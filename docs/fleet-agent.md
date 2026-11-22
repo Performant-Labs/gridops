@@ -351,6 +351,39 @@ service user cannot create it there, such as one installed as a user service, fa
 with a configuration error rather than starting a runner whose Docker actions would fail. Profiles that do
 not share the socket are unchanged.
 
+A `container:` job needs two more host paths. The runner mounts its own `externals` folder (where the job
+container finds the runner's `node`) and its tool cache into the job container, and the daemon resolves
+both on the host too. Inside a runner image they exist only in the runner container, so without the steps
+below every such job fails at its first JavaScript action with
+`exec: "/__e/node24/bin/node": stat /__e/node24/bin/node: no such file or directory`. For a GitHub runner
+whose profile shares the socket, the agent therefore:
+
+- **Prepares an externals cache per image.** When it prepares the runner, after pulling the image, it
+  copies the image's runner `externals` (the folder `externals` in the image's working directory) once
+  into `/var/lib/gridops-agent/externals/<image id>` (the image ID's hex digits, without `sha256:`).
+  Later runners of the same image reuse it. After it fills a new cache it removes the caches of images
+  that are no longer on the machine.
+- **Runs each runner from a runner root.** Each runner gets `/var/lib/gridops-agent/runners/<environment id>`,
+  mounted at the same path. When the runner container starts, it copies the image's runner directory there,
+  except `externals`, which is a link to the image's cache, mounted read-only. The runner then registers and
+  runs from that folder. The copy is the runner's `bin` and scripts. For runner 2.338.2 that is about
+  85 MB in 272 files per runner start.
+- **Keeps the tool cache in the work folder** (`<work folder>/_tool`), not in the image's
+  `/opt/hostedtoolcache`.
+
+The agent removes the runner root with the work folder when the runner is cleaned up. It never removes a
+cache that an image on the machine still uses. Each image's cache takes about 600 MB (9,122 files for runner
+2.338.2) under `/var/lib/gridops-agent/externals`.
+
+If the agent cannot fill the cache, the prepare fails and the agent logs why. This happens when the image
+has no working directory, has no `externals` there, or has a link in `externals` that leads outside it,
+and when the agent cannot create the folder. A start also fails when the cache of the runner's image is
+missing, for example when the image tag moved since the prepare. GridOps retries such a runner as it retries any failed start (see
+[When runners fail to start on a machine](#when-runners-fail-to-start-on-a-machine)).
+
+**Upgrading:** hosts that run such runners need the agent build with this change (#126). An older agent
+starts them, but their `container:` jobs fail as described above.
+
 ## When runners fail to start on a machine
 
 A machine can look healthy and still fail some of the runners placed on it,

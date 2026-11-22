@@ -116,3 +116,31 @@
     - "No such image" versus "no such object";
     - `rm -f` of a missing container exits 0;
     - `docker cp`'s "Could not find the file" message and its symlink and nesting behaviour.
+
+## Phase 6 Implementation (F) - 2026-11-22T12:17:25-08:00
+- **Decided:**
+  - Implemented the contract T fixed, in `docker.rs` (host agent) and `work_folder.rs` (core): `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT`, `shared_runner_root(PreparedEnvironmentId)`, `Refusal`, `externals_cache_name`, `externals_cache`, `uses_externals_cache`, `shared_socket_args`, `github_runner_script`, `DockerRuntime::fill_externals_cache` and `parse_shared_folders_leftover`.
+  - **Symlinked `externals`:** followed (`docker cp -L`). Links inside it stay links. Any link that is absolute or does not resolve inside the copy refuses the image with `Configuration, false`, so the cache never holds a dangling link.
+  - **Sweep:** runs only after a new fill, under the same `externals_lock` guard (A warn 8). It uses plain `docker inspect sha256:<hex>`, so `missing()` stays unchanged.
+  - **Image facts:** the image id and working directory come from one `docker image inspect -f '{{.Id}} {{json .Config}}'`. Docker 29 and older Docker both answer it whether or not the image has a WorkingDir.
+  - **Start's socket branch** goes through `shared_runner(socket, image, &SharedPaths)`. Its order: resolve the id, check the cache, create the work folder and then the runner root (A warn 3). The container is created from the resolved id. A failed `docker create` or `feed_secret` removes both folders with the existing `remove_shared_folder`. That function now tries a plain `remove_dir` first, so an empty folder needs no container.
+  - **Tool cache:** `-e RUNNER_TOOL_CACHE` and `-e AGENT_TOOLSDIRECTORY` are both `<work>/_tool`. The script also rewrites the root's `.env` lines for both.
+  - **The parse also rejects `.`** as a folder name, beside `..`.
+- **Assumed:**
+  - The pool image's runner directory holds what the 2.338.2 release tarball holds. The Harbor pull was unauthorized and the `ghcr.io/actions/actions-runner:2.338.2` pull failed mid-download, so the sizes were measured from the release tarball:
+    - per start: 272 files, 84,797,525 bytes (`bin` plus 6 scripts);
+    - cache fill: 9,122 files, 599,417,734 bytes, with 6 relative links, all of which resolve inside the tree.
+  - The pool image may add files to `/actions-runner` beyond the tarball. Those would add to the per-start copy.
+- **Hedged:**
+  - No real Docker daemon and no fleet host were used. The following ran only against T's stand-in and under bash on macOS:
+    - the fill (`create`/`cp`/`rm` and the rename);
+    - Start's refusal;
+    - Cleanup;
+    - the scripts.
+  - Start's success path (it writes `/var/lib/gridops-agent`) was not run.
+  - Whether `docker cp -L` on a real daemon follows only the top-level link is from Docker's documentation. Either way, the link check covers it.
+- **Evidence:**
+  - `cargo test -p gridops-host-agent` (all binaries, twice) and `cargo test -p gridops-core --lib` (313) are green.
+  - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` and `cargo fmt --all -- --check` are clean.
+  - Read the runner 2.338.2 release's `run.sh` (root = the physical dir of `run.sh`) and `env.sh` (it never writes a tool-cache variable).
+  - Facts from unchanged code are in `docs/handoffs/126/evidence.md`.

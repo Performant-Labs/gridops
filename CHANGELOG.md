@@ -26,6 +26,11 @@ Known problems in the current release are in the README's
 - Migration `0048` adds `retired_at` to fleet CI targets. It rebuilds the
   `fleet_ci_targets` table, copying every row; existing targets stay
   unretired. (#183)
+- Machines whose Docker runner profiles share the Docker socket need the new
+  host agent build so that GitHub `container:` jobs work there. The agent now
+  keeps a runner externals cache for each image under
+  `/var/lib/gridops-agent/externals` and a runner folder for each runner under
+  `/var/lib/gridops-agent/runners`. (#126)
 
 ### Added
 
@@ -49,6 +54,18 @@ Known problems in the current release are in the README's
 
 ### Fixed
 
+- **GitHub `container:` jobs run on Docker runners that share the Docker
+  socket.** Every such job failed at its first JavaScript action with
+  `exec: "/__e/node24/bin/node": ... no such file or directory`. The runner's
+  `externals` and tool cache existed only inside the runner container, so the
+  host's daemon mounted empty folders into the job container. The host agent
+  now copies each image's `externals` once, when it prepares the runner. It
+  runs the runner from a folder that exists at the same path on the host, and
+  keeps the tool cache in the runner's work folder. A prepare that cannot copy
+  the `externals` fails, and so does a start whose image has no copy, each
+  with the reason in the agent's log. See
+  [Docker actions and container jobs](docs/fleet-agent.md#docker-actions-and-container-jobs).
+  (#126)
 - **A GitLab connection used on the fleet can be removed again.** Once the
   fleet's target list had been opened, every GitLab connection had a fleet
   target, and removing the connection was refused for good with "is a CI
