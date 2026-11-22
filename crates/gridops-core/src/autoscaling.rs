@@ -241,7 +241,8 @@ pub async fn assigned_queued_jobs(
 
 /// Ids of the queued GitHub jobs this pool owns, oldest first; see
 /// [`queued_job_owners`]. GitLab jobs it owns are left out: every view built
-/// from this is keyed by GitHub job and repository ids.
+/// from this is keyed by GitHub job and repository ids. Fleet placement,
+/// which counts both, reads [`fleet_queued_jobs`].
 async fn owned_queued_jobs(database: &SqlitePool, pool_id: &str) -> Result<Vec<i64>, sqlx::Error> {
     Ok(queued_job_owners(database)
         .await?
@@ -336,7 +337,8 @@ impl KeyedJobOwner {
 ///
 /// Pending GitLab jobs are owned by the same rule, in the same ordered list
 /// (see [`queued_job_candidates`]), so they take room in a pool they share
-/// with GitHub jobs. Only [`assigned_queued_jobs`] counts them; every other
+/// with GitHub jobs. [`assigned_queued_jobs`] counts them for the scaler and
+/// [`fleet_queued_jobs`] lists them for fleet placement (#181); every other
 /// view lists GitHub jobs only.
 async fn queued_job_owners(database: &SqlitePool) -> Result<Vec<KeyedJobOwner>, sqlx::Error> {
     let candidates = queued_job_candidates(database, false).await?;
@@ -912,6 +914,8 @@ pub fn provider_capacity_deficit(capacity: &ProviderCapacity, factor: i64) -> i6
 }
 
 /// Labels of the queued jobs assigned to this pool, with their repository.
+/// GitHub jobs only; fleet placement reads both platforms' jobs through
+/// [`fleet_queued_jobs`].
 ///
 /// Here and wherever jobs count as queued, a job in a finished run doesn't:
 /// GitHub sometimes leaves one listed as queued after its run completes, and
@@ -922,8 +926,79 @@ pub async fn queued_job_assignments(
     pool_id: &str,
 ) -> Result<Vec<QueuedJob>, sqlx::Error> {
     let owned = owned_queued_jobs(database, pool_id).await?;
+    Ok(github_queued_jobs(database, pool_id, &owned)
+        .await?
+        .into_iter()
+        .map(|(_, job)| job)
+        .collect())
+}
+
+/// A queued job a pool owns, of either platform, as fleet placement counts
+/// it ([`fleet_queued_jobs`]). A GitLab job carries nothing: it has no
+/// repository, its tags were matched when the pool took it, and it is never
+/// prioritised.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FleetQueuedJob {
+    Github(QueuedJob),
+    Gitlab,
+}
+
+impl FleetQueuedJob {
+    /// The GitHub job; `None` for a GitLab job.
+    pub(crate) fn github(self) -> Option<QueuedJob> {
+        match self {
+            Self::Github(job) => Some(job),
+            Self::Gitlab => None,
+        }
+    }
+}
+
+/// The queued jobs this pool owns, GitHub and GitLab alike, in owner order
+/// (oldest first; see [`queued_job_owners`]): the demand fleet placement
+/// attributes to the pool's platforms (#181). Ownership is read once, so it
+/// agrees with [`assigned_queued_jobs`]. A GitHub job is listed as
+/// [`queued_job_assignments`] lists it, and one whose job or run has changed
+/// since ownership was read is left out as it is there. A GitLab job is a
+/// pending job with no repository, and is never prioritised: prioritisation
+/// is by GitHub repository.
+pub(crate) async fn fleet_queued_jobs(
+    database: &SqlitePool,
+    pool_id: &str,
+) -> Result<Vec<FleetQueuedJob>, sqlx::Error> {
+    let owners = queued_job_owners(database)
+        .await?
+        .into_iter()
+        .filter(|owner| owner.pool_id == pool_id)
+        .collect::<Vec<_>>();
+    let github_ids = owners
+        .iter()
+        .filter_map(|owner| match owner.job {
+            QueuedJobKey::Github(job_id) => Some(job_id),
+            QueuedJobKey::Gitlab { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let mut github = github_queued_jobs(database, pool_id, &github_ids)
+        .await?
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    Ok(owners
+        .into_iter()
+        .filter_map(|owner| match owner.job {
+            QueuedJobKey::Github(job_id) => github.remove(&job_id).map(FleetQueuedJob::Github),
+            QueuedJobKey::Gitlab { .. } => Some(FleetQueuedJob::Gitlab),
+        })
+        .collect())
+}
+
+/// The queued GitHub jobs among `owned`, by job id, oldest first; a job no
+/// longer queued, or in a finished run, is left out.
+async fn github_queued_jobs(
+    database: &SqlitePool,
+    pool_id: &str,
+    owned: &[i64],
+) -> Result<Vec<(i64, QueuedJob)>, sqlx::Error> {
     let sql = concat!(
-        r#"SELECT repo.id AS repository_id,wj.labels,wj.created_at,
+        r#"SELECT wj.id AS job_id,repo.id AS repository_id,wj.labels,wj.created_at,
           "#,
         prioritised_job!(),
         r#" AS prioritised FROM workflow_jobs wj
@@ -937,16 +1012,21 @@ pub async fn queued_job_assignments(
         .bind(pool_id)
         .bind(crate::now_millis())
         .bind(pool_id)
-        .bind(serde_json::to_string(&owned).unwrap_or_else(|_| "[]".into()))
+        .bind(serde_json::to_string(owned).unwrap_or_else(|_| "[]".into()))
         .fetch_all(database)
         .await?;
     Ok(rows
         .into_iter()
-        .map(|row| QueuedJob {
-            repository_id: row.get("repository_id"),
-            labels: serde_json::from_str(row.get::<&str, _>("labels")).unwrap_or_default(),
-            queued_at: row.get("created_at"),
-            prioritised: row.get("prioritised"),
+        .map(|row| {
+            (
+                row.get("job_id"),
+                QueuedJob {
+                    repository_id: row.get("repository_id"),
+                    labels: serde_json::from_str(row.get::<&str, _>("labels")).unwrap_or_default(),
+                    queued_at: row.get("created_at"),
+                    prioritised: row.get("prioritised"),
+                },
+            )
         })
         .collect())
 }

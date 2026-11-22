@@ -82,3 +82,20 @@
   - `cargo test -p gridops-reconciler`: 123 pass, 2 fail (`placed` is 0, expected 1; totals `[0,0,0]`, expected a final 2), with the `desired_count == 1` precondition passing.
   - A `min_count=1` fixture probe made test 3 pass in full, and was reverted.
   - `cargo fmt --check` and the clippy run on the core test target are clean.
+
+## Phase 6 Implement (F) - 2026-11-21T18:41:51-08:00
+- **Decided:**
+  - One `pub(crate) enum FleetQueuedJob { Github(QueuedJob), Gitlab }` and one `pub(crate) fleet_queued_jobs` accessor in `autoscaling.rs`, following A warn 1. The accessor makes a single `queued_job_owners` call.
+  - The SQL of `queued_job_assignments` moved into a private helper, `github_queued_jobs`, that both functions call. The accessor puts GitHub rows in owner order by id and skips ids the helper leaves out (A warn 2).
+  - `attribute_queued_jobs` counts a GitLab job on every profile, and only a `None` spare covers it. `choose_platform` adds it to `queued` only. `platform_jobs` filters with `github()`.
+  - `main.rs` and `fleet.rs` in the reconciler are unchanged.
+- **Assumed:**
+  - Changing the module doc line of `autoscaling_gitlab_tests.rs` is in F's scope: the brief's Scope 1 lists it among the doc comments to update, and no assertion changes.
+  - `archChanged=true`, because a private return type changed and a crate-internal accessor was added. When in doubt, the role doc says to report true.
+- **Hedged:** the `gridops-api` `release_preflight` macOS-arm64 test fails on this dev host. I recorded it as environmental after reproducing the same failure on master 42e8474, not as a regression.
+- **Evidence:**
+  - All 5 of T's tests are GREEN.
+  - gridops-core: 421 passed, 0 failed. gridops-reconciler: 125 passed, 0 failed.
+  - gridops-api `fleet_http`: 149 passed. The one failure also fails on master.
+  - `cargo fmt --check` is clean, and CI's exact clippy command on 1.98.1 is clean.
+  - Source facts are in `docs/handoffs/181/evidence.md`.

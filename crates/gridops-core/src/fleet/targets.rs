@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row as _, SqlitePool};
 use uuid::Uuid;
 
+use crate::autoscaling::FleetQueuedJob;
+
 use super::{
     FleetError,
     domain::{CiTarget, ExternalId},
@@ -1299,10 +1301,13 @@ pub async fn machine_available(pool: &SqlitePool, profile_id: &str) -> Result<bo
     )
 }
 
-/// The pool's queued jobs that count for `profile_id`, one of `profiles`.
-/// A runner for that platform should go to one of their repositories: a job
-/// another platform counts would wait for this platform's machines while
-/// that platform's sat idle, and its runner would cover neither queue.
+/// The pool's queued GitHub jobs that count for `profile_id`, one of
+/// `profiles`. A runner for that platform should go to one of their
+/// repositories: a job another platform counts would wait for this platform's
+/// machines while that platform's sat idle, and its runner would cover
+/// neither queue. GitLab jobs are attributed with the rest, so they take
+/// their share of room and spare runners, but are not listed: they have no
+/// repository.
 pub async fn platform_jobs(
     pool: &SqlitePool,
     pool_id: &str,
@@ -1325,7 +1330,7 @@ pub async fn platform_jobs(
     Ok(jobs
         .into_iter()
         .filter(|(_, index)| Some(*index) == platform)
-        .map(|(job, _)| job)
+        .filter_map(|(job, _)| job.github())
         .collect())
 }
 
@@ -1357,12 +1362,25 @@ async fn machines_available(
     Ok(available)
 }
 
-/// The pool's queued jobs, each with the platform (its index in `profiles`)
-/// it counts for, and the room left on the platforms' machines once they
-/// have theirs. Jobs no platform can run are left out.
+/// The pool's queued jobs, GitHub and GitLab alike
+/// ([`crate::autoscaling::fleet_queued_jobs`]), each with the platform (its
+/// index in `profiles`) it counts for, and the room left on the platforms'
+/// machines once they have theirs. Jobs no platform can run are left out.
+///
+/// A GitHub job can run on the platforms whose labels it asks for. A GitLab
+/// job can run on every platform: the pool already matched its tags when it
+/// took the job, and a GitLab runner is registered with exactly the pool's
+/// labels, so no system label narrows it (#181).
 ///
 /// A job counts for the platform of one of `runners` not yet on a job that
-/// can take it. Otherwise it needs room: runners waiting for a machine take
+/// can take it. A GitHub job is taken by a runner registered to its
+/// repository or to none; a GitLab job only by a runner registered to none.
+/// A runner with no repository is either an organization GitHub runner or a
+/// GitLab runner, and the rows don't tell them apart, so either covers a
+/// GitLab job here. That is safe because a pool linked to GitLab starts only
+/// GitLab runners on the fleet (the reconciler's fleet `provision` checks for
+/// a GitLab connection first, and a GitLab runner has no repository), and a
+/// pool not linked to GitLab owns no GitLab job. Otherwise it needs room: runners waiting for a machine take
 /// theirs first, then jobs only one platform can run. A job several platforms
 /// can run counts for the one with the most room left on its machines, so
 /// work spreads across the fleet instead of queueing on the first platform
@@ -1375,7 +1393,7 @@ async fn attribute_queued_jobs(
     profiles: &[Profile],
     available: &[bool],
     runners: &[sqlx::sqlite::SqliteRow],
-) -> Result<(Vec<(crate::QueuedJob, usize)>, Room), FleetError> {
+) -> Result<(Vec<(FleetQueuedJob, usize)>, Room), FleetError> {
     let mut room = Room::load(pool, profiles).await?;
     let waiting_runners: Vec<String> = sqlx::query_scalar(
         "SELECT profile_id FROM workload_intents WHERE pool_id=? AND status='queued'",
@@ -1402,13 +1420,13 @@ async fn attribute_queued_jobs(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let mut jobs = crate::queued_job_assignments(pool, pool_id)
+    let mut jobs = crate::autoscaling::fleet_queued_jobs(pool, pool_id)
         .await?
         .into_iter()
         .map(|job| {
             let platforms = (0..profiles.len())
-                .filter(|index| {
-                    platform_supports_labels(
+                .filter(|index| match &job {
+                    FleetQueuedJob::Github(job) => platform_supports_labels(
                         profiles[*index].input.execution_os,
                         profiles[*index].input.architecture,
                         &job.labels,
@@ -1416,7 +1434,8 @@ async fn attribute_queued_jobs(
                         // The job is already this pool's, so the pool took it
                         // on labels it offers.
                         false,
-                    )
+                    ),
+                    FleetQueuedJob::Gitlab => true,
                 })
                 .collect::<Vec<_>>();
             (platforms, job)
@@ -1430,8 +1449,11 @@ async fn attribute_queued_jobs(
         let covered = platforms.iter().copied().find(|index| {
             spare[*index]
                 .iter()
-                .position(|repository| {
-                    repository.is_none_or(|repository| repository == job.repository_id)
+                .position(|repository| match &job {
+                    FleetQueuedJob::Github(job) => {
+                        repository.is_none_or(|repository| repository == job.repository_id)
+                    }
+                    FleetQueuedJob::Gitlab => repository.is_none(),
                 })
                 .map(|at| spare[*index].swap_remove(at))
                 .is_some()
@@ -1463,7 +1485,9 @@ async fn attribute_queued_jobs(
 /// furthest behind the queued jobs it would run, else the first with room on a
 /// machine, else the first with a machine available, else the first. The flag
 /// says whether that platform is behind. Each job counts for one platform, as
-/// [`attribute_queued_jobs`] says.
+/// [`attribute_queued_jobs`] says. Pending GitLab jobs the pool owns count as
+/// queued jobs, so a fleet GitLab pool falls behind and grows past its
+/// `min_count` (#181); they are never prioritised.
 pub async fn choose_platform<'a>(
     pool: &SqlitePool,
     pool_id: &str,
@@ -1490,6 +1514,10 @@ pub async fn choose_platform<'a>(
     .await?;
     for (job, index) in jobs {
         queued[index] += 1;
+        // A GitLab job has no repository and is never prioritised.
+        let FleetQueuedJob::Github(job) = job else {
+            continue;
+        };
         waiting[index].insert(job.repository_id);
         if job.prioritised {
             let (count, since) = prioritised[index]
