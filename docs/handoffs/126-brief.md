@@ -47,6 +47,15 @@ mounts empty, root-owned host directories it creates itself (it also leaves `/ac
      pure, unit-tested function whose output is always a single, non-empty path component (no `/`, never `.` or
      `..`); an id that cannot be turned into one is treated as a Docker error (`Runtime, true`, decision 5). The
      function's doc comment says how the name is formed (for example whether the `sha256:` prefix is kept).
+   - The `<environment id>` component of `/var/lib/gridops-agent/runners/<environment id>` needs no sanitizer: it is
+     a `PreparedEnvironmentId` (`crates/gridops-core/src/fleet/ids.rs:94`, `fleet_uuid!`), a non-nil `Uuid` newtype
+     whose `Display` (`:73-77`) is the UUID's hyphenated text, so it is always one path component. The runner-root
+     path is built only from that typed id (as `shared_work_folder` does, `work_folder.rs:26-28`), never from a
+     string, and a test pins that the runner root is a direct child of the runners root.
+   - Every Start resolves the image's `{{.Id}}` itself (decision 7) and checks the cache and creates the runner
+     container from that id; it never reuses an id or tag resolution from Prepare or from an earlier Start. A re-pull
+     that moves the tag between Prepare and Start therefore either finds that id's cache or fails with the
+     cache-missing code (`Runtime, true`, decision 5); it never runs one image's runner against another image's cache.
    - An `externals` in the image that is itself a symlink is either followed (the cache holds the real files) or
      rejected with `Configuration, false` (decision 5, "image lacks ... `externals`"); the implementation picks one,
      says which in a doc comment, and a test pins it. The cache must never end up holding a dangling link.
@@ -71,8 +80,9 @@ mounts empty, root-owned host directories it creates itself (it also leaves `/ac
      - Prepare, image has no working directory (`{{.Config.WorkingDir}}` empty) → `Configuration, false`;
      - Prepare, image's working directory has no `externals` → `Configuration, false`;
      - Prepare, a folder under the StateDirectory roots cannot be created (permission; use a 0555 temp root as
-       `moves_an_unwritable_root_aside_and_starts_a_fresh_one` in `docker.rs` does, skipping when run as root) →
-       `Configuration, false`;
+       `moves_an_unwritable_root_aside_and_starts_a_fresh_one` in `docker.rs` does, skipping when run as root by the
+       same probe: if `std::fs::create_dir(root.join("probe"))` under the 0555 root succeeds, permissions do not
+       apply, so the test cleans up and returns early, `docker.rs:977-980`) → `Configuration, false`;
      - Prepare, a Docker or IO error during the fill (stand-in `docker` failing `create`, `cp` or `rm`, or a failed
        rename) → `Runtime, true`, and no staging directory is taken for a cache;
      - Start, cache missing for the resolved image id, in both JIT and persistent modes → `Runtime, true`, and no
@@ -80,6 +90,11 @@ mounts empty, root-owned host directories it creates itself (it also leaves `/ac
      Each test also asserts the reason that is logged: the crate has no log-capture pattern, so the failing function
      returns an error whose text names the image id and the path, the caller logs that text with `tracing::warn!`, and
      the test asserts on the text.
+   - **Stale-cache sweep (decision 8)** has a test on a temp cache root holding a live cache, a stale cache and a
+     leftover staging directory, with a stand-in `docker` that reports the stale cache's image missing (an error the
+     existing `missing()` check, `docker.rs:849-852`, recognises: "no such object"): after a fill, the stale cache
+     and the staging leftover are gone and the live cache and the newly filled cache remain. A second case has the
+     stand-in fail `image inspect` with an error that is not "missing": that cache is kept.
    - The cleanup parse returns both the work folder and the runner root and **never** the externals cache; a parse test
      has the cache mount among the mount sources. A test pins that the cache root is never under `SHARED_WORK_ROOT`
      (and, per decision 1, that the runner root is never under `<work>/`).
@@ -165,8 +180,10 @@ behaviour are third-party; handoff-A records them as read from the upstream sour
 - `docs/handoffs/126-brief.md` (this file), in full.
 - Issue #126 (`gh issue view 126 --repo Performant-Labs/gridops`), in full.
 - `docs/handoffs/126/handoff-A.md`, in full; `docs/handoffs/126/decisions.md`, in full.
-- `crates/gridops-host-agent/src/docker.rs`, in full.
+- `crates/gridops-host-agent/src/docker.rs`, in full (re-checked in the brief-gate R2 amendment: `:845-852` `missing()`,
+  `:970-995` `moves_an_unwritable_root_aside_and_starts_a_fresh_one`).
 - `crates/gridops-core/src/fleet/work_folder.rs`, in full.
+- `crates/gridops-core/src/fleet/ids.rs:29-95` (`fleet_uuid!` macro, `Display`, `PreparedEnvironmentId`), brief-gate R2 amendment.
 - `crates/gridops-core/src/provisioning.rs:55-80`, `:280-370`.
 - `crates/gridops-host-agent/src/native.rs:30-140`, `:480-535`, plus its function list.
 - `crates/gridops-host-agent/tests/docker_runtime.rs`, in full.
