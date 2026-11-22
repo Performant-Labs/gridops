@@ -221,7 +221,13 @@ async fn the_release_preflight_fails_early_without_a_macos_arm64_machine() -> Re
     let f = Fixture::new().await?;
     seed_pool(&f).await?;
     // A healthy fleet of one Linux machine: no Mac for the macOS agent build.
-    active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    // The test agent enrolls as the OS it was built for, so on a Mac it would
+    // be the very machine this test says is missing; make it Linux.
+    let machine = active_machine(&f, &f.origin, Arc::new(FakeDocker::default())).await?;
+    sqlx::query("UPDATE fleet_hosts SET host_os='linux' WHERE id=?")
+        .bind(machine.host.to_string())
+        .execute(&f.database)
+        .await?;
     let token = mint(
         &f,
         "release",

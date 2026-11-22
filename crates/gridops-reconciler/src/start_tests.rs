@@ -400,33 +400,97 @@ async fn fake_manager() -> Result<(String, Arc<ManagerLog>)> {
 /// The runner registrations the fake GitHub was asked to remove: the paths.
 pub(crate) type GitHubRemovals = Arc<Mutex<Vec<String>>>;
 
+/// How the fake GitHub answers just-in-time runner registrations.
+#[derive(Default)]
+pub(crate) struct GitHubRegistrations {
+    /// While set, every registration is refused with `409 Conflict`, and the
+    /// name it asked for is listed as held by an online runner, which GitHub
+    /// never lets a new registration replace (#130).
+    pub(crate) conflict: AtomicBool,
+    /// Registrations asked for, refused or not.
+    pub(crate) asked: AtomicU64,
+    /// The name the online runner holds: the last one refused.
+    held: Mutex<Option<String>>,
+}
+
+impl GitHubRegistrations {
+    fn held(&self) -> Option<String> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// A fake GitHub that hands out installation tokens and just-in-time runner
 /// configurations, and removes runner registrations.
-async fn fake_github() -> Result<(String, GitHubRemovals)> {
+async fn fake_github() -> Result<(String, GitHubRemovals, Arc<GitHubRegistrations>)> {
     use axum::{
         Json, Router,
         extract::Path,
-        routing::{delete, post},
+        http::StatusCode as Status,
+        routing::{delete, get, post},
     };
     let next_runner = Arc::new(AtomicU64::new(1));
     let removals = GitHubRemovals::default();
     let removed = Arc::clone(&removals);
+    let registrations = Arc::new(GitHubRegistrations::default());
+    let registering = Arc::clone(&registrations);
+    let listing = Arc::clone(&registrations);
     let app = Router::new()
         .route(
             "/app/installations/{id}/access_tokens",
             post(|| async {
-                Json(json!({ "token": "installation-token", "expires_at": "2099-01-01T00:00:00Z" }))
+                Json(json!({ "token": "[REDACTED]", "expires_at": "2099-01-01T00:00:00Z" }))
             }),
         )
         .route(
             "/orgs/{org}/actions/runners/generate-jitconfig",
             post(move |Json(body): Json<Value>| {
                 let id = next_runner.fetch_add(1, Ordering::SeqCst);
+                let registrations = Arc::clone(&registering);
                 async move {
-                    Json(json!({
-                        "runner": { "id": id, "name": body["name"], "status": "offline", "busy": false },
-                        "encoded_jit_config": "jit",
-                    }))
+                    registrations.asked.fetch_add(1, Ordering::SeqCst);
+                    if registrations.conflict.load(Ordering::SeqCst) {
+                        *registrations
+                            .held
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            body["name"].as_str().map(str::to_owned);
+                        return (
+                            Status::CONFLICT,
+                            Json(json!({
+                                "message": "Already exists - A runner with the name already exists.",
+                            })),
+                        );
+                    }
+                    (
+                        Status::OK,
+                        Json(json!({
+                            "runner": { "id": id, "name": body["name"], "status": "offline", "busy": false },
+                            "encoded_jit_config": "jit",
+                        })),
+                    )
+                }
+            }),
+        )
+        // Only while registrations conflict: the online runner holding the
+        // name. Otherwise not found, as before this route existed.
+        .route(
+            "/orgs/{org}/actions/runners",
+            get(move || {
+                let registrations = Arc::clone(&listing);
+                async move {
+                    match registrations.held() {
+                        Some(name) if registrations.conflict.load(Ordering::SeqCst) => (
+                            Status::OK,
+                            Json(json!({
+                                "total_count": 1,
+                                "runners": [{ "id": 7001, "name": name, "status": "online", "busy": false }],
+                            })),
+                        ),
+                        _ => (Status::NOT_FOUND, Json(json!({ "message": "Not Found" }))),
+                    }
                 }
             }),
         )
@@ -439,14 +503,14 @@ async fn fake_github() -> Result<(String, GitHubRemovals)> {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(format!("/orgs/{org}/actions/runners/{id}"));
-                    axum::http::StatusCode::NO_CONTENT
+                    Status::NO_CONTENT
                 }
             }),
         );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await });
-    Ok((url, removals))
+    Ok((url, removals, registrations))
 }
 
 pub(crate) struct Setup {
@@ -456,6 +520,8 @@ pub(crate) struct Setup {
     pub(crate) gitlab: FakeGitLab,
     /// Runner registrations removed from GitHub.
     pub(crate) github_removals: GitHubRemovals,
+    /// How GitHub answers runner registrations.
+    pub(crate) github_registrations: Arc<GitHubRegistrations>,
     directory: std::path::PathBuf,
 }
 
@@ -468,7 +534,7 @@ impl Setup {
             std::env::temp_dir().join(format!("gridops-starts-test-{}", uuid::Uuid::new_v4()));
         let database = connect_database_path(&directory.join("gridops.sqlite")).await?;
         let (manager_url, manager) = fake_manager().await?;
-        let (github_url, github_removals) = fake_github().await?;
+        let (github_url, github_removals, github_registrations) = fake_github().await?;
         let config = Config::from_env()?
             .with_github_api_url(reqwest::Url::parse(&github_url)?)
             .with_manager(reqwest::Url::parse(&manager_url)?, "manager-token")
@@ -514,6 +580,7 @@ impl Setup {
             manager,
             gitlab,
             github_removals,
+            github_registrations,
             directory,
         })
     }

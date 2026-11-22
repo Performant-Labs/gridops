@@ -31,6 +31,14 @@ Known problems in the current release are in the README's
   keeps a runner externals cache for each image under
   `/var/lib/gridops-agent/externals` and a runner folder for each runner under
   `/var/lib/gridops-agent/runners`. (#126)
+- Migration `0049` adds an index on fleet inventory snapshots' `received_at`.
+  The index is built once, when the services start on the new version, while
+  the database is locked for writes. Expect a second or two for a 700 MB
+  snapshot table. (#152)
+- The first reconcile passes after the upgrade delete the backlog of old
+  inventory snapshots, at most 20,000 rows a pass. The database file does not
+  shrink: SQLite reuses the freed space. To get the space back, `VACUUM` the
+  database while GridOps is stopped. (#152)
 
 ### Added
 
@@ -47,6 +55,14 @@ Known problems in the current release are in the README's
 
 ### Changed
 
+- **Old fleet inventory snapshots are deleted.** Snapshots grew without
+  bound, by about 27 MB a day on an 8-machine fleet. The reconciler now
+  deletes those older than the new `inventorySnapshotRetentionDays` system
+  setting (7 days by default, 1 to 3,650; set through `PUT /api/v1/settings`).
+  It always keeps the current snapshot of a session that has not ended, and it
+  deletes in small batches so that agent requests are not locked out. See
+  [Inventory snapshot retention](docs/fleet-api.md#inventory-snapshot-retention).
+  (#152)
 - Runner pool API: `runnerGroupId` may be left out. A GitHub pool without one
   gets the 400 "Runner group ID must be positive." instead of a
   422. An invalid update sent to a pool that does not exist, or that the caller
@@ -66,6 +82,19 @@ Known problems in the current release are in the README's
   with the reason in the agent's log. See
   [Docker actions and container jobs](docs/fleet-agent.md#docker-actions-and-container-jobs).
   (#126)
+- **A fleet runner that cannot be registered no longer holds its machine's
+  capacity forever.** A prepared placement whose runner could not be
+  registered with GitHub or GitLab and started (for example, GitHub kept
+  answering 409 because a live runner held the name, the App credentials were
+  unavailable, or the machine had lost its work authority) was retried every
+  pass with its capacity held and its runner counted as starting. After 10
+  minutes in `registering` it is now given up: its capacity is released, it
+  records a `placement_failed` event with the new reason
+  `registration_timed_out` and the last error, and the pool replaces the
+  runner. Any registration already made upstream is removed by the usual
+  runner cleanup. The failure is not counted against the machine and is not
+  retried on another machine. See
+  [the fleet API](docs/fleet-api.md). (#130)
 - **A GitLab connection used on the fleet can be removed again.** Once the
   fleet's target list had been opened, every GitLab connection had a fleet
   target, and removing the connection was refused for good with "is a CI

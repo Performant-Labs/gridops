@@ -587,6 +587,27 @@ offline, and the start grant can't exceed local authority.
 | Local authority without contact | 90 s | 90 s |
 | Heartbeat / stale / offline | 15 s / 45 s / 90 s | same |
 
+## Inventory snapshot retention
+
+Every inventory report an agent submits is kept as a snapshot. GridOps reads
+only a session's current snapshot, so the reconciler deletes older ones during
+its retention cleanup on each pass.
+
+- **Setting:** `inventorySnapshotRetentionDays` in the system settings
+  (`GET`/`PUT /api/v1/settings`). It defaults to **7** days, and a save accepts
+  **1 to 3,650**; anything else answers 400. The field is optional in a `PUT`:
+  left out, the stored value stays as it is. The settings page doesn't show it
+  yet, so set it through the API.
+- **What goes:** a snapshot received more than that many days ago, unless it
+  is the current snapshot of a session that has not ended. The current
+  snapshot of an ended session is deleted like any other once it is old
+  enough.
+- **How:** in batches of 500 rows, one short write each, with a 25 ms pause
+  between batches so agent requests get the database in between. A pass
+  deletes at most 20,000 rows; anything left over goes on the next pass.
+- **Disk:** SQLite reuses the freed space, so the database stops growing, but
+  the file does not shrink. GridOps never runs `VACUUM` itself.
+
 ## Domain relationships
 
 - A **host** is one physical or virtual machine running the agent. It has an
@@ -612,10 +633,16 @@ offline, and the start grant can't exceed local authority.
   carries the same message. The reasons are `agent_reported`,
   `agent_outcome_unknown`, `prepare_deadline_expired`, `start_deadline_expired`,
   `agent_session_lost`, `host_epoch_changed`, `runner_removed_before_start`,
-  `operator_released` and `unknown`. The host detail read summarises them as
-  `failedPlacementsLastHour` and `recentPlacementFailures` (the last 24 hours,
-  grouped by reason). Only failures after the release that added this are
+  `operator_released`, `registration_timed_out` and `unknown`. The host detail
+  read summarises them as `failedPlacementsLastHour` and
+  `recentPlacementFailures` (the last 24 hours, grouped by reason). Only failures after the release that added this are
   recorded; earlier failed placements have no event.
+- A prepared runner that cannot be registered upstream and started within 10
+  minutes gives up its placement, which fails with `registration_timed_out`:
+  its message carries the last attempt's error, `elapsed_ms` and
+  `allowed_ms` hold the numbers, and its capacity is released. The pool then
+  replaces the runner, and any registration already made upstream is removed
+  with it. Until then the reconciler retries the registration every pass.
 - A runner whose placement failed to start is started again as a new runner
   (new name, new registration), placed with the machines its earlier attempts
   failed on tried last. That is only done once nothing of the failed
@@ -623,8 +650,9 @@ offline, and the start grant can't exceed local authority.
   local absence and delayed-start exclusion are proven, its capacity is
   released and its prepare and start commands are settled. A runner gets at
   most three placements, and only failures the machine could have caused are
-  retried (not `runner_removed_before_start`, `operator_released`, `unknown`,
-  or an agent-reported `configuration`, `unsupported` or `cancelled` code).
+  retried (not `runner_removed_before_start`, `operator_released`,
+  `registration_timed_out`, `unknown`, or an agent-reported `configuration`,
+  `unsupported` or `cancelled` code).
   Each retry records a `placement_retried` event on the machine where the
   start failed; its detail holds `attempt`, `max_attempts`, `failure_reason`,
   `retry_runner_id`, `retry_operation_id`, `avoided_host_ids` and a `message`.

@@ -40,6 +40,11 @@ use super::{
 
 /// A queued intent that no host could take within this long is given up.
 const QUEUE_TIMEOUT_MILLIS: i64 = 10 * 60_000;
+/// A prepared placement whose runner could not be registered and started
+/// within this long is given up and its capacity released (#130). Measured
+/// from the placement's `updated_at`, which is set when it enters
+/// `registering` and not touched again until it leaves that state.
+const REGISTRATION_TIMEOUT_MILLIS: i64 = 10 * 60_000;
 const INSPECT_INTERVAL_MILLIS: i64 = 30_000;
 /// The agent has this long to fetch registration material and start.
 const START_WINDOW_MILLIS: i64 = 60_000;
@@ -270,8 +275,12 @@ pub(super) async fn tick(app: &Reconciler) -> Result<()> {
     retire_superseded_intents(&app.database, &service).await?;
     expire_queued(app, &service).await?;
     for placement in placement::placements(&app.database, &["registering"]).await? {
-        if let Err(error) = register_and_start(app, &placement).await {
+        let attempt = register_and_start(app, &placement).await;
+        if let Err(error) = &attempt {
             tracing::warn!(placement = %placement.id, error = ?error, "could not start fleet runner");
+        }
+        if let Err(error) = expire_registering(app, &placement, attempt.err().as_ref()).await {
+            tracing::warn!(placement = %placement.id, error = ?error, "could not give up fleet runner");
         }
     }
     for placement in
@@ -315,6 +324,41 @@ async fn expire_queued(app: &Reconciler, service: &FleetService) -> Result<()> {
             .execute(&app.database)
             .await?;
         }
+    }
+    Ok(())
+}
+
+/// Gives up a placement that has been `registering` for
+/// [`REGISTRATION_TIMEOUT_MILLIS`], whatever this pass's attempt returned: an
+/// attempt that keeps failing, or that cannot be made at all (the machine has
+/// no work authority), would otherwise hold the machine's capacity and keep
+/// the runner row `starting` forever. `abandon_unstarted` refuses once a start
+/// was issued and does nothing for a placement that already failed, so a
+/// placement this pass started, or the GitLab rollback already failed, is
+/// left alone. The pass's `finish` then fails the runner row, and the pool
+/// replaces it.
+async fn expire_registering(
+    app: &Reconciler,
+    placement: &Placement,
+    last_error: Option<&anyhow::Error>,
+) -> Result<()> {
+    let elapsed = now_millis() - placement.updated_at;
+    if elapsed < REGISTRATION_TIMEOUT_MILLIS {
+        return Ok(());
+    }
+    let last_error = last_error.map(|error| format!("{error:#}"));
+    let cause = PlacementFailure::registration_timed_out(
+        elapsed,
+        REGISTRATION_TIMEOUT_MILLIS,
+        last_error.as_deref(),
+    );
+    if placement::abandon_unstarted(&app.database, placement.id, &cause).await? {
+        tracing::warn!(
+            placement = %placement.id,
+            elapsed_ms = elapsed,
+            error = last_error.as_deref().unwrap_or("no start could be issued"),
+            "gave up a fleet runner that could not be registered and started in time"
+        );
     }
     Ok(())
 }

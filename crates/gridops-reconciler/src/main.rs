@@ -14,6 +14,10 @@ mod jit_conflict_tests;
 #[cfg(test)]
 mod log_filter_tests;
 #[cfg(test)]
+mod registration_cap_tests;
+#[cfg(test)]
+mod snapshot_retention_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tart_outage_tests;
@@ -3348,7 +3352,36 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
         .bind(capacity_cutoff)
         .execute(&app.database)
         .await?;
+    prune_inventory_snapshots(app, now).await;
     Ok(())
+}
+
+/// Deletes old fleet inventory snapshots in bounded batches (#152), keeping
+/// `inventorySnapshotRetentionDays` of them and every open session's current
+/// one. A failure is logged and does not fail the pass: what is left goes on
+/// the next pass, as does anything past the per-pass cap.
+async fn prune_inventory_snapshots(app: &Reconciler, now: i64) {
+    use gridops_core::fleet::registry::snapshot_retention as retention;
+    let days = setting_i64(
+        &app.database,
+        retention::RETENTION_DAYS_KEY,
+        retention::DEFAULT_RETENTION_DAYS,
+    )
+    .await;
+    match retention::prune_inventory_snapshots(
+        &app.database,
+        retention::cutoff_millis(now, days),
+        retention::BATCH_SIZE,
+        retention::MAX_BATCHES,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(deleted) => tracing::info!(deleted, "pruned old fleet inventory snapshots"),
+        Err(error) => {
+            tracing::warn!(error = ?error, "could not prune old fleet inventory snapshots");
+        }
+    }
 }
 
 async fn enforce_log_storage_budget(app: &Reconciler) -> Result<()> {

@@ -227,7 +227,7 @@
           "reason": {
             "type": "string",
             "description": "Why the placement failed. Derived from facts the server had when it failed; `unknown` when no cause was available or the code is not recognised.",
-            "enum": ["agent_reported", "agent_outcome_unknown", "prepare_deadline_expired", "start_deadline_expired", "agent_session_lost", "host_epoch_changed", "runner_removed_before_start", "operator_released", "unknown"]
+            "enum": ["agent_reported", "agent_outcome_unknown", "prepare_deadline_expired", "start_deadline_expired", "agent_session_lost", "host_epoch_changed", "runner_removed_before_start", "operator_released", "registration_timed_out", "unknown"]
           },
           "message": { "type": "string", "maxLength": 240, "description": "The newest failure's message." },
           "count": { "type": "integer", "minimum": 1 },

@@ -52,6 +52,7 @@ pub fn is_start_failure(reason: PlacementFailureReason, agent_code: Option<&str>
         | PlacementFailureReason::HostEpochChanged => true,
         PlacementFailureReason::RunnerRemovedBeforeStart
         | PlacementFailureReason::OperatorReleased
+        | PlacementFailureReason::RegistrationTimedOut
         | PlacementFailureReason::Unknown => false,
     }
 }
@@ -240,6 +241,10 @@ mod tests {
         assert!(is_start_failure(R::AgentOutcomeUnknown, None));
         assert!(!is_start_failure(R::RunnerRemovedBeforeStart, None));
         assert!(!is_start_failure(R::OperatorReleased, None));
+        // #130: a registration that timed out says nothing about its machine
+        // (the cause is usually GitHub, or the whole organization), so it
+        // neither counts towards the start gate nor is retried elsewhere.
+        assert!(!is_start_failure(R::RegistrationTimedOut, None));
         assert!(!is_start_failure(R::Unknown, None));
     }
 }
