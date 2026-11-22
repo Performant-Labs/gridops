@@ -33,6 +33,9 @@ jobs:
     # GridOps is public, so two guards beyond the playbook's caller: a pull request from a
     # fork is never reviewed (it gets no secrets, and the review runs on the self-hosted
     # fleet), and only the owner, members and collaborators can start a review by comment.
+    # Only `/review` starts a run. `/describe`, `/improve` and `/ask` post no Reviewer Guide, so
+    # the reusable's status step would find no score and turn `pr-agent/review` red on a commit
+    # that already passed (found by PR-Agent on #208); that status is a required check.
     if: |
       github.event.sender.type != 'Bot' &&
       (github.event_name != 'pull_request' ||
@@ -40,20 +43,15 @@ jobs:
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        (startsWith(github.event.comment.body, '/review') ||
-         startsWith(github.event.comment.body, '/describe') ||
-         startsWith(github.event.comment.body, '/improve') ||
-         startsWith(github.event.comment.body, '/ask'))))
+        startsWith(github.event.comment.body, '/review')))
     # On the job, not the workflow. Workflow-level `concurrency` is taken when the run is
     # CREATED, before any job `if`: every PR comment (an ordinary reply, a bot notice) then joined the group and, as the newest pending run, replaced a queued `/review`
     # or push review, and was itself skipped, so that review never ran. On the job, only a run
     # that passes the `if` above takes a slot.
     # Event-scoped cancellation: a push (`synchronize`) cancels a superseded in-flight review,
     # because the new commit makes it stale; a command comment never cancels a running review.
-    # Known limit: the group still holds ONE pending run, so a `/describe`, `/improve` or `/ask`
-    # posted while a push review is queued displaces that review (its commit status stays
-    # missing, not green); post `/review` afterwards. A `/review` that displaces it is harmless:
-    # it reviews the current head and posts that commit's status.
+    # The group holds ONE pending run; a `/review` that displaces a queued push review is
+    # harmless: it reviews the current head and posts that commit's status.
     concurrency:
       group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
