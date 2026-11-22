@@ -46,3 +46,37 @@
   - **Checked:**
     - `Cargo.lock`: no `regex`, no `proptest`.
     - `sqlite3`: a STRICT primary key rejects a NULL `pool_id`, and `window` works as a column name.
+
+## Phase 3 Architecture (A, up-front plan review, round 2) - 2026-11-22T14:01:08-08:00
+- **Decided:** BLOCK, with 1 new block and 7 new warns (`docs/handoffs/197/handoff-A.md`, rewritten). Warns 5 to 13 from round 1 are carried unchanged under their numbers, because the brief adopts them "as written in `handoff-A.md`".
+  - **Resolved:** all four round-1 blocks (R-1 to R-4), by D-1 to D-4, checked against the code at 5c100ab.
+  - **Block 14 [new, completeness]: #201 can't reuse the `/fleet/hosts` host reads.**
+    - #201 is told to call the functions `/fleet/hosts` uses for budget, allocation, latest root measurement and counts.
+    - They are private `async fn`s in core's private `fleet/registry/queries.rs` (`:1209,1243,1309,1321,1766`). The only public way in is `list_hosts(principal, …)`, and its `open_snapshot` refuses any principal without a user id.
+    - `collect_live(db, now)` has no principal, and #201 owns only `health_live.rs`.
+    - Fix: a D-3(f). Either #197 exposes a principal-free, fleet-wide host read in core built from the same helpers (recommended), or the brief records in writing that #201 uses its own bounded queries. Either way, #201 gets a correcting comment.
+  - **The new warns:**
+    - (15) the classifier seam takes the caller's `&mut SqliteConnection`, never the pool, because three of the four writer paths call it inside a write transaction (one is `BEGIN IMMEDIATE`); category is bound on insert only;
+    - (16) extend D18's module-doc rules and `jobs_tests.rs`; the serde default goes on `JobResponse`; the `WHERE` guard must admit name and path fills;
+    - (17) close D-3(b) to a fleet-wide `pub(crate)` variant in `overview_queue.rs`; a "signature #201 fills in" would be a parallel queue path;
+    - (18) the cache's clock and the health-state type, with its default source, live in `fleet/health.rs` (`RegistryClock` / `with_clock` shape), not on the fake;
+    - (19) accept `fleet:read` like `workload`, and wire the token-scope table, docs and OpenAPI;
+    - (20) the 422 body carries per-rule positions;
+    - (21) record D-4 in the design doc, and comment on #194 and #201 as well as #190.
+- **Assumed:**
+  - This is round 1 of a fresh run (the task text carried no re-review note), so completeness findings still block. I listed the round-1 blocks under "Resolved findings" anyway, so a carry-forward would match them.
+  - The issue bodies fetched on 2026-11-22 are still current.
+- **Hedged:**
+  - Block 14 is a gap I missed in round 1; it is the same class as round-1 block 3(b). I chose block over warn for two reasons. Nothing in #197's stub or contract tests would bring it to light, so Phase 7 would not catch it either. And if it is left, #201 has to edit unowned core files or stop and ask.
+  - Warns 15 to 21 are fixes inside #197's own diff, which Phase 7 reviews before wave 1 starts, so they don't block.
+- **Evidence:**
+  - **Read:**
+    - the amended brief (5c100ab), round 1's `handoff-A.md` and `decisions.md`, and issues #197, #190, #191, #192, #193, #194, #200, #201 and #204;
+    - `crates/gridops-core/src/{db.rs,gitlab/mod.rs,gitlab/jobs.rs,gitlab/http.rs (Job/JobResponse),fleet/registry/queries.rs (list_hosts, open_snapshot, host_projection and its helpers),fleet/registry/mod.rs,fleet/authorization.rs (Principal),fleet/workload.rs}`;
+    - `crates/gridops-api/src/{state.rs,error.rs,webhooks.rs:600-720,webhooks/gitlab.rs:320-400,fleet/query.rs,fleet/profiles.rs:320-365,fleet/mod.rs:30-140,resources.rs:80-100,resources/overview_queue.rs}`;
+    - `crates/gridops-reconciler/src/{main.rs (sync_run_jobs, upsert_workflow_job, the job check, reconcile),gitlab_poll.rs}`;
+    - `vitest.config.ts`, `tsconfig.json`, `tests/api-tokens-section.test.ts`, `src/features/dashboard/metric-tiles.ts`, `src/features/fleet/fleet-workload-section.tsx`, `src/routes/_app/index.tsx`, `src/lib/navigation.ts`.
+  - **Checked:**
+    - `grep`: the production `INSERT INTO workflow_jobs` sites;
+    - `grep`: tokio `test-util` is only in the manager and tart-agent crates;
+    - `grep`: no public, principal-free reader of `capacity_allocations` or the latest `host_samples` row exists in core.
