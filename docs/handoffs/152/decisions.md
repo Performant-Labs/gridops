@@ -156,3 +156,9 @@
 - **Assumed:** S's mutant results (P removes the pause, G removes the guard, and all 4 core tests still pass either way) are accurate. I did not re-run them, because doing so means touching production code only to revert it.
 - **Hedged:** none.
 - **Evidence:** the guard is at `snapshot_retention.rs:78-80` and the inter-batch sleep is at `snapshot_retention.rs:84-86`. I read both at this round's HEAD, and both are unchanged.
+
+## T (Phase 6, test-only rework of S findings 1 and 2)
+- **Decided:** replace the constants-only pause test with `a_pass_pauses_between_its_batches`, which measures wall time across 3 full batches and asserts at least `2 * BATCH_PAUSE` with no upper bound. Add `a_batch_size_below_one_deletes_nothing`, which runs `batch_size` 0 and -1 and checks 0 returned and all rows kept. Drop the 500/40 literal equalities, which add no signal.
+- **Assumed:** none.
+- **Hedged:** the tests do not check that no pause follows the last batch, because that needs a wall-time upper bound, which can flake. The tokio paused clock was rejected: auto-advance would also fire the sqlx pool timers.
+- **Evidence:** mutant P (sleep removed) fails the pause test with 1.14 ms < 50 ms. Mutant G (guard removed) fails the guard test at -1 with 3 rows deleted. Both mutants were reverted and `snapshot_retention.rs` has no diff. The suite gives 4 passed, and fmt and clippy are clean.

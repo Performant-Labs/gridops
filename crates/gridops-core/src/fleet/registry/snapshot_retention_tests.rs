@@ -198,12 +198,55 @@ async fn one_call_deletes_at_most_batch_size_times_max_batches_oldest_first() ->
     f.close().await
 }
 
-/// The decided bounds of one reconcile pass (#152 brief): 500-row batches,
-/// at most 40 of them (20,000 rows), with a pause between batches of at
-/// least the measured per-batch lock hold so the API's writers get in.
-#[test]
-fn a_pass_is_bounded_to_forty_batches_of_five_hundred_with_a_pause_between() {
-    assert_eq!(BATCH_SIZE, 500);
-    assert_eq!(MAX_BATCHES, 40);
+/// The write lock is let go between batches for long enough that the API's
+/// writers, in another process, get it: each batch after the first waits
+/// `BATCH_PAUSE` (at least the measured per-batch lock hold) first.
+/// `tokio::time::sleep` never returns early, so only a lower bound is
+/// asserted, which keeps the test deterministic.
+#[tokio::test]
+async fn a_pass_pauses_between_its_batches() -> Result<()> {
     assert!(BATCH_PAUSE >= Duration::from_millis(25), "{BATCH_PAUSE:?}");
+    let f = Fixture::new(NOW).await?;
+    let a = host(&f, "snapshot-retention-pause").await?;
+    session(&f, a, "s", 100, false).await?;
+    // Seven eligible rows: three full batches of two, so the call runs all
+    // three batches (two pauses) and stops at max_batches, not early.
+    for sequence in 1..=7 {
+        snapshot(&f, a, "s", sequence, OLD - sequence * DAY).await?;
+    }
+
+    let started = std::time::Instant::now();
+    let deleted = prune_inventory_snapshots(&f.pool, CUTOFF, 2, 3).await?;
+    let elapsed = started.elapsed();
+
+    assert_eq!(deleted, 6, "three full batches of two ran");
+    assert!(
+        elapsed >= 2 * BATCH_PAUSE,
+        "three batches take at least two pauses: {elapsed:?} < 2 * {BATCH_PAUSE:?}"
+    );
+    f.close().await
+}
+
+/// A batch size below 1 deletes nothing: a negative `LIMIT` is no limit in
+/// `SQLite`, so passing one through would be the unbounded delete the
+/// batching exists to prevent.
+#[tokio::test]
+async fn a_batch_size_below_one_deletes_nothing() -> Result<()> {
+    let f = Fixture::new(NOW).await?;
+    let a = host(&f, "snapshot-retention-no-batch").await?;
+    session(&f, a, "s", 100, false).await?;
+    for sequence in 1..=3 {
+        snapshot(&f, a, "s", sequence, OLD - sequence * DAY).await?;
+    }
+    let all = rows(&[("s", 1), ("s", 2), ("s", 3)]);
+
+    for batch_size in [0, -1] {
+        assert_eq!(
+            prune_inventory_snapshots(&f.pool, CUTOFF, batch_size, MAX_BATCHES).await?,
+            0,
+            "batch_size {batch_size}"
+        );
+        assert_eq!(remaining(&f).await?, all, "batch_size {batch_size}");
+    }
+    f.close().await
 }

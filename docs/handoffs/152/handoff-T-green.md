@@ -35,7 +35,7 @@ Ran with `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`, after `find crates -name '*.r
 
 ## Acceptance criteria status
 1. Retention rule (old non-current and old ended-current go; open-session current and recent stay): PASS, `the_prune_keeps_each_open_sessions_current_snapshot_and_everything_recent`.
-2. Batch limit (batch_size * max_batches per call, oldest first, max_batches=1 deletes at most batch_size): PASS, `one_call_deletes_at_most_batch_size_times_max_batches_oldest_first`; bounds 500/40/25 ms: `a_pass_is_bounded_to_forty_batches_of_five_hundred_with_a_pause_between`.
+2. Batch limit (batch_size * max_batches per call, oldest first, max_batches=1 deletes at most batch_size): PASS, `one_call_deletes_at_most_batch_size_times_max_batches_oldest_first`; the pause between batches: `a_pass_pauses_between_its_batches`; the `batch_size < 1` guard: `a_batch_size_below_one_deletes_nothing` (both added in the test-only rework below).
 3. Settings API (store, omit keeps, 1..=3650): PASS, `snapshot_retention_days_are_a_setting_left_alone_when_a_save_omits_them`.
 4. Reconciler default 7 and clamp, prune error does not fail cleanup: PASS, reconciler `snapshot_retention_tests` (2).
 5. Plan test (SEARCH snap via received_idx, SEARCH s via index, no SCAN): PASS, `a_snapshot_prune_batch_reads_only_rows_older_than_the_cutoff`.
@@ -48,3 +48,13 @@ None.
 ## Advisory notes
 - No test of the `info` row-count log or of lock release under a concurrent writer (timing-dependent; covered by review and F's timings).
 - U: N/A (no UI surface). S: Tier 3 per brief; PR body must say the 0049 index builds once under the write lock (about 1-3 s), the file does not shrink, and VACUUM only while stopped.
+
+## Test-only rework (S REWORK findings 1 and 2, 2026-11-22)
+Both S findings were test-quality gaps, so T fixed them. `snapshot_retention.rs` is byte-identical: `git diff` on it is empty.
+- **Finding 1:** deleted the constant-pinning `a_pass_is_bounded_to_forty_batches_of_five_hundred_with_a_pause_between` and replaced it with `a_pass_pauses_between_its_batches`. The new test seeds 7 eligible rows and calls with `batch_size` 2 and `max_batches` 3, so three batches are full and the call takes two pauses. It asserts 6 rows deleted and a wall-clock time of at least `2 * BATCH_PAUSE`. It asserts no upper bound, because `tokio::time::sleep` never returns early. It keeps the `BATCH_PAUSE >= 25 ms` check. The paused tokio clock was not used: auto-advance would also fire the sqlx pool's timers. The test does not assert that no pause follows the last batch, because that needs an upper bound on wall time, which can flake.
+- **Finding 2:** added `a_batch_size_below_one_deletes_nothing`. With 3 eligible rows, `batch_size` 0 and then -1 (`max_batches = MAX_BATCHES`) each return 0 and leave every row in place.
+- **Mutants**, each applied, run and reverted:
+  - P (the `tokio::time::sleep(BATCH_PAUSE)` line removed): `a_pass_pauses_between_its_batches` FAILS (`1.144792ms < 2 * 25ms`) and the others pass. Killed.
+  - G (the guard replaced by `let full = batch_size as u64;`): `a_batch_size_below_one_deletes_nothing` FAILS at `batch_size -1` (left 3, right 0: the unbounded delete). Killed.
+- **Re-run on the real code:** `cargo test -p gridops-core --lib snapshot_retention` gives 4 passed. `cargo fmt -p gridops-core --check` is clean. `cargo +1.98.1 clippy -p gridops-core --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` is clean.
+- **Shared target-dir note:** the first run reported a stale "Fresh" binary with 0 matching tests, because another checkout had built into the shared target dir. Touching `src/lib.rs` before each run forced a real rebuild, and every result above comes from a rebuilt binary. Check the test count, not just the exit code.
