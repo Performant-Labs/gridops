@@ -20,6 +20,7 @@ mod queries;
 #[cfg(test)]
 mod query_tests;
 mod retire;
+pub mod snapshot_retention;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

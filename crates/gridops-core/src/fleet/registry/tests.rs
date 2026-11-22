@@ -38,6 +38,8 @@ mod invariants_tests;
 mod query_plan_tests;
 #[path = "retire_tests.rs"]
 mod retire_tests;
+#[path = "snapshot_retention_tests.rs"]
+mod snapshot_retention_tests;
 
 fn inventory_digest() -> String {
     URL_SAFE_NO_PAD.encode([7_u8; 32])

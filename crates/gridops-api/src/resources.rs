@@ -18,6 +18,7 @@ use gridops_core::{
     ConfigurationState, CreateRunnerPool, GitHubRepository, GitHubWorkflowJob, GitHubWorkflowStep,
     JitRequest, RepositoryCapacity, RepositoryPage, RunnerTarget, UpdateRunnerPool, build_info,
     compatible_runner_provider, effective_runner_labels,
+    fleet::registry::snapshot_retention,
     job_log::{LogAnnotation, StructuredLogStep, structure_job_log},
     next_runner_provider, next_runner_repository, now_millis,
 };
@@ -268,6 +269,9 @@ pub struct SystemSettings {
     /// The Tart host's macOS VM slots. Left out, it stays as it is.
     #[serde(default)]
     macos_vm_slots: Option<i64>,
+    /// Days of fleet inventory snapshots kept. Left out, it stays as it is.
+    #[serde(default)]
+    inventory_snapshot_retention_days: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -3579,6 +3583,11 @@ pub async fn settings(
             "builtinRunnerHostEnabled": builtin_host_enabled(&state).await,
             "builtinRunnerHostBudget": gridops_core::builtin_host::budget(&state.database).await,
             "macosVmSlots": gridops_core::tart_host::vm_slots(&state.database).await,
+            "inventorySnapshotRetentionDays": stored_i64(
+                &stored,
+                snapshot_retention::RETENTION_DAYS_KEY,
+                snapshot_retention::DEFAULT_RETENTION_DAYS,
+            ),
         }, "user": { "id": user.id, "login": user.login, "role": user.role }, "users": users
     }})))
 }
@@ -3596,6 +3605,9 @@ pub async fn save_settings(
         || !(1..=3_650).contains(&input.audit_retention_days)
         || !(5..=3_600).contains(&input.reconcile_interval_seconds)
         || !(30..=3_600).contains(&input.github_sync_interval_seconds)
+        || input
+            .inventory_snapshot_retention_days
+            .is_some_and(|days| !snapshot_retention::RETENTION_DAYS.contains(&days))
     {
         return Err(ApiError::BadRequest(
             "Retention or reconciliation settings are outside the supported range.".into(),
@@ -3630,6 +3642,9 @@ pub async fn save_settings(
     if let Some(slots) = input.macos_vm_slots {
         values.push((gridops_core::tart_host::VM_SLOTS_KEY, json!(slots)));
     }
+    if let Some(days) = input.inventory_snapshot_retention_days {
+        values.push((snapshot_retention::RETENTION_DAYS_KEY, json!(days)));
+    }
     let now = now_millis();
     let mut transaction = state.database.begin().await?;
     for (key, value) in values {
@@ -3658,6 +3673,7 @@ pub async fn save_settings(
         "autoUpdateImages": input.auto_update_images,
         "provisioningPaused": input.provisioning_paused,
         "macosVmSlots": input.macos_vm_slots,
+        "inventorySnapshotRetentionDays": input.inventory_snapshot_retention_days,
     })).await?;
     Ok(Json(json!({ "ok": true })))
 }

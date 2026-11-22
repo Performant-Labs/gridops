@@ -369,7 +369,10 @@ pub(super) fn supervisor(
     Ok(
         Supervisor::new(Client::new(origin)?, journal, "fleet-host".into())
             .with_heartbeat(Duration::from_millis(200))
+            // Every reading is fixed, CPU included, so admission never
+            // depends on how many cores the test runner has.
             .with_measurements(|| gridops_host_agent::probe::Measurement {
+                cpu_total_millis: Some(8_000),
                 memory_total_mib: Some(16_384),
                 memory_used_mib: Some(4_096),
                 cpu_used_millis: Some(500),

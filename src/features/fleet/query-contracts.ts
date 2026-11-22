@@ -135,6 +135,7 @@ export const placementFailureReasons = [
   "host_epoch_changed",
   "runner_removed_before_start",
   "operator_released",
+  "registration_timed_out",
   "unknown",
 ] as const;
 
