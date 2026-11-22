@@ -556,13 +556,14 @@ async fn the_cache_is_filled_once_per_image_from_the_images_working_directory() 
     Ok(())
 }
 
-/// Item 1: an image whose `externals` is itself a symlink is either followed (the cache holds the
-/// real files) or refused as `Configuration, false`; the cache never holds a dangling link.
-/// Phase 6 narrows this to the choice F documents.
+/// Item 1: an image whose `externals` is itself a symlink is FOLLOWED (the choice documented on
+/// `fill_externals_cache`): the cache holds the real files, never the link, and never a dangling
+/// link; no fill container is left behind.
 #[tokio::test]
-async fn a_symlinked_externals_is_followed_or_refused_never_cached_dangling() -> Result<()> {
+async fn a_symlinked_externals_is_followed_and_the_cache_never_holds_a_dangling_link() -> Result<()>
+{
     let Some(directory) =
-        stand_in("a_symlinked_externals_is_followed_or_refused_never_cached_dangling")?
+        stand_in("a_symlinked_externals_is_followed_and_the_cache_never_holds_a_dangling_link")?
     else {
         return Ok(());
     };
@@ -580,38 +581,24 @@ async fn a_symlinked_externals_is_followed_or_refused_never_cached_dangling() ->
     let filled = DockerRuntime::new(None, None)
         .fill_externals_cache(&cache_root, TAG)
         .await;
-    match &filled {
-        Ok(path) => {
-            ensure!(*path == cache_root.join(HEX), "{}", path.display());
-            ensure!(
-                fs::symlink_metadata(path)?.is_dir()
-                    && fs::read_to_string(path.join("node24/bin/node"))? == "node24 behind a link",
-                "followed, but the cache does not hold the real files"
-            );
-            ensure!(
-                dangling_links(path)?.is_empty(),
-                "{:?}",
-                dangling_links(path)?
-            );
-        }
-        Err(refusal) => {
-            ensure!(
-                refusal.code == FailureCode::Configuration && !refusal.retryable,
-                "{}",
-                describe(refusal)
-            );
-            ensure!(
-                (refusal.reason.contains(HEX) || refusal.reason.contains(TAG))
-                    && refusal.reason.contains("/actions-runner/externals"),
-                "the reason must name the image and its externals: {}",
-                refusal.reason
-            );
-            ensure!(
-                !cache_root.join(HEX).exists(),
-                "a refused image left a cache"
-            );
-        }
-    }
+    let path = match &filled {
+        Ok(path) => path,
+        Err(refusal) => bail!(
+            "a symlinked externals must be followed: {}",
+            describe(refusal)
+        ),
+    };
+    ensure!(*path == cache_root.join(HEX), "{}", path.display());
+    ensure!(
+        fs::symlink_metadata(path)?.is_dir()
+            && fs::read_to_string(path.join("node24/bin/node"))? == "node24 behind a link",
+        "followed, but the cache does not hold the real files"
+    );
+    ensure!(
+        dangling_links(path)?.is_empty(),
+        "{:?}",
+        dangling_links(path)?
+    );
     ensure!(
         docker.containers()?.is_empty(),
         "containers left behind: {:?}",

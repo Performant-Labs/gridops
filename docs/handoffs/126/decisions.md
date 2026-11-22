@@ -144,3 +144,15 @@
   - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` and `cargo fmt --all -- --check` are clean.
   - Read the runner 2.338.2 release's `run.sh` (root = the physical dir of `run.sh`) and `env.sh` (it never writes a tool-cache variable).
   - Facts from unchanged code are in `docs/handoffs/126/evidence.md`.
+
+## T-green (Phase 7)
+
+- **Decided:**
+  - Narrowed `a_symlinked_externals_is_followed_or_refused_never_cached_dangling` to the follow branch and renamed it `a_symlinked_externals_is_followed_and_the_cache_never_holds_a_dangling_link`, as F's `fill_externals_cache` doc comment documents the choice. A refusal now fails the test.
+  - No production file touched; no other test changed.
+- **Assumed:** the sizes F reports (per start 272 files / 84,797,525 bytes; fill 9,122 files / 599,417,734 bytes) are from the runner 2.338.2 tarball, not the pool image. I did not re-measure.
+- **Hedged:** Start's success path, `docker cp -L` and `--mount ...,readonly` on a real engine, and a host bind source resolved through the runner root's `externals` link are not exercised by any test (no daemon, no writable `/var/lib/gridops-agent`). U/S/the fleet must cover them.
+- **Evidence:**
+  - `cargo test -p gridops-core --lib` 313 passed; `cargo test -p gridops-host-agent` all binaries green.
+  - Mutation spot-checks (reverted): dropping the cache's `readonly` flag fails `a_shared_runner_gets_its_folders_at_host_paths_and_the_cache_read_only`; removing the `.env` rewrite fails `the_runner_resolves_its_tool_cache_to_the_work_folder_whatever_the_image_sets`.
+  - Facts F used from unchanged code are in `evidence.md`; I checked the Start/Prepare wiring by reading `docker.rs` `start` and `shared_runner`.
