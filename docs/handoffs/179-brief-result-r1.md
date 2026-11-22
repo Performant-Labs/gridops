@@ -1,0 +1,29 @@
+## Brief Review (Round 1)
+
+### BLOCK findings
+**[B-1]** Internal contradiction in Part 3's session-end conditions. The scope says: "End the session and reconnect only when the lease would expire, on `Unauthenticated`, or on `Refused`, exactly as today." But the same section twice decides otherwise: "Command results are not retried in-session (decided). … A failed result still ends the session" and "A command poll that fails with `Unavailable` still ends the session, as today." An implementer following the "only when" sentence would retry polls/results on `Unavailable`, which the brief elsewhere forbids and which the recovery tests (`host_recovers_when_a_delivered_command_never_reaches_it`) pin against. Rewrite the session-end rule as an exhaustive list that includes poll/result `Unavailable` failures, so the "only" clause cannot be read as overriding the decided cases.
+
+### Needs-verification findings
+**[NV-1]** "A heartbeat or inventory with the same sequence and digest is a replay, not a conflict" — the registry's idempotent-replay handling for the heartbeat and inventory-refresh endpoints (file:line in `crates/gridops-core/src/fleet/registry/`, e.g. the upsert/sequence check that treats a duplicate sequence+digest as replay). If no replay rule exists, the whole Part 3 retry design and its acceptance tests change shape; the brief acknowledges this contingency but the acceptance criteria assume retry works.
+**[NV-2]** sqlx 0.9 "already logs slow statements at WARN over 1 s by default, on the `sqlx::query` log target" and that `log_slow_statements(LevelFilter, Duration)` exists with that signature — sqlx 0.9 source/docs (e.g. `SqliteConnectOptions::log_slow_statements`).
+**[NV-3]** "`log_slow_statements` takes `log::LevelFilter`, which sqlx does not re-export" — sqlx 0.9 source showing the parameter type and its re-export surface.
+**[NV-4]** The measured plans and index existence: `host_commands_poll_idx(host_id,state,cursor)` exists and yields `state=?` with a top-level `state IN ('pending','delivered')`; `host_commands_host_kind_issued_idx(host_id,kind,issued_at)` is what the current queries use — migration files / schema DDL.
+**[NV-5]** "`commands::poll` … repeats it every 500 ms (`POLL_STEP`) for up to 25 s"; "`busy_timeout` (5 s, `crates/gridops-core/src/db.rs`)"; the api maps code 5 to 503 `DependencyUnavailable` — the respective file:line excerpts.
+**[NV-6]** "The host agent … ends its session on any error, including `ClientError::Unavailable` (5xx/429/transport)" and that `Unavailable` also carries local `internal()` errors — `supervisor.rs` `run`/`session` and `client.rs` error mapping.
+**[NV-7]** "Logs (`ship_logs`) and output (`output.rs`) already never end the session" — supervisor session loop showing these call sites' error handling.
+**[NV-8]** "The existing private `STARTED` and `LIVE_WORKLOADS` consts show the pattern" and "existing poll and cancel behaviour tests are in the api crate (`fleet_http`)" — file:line for both, since the done-when's plan test is built directly on this pattern.
+**[NV-9]** The held-writer pattern exists at `inventory.rs` ~793–811, and the recovery tests enumerated (`an_api_restart_leaves_a_running_runner_alone`, etc.) exist with the asserted behaviors — the test files themselves.
+
+### WARN findings
+**[W-1]** Part 3's fallback ("If one endpoint has no replay rule, say so and keep today's behaviour for that endpoint only") has no matching acceptance criterion: the agent test mandates retry-then-success for both heartbeat and inventory. If NV-1 fails for one endpoint, the done-when section gives no amended criterion. Add a conditional criterion (which endpoint degrades, and what the test asserts then) or verify replay before implementation begins.
+**[W-2]** The agent test criterion "backs off between attempts" is not operationally defined — no observable (timing threshold, proxy-side inter-arrival assertion) is specified, and the brief forbids test hooks and a test-only Supervisor builder. Specify how backoff is observed (e.g. minimum gap between proxy-observed resends).
+**[W-3]** "In both cases the agent sends exactly one handshake" — "both cases" is ambiguous when three arms are listed (heartbeat 503s, inventory 503s, lease-expiry). State per-arm which assertions apply, including whether the lease-expiry arm asserts one handshake before the deadline passes and a second after.
+**[W-4]** The slow-statement logging test offers two alternatives ("test that `connect_database_path`'s options carry the 100 ms threshold, or that a deliberately slow statement emits a WARN"). The first alternative depends on connect options being inspectable from the api crate; if they are not, only the second is implementable. Prefer mandating the behavior-level test (WARN on `sqlx::query` target) as primary.
+**[W-5]** Held-lock test duration: holding `BEGIN IMMEDIATE` "longer than `busy_timeout` (5 s)" plus agent retry/backoff (up to 30 s) can make this test slow. Consider bounding the lease rewrite in this test too, so the reconnect path is reachable without a 30+ s test.
+
+### NIT findings
+**[NIT-1]** The sweep scope ("about 21 outside tests") counts statements but the hand-off sweep table has no stated completeness criterion (e.g. grep pattern used), so a reviewer can't check nothing was skipped. Name the grep/sweep method in the hand-off contract.
+**[NIT-2]** "`settle_unreceived` … Include it in the plan test, but it needs no change" — fine, but the plan-test assertion text says "uses `host_commands_poll_idx` with `state=?`"; confirm `state IN (...)` renders that way in `EXPLAIN QUERY PLAN` or adjust the assertion wording.
+
+### Verdict
+BLOCK — 1 blocking finding; must resolve before implementation starts.

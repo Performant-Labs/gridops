@@ -1,0 +1,31 @@
+## Brief Review (Round 1)
+
+### BLOCK findings
+None.
+
+### Resolved findings
+**[R-1]** Earlier [B-1]: "Internal contradiction in Part 3's session-end conditions. The scope says: 'End the session and reconnect only when the lease would expire, on `Unauthenticated`, or on `Refused`, exactly as today.' But the same section twice decides otherwise… Rewrite the session-end rule as an exhaustive list…" — resolved: Part 3 now has a "When the session ends (exhaustive)" list with six numbered cases ("The only new behaviour in part 3 is that a heartbeat or an inventory refresh inside an established session is retried on `Unavailable`. Everything else ends the session exactly as today"), including the poll (case 4) and result (case 5) `Unavailable` cases explicitly.
+
+### Needs-verification findings
+**[NV-1]** The claim that `submit_inventory` (`registry/inventory.rs:91-142`) and `heartbeat` (`:275-300`) answer an identical resend as a replay (`SequenceConflict`/`HeartbeatConflict` only on other reuse) — an excerpt of `registry/inventory.rs` at those lines. Part 3's entire retry design and its byte-identical-resend acceptance tests rest on this.
+**[NV-2]** The claim about `supervisor.rs` line numbers and behaviours: `run`/`session` end the session on every error except `Unauthenticated` (`:181-207`, `:210-396`), `backoff()` never returns under 1 s and `MIN_BACKOFF` is at `:48`, `ship_logs` never ends the session (`:398-423`), `internal()` wraps local errors as `Unavailable` (`:622-624`) — excerpts of `supervisor.rs`.
+**[NV-3]** The claim that `client.rs:252-276` maps 401→`Unauthenticated`, other non-5xx/429→`Refused`, 5xx/429/transport→`Unavailable` — an excerpt of `client.rs`.
+**[NV-4]** The sqlx claims: default `slow_statements_level: Warn` / 1 s on target `sqlx::query` (`sqlx-core-0.9.0/src/connection.rs:196-216`, `logger.rs:108-122`), and `log_slow_statements(log::LevelFilter, Duration)` on `ConnectOptions` with no `log` re-export — sqlx source excerpts.
+**[NV-5]** The claimed current plans of `cancel_undeliverable` and the poll delivery select (index choice, 176 ms / 375 ms) and that a top-level `state IN ('pending','delivered')` switches to `host_commands_poll_idx` — `EXPLAIN QUERY PLAN` output against the schema, or the SQL text at `registry/commands.rs:91-97` and `:741-750`.
+**[NV-6]** The api/reconciler default EnvFilters actually omit `sqlx::query`, and `compose.yaml`/`.env.example` set no `RUST_LOG` — excerpts of the two `main.rs` files and the grep results.
+**[NV-7]** The existing tests named as anchors exist with the described shape: `recovery.rs:392` (`host_recovers_when_a_delivered_command_never_reaches_it`), `inventory.rs:797` held-writer pattern (`begin_with("BEGIN IMMEDIATE")` at `:800`), `an_api_restart_leaves_a_running_runner_alone`, and the `within` helper at `recovery.rs:114-126` — excerpts of the test files.
+**[NV-8]** The claim that `output.rs:48-50` never returns and `:187-194` treats `Unavailable`/refusals as wait-and-retry — an excerpt of `output.rs`.
+**[NV-9]** The grep hit count (25 lines, per-file breakdown: `resources.rs` 3, `placement.rs` 6, `registry/commands.rs` 6, `delete.rs` 1, `retire.rs` 1, `unconfirmed.rs` 3, `retry.rs` 1, `start_health.rs` 1, `targets.rs` 3) — running the stated grep `grep -rnE '(FROM|JOIN) host_commands\b' crates --include='*.rs'` against the tree; if the real count differs, the sweep's completeness contract in the handoff is wrong.
+
+### WARN findings
+**[W-1]** Statement-count inconsistency: Part 1 says "there are about 21 outside tests" statements touching `host_commands`, while the handoff contract's grep yields 25 lines with a per-file breakdown summing to 25. If a line can carry more than one statement these can both be true, but the brief never says so; a reviewer checking the handoff table against either number will flag a mismatch. State which number the table is checked against (the grep hit count, per the handoff) and reconcile the "about 21".
+**[W-2]** The backoff-gap criterion references "a test heartbeat interval of 200 ms" as the contrast case, but the only heartbeat interval shown in the excerpts is `HEARTBEAT_INTERVAL_MILLIS: 15_000` (`handshake.rs:27`). If the production interval is 15 s, a 503-storm retry sequence must come from the failure path, not the interval, and the criterion's reasoning ("gaps far below that if the agent resent without backing off") needs the test to actually drive sub-second request attempts (e.g. via the proxy's fail-next-N). Clarify what sets request cadence in the test so the ≥1 s gap assertion is meaningful.
+**[W-3]** The brief cites `OBSERVATION_LEASE_MILLIS` at `registry/inventory.rs:37`; the excerpt shows it defined at `handshake.rs:26`. Possibly defined in both or moved — a wrong file:line in the done-when will cost the implementer a lookup. Confirm the location.
+**[W-4]** Part 2 asserts "after part 1 the hot-path statements take about 1 ms, so 100 ms stays quiet" while also asserting the reconciler's unbatched retention deletes and migrations will WARN at 100 ms — the CHANGELOG/PR must carry both messages, which the brief does say, but the migration WARNs fire on every process start (migrations run at connect, `db.rs:38-41`). That is a WARN on every boot, not just slow deploys; consider whether the PR should note expected-on-startup WARNs so operators don't file noise tickets.
+
+### NIT findings
+**[NIT-1]** The held-lock test justifies "finishes well inside the 45 s `within` helper" with backoff attempts 1, 2, 4, 8 s — that arithmetic assumes attempts 0-3 only; state the assumed number of attempts explicitly so the bound survives a backoff-curve change.
+**[NIT-2]** The lease-expiry agent arm requires the proxy to rewrite `lease.expires_at` in heartbeat and inventory replies, but part 3 stores the deadline from "the observation lease expiry the server last granted" — confirm the rewritten field is the one the agent stores as `lease_expires_at`, or the test may rewrite a field the retry path never reads.
+
+### Verdict
+PASS — no BLOCK findings; implementation may proceed.

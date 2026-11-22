@@ -43,6 +43,15 @@ pub const MAX_START_ATTEMPTS: i64 = 3;
 /// that was wanted then and may not be now.
 pub const RETRY_WINDOW_MILLIS: i64 = 5 * 60_000;
 
+/// The placement's newest failure event. It runs under the write lock, and
+/// `fleet_events` has no index on `placement_id`, so without the host the read
+/// walks every machine's events back to the failure (#179). A placement's
+/// events always carry its host (the table's foreign key on
+/// `(placement_id,host_id,target_id)`), so naming it finds the same row.
+/// Binds the placement's host, the placement and the event kind.
+pub(super) const LAST_FAILURE: &str = "SELECT created_at,detail_json FROM fleet_events
+  WHERE host_id=? AND placement_id=? AND kind=? ORDER BY cursor DESC LIMIT 1";
+
 /// The replacement made for a failed start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retry {
@@ -148,14 +157,12 @@ pub async fn retry_failed_start(
     else {
         return Ok(RetryOutcome::NotRetried(NotRetried::NotFound));
     };
-    let failure = sqlx::query(
-        "SELECT created_at,detail_json FROM fleet_events
-          WHERE placement_id=? AND kind=? ORDER BY cursor DESC LIMIT 1",
-    )
-    .bind(&id)
-    .bind(PLACEMENT_FAILED_EVENT)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let failure = sqlx::query(LAST_FAILURE)
+        .bind(row.get::<String, _>("host_id"))
+        .bind(&id)
+        .bind(PLACEMENT_FAILED_EVENT)
+        .fetch_optional(&mut *tx)
+        .await?;
     let attempt: i64 = row.get("start_attempt");
     let refusal = if row.get::<String, _>("kind") != WorkloadKind::CiRunner.as_str() {
         Some(NotRetried::NotARunner)

@@ -1,0 +1,141 @@
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-21T14:25:35-08:00
+- **Decided:** BLOCK, with 2 block and 6 warn findings (docs/handoffs/179/handoff-A.md).
+  - Block 1, Part 2 is a no-op at the wrong seam. sqlx-core 0.9.0 already defaults slow statements to WARN at 1 s. The event's target is `sqlx::query`, which the api's (`gridops=info,tower_http=info`) and the reconciler's (`gridops_reconciler=info`) default EnvFilter drop, and compose sets no RUST_LOG. The manager never opens the DB. Fix: admit `sqlx::query=warn` in those two filters, choose the threshold against the measured 176/375 ms, and require a test that fails today.
+  - Block 2, Part 3 retries the command poll in-session. The poll has no replay rule: a delivered command is offered again only after 60 s. A lost poll reply is settled today by ending the session and running the handshake's `settle_unreceived`, pinned by `fleet_http/recovery.rs` `host_recovers_when_a_delivered_command_never_reaches_it`. An in-session retry leaves the start delivered, then uncertain at its deadline; the placement goes uncertain, authority is withheld at the next inventory, and no reconnect happens. That is the 2026-10-14 21:05 lockout. The brief's own "no replay rule, keep today's behaviour" clause covers this, but its Scope list and its Agent-test done-when name the poll.
+  - Warns:
+    - (3) logs and output already never end the session;
+    - (4) one retry helper in supervisor.rs next to `backoff()`, wrapping only the client call (`Unavailable` also carries local `internal()` errors), with the lease kept in `Authority`;
+    - (5) the agent and held-lock tests belong with the real `Supervisor` in `fleet_http/agent.rs` or `recovery.rs` (`Proxy`/`Faults`), and the existing poll and cancel tests live in the api crate, not core;
+    - (6) `pub(super)` SQL consts and an in-crate registry plan-test module, on the `tests/retention.rs` shape;
+    - (7) no migration uses `IF NOT EXISTS`, and the sweep may need no new index;
+    - (8) the sweep table should say whether `uncertain` counts as open (`settle_unreceived` reads it at every handshake).
+- **Assumed:**
+  - Mars's `GRIDOPS_ENV_FILE` does not set `RUST_LOG`. `.env.example` and compose do not; I did not read the host's env file. Block 1 holds either way, because the proposed call equals sqlx's default.
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+- **Hedged:**
+  - The lockout in block 2 is traced through code (`commands.rs:91-97`, `:769-777`; `inventory.rs:207`, `:1081-1095`), not run. The pinned recovery test would fail against an in-session poll retry, which T's RED run would show.
+  - Warn 8 is a sweep-contract gap, not a defect.
+- **Evidence:**
+  - Read: the brief and the brief gate result; `registry/commands.rs` in full; `registry/inventory.rs:77-380` and `:1081-1150`; `registry/mod.rs` begin and the test wiring; `db.rs` in full; host-agent `supervisor.rs` and `client.rs` in full, and the error handling in `output.rs`; api `fleet/commands.rs`; `fleet_http/agent.rs`, `recovery.rs:1-120`, `:212-266`, `:388-436` and `:589-675`; `fleet_http/inventory.rs:793-811`; `tests/retention.rs`.
+  - Migrations: the index list on the history tables; the 0026 triggers; the 0041 and 0045 index migrations.
+  - Third-party source: `sqlx-core-0.9.0` `connection.rs:201-219` and `logger.rs`; `sqlx-sqlite-0.9.0` `worker.rs:213-238`; `tracing-subscriber-0.3.23` `directive.rs:242-249`.
+  - Config and deploy: `compose.yaml`, `.env.example`, `deploy/` `RUST_LOG`.
+  - `git worktree list` and the status of the other worktrees.
+  - `git diff --stat origin/master HEAD` shows only the brief.
+
+## Phase 3 Architecture (A, up-front plan review, R2 on brief a44aac1) - 2026-11-21T14:38:30-08:00
+- **Decided:** BLOCK, with 2 block and 4 warn findings (docs/handoffs/179/handoff-A.md). Both R1 blocks and R1 warns 3 to 7 are resolved.
+  - **Block 1: the result-retry deadline never fires.**
+    - The bound is "before the observation lease in `Authority` would expire". The `heartbeats` loop keeps renewing that lease while the `commands` loop retries `post_result`, so the deadline moves.
+    - `record_command_result` has no session or lease check. A poison result (`RegistryError::Json` or a `Database` fault, both mapped to 503 `DependencyUnavailable`) is retried forever, and heartbeats keep granting work authority to a host that never polls.
+    - Today the session ends, the host loses authority, and the 24 h `RESULT_REDELIVERY_WINDOW` lets it heal.
+    - Fix: read the deadline once, at the first failure. Name the field `lease_expires_at`, separate from the work-authority `expires_at`. Add a done-when arm.
+  - **Block 2: an existing test fails by construction.**
+    - `fleet_http/recovery.rs` `an_api_restart_leaves_a_running_runner_alone` waits for a new session after a 2 s API restart (`:649-655`).
+    - Part 3's heartbeat and result retries ride out the restart: the lease is 90 s, and the incarnation is kept across restarts (`fleet/mod.rs:50-51`). The wait times out.
+    - The brief pins only the poll test. Fix: authorise amending this test to assert that the session survives, and state that the two sibling `refuse_results` tests keep their assertions.
+  - **Warns:**
+    - (3) The lease-expiry arm needs 90 s unless the proxy rewrites `lease.expires_at`. Add no production lease knob.
+    - (4) `log_slow_statements` needs a new direct `log` dependency in core. Put the capture test in the api crate. Retention passes and migrations will WARN at 100 ms.
+    - (5) Create SQL consts only for the asserted or changed statements. The existing poll and cancel tests are api-crate tests, not core.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+  - Whether a poison result occurs in prod is not measured. Block 1 rests on the error mapping in code, not on an observed incident.
+- **Hedged:**
+  - Block 2 is traced through code (the test's timeline, the 200 ms test heartbeat, the 90 s lease, the incarnation kept across restarts), not run.
+  - I expect the two sibling `refuse_results` tests to pass unchanged, because late and stale results are accepted without a session check. Not run.
+- **Evidence:**
+  - Read: the amended brief and its diff against 4b9aea4; host-agent `supervisor.rs` and `client.rs` in full.
+  - Registry: `commands.rs:25-240`, `:515-618`, `:720-786`; `inventory.rs:30-40`, `:77-462`, `:1081-1145`; `fleet/mod.rs:48-62`.
+  - Api: `fleet/error.rs:55-100`; `main.rs:66-76`. Reconciler: `main.rs:425-435`, `:3282-3340`.
+  - Core: `db.rs:1-60`; `Cargo.toml` (core and workspace).
+  - Tests: `fleet_http/recovery.rs:1-130`, `:205-270`, `:320-375`, `:575-680`, `:780-900`, `:940-1000`; `placement.rs:229-394`; `agent.rs:1-160`; `inventory.rs:760-812`; `tests/retention.rs`.
+  - Third-party source: `sqlx-core-0.9.0` `connection.rs`. `Cargo.lock` for `log`.
+  - Coexistence: the gridops-134 branch diff and its merge status.
+
+## Phase 3 Architecture (A, up-front plan review, R3 on brief f5fc862) - 2026-11-21T14:56:38-08:00
+- **Decided:** PASS, with 0 block and 5 warn findings (docs/handoffs/179/handoff-A.md). Both R2 blocks are resolved.
+  - Results are no longer retried. The heartbeat and inventory-refresh retries run in the loop that renews the lease, with the deadline fixed at the first failure.
+  - The exhaustive session-end list and the conditional amendment authority for `an_api_restart_leaves_a_running_runner_alone` close the test gap. Under R3 the refused inspect result still ends the session, so that test should pass unchanged.
+  - **Warns:**
+    - (1) `lease_expires_at` belongs in a local in the `heartbeats` block, now that only that loop reads it. Seed it from the first inventory, update it from every refresh and heartbeat reply, and clip retry sleeps at the deadline.
+    - (2) The plan test's "never `host_kind_issued_idx`" clause is planner-dependent. On a fresh migrated DB, today's poll select uses `sqlite_autoindex_host_commands_2 (host_id=?)`, so the clause should forbid any `(host_id=?)`-only step and `SCAN c`.
+    - (3) Relabel the existing behaviour tests as api-crate tests; "about 21" vs 25 grep hits; non-core const visibility.
+    - (4) The slow-statement capture test needs a process-global subscriber, because sqlx-sqlite emits on its worker thread.
+    - (5) Declare `log` through `[workspace.dependencies]`.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names serve as the Reuse map.
+  - The bundled SQLite in `libsqlite3-sys` 0.37 plans like the sqlite3 3.54 CLI for these statements. Warn 2's point holds whichever `(host_id=?)` index it picks.
+- **Hedged:**
+  - Warn 4 is traced through the sqlx-sqlite and tracing dispatch code, not run.
+  - That `an_api_restart_leaves_a_running_runner_alone` passes unchanged under R3 is traced, not run.
+- **Evidence:**
+  - Read: the amended brief and its diff against a44aac1; `179-brief-result-r2.md`; `supervisor.rs` in full; `client.rs:245-278`; `output.rs:40-55` and `:180-198`.
+  - Registry: `commands.rs:1-250`, `:500-786`; `inventory.rs:30-40`, `:77-145`, `:255-345`; `registry/tests.rs:1-60`; `protocol/inventory.rs` response types.
+  - Core: `db.rs:1-70`; core and workspace `Cargo.toml`.
+  - Api and reconciler: the EnvFilter sites in both `main.rs` files; `tart_outage_tests.rs:35-75`.
+  - Tests: `recovery.rs:1-130`, `:575-690`; `fleet_http/inventory.rs:790-812`; `tests/retention.rs`.
+  - Third-party: `sqlx-core-0.9.0/src/logger.rs`; `sqlx-sqlite-0.9.0` `worker.rs`, `execute.rs` and `arguments.rs`.
+  - Re-ran the brief's grep: 25 hits, and the per-file breakdown matches. No `ANALYZE` or `PRAGMA optimize` anywhere in the repo.
+  - Scratch-DB `EXPLAIN QUERY PLAN` (sqlite3 3.54, all 47 migrations applied): the as-written poll select uses the autoindex `(host_id=?)`; the as-written cancel uses `host_kind_issued_idx (host_id=?)`; both rewrites and `settle_unreceived` use `host_commands_poll_idx (host_id=? AND state=?)`.
+
+## Phase 4 Tests RED (T) - 2026-11-21T15:22:07-08:00
+- **Decided:** RED is valid (docs/handoffs/179/handoff-T-red.md). F may implement.
+  - **Contract names, which the brief left open:**
+    - `pub(super) const NEXT_DELIVERY`, `UNDELIVERABLE` and `UNRECEIVED` in `registry/commands.rs`;
+    - `fn default_log_filter() -> EnvFilter` at the crate root of both the api and the reconciler. It returns the default only and reads no environment, so a test that sets nothing gets a stable answer.
+  - **Plan test:** an exact positive step (`INDEX host_commands_poll_idx (host_id=? AND state=?)`). It forbids any step ending in `(host_id=?)` and any `SCAN`, rather than one index name (A warn 2).
+  - **Agent tests:** they go in a new `fleet_http/busy_database.rs`. The recovery `Faults` is extended in place (path-suffix failure injection, lease shortening, request log), not moved to a shared module, which keeps the diff small. No test body in `recovery.rs` changed.
+  - **Slow-statement test:** behaviour level, through a `Once`-installed global subscriber built from the api's own filter. It asserts `slow_threshold = 100ms` on the event, so neither the 1 s default nor a 0 threshold passes (A warn 4).
+  - **Guards, green by design:** the large-history behaviour test, the 401 stop, and the result 503 that still ends the session.
+- **Assumed:**
+  - No hot-path statement other than the poll and cancel selects needs a rewrite. A preliminary `EXPLAIN QUERY PLAN` on a migrated scratch DB found the session and snapshot statements PK- or partial-index-bounded. If F's sweep changes more, I add their plan assertions in Phase 6.
+  - `an_api_restart_leaves_a_running_runner_alone` still passes after F, as A traced. If it does not, I amend it in Phase 6 as the brief authorises.
+- **Hedged:**
+  - I proved the api slow-statement test can pass with throwaway code (`sqlx::query=warn` plus `log_slow_statements(Warn, 100 ms)`, then reverted), but not the agent tests. Their satisfiability rests on reading `supervisor.rs`:
+    - the retry sits inside the heartbeat loop;
+    - `MIN_BACKOFF` is 1 s;
+    - the refresh is every 30 s.
+  - The held-lock test's 7.5 s hold depends on the 5 s `busy_timeout`. It checks first that a heartbeat answered 503 during the hold, so a shorter timeout fails it loudly instead of passing vacuously.
+- **Evidence:**
+  - Compile RED: E0432 (three consts, core lib) and E0425 (`default_log_filter`, api and reconciler bins).
+  - Runtime RED behind it, with stubs equal to today's code: the poll plan is `sqlite_autoindex_host_commands_2 (host_id=?)` with a temp B-tree; the cancel plan is `host_commands_host_kind_issued_idx (host_id=?)`; the api logged nothing for a 200 ms statement; the reconciler filter dropped `sqlx::query` WARN.
+  - Agent RED on the real tree: the agent handshook again 4, 4, 2 and 2 times where 1 was expected.
+  - The 14 existing `recovery::` tests and `idle_command_poll_answers_while_another_writer_holds_the_database` pass on the extended proxy.
+  - Behaviour-guard mutations (cursor order DESC; the dropped epoch branch) each fail the guard.
+  - `cargo +1.98.1 clippy … --all-targets -D warnings` is clean with the stubs, and `cargo fmt --check` is clean.
+  - Every stub was reverted with `git checkout` and none was staged.
+
+## Phase 5 Feature (F) - 2026-11-21T16:05:00-08:00
+- **Decided:** Implemented against T's RED (docs/handoffs/179/handoff-F.md). T's #179 tests are GREEN, and `cargo fmt --check` and CI-toolchain clippy are clean.
+  - **Part 1:**
+    - `NEXT_DELIVERY` and `UNDELIVERABLE` get one top-level `c.state IN ('pending','delivered')` conjunct each, over their unchanged disjunctions. Both original disjunctions already required one of those states, so the rows and the order are the same by construction.
+    - `UNRECEIVED` only moved into a const.
+    - Sweep finding: `retry.rs` `LAST_FAILURE` (in lock, reconciler fleet pass) was `SCAN fleet_events`. Adding `host_id=?` lets it use `fleet_events_host_cursor_idx`, and the composite FK makes the result identical.
+    - No migration.
+  - **Part 2:**
+    - `log_slow_statements(Warn, 100 ms)` in `connect_database_path`, with `log` declared through `[workspace.dependencies]`.
+    - `default_log_filter()` in the api and the reconciler admits `sqlx::query=warn`.
+    - CHANGELOG notes added.
+  - **Part 3:**
+    - `resend_while_leased` next to `backoff()` wraps only the heartbeat and inventory-refresh client calls, and resends the identical request.
+    - The deadline is fixed when the request is first sent, and the last wait is cut short at it.
+    - `lease_expires_at` is a local in the heartbeat loop (A R3 warn 1), not an `Authority` field. This deviates from the brief's wording; the behaviour matches.
+    - Poll, result, handshake, first inventory, rotation and `internal()` errors end the session as before.
+- **Assumed:**
+  - The agent's and the server's wall clocks are close enough to compare against the lease. If they are not, the in-session resend window shrinks or grows, but it cannot loop forever: a server-side lease expiry answers `Refused`.
+  - The scratch-DB plans (sqlite3 3.54) for the statements outside T's plan test match the bundled SQLite. T's test checks the three `host_commands` consts with the bundled SQLite.
+- **Hedged:**
+  - After the change, `LAST_FAILURE` is bounded to one machine's events, newest first with `LIMIT 1`, not to a single row. That is enough, because the lock-free pre-check only lets through placements whose runner is still `starting`.
+  - `delete_pool`'s `DELETE FROM fleet_events` (whole-table scan) is admin-only and was left unchanged.
+- **Evidence:**
+  - Runtime statement capture: the `fleet_http` agent, placement, recovery, inventory, busy_database and start_retry modules (52 tests) with `RUST_LOG=sqlx::query=debug`. `EXPLAIN QUERY PLAN` of all 44 distinct history-table statements found.
+  - The brief's grep: 25 hits, each in the sweep table.
+  - Full run: 33 binaries, 887 passed, 1 failed. The failure is `release_preflight::…without_a_macos_arm64_machine`: the agent's OS is `cfg!(target_os)`, so the test fails on macOS dev machines only.
+  - Facts outside the diff are in docs/handoffs/179/evidence.md.
+
+## Phase 7 Tester GREEN (T) - 2026-11-21
+- **Decided:** Suite GREEN. Added one test, `the_start_retry_reads_one_hosts_events_not_the_whole_table`, for the swept `LAST_FAILURE` statement, as F's handoff asked. Returning PASS.
+- **Assumed:** `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` is a macOS-only environment failure unrelated to #179 (agent OS is `cfg!(target_os)`); I did not run it on master.
+- **Hedged:** The `LAST_FAILURE` assertion accepts any host-bounded index search and rejects a scan, so it does not pin the planner's choice between `fleet_events_host_cursor_idx` and `fleet_events_host_kind_time_idx`.
+- **Evidence:** Mutations (drop the state conjunct, un-host `LAST_FAILURE`, remove the in-session resend) each made the matching tests fail and were reverted. Four-crate run: 888 passed, 1 failed (the macOS one). fmt and CI-toolchain clippy clean.

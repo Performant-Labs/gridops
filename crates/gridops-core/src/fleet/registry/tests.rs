@@ -34,6 +34,8 @@ mod delete_tests;
 mod fault_tests;
 #[path = "invariants_tests.rs"]
 mod invariants_tests;
+#[path = "query_plan_tests.rs"]
+mod query_plan_tests;
 #[path = "retire_tests.rs"]
 mod retire_tests;
 

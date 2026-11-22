@@ -3,12 +3,20 @@
 //! replies the way a failing API or network does; nothing repairs the
 //! database by hand.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
+    time::Instant,
 };
 
-use axum::{body::Body, extract::State, http::Request, response::IntoResponse};
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    http::Request,
+    response::IntoResponse,
+};
 use gridops_core::fleet::{
     ids::{PlacementId, ResultId},
     placement,
@@ -31,7 +39,7 @@ use super::{
 
 /// Replies the proxy loses.
 #[derive(Default)]
-struct Faults {
+pub(super) struct Faults {
     /// Result posts fail before they reach the API.
     refuse_results: AtomicBool,
     /// The next poll reply carrying a command reaches the API, which records
@@ -39,15 +47,89 @@ struct Faults {
     swallow_command: AtomicBool,
     /// Requests for registration material wait while this is set.
     hold_bootstrap: AtomicBool,
+    /// Requests whose path ends with the suffix are answered with the status
+    /// without reaching the API, as many times as the count says
+    /// (`usize::MAX`: until healed).
+    injected: Mutex<Vec<(&'static str, StatusCode, usize)>>,
+    /// When positive, heartbeat and inventory replies grant an observation
+    /// lease this many milliseconds long, so a test needn't wait out the
+    /// API's 90 s.
+    short_lease_millis: AtomicI64,
+    /// Every request the proxy answered.
+    seen: Mutex<Vec<Seen>>,
 }
 
-struct Proxy {
-    origin: String,
-    faults: Arc<Faults>,
+/// A request as the proxy saw it, and how it was answered.
+#[derive(Clone)]
+pub(super) struct Seen {
+    pub(super) path: String,
+    pub(super) body: Bytes,
+    /// When it arrived.
+    pub(super) at: Instant,
+    /// The same moment, as the wall-clock milliseconds leases are given in.
+    pub(super) at_millis: i64,
+    /// When it was answered.
+    pub(super) answered: Instant,
+    pub(super) status: StatusCode,
+    /// The lease the reply granted, when the proxy shortened it.
+    pub(super) lease_expires_at: Option<i64>,
+}
+
+impl Faults {
+    /// Answers the next `times` requests whose path ends with `suffix` with
+    /// `status`.
+    pub(super) fn fail(&self, suffix: &'static str, status: StatusCode, times: usize) {
+        self.injected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((suffix, status, times));
+    }
+
+    /// Lets requests whose path ends with `suffix` through again.
+    pub(super) fn heal(&self, suffix: &str) {
+        self.injected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(injected, _, _)| *injected != suffix);
+    }
+
+    pub(super) fn shorten_leases(&self, millis: i64) {
+        self.short_lease_millis.store(millis, Ordering::SeqCst);
+    }
+
+    /// The requests whose path ends with `suffix`, in the order they arrived.
+    pub(super) fn seen(&self, suffix: &str) -> Vec<Seen> {
+        let mut seen: Vec<Seen> = self
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|seen| seen.path.ends_with(suffix))
+            .cloned()
+            .collect();
+        seen.sort_by_key(|seen| seen.at);
+        seen
+    }
+
+    fn injected(&self, path: &str) -> Option<StatusCode> {
+        let mut injected = self.injected.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_, status, times) = injected
+            .iter_mut()
+            .find(|(suffix, _, times)| path.ends_with(suffix) && *times > 0)?;
+        if *times != usize::MAX {
+            *times -= 1;
+        }
+        Some(*status)
+    }
+}
+
+pub(super) struct Proxy {
+    pub(super) origin: String,
+    pub(super) faults: Arc<Faults>,
 }
 
 impl Proxy {
-    async fn start(upstream: &str) -> Result<Self> {
+    pub(super) async fn start(upstream: &str) -> Result<Self> {
         let faults = Arc::new(Faults::default());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let origin = format!("http://{}", listener.local_addr()?);
@@ -65,33 +147,58 @@ async fn forward(
     request: Request<Body>,
 ) -> axum::response::Response {
     let (faults, upstream, client) = state.as_ref();
-    let unavailable = || axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let (at, at_millis) = (Instant::now(), gridops_core::now_millis());
     let path = request
         .uri()
         .path_and_query()
         .map_or("/", |path| path.as_str())
         .to_owned();
+    let method = request.method().clone();
+    let headers = request.headers().clone();
+    let Ok(body) = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024).await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let answer = |status: StatusCode, lease_expires_at: Option<i64>| {
+        faults
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Seen {
+                path: path.clone(),
+                body: body.clone(),
+                at,
+                at_millis,
+                answered: Instant::now(),
+                status,
+                lease_expires_at,
+            });
+    };
+    let unavailable = || {
+        answer(StatusCode::SERVICE_UNAVAILABLE, None);
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    };
+    if let Some(status) = faults.injected(&path) {
+        answer(status, None);
+        return status.into_response();
+    }
     if path.ends_with("/commands/result") && faults.refuse_results.load(Ordering::SeqCst) {
         return unavailable();
     }
     while path.ends_with("/bootstrap") && faults.hold_bootstrap.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let mut forwarded = client.request(request.method().clone(), format!("{upstream}{path}"));
-    for (name, value) in request.headers() {
+    let mut forwarded = client.request(method, format!("{upstream}{path}"));
+    for (name, value) in &headers {
         if name != header::HOST {
             forwarded = forwarded.header(name, value);
         }
     }
-    let Ok(body) = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024).await else {
-        return unavailable();
-    };
-    let Ok(response) = forwarded.body(body).send().await else {
+    let Ok(response) = forwarded.body(body.clone()).send().await else {
         return unavailable();
     };
     let status = response.status();
     let headers = response.headers().clone();
-    let Ok(bytes) = response.bytes().await else {
+    let Ok(mut bytes) = response.bytes().await else {
         return unavailable();
     };
     if path.ends_with("/commands/poll")
@@ -101,6 +208,19 @@ async fn forward(
     {
         return unavailable();
     }
+    let short = faults.short_lease_millis.load(Ordering::SeqCst);
+    let mut lease_expires_at = None;
+    if short > 0
+        && status.is_success()
+        && (path.ends_with("/heartbeat") || path.ends_with("/inventory"))
+    {
+        let expires = gridops_core::now_millis() + short;
+        if let Some(shortened) = shorten_lease(&bytes, expires) {
+            bytes = shortened;
+            lease_expires_at = Some(expires);
+        }
+    }
+    answer(status, lease_expires_at);
     let mut reply = (status, bytes).into_response();
     for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
         if let Some(value) = headers.get(&name) {
@@ -110,8 +230,17 @@ async fn forward(
     reply
 }
 
+/// A heartbeat or inventory reply whose observation lease ends at
+/// `expires`.
+fn shorten_lease(reply: &[u8], expires: i64) -> Option<Bytes> {
+    let mut reply: Value = serde_json::from_slice(reply).ok()?;
+    reply.get_mut("lease")?["expires_at"] =
+        serde_json::to_value(WireTimestamp::from_millis(expires).ok()?).ok()?;
+    Some(serde_json::to_vec(&reply).ok()?.into())
+}
+
 /// The agent backs off for up to half a minute between reconnects.
-async fn within<T, F, Fut>(what: &str, mut probe: F) -> Result<T>
+pub(super) async fn within<T, F, Fut>(what: &str, mut probe: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Option<T>>>,
@@ -136,7 +265,7 @@ async fn has_authority(f: &Fixture, host: &str) -> Result<Option<()>> {
         .then_some(()))
 }
 
-async fn agent_session(f: &Fixture, host: &str) -> Result<Option<String>> {
+pub(super) async fn agent_session(f: &Fixture, host: &str) -> Result<Option<String>> {
     Ok(
         sqlx::query_scalar("SELECT agent_session_id FROM fleet_hosts WHERE id=?")
             .bind(host)

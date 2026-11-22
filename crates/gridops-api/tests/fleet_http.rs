@@ -34,6 +34,8 @@ mod budget;
 mod builtin_host;
 #[path = "fleet_http/builtin_host_budget.rs"]
 mod builtin_host_budget;
+#[path = "fleet_http/busy_database.rs"]
+mod busy_database;
 #[path = "fleet_http/disk_alerts.rs"]
 mod disk_alerts;
 #[path = "fleet_http/host_delete.rs"]

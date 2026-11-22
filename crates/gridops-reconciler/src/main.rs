@@ -12,6 +12,8 @@ mod gitlab_poll_tests;
 #[cfg(test)]
 mod jit_conflict_tests;
 #[cfg(test)]
+mod log_filter_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tart_outage_tests;
@@ -424,12 +426,18 @@ enum ProvisionAttempt {
     },
 }
 
+/// The log filter when `RUST_LOG` is unset or invalid. It admits sqlx's
+/// slow-statement warnings (target `sqlx::query`, WARN) but not its
+/// per-statement lines, so a statement that holds the database for 100 ms or
+/// more shows in the log (#179).
+fn default_log_filter() -> EnvFilter {
+    EnvFilter::new("gridops_reconciler=info,sqlx::query=warn")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "gridops_reconciler=info".into()),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| default_log_filter()))
         .with(tracing_subscriber::fmt::layer())
         .init();
     let config = Config::from_env()?;

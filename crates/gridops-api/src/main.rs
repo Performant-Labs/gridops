@@ -5,6 +5,8 @@ mod error;
 mod fleet;
 mod github_app;
 mod install;
+#[cfg(test)]
+mod log_filter_tests;
 mod oauth;
 mod resources;
 mod state;
@@ -65,13 +67,18 @@ async fn clear_unused_default_images(database: &sqlx::SqlitePool, config: &Confi
     }
 }
 
+/// The log filter when `RUST_LOG` is unset or invalid. It admits sqlx's
+/// slow-statement warnings (target `sqlx::query`, WARN) but not its
+/// per-statement lines, so a statement that holds the database for 100 ms or
+/// more shows in the log (#179).
+fn default_log_filter() -> EnvFilter {
+    EnvFilter::new("gridops=info,tower_http=info,sqlx::query=warn")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gridops=info,tower_http=info".into()),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| default_log_filter()))
         .with(tracing_subscriber::fmt::layer())
         .init();
 

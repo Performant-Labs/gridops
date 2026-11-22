@@ -1,7 +1,13 @@
 //! The protocol supervisor: enrolls once, then keeps one authenticated session
-//! open with a handshake, a complete inventory and regular heartbeats. Any
-//! failure drops the session and reconnects with capped, jittered backoff; a
-//! long outage never strands the host. A rejected credential or an
+//! open with a handshake, a complete inventory and regular heartbeats.
+//!
+//! A heartbeat or an inventory refresh the server can't answer (a 5xx, a 429
+//! or a transport error) is resent unchanged, with capped, jittered backoff,
+//! until the observation lease the server last granted runs out: a database
+//! too busy to answer for a few seconds must not turn every agent's next
+//! request into a new session (#179). Any other failure, and one that
+//! outlasts the lease, drops the session and reconnects with the same
+//! backoff; a long outage never strands the host. A rejected credential or an
 //! incompatible server stops the loop, because retrying can't fix either.
 
 use std::{future::Future, sync::Arc, time::Duration};
@@ -278,6 +284,9 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
         *failures = 0;
         let interval =
             Duration::from_millis(inventory.lease.heartbeat_ms.get()).min(self.heartbeat);
+        // The observation lease the server last granted. A heartbeat or an
+        // inventory refresh it can't answer is resent until then.
+        let mut lease_expires_at = inventory.lease.expires_at;
         tracing::info!(
             session = %activity::short(&session_id.to_string()),
             heartbeat = ?interval,
@@ -322,38 +331,34 @@ impl<H: RuntimeHelper + 'static> Supervisor<H> {
                         vec![probe::root_sample(observed_at, (self.measure)()).map_err(internal)?],
                     )
                     .map_err(internal)?;
-                    self.client
-                        .inventory(
-                            identity.host_id,
-                            &current.credential,
-                            &InventoryRequest::new(new_id::<OperationId>()?, report)
-                                .map_err(internal)?,
-                        )
-                        .await?;
+                    let request = InventoryRequest::new(new_id::<OperationId>()?, report)
+                        .map_err(internal)?;
+                    let refreshed = resend_while_leased("inventory", lease_expires_at, || {
+                        self.client
+                            .inventory(identity.host_id, &current.credential, &request)
+                    })
+                    .await?;
+                    lease_expires_at = refreshed.lease.expires_at;
                     inventory_at = tokio::time::Instant::now();
                 }
                 let observed_at = now()?;
-                let heartbeat = self
-                    .client
-                    .heartbeat(
-                        identity.host_id,
-                        &current.credential,
-                        &HeartbeatRequest::new(
-                            new_id::<OperationId>()?,
-                            handshake.host_epoch,
-                            handshake.control_plane_incarnation,
-                            session_id,
-                            boot_id.clone(),
-                            BrowserCounter::new(sequence).map_err(internal)?,
-                            observed_at,
-                            vec![
-                                probe::root_sample(observed_at, (self.measure)())
-                                    .map_err(internal)?,
-                            ],
-                        )
-                        .map_err(internal)?,
-                    )
-                    .await?;
+                let request = HeartbeatRequest::new(
+                    new_id::<OperationId>()?,
+                    handshake.host_epoch,
+                    handshake.control_plane_incarnation,
+                    session_id,
+                    boot_id.clone(),
+                    BrowserCounter::new(sequence).map_err(internal)?,
+                    observed_at,
+                    vec![probe::root_sample(observed_at, (self.measure)()).map_err(internal)?],
+                )
+                .map_err(internal)?;
+                let heartbeat = resend_while_leased("heartbeat", lease_expires_at, || {
+                    self.client
+                        .heartbeat(identity.host_id, &current.credential, &request)
+                })
+                .await?;
+                lease_expires_at = heartbeat.lease.expires_at;
                 let granted = heartbeat.work_authority_expires_at.is_some();
                 if authorized != Some(granted) {
                     if granted {
@@ -605,6 +610,47 @@ fn backoff(failures: u32) -> Duration {
         .min(MAX_BACKOFF);
     let millis = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
     Duration::from_millis(rand::rng().random_range(MIN_BACKOFF.as_millis() as u64..=millis))
+}
+
+/// Sends a heartbeat or an inventory refresh, and resends the identical
+/// request while the server answers [`ClientError::Unavailable`] and the
+/// observation lease `lease_expires_at` still runs. The server answers a
+/// resent heartbeat or inventory (same operation, sequence and body) from what
+/// it stored, so a first attempt that did commit is not counted twice.
+///
+/// The deadline is the lease held when the request was first sent and is
+/// never re-read, and the last wait is cut short at it: past the lease the
+/// server no longer keeps the session open, so the error is returned and the
+/// session ends. Every other error is returned at once. `send` must wrap only
+/// the client call, because [`internal`] errors are `Unavailable` too.
+async fn resend_while_leased<T, F>(
+    request: &str,
+    lease_expires_at: WireTimestamp,
+    mut send: impl FnMut() -> F,
+) -> Result<T, ClientError>
+where
+    F: Future<Output = Result<T, ClientError>>,
+{
+    let mut attempts = 0_u32;
+    loop {
+        let error = match send().await {
+            Err(ClientError::Unavailable(error)) => error,
+            result => return result,
+        };
+        let left = lease_expires_at.millis() - gridops_core::now_millis();
+        if left <= 0 {
+            return Err(ClientError::Unavailable(error));
+        }
+        let delay = backoff(attempts).min(Duration::from_millis(left.unsigned_abs()));
+        attempts = attempts.saturating_add(1);
+        tracing::warn!(
+            %error,
+            ?delay,
+            attempts,
+            "GridOps couldn't take the {request}; resending it"
+        );
+        tokio::time::sleep(delay).await;
+    }
 }
 
 fn new_id<T: TryFrom<Uuid>>() -> Result<T, ClientError> {

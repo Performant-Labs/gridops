@@ -32,6 +32,48 @@ const REDELIVERY_MILLIS: i64 = 60_000;
 const DELIVERY_MARGIN_MILLIS: i64 = 5_000;
 const MAX_ATTEMPTS: i64 = 10;
 
+// The three statements below run under the write lock: on every heartbeat,
+// every poll that finds an open command, and every handshake. Each names its
+// states at the top level so `SQLite` reaches the host's open commands
+// through `host_commands_poll_idx(host_id,state,cursor)`. Without that it
+// reads every command the host was ever sent: on 2026-11-21 a host with
+// 59,136 commands held the write lock for about 550 ms per poll, and every
+// other writer timed out behind it (#179).
+
+/// The oldest command to hand the agent: pending, or delivered with no
+/// answer for [`REDELIVERY_MILLIS`] and attempts to spare. Binds the host,
+/// the earliest deadline still deliverable, the session, [`MAX_ATTEMPTS`] and
+/// the redelivery cutoff.
+pub(super) const NEXT_DELIVERY: &str =
+    "SELECT c.id,c.payload_json,c.attempt_count FROM host_commands c
+  WHERE c.host_id=? AND c.state IN ('pending','delivered') AND c.deadline_at>?
+    AND json_extract(c.payload_json,'$.authority_session_id')=?
+    AND (c.state='pending' OR (c.state='delivered' AND c.attempt_count<? AND NOT EXISTS (
+         SELECT 1 FROM host_command_attempts a WHERE a.command_id=c.id AND a.recorded_at>?)))
+  ORDER BY c.cursor LIMIT 1";
+
+/// Open commands that can no longer be delivered (see
+/// [`cancel_undeliverable`]). Binds the host, now (the delivered cutoff), and
+/// now plus the delivery margin (the pending cutoff).
+pub(super) const UNDELIVERABLE: &str =
+    "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count,
+        c.host_epoch AS command_epoch,h.epoch AS host_epoch,h.agent_session_id AS current_session,
+        json_extract(c.payload_json,'$.authority_session_id') AS command_session
+   FROM host_commands c JOIN fleet_hosts h ON h.id=c.host_id
+  WHERE c.host_id=? AND c.state IN ('pending','delivered') AND (
+    (c.state='delivered' AND c.deadline_at<=?) OR (c.state='pending' AND (
+      c.deadline_at<=?
+      OR h.agent_session_id IS NULL
+      OR json_extract(c.payload_json,'$.authority_session_id') IS NOT h.agent_session_id
+      OR c.host_epoch IS NOT h.epoch)))";
+
+/// Commands an earlier session was handed and never answered (see
+/// [`settle_unreceived`]). Binds the host, its epoch and the new session.
+pub(super) const UNRECEIVED: &str = "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count FROM host_commands c
+  WHERE c.host_id=? AND c.host_epoch=? AND c.state IN ('delivered','uncertain')
+    AND json_extract(c.payload_json,'$.authority_session_id') IS NOT ?
+    AND NOT EXISTS (SELECT 1 FROM host_command_results r WHERE r.command_id=c.id)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultDisposition {
     Applied,
@@ -88,21 +130,14 @@ impl RegistryService {
             tx.commit().await?;
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(
-            "SELECT c.id,c.payload_json,c.attempt_count FROM host_commands c
-              WHERE c.host_id=? AND c.deadline_at>?
-                AND json_extract(c.payload_json,'$.authority_session_id')=?
-                AND (c.state='pending' OR (c.state='delivered' AND c.attempt_count<? AND NOT EXISTS (
-                     SELECT 1 FROM host_command_attempts a WHERE a.command_id=c.id AND a.recorded_at>?)))
-              ORDER BY c.cursor LIMIT 1",
-        )
-        .bind(&host_id)
-        .bind(now + DELIVERY_MARGIN_MILLIS)
-        .bind(session_id.to_string())
-        .bind(MAX_ATTEMPTS)
-        .bind(now - REDELIVERY_MILLIS)
-        .fetch_all(&mut *tx)
-        .await?;
+        let rows = sqlx::query(NEXT_DELIVERY)
+            .bind(&host_id)
+            .bind(now + DELIVERY_MARGIN_MILLIS)
+            .bind(session_id.to_string())
+            .bind(MAX_ATTEMPTS)
+            .bind(now - REDELIVERY_MILLIS)
+            .fetch_all(&mut *tx)
+            .await?;
         let mut commands = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.get("id");
@@ -537,17 +572,12 @@ pub(super) async fn settle_unreceived(
     session_id: &str,
     now: i64,
 ) -> Result<(), RegistryError> {
-    let rows = sqlx::query(
-        "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count FROM host_commands c
-          WHERE c.host_id=? AND c.host_epoch=? AND c.state IN ('delivered','uncertain')
-            AND json_extract(c.payload_json,'$.authority_session_id') IS NOT ?
-            AND NOT EXISTS (SELECT 1 FROM host_command_results r WHERE r.command_id=c.id)",
-    )
-    .bind(host_id.to_string())
-    .bind(epoch)
-    .bind(session_id)
-    .fetch_all(&mut **tx)
-    .await?;
+    let rows = sqlx::query(UNRECEIVED)
+        .bind(host_id.to_string())
+        .bind(epoch)
+        .bind(session_id)
+        .fetch_all(&mut **tx)
+        .await?;
     let mut touched = Vec::new();
     for row in rows {
         let id: String = row.get("id");
@@ -737,23 +767,12 @@ pub(super) async fn cancel_undeliverable(
     host_id: &str,
     now: i64,
 ) -> Result<(), RegistryError> {
-    let rows = sqlx::query(
-        "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count,
-                c.host_epoch AS command_epoch,h.epoch AS host_epoch,h.agent_session_id AS current_session,
-                json_extract(c.payload_json,'$.authority_session_id') AS command_session
-           FROM host_commands c JOIN fleet_hosts h ON h.id=c.host_id
-          WHERE c.host_id=? AND (
-            (c.state='delivered' AND c.deadline_at<=?) OR (c.state='pending' AND (
-              c.deadline_at<=?
-              OR h.agent_session_id IS NULL
-              OR json_extract(c.payload_json,'$.authority_session_id') IS NOT h.agent_session_id
-              OR c.host_epoch IS NOT h.epoch)))",
-    )
-    .bind(host_id)
-    .bind(now)
-    .bind(now + DELIVERY_MARGIN_MILLIS)
-    .fetch_all(&mut **tx)
-    .await?;
+    let rows = sqlx::query(UNDELIVERABLE)
+        .bind(host_id)
+        .bind(now)
+        .bind(now + DELIVERY_MARGIN_MILLIS)
+        .fetch_all(&mut **tx)
+        .await?;
     for row in rows {
         let id: String = row.get("id");
         let delivered = row.get::<String, _>("state") == "delivered";
