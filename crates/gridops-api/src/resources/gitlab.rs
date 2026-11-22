@@ -20,7 +20,10 @@ use axum::{
     http::StatusCode,
 };
 use gridops_core::{
-    fleet::ExternalId,
+    fleet::{
+        ExternalId,
+        targets::{ConnectionTargetsRetirement, retire_gitlab_connection_targets},
+    },
     gitlab::{GitLabCredentials, GitLabError, Scope, ScopeKind},
     now_millis,
 };
@@ -375,11 +378,14 @@ pub async fn delete_gitlab_connection(
     require_system_admin(&user)?;
     let connection = stored_connection(&state, &connection_id).await?;
     let name = &connection.name;
-    let mut transaction = state.database.begin().await?;
+    let now = now_millis();
+    let mut transaction = state.database.begin_with("BEGIN IMMEDIATE").await?;
     // Checked in the transaction that deletes, so nothing starts referencing
-    // the connection in between. Pool memberships would cascade, a fleet
-    // target would fail the delete (its foreign key is NO ACTION), and a
-    // live runner needs this connection's token to be removed from GitLab.
+    // the connection in between. Pool memberships would cascade, a live
+    // runner needs this connection's token to be removed from GitLab, and
+    // work on its fleet targets must finish first. Its fleet targets are then
+    // retired (#183): their foreign key is NO ACTION, and fleet history keeps
+    // referencing them.
     let pools = sqlx::query_scalar::<_, String>(
         r#"SELECT pool.name FROM runner_pool_gitlab_connections membership
           JOIN runner_pools pool ON pool.id=membership.pool_id
@@ -400,18 +406,6 @@ pub async fn delete_gitlab_connection(
             },
         )));
     }
-    let targets = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM fleet_ci_targets WHERE gitlab_connection_id=?",
-    )
-    .bind(&connection_id)
-    .fetch_one(&mut *transaction)
-    .await?;
-    if targets > 0 {
-        return Err(ApiError::Conflict(format!(
-            "{name} is a CI target of the fleet ({targets} target{}). Remove it from the fleet first.",
-            if targets == 1 { "" } else { "s" },
-        )));
-    }
     let runners = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM runners WHERE gitlab_connection_id=? AND deleted_at IS NULL",
     )
@@ -425,6 +419,24 @@ pub async fn delete_gitlab_connection(
             if runners == 1 { "it" } else { "them" },
         )));
     }
+    let retired = match retire_gitlab_connection_targets(
+        &mut transaction,
+        &connection_id,
+        &user.id,
+        now,
+    )
+    .await
+    .map_err(|error| ApiError::Internal(error.into()))?
+    {
+        ConnectionTargetsRetirement::Retired(retired) => retired,
+        ConnectionTargetsRetirement::LiveWork(pools) => {
+            return Err(ApiError::Conflict(format!(
+                "Fleet work of {} {} still runs or waits on {name}. Stop it or let it finish first.",
+                if pools.len() == 1 { "pool" } else { "pools" },
+                pools.join(", "),
+            )));
+        }
+    };
     sqlx::query("DELETE FROM gitlab_connections WHERE id=?")
         .bind(&connection_id)
         .execute(&mut *transaction)
@@ -446,6 +458,10 @@ pub async fn delete_gitlab_connection(
             "name": name,
             "baseUrl": connection.base_url,
             "scopePath": connection.scope.path(),
+            "retiredTargetIds": retired.target_ids,
+            "hostGrantsRevoked": retired.host_grants_revoked,
+            "sessionGrantsRevoked": retired.session_grants_revoked,
+            "profileLinksRevoked": retired.profile_links_revoked,
         }),
     )
     .await?;

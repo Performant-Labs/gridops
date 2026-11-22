@@ -738,8 +738,9 @@ pub(crate) async fn ensure_target_identity_for_pool(
     pool_id: &str,
     target_id: &str,
 ) -> Result<(), FleetError> {
+    // A retired target (#183) is unknown to new work.
     let Some(kind): Option<String> =
-        sqlx::query_scalar("SELECT kind FROM fleet_ci_targets WHERE id=?")
+        sqlx::query_scalar("SELECT kind FROM fleet_ci_targets WHERE id=? AND retired_at IS NULL")
             .bind(target_id)
             .fetch_optional(&mut **tx)
             .await?

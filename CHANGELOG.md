@@ -23,6 +23,9 @@ Known problems in the current release are in the README's
   include `sqlx::query=warn` to see them. Expect a few at startup while
   migrations run, and from the reconciler's retention deletes; during normal
   agent traffic there should be none. (#179)
+- Migration `0048` adds `retired_at` to fleet CI targets. It rebuilds the
+  `fleet_ci_targets` table, copying every row; existing targets stay
+  unretired. (#183)
 
 ### Added
 
@@ -46,6 +49,16 @@ Known problems in the current release are in the README's
 
 ### Fixed
 
+- **A GitLab connection used on the fleet can be removed again.** Once the
+  fleet's target list had been opened, every GitLab connection had a fleet
+  target, and removing the connection was refused for good with "is a CI
+  target of the fleet". Removing a connection now retires its fleet targets:
+  their machine grants and pool platform links are revoked, they are no longer
+  offered for new grants or work, and their fleet history is kept. Removal is
+  still refused while a pool uses the connection or a runner registered
+  through it is live, and is now also refused, naming the pool, while fleet
+  work on its targets is running or queued. See
+  [Removing a connection](docs/gitlab-runners.md#removing-a-connection). (#183)
 - The GitLab and Bitbucket Tart image scripts
   (`scripts/prepare-tart-gitlab-runner-image.sh`,
   `scripts/prepare-tart-bitbucket-runner-image.sh`) flush the guest's disk

@@ -115,3 +115,24 @@
   - **Checks run:**
     - A temporary test-only probe, since deleted, confirmed the later-step seeds: the liveness transitions, the event insert, grant route 200 and 404 `{"code":"not_found"}`, the target list, and `delete_pool` from the test process.
     - A `sqlite3` replay of A's CHECK and trigger matched all 10 refusals and 2 successes in the retire test.
+
+## Phase 6 Implement (F) - 2026-11-22T09:28:00-08:00
+- **Decided:** implemented against T's RED (`docs/handoffs/183/handoff-F.md`). All 10 RED tests are GREEN.
+  - **0048** rebuilds `fleet_ci_targets` in 0047's style and appends `retired_at`. The GitLab CHECK arms accept a NULL connection only when retired. The FK stays NO ACTION. The single identity trigger (same name and message) allows only the retire transition, so a retired row is final.
+  - **One core function,** `fleet::targets::retire_gitlab_connection_targets(&mut SqliteConnection, …)`. It refuses on live work (pool names) through `LIVE_CONNECTION_WORK`, which shares the `live_placement!()` fragment with `LIVE_WORKLOADS`. Otherwise it revokes host and session grants (`revision+1`) and profile links, retires each target with one UPDATE, and writes a `fleet.target.retired` event per target.
+  - **The handler** uses `BEGIN IMMEDIATE` and keeps the pool refusal, then the runner refusal. It drops the target COUNT refusal and adds the four audit keys.
+  - **Guards** are inline `retired_at IS NULL` predicates in `target_id_for_key` (the key path), `list_targets`, the `save_pool_fleet` upsert, `link_pool_target`, `ensure_target_identity_for_pool` and `set_host_grant`. There is no new helper.
+  - **Copy:** OpenAPI DELETE text, the `removeConfirm` sentence, the "Removing a connection" docs section, and the CHANGELOG.
+- **Assumed:**
+  - Revoking every profile link on the target with `revoked_at IS NULL` (including ones only disabled by `save_pool_fleet`) is the intended "revoke".
+  - Naming the live work's pools is what an operator needs; T pins only the pool name.
+- **Hedged:**
+  - The trigger also allows retiring a non-GitLab row. Nothing does it (out of scope), so I didn't add a kind clause the brief didn't ask for.
+  - `gitlab_tests.rs:1222` (pre-existing) pins the removed refusal and now fails. It is flagged for T as test-only. I did not edit it.
+- **Evidence:**
+  - `cargo test -p gridops-core`: all pass (lib 311, `fleet_schema` 17, `gitlab_pool_fleet` 8).
+  - `-p gridops-api`: `control_plane_contracts` 39/39. The only failures are the stale unit test above and the known macOS-only `release_preflight`.
+  - `-p gridops-reconciler`: 125/125.
+  - fmt is clean, and clippy 1.98.1 with the CI flags is clean.
+  - `npm run build` (incl. tsc), eslint, vitest 624/624 and the redocly lint (67 warnings, the same as master) all pass.
+  - The sweep table of every production `fleet_ci_targets` / `target_id` read is in `handoff-F.md`. Source facts are in `evidence.md`.

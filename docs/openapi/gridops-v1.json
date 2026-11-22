@@ -1356,7 +1356,7 @@
       "delete": {
         "tags": ["platform-connections"],
         "summary": "Remove a GitLab connection",
-        "description": "Refused with 409 while a pool, a fleet target or a live runner references the connection. Removes the stored access token and webhook secret.",
+        "description": "Refused with 409 while a pool uses the connection, a live runner was registered through it, or fleet work on one of its fleet targets is still running or queued. Otherwise retires the connection's fleet targets and revokes their machine grants and pool platform links, keeps their fleet history, and removes the stored access token and webhook secret.",
         "security": [{ "cookieAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ConnectionId" }],
         "responses": {
@@ -1364,7 +1364,7 @@
           "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
           "403": { "description": "The caller may not manage connections", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
           "404": { "description": "No such connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
-          "409": { "description": "The connection cannot be removed while a pool or a fleet target references it", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+          "409": { "description": "The connection cannot be removed while a pool uses it, a live runner was registered through it, or fleet work on its fleet targets is still running or queued", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
         }
       }
     },

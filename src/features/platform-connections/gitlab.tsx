@@ -375,7 +375,7 @@ export const gitlabPlatform: PlatformDescriptor = {
     createDescription: "GridOps verifies the token before saving. The token is encrypted at rest and never returned to the browser. Each project or group is connected once per GitLab address; edit an existing connection to replace its token.",
     createSubmitLabel: "Connect GitLab",
     updateSuccess: (values) => values.accessToken?.trim() ? "Connection updated and token replaced." : "Connection updated.",
-    removeConfirm: (item) => `Remove ${(item as GitlabConnection).name}? GridOps deletes its stored token and webhook secret. Pools that use it must be changed first. The webhook in GitLab is not deleted; remove it there too.`,
+    removeConfirm: (item) => `Remove ${(item as GitlabConnection).name}? GridOps deletes its stored token and webhook secret. Pools that use it must be changed first. Its fleet targets are retired and their machine grants revoked; their fleet history is kept. The webhook in GitLab is not deleted; remove it there too.`,
     removeSuccess: (item) => `${(item as GitlabConnection).name} removed.`,
   },
   postCreate: (created: GitlabConnectionCreated) => createdReveal(created),
