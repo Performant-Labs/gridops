@@ -1,7 +1,6 @@
 use std::{
     env, fs,
-    net::TcpListener,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
     time::Duration,
@@ -31,6 +30,8 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[path = "support/api_process.rs"]
+mod api_process;
 #[path = "support/openapi_schema.rs"]
 mod openapi_schema;
 
@@ -43,6 +44,8 @@ struct ApiFixture {
     client: Client,
     base_url: String,
     database_path: PathBuf,
+    /// The token of the session this fixture seeds in its own database.
+    session_token: String,
 }
 
 impl ApiFixture {
@@ -51,62 +54,103 @@ impl ApiFixture {
     }
 
     async fn start_with(extra_env: &[(&str, String)]) -> Result<Self> {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        Self::start_on(None, 0, extra_env).await
+    }
+
+    /// Starts the API on `port` if it can have it, as if choosing a free
+    /// port had picked `port`: the case where another process takes the
+    /// chosen port before the API binds it (#124).
+    async fn start_trying_port_first(port: u16) -> Result<Self> {
+        Self::start_on(Some(port), 0, &[]).await
+    }
+
+    /// Starts the API as a loaded machine does, idle for `seconds` after it
+    /// is spawned and before it binds: longer than a fixture used to wait.
+    async fn start_slow_to_bind(seconds: u64) -> Result<Self> {
+        Self::start_on(None, seconds, &[]).await
+    }
+
+    async fn start_on(
+        first_port: Option<u16>,
+        idle_seconds: u64,
+        extra_env: &[(&str, String)],
+    ) -> Result<Self> {
         let database_path =
             env::temp_dir().join(format!("gridops-api-test-{}.sqlite", Uuid::new_v4()));
-        let base_url = format!("http://127.0.0.1:{port}");
-        let binary = env!("CARGO_BIN_EXE_gridops-api");
-        let child = Command::new(binary)
-            .env("GRIDOPS_BASE_URL", &base_url)
-            .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
-            .env("GRIDOPS_API_BIND", format!("127.0.0.1:{port}"))
-            .env("GRIDOPS_DATABASE_PATH", &database_path)
-            .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
-            .env("GRIDOPS_ENCRYPTION_KEY", ENCRYPTION_KEY)
-            .env("GITHUB_CLIENT_ID", "integration-client")
-            .env("GITHUB_CLIENT_SECRET", "integration-secret")
-            .env("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
-            .env("GRIDOPS_WEBHOOK_ACTIVE", "false")
-            .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
-            .envs(extra_env.iter().map(|(name, value)| (*name, value)))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to start the API fixture")?;
+        // Unique to this fixture, so no other API knows it (#124). The
+        // cookie splits on the first `.`, which a simple UUID never holds.
+        let session_token = format!("fixture-session-{}", Uuid::new_v4().simple());
         let client = Client::builder().build()?;
-        let fixture = Self {
+        // Seeded once, before the API starts: every attempt below runs on
+        // this database, and its identity check needs the session.
+        let started = async {
+            Self::seed_identity(&database_path, &session_token, "member").await?;
+            let cookie = session_cookie_for(&session_token)?;
+            let binary = env!("CARGO_BIN_EXE_gridops-api");
+            api_process::start(
+                &client,
+                first_port
+                    .into_iter()
+                    .map(Some)
+                    .chain(std::iter::repeat(None)),
+                &cookie,
+                |base_url| {
+                    let mut command = if idle_seconds == 0 {
+                        Command::new(binary)
+                    } else {
+                        // The same process becomes the API once the shell
+                        // execs it, so the fixture sees one live child.
+                        let mut shell = Command::new("/bin/sh");
+                        shell
+                            .arg("-c")
+                            .arg(format!("sleep {idle_seconds}; exec \"$0\""))
+                            .arg(binary);
+                        shell
+                    };
+                    command
+                        .env("GRIDOPS_BASE_URL", base_url)
+                        .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
+                        .env("GRIDOPS_API_BIND", base_url.trim_start_matches("http://"))
+                        .env("GRIDOPS_DATABASE_PATH", &database_path)
+                        .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
+                        .env("GRIDOPS_ENCRYPTION_KEY", ENCRYPTION_KEY)
+                        .env("GITHUB_CLIENT_ID", "integration-client")
+                        .env("GITHUB_CLIENT_SECRET", "integration-secret")
+                        .env("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+                        .env("GRIDOPS_WEBHOOK_ACTIVE", "false")
+                        .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
+                        .envs(extra_env.iter().map(|(name, value)| (*name, value)))
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .context("failed to start the API fixture")
+                },
+            )
+            .await
+        }
+        .await;
+        let (child, base_url) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                remove_database(&database_path);
+                return Err(error);
+            }
+        };
+        Ok(Self {
             child,
             client,
             base_url,
             database_path,
-        };
-        fixture.wait_until_healthy().await?;
-        fixture.seed_identity("member").await?;
-        Ok(fixture)
-    }
-
-    async fn wait_until_healthy(&self) -> Result<()> {
-        for _ in 0..60 {
-            if let Ok(response) = self
-                .client
-                .get(format!("{}/api/health", self.base_url))
-                .send()
-                .await
-                && response.status().is_success()
-            {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-        Err(anyhow!("API fixture did not become healthy"))
+            session_token,
+        })
     }
 
     async fn database(&self) -> Result<SqlitePool> {
         connect_database_path(&self.database_path).await
     }
 
-    async fn seed_identity(&self, role: &str) -> Result<()> {
-        let database = self.database().await?;
+    async fn seed_identity(database_path: &FsPath, session_token: &str, role: &str) -> Result<()> {
+        let database = connect_database_path(database_path).await?;
         let now = gridops_core::now_millis();
         sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('user-1',1,'fixture',?,?, ?,?,?)")
             .bind(role)
@@ -125,26 +169,21 @@ impl ApiFixture {
             .bind(now)
             .execute(&database)
             .await?;
-        let token = "fixture-session-token";
         sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES ('session-1',?,?, ?,?,?)")
-            .bind(hash_token(token))
+            .bind(hash_token(session_token))
             .bind("user-1")
             .bind(now + 3_600_000)
             .bind(now)
             .bind(now)
             .execute(&database)
             .await?;
+        database.close().await;
         Ok(())
     }
 
-    fn session_cookie() -> Result<String> {
-        let token = "fixture-session-token";
-        let mut mac = HmacSha256::new_from_slice(SESSION_SECRET.as_bytes())?;
-        mac.update(token.as_bytes());
-        Ok(format!(
-            "gridops_session={token}.{}",
-            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
-        ))
+    /// The cookie of the session this fixture seeded in its own database.
+    fn session_cookie(&self) -> Result<String> {
+        session_cookie_for(&self.session_token)
     }
 
     fn webhook_signature(body: &str) -> Result<String> {
@@ -185,13 +224,27 @@ impl ApiFixture {
     }
 }
 
+/// The signed cookie that carries `token`.
+fn session_cookie_for(token: &str) -> Result<String> {
+    let mut mac = HmacSha256::new_from_slice(SESSION_SECRET.as_bytes())?;
+    mac.update(token.as_bytes());
+    Ok(format!(
+        "gridops_session={token}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    ))
+}
+
+fn remove_database(database_path: &FsPath) {
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(database_path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(database_path.with_extension("sqlite-wal"));
+}
+
 impl Drop for ApiFixture {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = fs::remove_file(&self.database_path);
-        let _ = fs::remove_file(self.database_path.with_extension("sqlite-shm"));
-        let _ = fs::remove_file(self.database_path.with_extension("sqlite-wal"));
+        remove_database(&self.database_path);
     }
 }
 
@@ -209,10 +262,89 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
     let member_settings = fixture
         .client
         .get(format!("{}/api/v1/backups/database", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(member_settings.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+/// The fixture used to choose a port by binding it and letting it go, so
+/// another process could take the port before the API bound it. That
+/// process then answered the health check and every request (#124: a
+/// member got 401 instead of 403). The fixture must notice and move.
+#[tokio::test]
+async fn the_fixture_moves_off_a_port_another_server_answers_on() -> Result<()> {
+    // Healthy to anyone, and it knows no session.
+    let foreign = Router::new()
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({ "status": "ok" })) }),
+        )
+        .fallback(|| async { axum::http::StatusCode::UNAUTHORIZED });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let taken = listener.local_addr()?.port();
+    let server = tokio::spawn(async move { axum::serve(listener, foreign).await });
+
+    let fixture = ApiFixture::start_trying_port_first(taken).await?;
+    server.abort();
+    assert_ne!(
+        fixture.base_url,
+        format!("http://127.0.0.1:{taken}"),
+        "the fixture kept the port another server answers on"
+    );
+    let me = fixture
+        .client
+        .get(format!("{}/api/v1/auth/me", fixture.base_url))
+        .header(header::COOKIE, fixture.session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(
+        me.status(),
+        StatusCode::OK,
+        "the fixture's own API knows its session"
+    );
+    Ok(())
+}
+
+/// On a loaded CI runner the API can take seconds to bind (2026-11-22: three
+/// fixtures in a row gave up at 3 s). A fixture whose API is still running
+/// waits for it; giving up only moves it to another port that is as slow.
+#[tokio::test]
+async fn a_fixture_waits_for_its_own_api_however_slow_it_is_to_bind() -> Result<()> {
+    let fixture = ApiFixture::start_slow_to_bind(4).await?;
+    let me = fixture
+        .client
+        .get(format!("{}/api/v1/auth/me", fixture.base_url))
+        .header(header::COOKIE, fixture.session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(me.status(), StatusCode::OK);
+    Ok(())
+}
+
+/// Another fixture's API is the likeliest process to take a fixture's port,
+/// and it seeds a session too. Were the sessions the same, it would accept
+/// this fixture's cookie and the fixture could not tell it from its own.
+#[tokio::test]
+async fn a_fixtures_session_is_unknown_to_another_fixtures_api() -> Result<()> {
+    let (first, second) = tokio::try_join!(ApiFixture::start(), ApiFixture::start())?;
+    let me = |fixture: &ApiFixture, cookie: String| {
+        fixture
+            .client
+            .get(format!("{}/api/v1/auth/me", fixture.base_url))
+            .header(header::COOKIE, cookie)
+            .send()
+    };
+    assert_eq!(
+        me(&second, second.session_cookie()?).await?.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        me(&second, first.session_cookie()?).await?.status(),
+        StatusCode::UNAUTHORIZED,
+        "another fixture's API accepted this fixture's session"
+    );
     Ok(())
 }
 
@@ -313,10 +445,7 @@ async fn a_queued_run_with_a_running_job_shows_as_in_progress_with_its_waiting_j
         let request = fixture
             .client
             .get(format!("{}{path}", fixture.base_url))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            );
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default());
         async move {
             let response = request.send().await?;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
@@ -399,7 +528,7 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
             "{}/api/v1/webhooks/retry-1/retry",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .header(header::ORIGIN, &fixture.base_url)
         .send()
         .await?;
@@ -414,7 +543,7 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
             "{}/api/v1/webhooks/retry-1/retry",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .header(header::ORIGIN, &fixture.base_url)
         .send()
         .await?;
@@ -511,10 +640,7 @@ async fn links_follow_the_github_app_to_its_new_name_and_owner() -> Result<()> {
         fixture
             .client
             .get(format!("{}{path}", fixture.base_url))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            )
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default())
             .send()
     };
 
@@ -578,10 +704,7 @@ async fn run_controls_act_as_the_signed_in_user() -> Result<()> {
                 "{}/api/v1/workflow-runs/{run_id}/action",
                 fixture.base_url
             ))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            )
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default())
             .header(header::ORIGIN, &fixture.base_url)
             .json(&json!({ "action": "cancel" }))
             .send()
@@ -648,7 +771,7 @@ async fn backup_route_is_authenticated_and_migrations_preserve_contract_columns(
     let backup = fixture
         .client
         .get(format!("{}/api/v1/backups/database", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(backup.status(), StatusCode::OK);
@@ -839,7 +962,7 @@ async fn overview_metrics(fixture: &ApiFixture) -> Result<Value> {
     let response = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1039,7 +1162,7 @@ async fn queued_jobs_page(fixture: &ApiFixture, query: &str) -> Result<Value> {
             "{}/api/v1/overview/queued-jobs{query}",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK, "{query}");
@@ -1177,7 +1300,7 @@ async fn queued_jobs_are_listed_with_the_pool_the_scaler_owns_them_for() -> Resu
     let overview = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json::<Value>()
@@ -1239,7 +1362,7 @@ async fn queued_jobs_page_through_and_belong_to_the_viewers_installations() -> R
     let overview = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json::<Value>()
@@ -1312,7 +1435,7 @@ async fn overview_of(fixture: &ApiFixture) -> Result<Value> {
     let response = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1502,7 +1625,7 @@ async fn overview_tiles_split_a_live_shaped_fleet_into_parts_that_add_up() -> Re
             "{}/api/v1/overview/queued-jobs?perPage=100",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json()
@@ -1788,7 +1911,7 @@ async fn run_detail(fixture: &ApiFixture, run_id: i64) -> Result<Value> {
             "{}/api/v1/workflow-runs/{run_id}",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -2219,7 +2342,7 @@ impl ApiFixture {
             .request(method, url)
             .header(header::ORIGIN, &self.base_url);
         if signed_in {
-            request = request.header(header::COOKIE, Self::session_cookie()?);
+            request = request.header(header::COOKIE, self.session_cookie()?);
         }
         if let Some(body) = body {
             request = request.json(&body);
