@@ -43,6 +43,8 @@ struct ApiFixture {
     client: Client,
     base_url: String,
     database_path: PathBuf,
+    /// The token of the session this fixture seeds in its own database.
+    session_token: String,
 }
 
 impl ApiFixture {
@@ -51,7 +53,21 @@ impl ApiFixture {
     }
 
     async fn start_with(extra_env: &[(&str, String)]) -> Result<Self> {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        Self::start_on(None, extra_env).await
+    }
+
+    /// Starts the API on `port` if it can have it, as if choosing a free
+    /// port had picked `port`: the case where another process takes the
+    /// chosen port before the API binds it (#124).
+    async fn start_trying_port_first(port: u16) -> Result<Self> {
+        Self::start_on(Some(port), &[]).await
+    }
+
+    async fn start_on(first_port: Option<u16>, extra_env: &[(&str, String)]) -> Result<Self> {
+        let port = match first_port {
+            Some(port) => port,
+            None => TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port(),
+        };
         let database_path =
             env::temp_dir().join(format!("gridops-api-test-{}.sqlite", Uuid::new_v4()));
         let base_url = format!("http://127.0.0.1:{port}");
@@ -79,6 +95,7 @@ impl ApiFixture {
             client,
             base_url,
             database_path,
+            session_token: "fixture-session-token".to_owned(),
         };
         fixture.wait_until_healthy().await?;
         fixture.seed_identity("member").await?;
@@ -125,7 +142,7 @@ impl ApiFixture {
             .bind(now)
             .execute(&database)
             .await?;
-        let token = "fixture-session-token";
+        let token = self.session_token.as_str();
         sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES ('session-1',?,?, ?,?,?)")
             .bind(hash_token(token))
             .bind("user-1")
@@ -137,8 +154,9 @@ impl ApiFixture {
         Ok(())
     }
 
-    fn session_cookie() -> Result<String> {
-        let token = "fixture-session-token";
+    /// The cookie of the session this fixture seeded in its own database.
+    fn session_cookie(&self) -> Result<String> {
+        let token = self.session_token.as_str();
         let mut mac = HmacSha256::new_from_slice(SESSION_SECRET.as_bytes())?;
         mac.update(token.as_bytes());
         Ok(format!(
@@ -209,10 +227,73 @@ async fn api_routes_enforce_authentication_and_admin_boundaries() -> Result<()> 
     let member_settings = fixture
         .client
         .get(format!("{}/api/v1/backups/database", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(member_settings.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+/// The fixture used to choose a port by binding it and letting it go, so
+/// another process could take the port before the API bound it. That
+/// process then answered the health check and every request (#124: a
+/// member got 401 instead of 403). The fixture must notice and move.
+#[tokio::test]
+async fn the_fixture_moves_off_a_port_another_server_answers_on() -> Result<()> {
+    // Healthy to anyone, and it knows no session.
+    let foreign = Router::new()
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({ "status": "ok" })) }),
+        )
+        .fallback(|| async { axum::http::StatusCode::UNAUTHORIZED });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let taken = listener.local_addr()?.port();
+    let server = tokio::spawn(async move { axum::serve(listener, foreign).await });
+
+    let fixture = ApiFixture::start_trying_port_first(taken).await?;
+    server.abort();
+    assert_ne!(
+        fixture.base_url,
+        format!("http://127.0.0.1:{taken}"),
+        "the fixture kept the port another server answers on"
+    );
+    let me = fixture
+        .client
+        .get(format!("{}/api/v1/auth/me", fixture.base_url))
+        .header(header::COOKIE, fixture.session_cookie()?)
+        .send()
+        .await?;
+    assert_eq!(
+        me.status(),
+        StatusCode::OK,
+        "the fixture's own API knows its session"
+    );
+    Ok(())
+}
+
+/// Another fixture's API is the likeliest process to take a fixture's port,
+/// and it seeds a session too. Were the sessions the same, it would accept
+/// this fixture's cookie and the fixture could not tell it from its own.
+#[tokio::test]
+async fn a_fixtures_session_is_unknown_to_another_fixtures_api() -> Result<()> {
+    let (first, second) = tokio::try_join!(ApiFixture::start(), ApiFixture::start())?;
+    let me = |fixture: &ApiFixture, cookie: String| {
+        fixture
+            .client
+            .get(format!("{}/api/v1/auth/me", fixture.base_url))
+            .header(header::COOKIE, cookie)
+            .send()
+    };
+    assert_eq!(
+        me(&second, second.session_cookie()?).await?.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        me(&second, first.session_cookie()?).await?.status(),
+        StatusCode::UNAUTHORIZED,
+        "another fixture's API accepted this fixture's session"
+    );
     Ok(())
 }
 
@@ -313,10 +394,7 @@ async fn a_queued_run_with_a_running_job_shows_as_in_progress_with_its_waiting_j
         let request = fixture
             .client
             .get(format!("{}{path}", fixture.base_url))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            );
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default());
         async move {
             let response = request.send().await?;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
@@ -399,7 +477,7 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
             "{}/api/v1/webhooks/retry-1/retry",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .header(header::ORIGIN, &fixture.base_url)
         .send()
         .await?;
@@ -414,7 +492,7 @@ async fn webhook_retry_requires_admin_and_reprocesses_verified_delivery() -> Res
             "{}/api/v1/webhooks/retry-1/retry",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .header(header::ORIGIN, &fixture.base_url)
         .send()
         .await?;
@@ -511,10 +589,7 @@ async fn links_follow_the_github_app_to_its_new_name_and_owner() -> Result<()> {
         fixture
             .client
             .get(format!("{}{path}", fixture.base_url))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            )
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default())
             .send()
     };
 
@@ -578,10 +653,7 @@ async fn run_controls_act_as_the_signed_in_user() -> Result<()> {
                 "{}/api/v1/workflow-runs/{run_id}/action",
                 fixture.base_url
             ))
-            .header(
-                header::COOKIE,
-                ApiFixture::session_cookie().unwrap_or_default(),
-            )
+            .header(header::COOKIE, fixture.session_cookie().unwrap_or_default())
             .header(header::ORIGIN, &fixture.base_url)
             .json(&json!({ "action": "cancel" }))
             .send()
@@ -648,7 +720,7 @@ async fn backup_route_is_authenticated_and_migrations_preserve_contract_columns(
     let backup = fixture
         .client
         .get(format!("{}/api/v1/backups/database", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(backup.status(), StatusCode::OK);
@@ -839,7 +911,7 @@ async fn overview_metrics(fixture: &ApiFixture) -> Result<Value> {
     let response = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1039,7 +1111,7 @@ async fn queued_jobs_page(fixture: &ApiFixture, query: &str) -> Result<Value> {
             "{}/api/v1/overview/queued-jobs{query}",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK, "{query}");
@@ -1177,7 +1249,7 @@ async fn queued_jobs_are_listed_with_the_pool_the_scaler_owns_them_for() -> Resu
     let overview = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json::<Value>()
@@ -1239,7 +1311,7 @@ async fn queued_jobs_page_through_and_belong_to_the_viewers_installations() -> R
     let overview = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json::<Value>()
@@ -1312,7 +1384,7 @@ async fn overview_of(fixture: &ApiFixture) -> Result<Value> {
     let response = fixture
         .client
         .get(format!("{}/api/v1/overview", fixture.base_url))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1502,7 +1574,7 @@ async fn overview_tiles_split_a_live_shaped_fleet_into_parts_that_add_up() -> Re
             "{}/api/v1/overview/queued-jobs?perPage=100",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?
         .json()
@@ -1788,7 +1860,7 @@ async fn run_detail(fixture: &ApiFixture, run_id: i64) -> Result<Value> {
             "{}/api/v1/workflow-runs/{run_id}",
             fixture.base_url
         ))
-        .header(header::COOKIE, ApiFixture::session_cookie()?)
+        .header(header::COOKIE, fixture.session_cookie()?)
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -2219,7 +2291,7 @@ impl ApiFixture {
             .request(method, url)
             .header(header::ORIGIN, &self.base_url);
         if signed_in {
-            request = request.header(header::COOKIE, Self::session_cookie()?);
+            request = request.header(header::COOKIE, self.session_cookie()?);
         }
         if let Some(body) = body {
             request = request.json(&body);

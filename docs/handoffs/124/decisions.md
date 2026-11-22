@@ -20,3 +20,22 @@
   - Searched every crate for `TcpListener::bind` without `tokio::net`, for `127.0.0.1:9`, and for `SESSION_TOKEN`/`session_cookie` uses.
   - Coexistence: `git worktree list`; the diffs of #134, #143, #183, #126, #130 and #152 against their merge-bases for the touched files; the #126, #130 and #152 briefs. #183 is already merged.
   - `git diff origin/master HEAD -- crates scripts src tests .github` is empty.
+
+## Phase 5 Tests RED (T) - 2026-11-22
+- **Decided:** RED valid; 6 new tests, each failing on its feature assertion (docs/handoffs/124/handoff-T-red.md).
+  - Tart: `tart_run_never_writes_the_state_a_held_slot_is_kept_in` (the lost update, deterministic: the counter changes on every retry) and `tart_commands_run_at_once_each_log_their_whole_path` (the sibling's cause). Both failed 20 of 20 runs on the old fixture.
+  - API: `the_fixture_moves_off_a_port_another_server_answers_on` (required by A warn 7, one binary), `a_fixtures_session_is_unknown_to_another_fixtures_api`, `a_fleet_fixtures_session_is_unknown_to_another_fleet_fixtures_api`, `a_restart_that_another_server_answers_for_fails_and_names_the_origin` (A warn 2).
+  - **Split inside test-only work:** T owns every test body. T added thin seams that keep today's behaviour (`FakeTart::hold_slot/free_slot/logged_paths/clear`, `ApiFixture::start_trying_port_first`/`start_on`, `ApiFixture.session_token` + `session_cookie(&self)`), so the tests compile and fail on assertions. F owns the fixture internals behind them and should not need to touch a test body.
+  - Sibling `every_tart_command_gets_a_path_starting_with_tarts_directory`: **confirmed a fixture race, but not A's mechanism.** Concurrent fake commands (background `tart run` plus polling `tart exec`) append multi-`write()` PATH lines to one shared `paths` file and interleave. 7 of 300 runs on base failed this way. The test now waits with `wait_for_stops(&tart, 2)` (A's lead, a smaller real risk) and reads through `logged_paths()`.
+  - Sweep: `gitlab_runner_script.rs:675` and `tart_outage_tests.rs:118` `refused_url()` can change a result under a foreign listener, so both now use the discard port 9 (the repo convention). The fleet log assertion now checks the token parsed from `f.cookie` (A warn 5). 15 `session_cookie` callers now use the instance method. #134's `cookie`/`new`/`with_*` names are untouched.
+- **Assumed:**
+  - Port 9 refuses on CI hosts as it does here (curl exit 7). The repo already relies on it at 5 sites.
+  - CI's clippy is 1.98.1 with `-A clippy::unused_async_trait_impl` (`ci.yml:93,113`). Lint was judged with that toolchain.
+- **Hedged:**
+  - R2 is probabilistic by nature (an interleave needs overlap). With 8 concurrent writers × 25 rounds × a 34 KB PATH it failed 20/20 on the old fixture, and it cannot fail on a per-entry atomic log.
+  - `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` fails on base on this macOS host (the fake machine reports the real OS). It is pre-existing, out of scope and untouched.
+  - The manager `tart_outage` tests need a short `TMPDIR` on macOS (`SUN_LEN`). That is pre-existing.
+- **Evidence:**
+  - Base `9e357e0`, `RUST_TEST_THREADS=2`, load about 6.7: the full tart suite had 2 of 25 waiting-test failures; the sibling alone had 7 of 300; a shell lost-update repro hit 1 of 40; partial-tail reads were 65 of 35 252.
+  - RED runs: `cargo test -p gridops-tart-agent` gave 52 passed and 2 failed (R1, R2). `cargo test -p gridops-api` gave unit tests 130 passed; control_plane_contracts 39 passed and 2 failed (R3, R4); fleet_http 149 passed and 3 failed (R5, R6, plus the pre-existing preflight test).
+  - Read: brief; handoff-A; `main.rs:2880-3320, 3520-3560, 3630-3655, 1830-1860`; `control_plane_contracts.rs:1-260, 300-600, 2195-2230`; `fleet_http.rs:1-260, 455-480`; `auth.rs:60-150`; `tart_outage_tests.rs:105-130`; `gitlab_runner_script.rs:660-720`; `ci.yml`.

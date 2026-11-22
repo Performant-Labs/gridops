@@ -671,9 +671,9 @@ fn run_script(scenario: &Scenario) -> Result<Run> {
     let (port, requests) = if let Some(status) = scenario.verify_status {
         gitlab(status)?
     } else {
-        // Bound and released: nothing listens there now.
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-        (port, Arc::default())
+        // The discard port, where nothing listens. A port bound and let go
+        // could be taken by another process, which would then answer (#124).
+        (9, Arc::default())
     };
     let url = format!("http://127.0.0.1:{port}");
 

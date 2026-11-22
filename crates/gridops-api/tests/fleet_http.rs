@@ -299,6 +299,56 @@ async fn other_admin_cookie(f: &Fixture) -> Result<String> {
     ))
 }
 
+/// Another fixture's API is the likeliest process to take a fixture's port,
+/// and it seeds a session too. Were the sessions the same, it would accept
+/// this fixture's cookie and the fixture could not tell it from its own.
+#[tokio::test]
+async fn a_fleet_fixtures_session_is_unknown_to_another_fleet_fixtures_api() -> Result<()> {
+    let (first, second) = tokio::try_join!(Fixture::new(), Fixture::new())?;
+    let me = |cookie: &str| {
+        second
+            .client
+            .get(format!("{}/api/v1/auth/me", second.origin))
+            .header(header::COOKIE, cookie)
+            .send()
+    };
+    assert_eq!(me(&second.cookie).await?.status(), StatusCode::OK);
+    assert_eq!(
+        me(&first.cookie).await?.status(),
+        StatusCode::UNAUTHORIZED,
+        "another fixture's API accepted this fixture's session"
+    );
+    Ok(())
+}
+
+/// A restart keeps its origin, since agents reconnect to it, and leaves the
+/// port free while the API is down. If another process answers there when
+/// the API comes back, the restart must fail and say so, not carry on
+/// talking to that process.
+#[tokio::test]
+async fn a_restart_that_another_server_answers_for_fails_and_names_the_origin() -> Result<()> {
+    let mut f = Fixture::new().await?;
+    f.process.0.kill()?;
+    f.process.0.wait()?;
+    // Healthy to anyone, and it knows no session.
+    let app = axum::Router::new()
+        .route(
+            "/api/health",
+            axum::routing::get(|| async { axum::Json(json!({ "status": "ok" })) }),
+        )
+        .fallback(|| async { axum::http::StatusCode::UNAUTHORIZED });
+    let listener = tokio::net::TcpListener::bind(f.origin.trim_start_matches("http://")).await?;
+    let foreign = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let restarted = f.restart(Duration::ZERO).await;
+    foreign.abort();
+    let Err(error) = restarted else {
+        bail!("the restart accepted another server on {}", f.origin)
+    };
+    assert!(format!("{error:#}").contains(&f.origin), "{error:#}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn rotation_replays_are_actor_bound_and_remain_metadata_only_after_recovery() -> Result<()> {
     let f = Fixture::new().await?;
@@ -473,7 +523,13 @@ async fn enrollment_is_one_time_with_metadata_only_retries_and_secret_free_logs(
     let logs = fs::read_to_string(f.directory.join("api.log"))?;
     assert!(!logs.contains(code));
     assert!(!logs.contains(credential));
-    assert!(!logs.contains(SESSION_TOKEN));
+    let session_token = f
+        .cookie
+        .strip_prefix("gridops_session=")
+        .and_then(|value| value.split_once('.'))
+        .map(|(token, _)| token)
+        .context("the fixture's cookie has no session token")?;
+    assert!(!logs.contains(session_token));
     Ok(())
 }
 
