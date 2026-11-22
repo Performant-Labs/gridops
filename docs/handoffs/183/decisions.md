@@ -136,3 +136,14 @@
   - fmt is clean, and clippy 1.98.1 with the CI flags is clean.
   - `npm run build` (incl. tsc), eslint, vitest 624/624 and the redocly lint (67 warnings, the same as master) all pass.
   - The sweep table of every production `fleet_ci_targets` / `target_id` read is in `handoff-F.md`. Source facts are in `evidence.md`.
+
+## Phase 7 Verify GREEN (T) - 2026-11-22T10:00:00-08:00
+- **Decided:** the suite is GREEN with no blocking Tier 2 issue. I repaired two stale tests (test-only):
+  - deleted `gitlab_tests.rs` `a_connection_a_fleet_target_references_is_refused_with_409_not_500`, because it is superseded by the HTTP tests;
+  - updated `fleet/openapi.rs` `the_gitlab_operations_are_specified_and_all_are_served` to pin the new DELETE 409 description. F did not flag this one.
+- **Assumed:** the `release_preflight` failure is the macOS-only one recorded in T-red (not touched by this diff).
+- **Hedged:** the frontend checks were not re-run, because only a copy string changed. F's results are accepted.
+- **Evidence:**
+  - full `cargo test` for core, api and reconciler is green except the one known macOS-only failure;
+  - fmt and clippy are clean;
+  - a temporary mutation of the `list_targets` and key-path filters failed `a_retired_gitlab_target_is_never_revived_offered_or_relinked`, and production was restored.
