@@ -53,8 +53,8 @@ pub(super) const NEXT_DELIVERY: &str =
   ORDER BY c.cursor LIMIT 1";
 
 /// Open commands that can no longer be delivered (see
-/// [`cancel_undeliverable`]). Binds the host, now, and the latest deadline
-/// within the delivery margin.
+/// [`cancel_undeliverable`]). Binds the host, now (the delivered cutoff), and
+/// now plus the delivery margin (the pending cutoff).
 pub(super) const UNDELIVERABLE: &str =
     "SELECT c.id,c.kind,c.state,c.placement_id,c.issued_at,c.deadline_at,c.attempt_count,
         c.host_epoch AS command_epoch,h.epoch AS host_epoch,h.agent_session_id AS current_session,
