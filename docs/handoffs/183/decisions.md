@@ -50,3 +50,37 @@
     - **SQLite trigger and FK behaviour, checked in `sqlite3`.** A SET NULL FK action fires the child's BEFORE UPDATE trigger and aborts. The chosen CHECK and trigger keep `FOREIGN KEY constraint failed` for a live target, allow retire then delete, and refuse un-retiring, re-retiring and identity edits.
     - **No code exists yet.** `git diff origin/master -- crates src migrations` is empty.
     - **No live worktree overlaps,** according to `git worktree list` and each worktree's status.
+
+## Phase 3 Architecture (A, up-front plan review, R2) - 2026-11-22T08:49:00-08:00
+- **Decided:** PASS, with 0 block and 4 warn findings (`docs/handoffs/183/handoff-A.md`, R2). The brief amended in `aef7a18` fixes both R1 blocks.
+  - **R1 block 1 is resolved.** Item 2 refuses on a live placement or an unreleased allocation keyed by `p.target_id`, or on a `queued` intent, and it shares one fragment with `LIVE_WORKLOADS`. An `admitted` intent is explicitly history.
+  - **R1 block 2 is resolved.** The test is split into (a), the issue's case where only the grant survives `delete_pool`, and (b), the history case via the pool update.
+  - **Warns:**
+    1. Build §1 and §2 still carry option and "architect decides" wording. The binding decisions §1 and §3 override it, and T and F follow the decisions.
+    2. The session-grant revoke stays in the core function. "No production code writes" means only that nothing inserts them.
+    3. The `link_pool_target` and `save_pool_fleet` guards are backstops for GitLab. Add every guard as an inline `retired_at IS NULL` predicate, with no new helper layer.
+    4. Share the liveness clause through a `macro_rules!` fragment and `concat!`, as `delete_pool` does, because `LIVE_WORKLOADS` is a `const &str`.
+- **Assumed:** with no `survey.md`, the analogues the brief names still serve as the Reuse map. They are `LIVE_WORKLOADS`/`delete_pool`, 0047's rebuild, and the fleet-host retire and delete.
+- **Hedged:** warn 1 does not block. The brief labels the decisions section binding, so the leftover build text can't pick the design on its own. It could still mislead a reader, which is why it is a warn.
+- **Evidence:**
+  - **Re-read at `aef7a18`:**
+    - `resources/gitlab.rs:369-450`;
+    - `targets.rs:59-230, 551-758, 795-960`;
+    - `service.rs:736-830`;
+    - `registry/mod.rs:1155-1206`;
+    - `registry/delete.rs:150-180`;
+    - `registry/queries.rs:820-850`;
+    - `failure.rs:200-220`;
+    - `webhooks/gitlab.rs:350-365`;
+    - `gitlab/jobs.rs:202-206`;
+    - `resources.rs:1840-1930`;
+    - `0022` (the grant tables, `profile_ci_targets`, `fleet_events`, every FK into `fleet_ci_targets`);
+    - `0047` §5;
+    - `fleet_schema.rs:240-275, 600-620, 855-880`;
+    - `control_plane_contracts.rs:2345-2440`;
+    - `fleet/error.rs:78`.
+  - **Checks run:**
+    - **No code exists yet.** `git diff origin/master -- crates src migrations` is empty.
+    - **No overlapping 0048 migration.** No worktree has one, and every other worktree is clean.
+    - **Nothing pins the removed refusal message.** "is a CI target of the fleet" appears only in the handler.
+    - **Only the admission reader touches session grants.** `host_session_target_grants` appears in production code only at `admission.rs:825`, which reads it.
