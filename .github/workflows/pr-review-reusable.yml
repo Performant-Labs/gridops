@@ -6,7 +6,7 @@ name: PR-Agent Spec Review (reusable)
 # FreeToken-Intel and performantlabs.com. Not auto-synced: re-copy from playbook
 # by hand when playbook's reusable changes, keeping the LOCAL PATCH below.
 #
-# LOCAL PATCH (2026-11-22, found by PR-Agent on gridops#208): the three score
+# LOCAL PATCH (2026-11-22, found by PR-Agent on gridops#208): all four score
 # parsers read only the Reviewer Guide's Score row (<strong>Score</strong>: N),
 # not the first "score" + number anywhere in the comment. The ticket-compliance
 # section quotes issue text before that row, and fleet-health issues say things
@@ -1260,8 +1260,8 @@ jobs:
             "$TMP/pr-comments-shared.json" > "$TMP/aftersight-review-body.txt"
           REVIEW_URL=$(jq -r --arg since "$RUN_START" "${THIS_RUN} | last.html_url // \"\"" \
             "$TMP/pr-comments-shared.json")
-          SCORE=$(grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' "$TMP/aftersight-review-body.txt" \
-            | grep -oE '[0-9]+' | head -1)
+          SCORE=$(grep -oE '<strong>Score</strong>[^0-9]{0,20}[0-9]{1,3}' "$TMP/aftersight-review-body.txt" \
+            | grep -oE '[0-9]{1,3}$' | head -1)
           [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip Aftersight report"; exit 0; }
 
           SEC_PASS=true; grep -qi  'No security concerns' "$TMP/aftersight-review-body.txt" || SEC_PASS=false
