@@ -16,7 +16,9 @@ name: PR-Agent Spec Review (reusable)
 # each other's PR body or file list. Third LOCAL PATCH (same PR): every step that
 # ran under `always()` now runs under `!cancelled()`, so a review cancelled by a newer
 # push no longer posts a failed pr-agent/review status and a false "crashed" comment.
-# Drop all three once playbook's reusable does the same.
+# Fourth LOCAL PATCH (same PR): the status step posts nothing when "Refuse untrusted
+# triggers" failed, so a refused run is not reported as a crash. Drop all four once
+# playbook's reusable does the same.
 # Called by each project's .github/workflows/pr-review.yml via:
 #   uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
 #   secrets:
@@ -554,6 +556,7 @@ jobs:
       # token is never in the environment of an install step. To move a pin, bump the
       # PR_AGENT_VERSION / HANDLERS_COMMIT / CLAUDE_CLI_VERSION values in the install step.
       - name: Refuse untrusted triggers before the token is used
+        id: refuse
         if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1097,7 +1100,9 @@ jobs:
       # comment left by an earlier run is invisible here. Without that bound a
       # crash inherited the last green score and reported it as its own.
       - name: PR-Agent review status check
-        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.status_check == 'true' }}
+        # A refused trigger (e.g. `/review` on a fork's PR) is not a crash: post nothing,
+        # rather than a failed status and a "re-run with /review" comment (gridops#208).
+        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.status_check == 'true' && steps.refuse.outcome != 'failure' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

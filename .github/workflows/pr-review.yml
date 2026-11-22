@@ -10,8 +10,9 @@
 #
 # NOTE: `concurrency` sits on the JOB, behind an `if`, and `cancel-in-progress` is
 # event-scoped, both on purpose — see the job below and the pr-reviewer README
-# §"Issue comment trigger fires on all slash commands". A comment must never cancel
-# a running review, nor replace a queued one.
+# §"Issue comment trigger fires on all slash commands". A comment never cancels
+# a running review. GitHub keeps only the newest PENDING run per group, so a `/review`
+# posted while a push review is queued replaces it; that is harmless, as the job notes.
 
 name: PR-Agent Spec Review
 
