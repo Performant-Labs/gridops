@@ -1707,9 +1707,10 @@ const INCARNATION: &str = "b5000000-0000-4000-8000-000000000001";
 const PROFILE: &str = "b6000000-0000-4000-8000-000000000001";
 const BOOT: &str = "boot-gitlab-fleet";
 
-/// A GitLab pool (`pool-gl`, wanting one runner) that runs on one approved,
-/// active Linux Docker machine with work authority, granted the pool's
-/// connection's target.
+/// A GitLab pool (`pool-gl`) that runs on one approved, active Linux Docker
+/// machine with work authority, granted the pool's connection's target. From
+/// [`Fleet::new`] the pool keeps one runner (`min_count` 1, autoscaling off);
+/// from [`Fleet::autoscaling`] it scales from nothing on its pending jobs.
 struct Fleet {
     setup: Setup,
     registry: RegistryService,
@@ -1718,11 +1719,32 @@ struct Fleet {
 
 impl Fleet {
     async fn new(requires_docker_socket: bool) -> Result<Self> {
-        let setup = gitlab_setup(&format!(
-            "{} UPDATE runner_pools SET min_count=1 WHERE id='pool-gl';",
-            gitlab_pool("pool-gl", "docker", RUNNER_IMAGE, "", 1)
-        ))
-        .await?;
+        Self::with_pool(
+            requires_docker_socket,
+            &format!(
+                "{} UPDATE runner_pools SET min_count=1 WHERE id='pool-gl';",
+                gitlab_pool("pool-gl", "docker", RUNNER_IMAGE, "", 1)
+            ),
+        )
+        .await
+    }
+
+    /// #181: `pool-gl` autoscaling from `min_count` 0 up to `max_count`, as
+    /// prod's `gl-e2e-prod` was: wanting nothing until its pending jobs raise
+    /// its desired count. Its queue scale factor is the default, 1.
+    async fn autoscaling(max_count: i64) -> Result<Self> {
+        Self::with_pool(
+            true,
+            &format!(
+                "{} UPDATE runner_pools SET min_count=0,max_count={max_count},autoscaling_enabled=1 WHERE id='pool-gl';",
+                gitlab_pool("pool-gl", "docker", RUNNER_IMAGE, "", 0)
+            ),
+        )
+        .await
+    }
+
+    async fn with_pool(requires_docker_socket: bool, pool_sql: &str) -> Result<Self> {
+        let setup = gitlab_setup(pool_sql).await?;
         ACME.add(&setup, &["pool-gl"]).await?;
         let database = &setup.app.database;
         let now = now_millis();
@@ -2059,9 +2081,134 @@ impl Fleet {
             .context("the runner's row")
     }
 
+    /// Records jobs of `ACME`'s project in `statuses`, tagged `docker` (one
+    /// of the pool's labels), as the poll records them, one job id each.
+    async fn gitlab_jobs(&self, statuses: &[&str]) -> Result<()> {
+        let now = now_millis();
+        let rows = statuses
+            .iter()
+            .zip(1_i64..)
+            .map(|(status, job_id)| gitlab_poll_tests::row(ACME.id, 42, job_id, status, now))
+            .collect::<String>();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(rows))
+            .execute(&self.setup.app.database)
+            .await?;
+        Ok(())
+    }
+
+    /// How many fleet runners the reconciler has placed for `pool-gl`: one
+    /// workload intent each.
+    async fn placed(&self) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM workload_intents WHERE pool_id='pool-gl'")
+                .fetch_one(&self.setup.app.database)
+                .await?,
+        )
+    }
+
     async fn finish(self) -> Result<()> {
         self.setup.finish().await
     }
+}
+
+/// #181 regression: a fleet GitLab pool at `min_count` 0 with no runners and
+/// one pending job it owns places exactly one runner in one pass; the next
+/// pass, with that runner starting and covering the job, places no second.
+/// Before #181 the pass placed nothing: GitLab jobs never made a fleet
+/// platform behind, and the pool already had its minimum of 0 runners.
+#[tokio::test]
+async fn a_pending_job_places_one_fleet_runner_for_a_pool_at_min_zero() -> Result<()> {
+    let fleet = Fleet::autoscaling(3).await?;
+    fleet.gitlab_jobs(&["pending"]).await?;
+
+    fleet.pass().await?;
+    let desired: i64 =
+        sqlx::query_scalar("SELECT desired_count FROM runner_pools WHERE id='pool-gl'")
+            .fetch_one(&fleet.setup.app.database)
+            .await?;
+    assert_eq!(desired, 1, "the scaler counts the pending job as demand");
+    assert_eq!(
+        fleet.placed().await?,
+        1,
+        "one pending job places one fleet runner"
+    );
+    let (runner, _) = fleet.newest().await?;
+    assert_eq!(fleet.row(&runner).await?.status, "starting");
+
+    fleet.pass().await?;
+    assert_eq!(
+        fleet.placed().await?,
+        1,
+        "the starting runner covers the job, so no second runner is placed"
+    );
+    fleet.finish().await
+}
+
+/// #181 scope 2: with more pending jobs than `max_count`, the pool's fleet
+/// runners grow to `max_count` and never past it, however many passes run.
+#[tokio::test]
+async fn pending_jobs_scale_a_fleet_gitlab_pool_up_to_max_count() -> Result<()> {
+    let fleet = Fleet::autoscaling(2).await?;
+    fleet
+        .gitlab_jobs(&["pending", "pending", "pending"])
+        .await?;
+
+    let mut totals = Vec::new();
+    for _ in 0..3 {
+        fleet.pass().await?;
+        totals.push(fleet.placed().await?);
+    }
+
+    assert!(
+        totals.iter().all(|total| *total <= 2),
+        "never more runners than max_count 2, per pass: {totals:?}"
+    );
+    assert_eq!(
+        totals.last().copied(),
+        Some(2),
+        "three pending jobs bring the pool to max_count, per pass: {totals:?}"
+    );
+    fleet.finish().await
+}
+
+/// #181: only `pending` GitLab jobs are fleet demand. A fleet GitLab pool at
+/// `min_count` 0 whose jobs are `created` or `manual` places nothing, even
+/// with its desired count still raised from earlier work: `provision` runs
+/// (desired 2 is above the 0 active runners), its platform is not behind, so
+/// the `NoDemand` guard (`active >= min_count`) stops it.
+///
+/// The idle timeout is set far beyond the age of any timestamp, so
+/// `maybe_scale_down` keeps `desired_count` at 2 through both passes. With
+/// the default 5 minutes it would reset desired to `min_count` 0 first and
+/// `provision` would never run, leaving the guard untested.
+#[tokio::test]
+async fn jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero() -> Result<()> {
+    let fleet = Fleet::autoscaling(3).await?;
+    fleet.gitlab_jobs(&["created", "manual"]).await?;
+    sqlx::query(
+        "UPDATE runner_pools SET desired_count=2,idle_timeout_minutes=100000000 WHERE id='pool-gl'",
+    )
+    .execute(&fleet.setup.app.database)
+    .await?;
+
+    fleet.pass().await?;
+    fleet.pass().await?;
+
+    let desired: i64 =
+        sqlx::query_scalar("SELECT desired_count FROM runner_pools WHERE id='pool-gl'")
+            .fetch_one(&fleet.setup.app.database)
+            .await?;
+    assert_eq!(
+        desired, 2,
+        "desired stays above min_count, so provision ran and the guard decided"
+    );
+    assert_eq!(
+        fleet.placed().await?,
+        0,
+        "the platform is not behind, so the NoDemand guard places nothing"
+    );
+    assert_eq!(gitlab_calls(&fleet.setup, FakeMethod::CreateRunner), []);
+    fleet.finish().await
 }
 
 /// Done-when 2: on a fleet machine the runner is registered in

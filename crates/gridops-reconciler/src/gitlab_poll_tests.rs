@@ -188,7 +188,7 @@ fn pool(id: &str, connection: &str) -> String {
 
 /// A recorded `gitlab_jobs` row tagged `docker`, written at `at` (its
 /// `created_at`, `updated_at` and `status_changed_at`).
-fn row(connection: &str, project_id: i64, job_id: i64, status: &str, at: i64) -> String {
+pub(super) fn row(connection: &str, project_id: i64, job_id: i64, status: &str, at: i64) -> String {
     format!(
         "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at)
            VALUES ('{}','{connection}',{project_id},{job_id},1,'{status}','[\"docker\"]',{at},{at},{at});",

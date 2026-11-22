@@ -66,6 +66,13 @@ Known problems in the current release are in the README's
   deleted** warning in the pool's events. The token help now asks for the
   Maintainer role or higher on a project and the Owner role on a group.
   (#171, #174)
+- **A GitLab pool on fleet machines now scales up for pending jobs.** Its
+  pending GitLab jobs raised the pool's desired count but never counted as
+  fleet demand, so a pool with a `min_count` of 0 placed no runner and one
+  above 0 never grew past it. Pending jobs the pool owns now place fleet
+  runners up to `max_count`, scaled by the queue scale factor, as GitHub jobs
+  do. Bitbucket pools are unchanged: GridOps has no queued-job signal for
+  Bitbucket, and Bitbucket runners don't run on fleet machines. (#181)
 - **A busy database no longer drives agents into a reconnect storm.** An
   agent's command poll, and every heartbeat, read every command the machine
   was ever sent while holding the database's write lock. As the command

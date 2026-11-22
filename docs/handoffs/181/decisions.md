@@ -1,0 +1,152 @@
+# Decision journal: #181 fleet GitLab pools scale on pending jobs
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-21T18:05:07-08:00
+- **Decided:** BLOCK, with 1 block and 5 warn findings (`docs/handoffs/181/handoff-A.md`).
+  - **The block: the brief doesn't name the seam.** It says to change `attribute_queued_jobs` "or … whatever it reads its jobs from" (`queued_job_assignments`), and offers an `Option` repository as one representation.
+    - `queued_job_assignments` also feeds, through `provider_capacities` and `next_runner_provider`: the GitHub webhook's scale target (`webhooks.rs:870`), the reconciler's `maybe_scale_up` (`main.rs:1316`) and `evict_surplus_runner` (`main.rs:1457`), and the built-in provider choice (`resources.rs:4368`).
+    - #148's binding A-B2 keeps these views and `QueuedJob` public and GitHub-only.
+    - An `Option` on the public `QueuedJob` breaks the A-B2 pins (`autoscaling_gitlab_tests.rs:383-394, :440-445`) and `gridops-api/tests/fleet_http/recovery.rs:921-922`. Scope 3 doesn't list the latter.
+    - Fix: one `pub(crate)` accessor built on a single `queued_job_owners` call, and a private job type inside `attribute_queued_jobs`. `platform_jobs` filters its output to GitHub jobs after attribution.
+  - **The warns:**
+    - (2) run `queued_job_owners` once per attribution, not twice;
+    - (3) attribution internals: a GitLab job counts on every profile, only a `None` spare runner covers it, and it is never in `waiting` or `prioritised`;
+    - (4) test homes: `targets.rs` has no test module; the `Fleet` fixture's pool is manual with `min_count=1`; `repository_for_platform` is private to `fleet`;
+    - (5) the pass calls `provision` `desired - active` times, so it doesn't place one runner per pass;
+    - (6) the corrected doc-comment list.
+- **Assumed:** with no `survey.md`, the brief's named analogue (GitHub fleet demand through `attribute_queued_jobs`, `choose_platform` and `platform_jobs`, with ownership from `queued_job_owners`) serves as the Reuse map. #181 knowingly reverses only A-B2's "fleet placement is untouched" clause.
+- **Hedged:** finding 1 is a block, not a warn, because the brief invites T to pin a public shape before any code exists. Scope 3's tests would eventually force F onto the internal seam, but only after T's tests had pinned the wrong shape.
+- **Evidence:** I read:
+  - the brief and the brief gate result;
+  - #148's brief amendments A-B2 to A-B4 and its handoff-A;
+  - `autoscaling.rs` (ownership, candidates, the queue views, `provider_capacities`, `next_runner_provider`);
+  - `autoscaling_gitlab_tests.rs` (fixtures and the A-B2 pins);
+  - `fleet/targets.rs:1120-1561`;
+  - reconciler `fleet.rs:1-270`, `main.rs` (the provisioning loop, `maybe_scale_up`, `evict_surplus_runner`, `provision`), and `gitlab_lifecycle.rs` (`next_connection`, `fleet_target`);
+  - `gitlab_lifecycle_tests.rs` (`gitlab_pool`, `Fleet`) and `gitlab_poll_tests.rs` (pool and row seeders);
+  - `gridops-api` `webhooks.rs`, `resources.rs` and `tests/fleet_http/recovery.rs`;
+  - `gridops-core/tests/gitlab_pool_fleet.rs` and `docs/gitlab-runners.md`.
+
+  `git diff master -- crates src` is empty, and `git worktree list` shows no live overlap.
+
+## Phase 3 Architecture (A, re-review of the amended brief) - 2026-11-21T18:16:53-08:00
+- **Decided:** PASS, with 0 block and 2 warn findings (`docs/handoffs/181/handoff-A.md`, which replaces the earlier BLOCK review in 233dac5).
+  - **Earlier block A-B1 resolved:** the amended brief (a19e9e6) names the seam.
+    - The public GitHub-only views and `QueuedJob` stay unchanged.
+    - One `pub(crate)` accessor with a single `queued_job_owners` call.
+    - The job type stays internal to attribution.
+    - `platform_jobs` filters GitLab entries out after attribution.
+    - Only A-B2's "fleet placement is untouched" clause is superseded.
+    - The gridops-api fleet tests are in Scope 3.
+  - The earlier warns 2-6 are all in the brief.
+  - **Warn 1:** the job type crosses from `autoscaling.rs` to `fleet/targets.rs`, so it must be `pub(crate)` beside the accessor. Prefer an enum that wraps `QueuedJob` (`Github(QueuedJob)` / `Gitlab`) and a `github()`-style filter like `KeyedJobOwner::github`. Avoid a struct that copies `QueuedJob`'s fields, or a second mapping type in `targets.rs`.
+  - **Warn 2:** the shared helper returns rows in SQL order and can leave out owned ids, so the accessor must place GitHub rows in owner order by id and skip missing ids. For a GitHub-only pool, owner order already equals the helper's order (`github_job_candidates` orders by `wj.created_at, wj.id`), so byte-identity holds.
+- **Assumed:** with no `survey.md`, the brief's named analogue serves as the Reuse map (GitHub fleet demand through `attribute_queued_jobs`, `choose_platform` and `platform_jobs`, with ownership from `queued_job_owners`). This is a fresh run on an amended brief, not a resumed one.
+- **Hedged:**
+  - Warn 1 is a warn and not a block: the brief allows either shape, and the type is not public, so T can't pin it.
+  - Warn 2 is guidance that A will check at Phase 7, not a change to the brief.
+- **Evidence:** I re-read:
+  - the amended brief, and its diff against 048c53a;
+  - `autoscaling.rs`: ownership, candidates and their ordering, `assign_queued_jobs`, the queue views, and the `QueuedJob` definition;
+  - `fleet/targets.rs:1290-1561`;
+  - reconciler `fleet.rs:50-200`, and `main.rs` (the pass loop, `maybe_scale_up`, `provision`/`NoDemand`);
+  - the `Fleet` fixture and `gitlab_pool`;
+  - the pending `row` seeder in `gitlab_poll_tests.rs`;
+  - `tests/gitlab_pool_fleet.rs`;
+  - the `queue_scale_factor` default (`migrations/0003_autoscaling.sql:2`, DEFAULT 1);
+  - #148's A-B2 text;
+  - every caller of `choose_platform` and `platform_jobs`.
+
+  `git diff master -- crates src` is empty. No live worktree overlaps: `cool-davinci` is clean, and `gridops-134` is stale (its work landed as 80e6f1b).
+
+## Phase 4 Tests RED (T) - 2026-11-21T18:40:00-08:00
+- **Decided:**
+  - Five tests at two tiers (`docs/handoffs/181/handoff-T-red.md`).
+  - Core, in `crates/gridops-core/tests/gitlab_pool_fleet.rs` (public API, migrated SQLite):
+    - `a_pending_gitlab_job_puts_a_fleet_platform_behind_until_a_spare_runner_covers_it`;
+    - `a_pool_with_github_and_gitlab_jobs_counts_both_and_lists_only_github_jobs`.
+  - Reconciler, in `gitlab_lifecycle_tests.rs` (a full `run_pass`):
+    - `a_pending_job_places_one_fleet_runner_for_a_pool_at_min_zero`;
+    - `pending_jobs_scale_a_fleet_gitlab_pool_up_to_max_count`;
+    - `jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero`, a guard that is green before the fix.
+  - The `Fleet` fixture was extended, not duplicated. `new` now delegates to `with_pool`, and the new constructor is `autoscaling(max_count)`. `gitlab_poll_tests::row` became `pub(super)` (test module only) so its `pending`-row SQL is reused. No `pub` item was added.
+  - The core min-0 test tags its job `arm64` on an x64 platform, so it also pins the brief's rule that a GitLab job "is not filtered by `platform_supports_labels`".
+  - The guard test forces `desired_count=2` so that `provision` actually runs, which makes it a real guard on the `NoDemand` path and on "only `pending` jobs are demand".
+- **Assumed:**
+  - The reconciler's placed-runner count is the number of `workload_intents` rows for the pool. The brief allows this ("one `workload_intents` row or the equivalent").
+  - Prod's symptom, "desired raised but nothing placed", is reproduced by the `desired_count == 1` precondition passing while placement fails.
+- **Hedged:**
+  - The guard test is green before the fix, by design; it is required by the brief. Its validity was shown by a temporary `min_count=1` probe (it fails 1 vs 0), which was reverted.
+  - The local clippy (1.99.1) reports 5 lint errors in code this change doesn't touch. CI pins 1.98.1, so this is advisory for F's pre-PR clippy step.
+- **Evidence:**
+  - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 pass, 2 fail on the `behind` assertion, with the ownership preconditions passing.
+  - `cargo test -p gridops-reconciler`: 123 pass, 2 fail (`placed` is 0, expected 1; totals `[0,0,0]`, expected a final 2), with the `desired_count == 1` precondition passing.
+  - A `min_count=1` fixture probe made test 3 pass in full, and was reverted.
+  - `cargo fmt --check` and the clippy run on the core test target are clean.
+
+## Phase 6 Implement (F) - 2026-11-21T18:41:51-08:00
+- **Decided:**
+  - One `pub(crate) enum FleetQueuedJob { Github(QueuedJob), Gitlab }` and one `pub(crate) fleet_queued_jobs` accessor in `autoscaling.rs`, following A warn 1. The accessor makes a single `queued_job_owners` call.
+  - The SQL of `queued_job_assignments` moved into a private helper, `github_queued_jobs`, that both functions call. The accessor puts GitHub rows in owner order by id and skips ids the helper leaves out (A warn 2).
+  - `attribute_queued_jobs` counts a GitLab job on every profile, and only a `None` spare covers it. `choose_platform` adds it to `queued` only. `platform_jobs` filters with `github()`.
+  - `main.rs` and `fleet.rs` in the reconciler are unchanged.
+- **Assumed:**
+  - Changing the module doc line of `autoscaling_gitlab_tests.rs` is in F's scope: the brief's Scope 1 lists it among the doc comments to update, and no assertion changes.
+  - `archChanged=true`, because a private return type changed and a crate-internal accessor was added. When in doubt, the role doc says to report true.
+- **Hedged:** the `gridops-api` `release_preflight` macOS-arm64 test fails on this dev host. I recorded it as environmental after reproducing the same failure on master 42e8474, not as a regression.
+- **Evidence:**
+  - All 5 of T's tests are GREEN.
+  - gridops-core: 421 passed, 0 failed. gridops-reconciler: 125 passed, 0 failed.
+  - gridops-api `fleet_http`: 149 passed. The one failure also fails on master.
+  - `cargo fmt --check` is clean, and CI's exact clippy command on 1.98.1 is clean.
+  - Source facts are in `docs/handoffs/181/evidence.md`.
+
+## T (Phase 7, GREEN)
+- **Decided:** return PASS. The suite is GREEN (core 310 lib + integration, reconciler 125, 5 new tests), fmt and CI-pinned clippy are clean, and a mutation (count only GitHub jobs in `choose_platform`) makes both new core tests fail.
+- **Assumed:** the `release_preflight` failure in `gridops-api` is host-dependent (macOS arm64 dev host), as F showed on master; I did not re-run it on master.
+- **Hedged:** none.
+- **Evidence:** `docs/handoffs/181/handoff-T-green.md`; the mutation was reverted and `git status` was clean.
+
+## Phase 6 Rework (F, S REWORK #670) - 2026-11-21T18:58:09-08:00
+- **Decided:** no production change. R1 and R2 are test gaps, so they go to T. The `NoDemand` guard (`main.rs:2450`) and the GitLab coverage arm (`targets.rs:1456`) are correct as written. I declined A3 this cycle, because S scoped it to a later production touch and making the edit now would hide the test-only routing.
+- **Assumed:** the driver sends a self-reported test-only S REWORK to T (#678).
+- **Hedged:** none.
+- **Evidence:** I checked both production lines S cites by grep, and they are present and unchanged. Before this round `git status` was clean, and no `src/` file was edited in it.
+
+## T (S REWORK, test-only, dispatched by O after router misroute) - 2026-11-21T19:07:09-08:00
+- **Decided:**
+  - R1: repaired `jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero` in place (S's option 1). `idle_timeout_minutes=100000000` keeps `maybe_scale_down` from resetting desired, so `provision` runs and the `NoDemand` guard decides. Added a `desired_count == 2` check so the test can't go vacuous again, and fixed the doc comment. Also corrected T-red's claim about this test in `handoff-T-rework.md`.
+  - R2: added `a_spare_runner_registered_to_a_github_repository_does_not_cover_a_gitlab_job` (core). `spare_runner` gained an `Option<i64>` repository.
+  - R2 asserts attribution through `platform_jobs` on a two-platform pool, not S's suggested "stays behind". The single-platform `behind` version passed under M2, because `deficit` counts every queued job and ignores a repository runner with nothing of its repository waiting.
+- **Assumed:** the brief's "never one registered to a GitHub repository" rule is met by pinning attribution (the GitHub job keeps its repository runner, and the GitLab job does not take it). That is the only place the rule is observable.
+- **Hedged:**
+  - R2 relies on owners being oldest first and on the first-platform fallback with no machines. Both are recorded in `evidence.md`.
+  - Local clippy 1.99.1 reports 5 lints outside the changed files. CI-pinned 1.98.1 is clean.
+- **Evidence:**
+  - M1 (main.rs:2450 guard disabled): the R1 test fails, 2 runners placed against 0 expected.
+  - M2 (targets.rs:1456 `=> true`): the R2 test fails, `platform_jobs(arm64)` returns `[]` against `[10]`.
+  - Both mutations were reverted with `git checkout --`.
+  - Core: 422 passed, 0 failed. Reconciler: 125 passed, 0 failed. fmt is clean, and clippy 1.98.1 is clean.
+  - Details are in `docs/handoffs/181/handoff-T-rework.md`.
+
+## S (re-audit after test-only rework) - 2026-11-21T19:19:12-08:00
+- **Decided:**
+  - PASS. R1 and R2 are closed, and production code is unchanged since the first audit (`git diff 35c3891..HEAD -- crates/` touches tests only).
+  - I accepted T's two-platform `platform_jobs` shape for R2. My suggested single-platform "stays behind" shape could not detect M2: `deficit` adds every attributed job to `queued`, and it ignores a repository runner unless that repository is waiting. So the coverage rule only shows in attribution.
+- **Assumed:** the brief's binding clause is the exclusion ("never one registered to a GitHub repository"). The inclusion half (a `None` spare covers a GitLab job) survives M2b (`=> false`). I recorded it as advisory A4 because the brief's required core test is met as worded and R2 did not ask for it.
+- **Hedged:** `fleet_http::busy_database::a_result_the_api_cannot_take_still_ends_the_session` failed once in the full `fleet_http` run (148/150; the other failure is the known host-dependent `release_preflight`). The `busy_database` module passed 3/3 in isolated reruns and has no scaling path, so I classified it as a load flake.
+- **Evidence:**
+  - M1 (main.rs:2450 guard disabled): the R1 test fails, 2 runners placed against 0 expected.
+  - M2 (targets.rs:1456 `=> true`): the R2 test fails, `[]` against `[10]`.
+  - M2b (`=> false`): all tests pass (advisory A4).
+  - All mutations were reverted, and `git status` was clean.
+  - Core: 422 passed. Reconciler: 125 passed. fmt is clean. Clippy 1.98.1 is clean.
+  - Details are in `docs/handoffs/181/handoff-S-r2.md`.
+
+## T (S advisory A4, test-only, requested by O) - 2026-11-21T19:22:47-08:00
+- **Decided:** added the core test `a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform`. On two platforms, a None spare on the second platform must clear `choose_platform`'s `behind` flag. Without coverage, the GitLab job falls back to the first platform and stays behind.
+- **Assumed:** with no hosts seeded, the attribution of a multi-platform job falls back to the first platform (`targets.rs:1462-1472`, already in `evidence.md`).
+- **Hedged:** none.
+- **Evidence:**
+  - Mutation `FleetQueuedJob::Gitlab => false` (`targets.rs:1456`): the new test fails at line 611 ("not behind"), and the other 6 stay ok. Reverted.
+  - Core: 423 passed, 0 failed. fmt is clean, and clippy 1.98.1 is clean on gridops-core.
+  - Details are in `docs/handoffs/181/handoff-T-rework.md` (A4 section).

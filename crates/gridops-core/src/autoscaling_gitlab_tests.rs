@@ -1,8 +1,9 @@
 //! GitLab demand matching (#148): which pools count a GitLab job, through the
-//! public queue views. Only `assigned_queued_jobs` (room and scale) sees
-//! GitLab jobs; every GitHub-shaped output stays GitHub-only, but a GitLab job
-//! still uses up room in a pool it shares with GitHub jobs (brief A-B2, A-B3,
-//! A-B4, A-W4, A2-W5).
+//! public queue views. Of these, only `assigned_queued_jobs` (room and scale)
+//! sees GitLab jobs; fleet placement reads them through the crate-internal
+//! `fleet_queued_jobs` (#181). Every GitHub-shaped output stays GitHub-only,
+//! but a GitLab job still uses up room in a pool it shares with GitHub jobs
+//! (brief A-B2, A-B3, A-B4, A-W4, A2-W5).
 
 use super::*;
 use crate::connect_database_path;

@@ -67,6 +67,68 @@ impl Database {
         .await?)
     }
 
+    /// Records a `pending` GitLab job of `connection`, tagged `tags`, as the
+    /// poll or the webhook records it.
+    async fn pending_gitlab_job(&self, connection: &str, job_id: i64, tags: &[&str]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at)
+             VALUES (?,?,42,?,1,'pending',?,10,10,10)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(connection)
+        .bind(job_id)
+        .bind(serde_json::to_string(tags)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A fleet runner of the pool on `profile`, starting and not on a job: a
+    /// spare runner that can take a queued job. With `repository` `None` it is
+    /// registered to no GitHub repository (an organization GitHub runner or a
+    /// GitLab runner); otherwise to that GitHub repository.
+    async fn spare_runner(
+        &self,
+        pool_id: &str,
+        profile: &targets::Profile,
+        repository: Option<i64>,
+    ) -> Result<()> {
+        let target = profile
+            .target_ids
+            .first()
+            .context("the platform has a fleet target")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,status,busy,created_at,updated_at)
+             VALUES (?1,?2,?3,?1,'docker','starting',0,20,20)",
+        )
+        .bind(&id)
+        .bind(pool_id)
+        .bind(repository)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fleet_operations (id,kind,principal_kind,principal_scope,idempotency_key,request_hash,status,created_at,updated_at)
+             VALUES (?1,'submit_workload','autoscaler',?2,?1,'hash','succeeded',20,20)",
+        )
+        .bind(&id)
+        .bind(pool_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,agent_run_id,expected_profile_revision,status,created_at,updated_at)
+             VALUES (?1,?1,1,'ci_runner',?2,?3,?4,NULL,?5,'admitted',20,20)",
+        )
+        .bind(&id)
+        .bind(pool_id)
+        .bind(&profile.id)
+        .bind(target)
+        .bind(profile.revision)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// The targets linked (enabled) to the pool's live platforms, by kind.
     async fn linked_kinds(&self, pool_id: &str) -> Result<Vec<(String, String)>> {
         Ok(sqlx::query_as(
@@ -242,6 +304,313 @@ async fn a_gitlab_pool_without_a_docker_image_gets_the_gitlab_runner_image() -> 
     assert_eq!(
         profiles("gl-pool").fetch_all(&database.pool).await?,
         [("registry.example.test/gitlab-runner:v17".to_owned(),)]
+    );
+    database.finish().await
+}
+
+/// #181: whether `choose_platform` says the pool's chosen platform is behind
+/// its queued jobs, with the default queue scale factor (1).
+async fn behind(database: &Database, pool_id: &str, configured: &[String]) -> Result<bool> {
+    let profiles = targets::pool_profiles(&database.pool, pool_id).await?;
+    let (_, behind) = targets::choose_platform(&database.pool, pool_id, configured, 1, &profiles)
+        .await?
+        .context("the pool has a fleet platform")?;
+    Ok(behind)
+}
+
+/// #181 (core): a fleet GitLab pool at `min_count` 0 with no runners and one
+/// pending job it owns has its platform behind, so the reconciler places a
+/// runner above the minimum; once a spare runner registered to no repository
+/// (a GitLab runner) covers the job, it is not behind. The job's tags match
+/// the pool's labels only: a tag that reads as an architecture (`arm64`, on
+/// an x64 platform) does not narrow which platform counts a GitLab job.
+#[tokio::test]
+async fn a_pending_gitlab_job_puts_a_fleet_platform_behind_until_a_spare_runner_covers_it()
+-> Result<()> {
+    let database = Database::new().await?;
+    sqlx::query(
+        "UPDATE runner_pools SET min_count=0,max_count=2,autoscaling_enabled=1,labels='[\"docker\",\"arm64\"]'
+          WHERE id='gl-pool'",
+    )
+    .execute(&database.pool)
+    .await?;
+    targets::save_pool_fleet(
+        &database.pool,
+        "gl-pool",
+        &docker_platform("registry.example.test/gitlab-runner:v17")?,
+    )
+    .await?;
+    database
+        .pending_gitlab_job("conn-project", 501, &["docker", "arm64"])
+        .await?;
+    let configured = ["docker".to_owned(), "arm64".to_owned()];
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database.pool, "gl-pool").await?,
+        1,
+        "the pool owns the pending job (the scaler's demand)"
+    );
+
+    assert!(
+        behind(&database, "gl-pool", &configured).await?,
+        "one pending GitLab job and no runner: the platform is behind"
+    );
+
+    let profiles = targets::pool_profiles(&database.pool, "gl-pool").await?;
+    database
+        .spare_runner("gl-pool", profiles.first().context("a platform")?, None)
+        .await?;
+    assert!(
+        !behind(&database, "gl-pool", &configured).await?,
+        "a starting runner with no repository covers the one job"
+    );
+    database.finish().await
+}
+
+/// #181 (mixed pool): an organization pool linked to a GitLab connection
+/// counts both its queued GitHub job and its pending GitLab job, so one spare
+/// runner leaves its platform behind; `platform_jobs` (which picks a fleet
+/// runner's GitHub repository) still returns only the GitHub job.
+#[tokio::test]
+async fn a_pool_with_github_and_gitlab_jobs_counts_both_and_lists_only_github_jobs() -> Result<()> {
+    let database = Database::new().await?;
+    sqlx::raw_sql(
+        r#"
+        UPDATE runner_pools SET min_count=0,max_count=4,autoscaling_enabled=1,labels='["docker"]' WHERE id='gh-pool';
+        INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('gh-pool','conn-project',3);
+        INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+          VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+        INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+          VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    // Queued just now, so not yet past the pool's priority window: a
+    // prioritised job would make the platform behind on its own.
+    sqlx::query(
+        r#"INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+             VALUES (200,20,'build','queued','["self-hosted","linux"]','https://github.com/octo-org/gridops/actions/runs/20/job/200',?1,?1)"#,
+    )
+    .bind(gridops_core::now_millis())
+    .execute(&database.pool)
+    .await?;
+    targets::save_pool_fleet(&database.pool, "gh-pool", &docker_platform("")?).await?;
+    database
+        .pending_gitlab_job("conn-project", 502, &["docker"])
+        .await?;
+    let configured = ["docker".to_owned()];
+    let profiles = targets::pool_profiles(&database.pool, "gh-pool").await?;
+    let profile = profiles.first().context("a platform")?;
+    database.spare_runner("gh-pool", profile, None).await?;
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database.pool, "gh-pool").await?,
+        2,
+        "the pool owns both jobs (the scaler's demand)"
+    );
+
+    let jobs = targets::platform_jobs(
+        &database.pool,
+        "gh-pool",
+        &configured,
+        &profiles,
+        &profile.id,
+    )
+    .await?;
+    assert_eq!(
+        jobs.iter()
+            .map(|job| (job.repository_id, job.labels.clone()))
+            .collect::<Vec<_>>(),
+        [(10, vec!["self-hosted".to_owned(), "linux".to_owned()])],
+        "platform_jobs lists the GitHub job only"
+    );
+    assert!(
+        behind(&database, "gh-pool", &configured).await?,
+        "two queued jobs (one GitHub, one GitLab) and one spare runner: behind"
+    );
+    database.finish().await
+}
+
+/// #181 (seam rule): only a spare runner registered to no repository covers a
+/// pending GitLab job, never one registered to a GitHub repository.
+///
+/// An organization pool linked to a GitLab connection has two Linux platforms
+/// (x64 first, arm64 second) that can both run its two jobs: a pending GitLab
+/// job, queued first, and a queued GitHub job of repository 10. Its only
+/// runner is a starting spare on the arm64 platform, registered to repository
+/// 10. The GitLab job, attributed first, must not take that runner, so it
+/// counts for the first platform as a job with no runner; the repository-10
+/// runner stays with repository 10's job, so `platform_jobs` lists that job on
+/// the arm64 platform and nothing on x64. If the repository runner covered the
+/// GitLab job, the GitHub job would lose it and move to x64.
+///
+/// The observable is the attribution, not `choose_platform`'s `behind` flag:
+/// on one platform every queued job adds to the deficit whichever runner
+/// covers it, and a repository runner with no job of its repository waiting
+/// is not counted against the deficit, so the flag cannot show this rule.
+#[tokio::test]
+async fn a_spare_runner_registered_to_a_github_repository_does_not_cover_a_gitlab_job() -> Result<()>
+{
+    let database = Database::new().await?;
+    sqlx::raw_sql(
+        r#"
+        UPDATE runner_pools SET min_count=0,max_count=4,autoscaling_enabled=1,labels='["docker"]' WHERE id='gh-pool';
+        INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('gh-pool','conn-project',3);
+        INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+          VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+        INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+          VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    // The GitLab job (queued at 10) is older, so it is attributed first.
+    database
+        .pending_gitlab_job("conn-project", 503, &["docker"])
+        .await?;
+    sqlx::query(
+        r#"INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+             VALUES (200,20,'build','queued','["self-hosted","linux"]','https://github.com/octo-org/gridops/actions/runs/20/job/200',?1,?1)"#,
+    )
+    .bind(gridops_core::now_millis())
+    .execute(&database.pool)
+    .await?;
+    let platform = |architecture: &str| {
+        json!({
+            "runtimeKind": "docker",
+            "executionOs": "linux",
+            "architecture": architecture,
+            "image": "",
+            "requiresDockerSocket": true,
+        })
+    };
+    let two_platforms: FleetSettingsInput = serde_json::from_value(json!({
+        "enabled": true,
+        "mode": "ephemeral",
+        "cpuMillis": 1000,
+        "memoryMib": 1024,
+        "diskBytes": 0,
+        "platforms": [platform("x64"), platform("arm64")],
+    }))?;
+    targets::save_pool_fleet(&database.pool, "gh-pool", &two_platforms).await?;
+    let configured = ["docker".to_owned()];
+    let profiles = targets::pool_profiles(&database.pool, "gh-pool").await?;
+    let architecture = |profile: &targets::Profile| -> Result<String> {
+        Ok(serde_json::to_value(profile.input.architecture)?
+            .as_str()
+            .context("an architecture name")?
+            .to_owned())
+    };
+    let [x64, arm64] = profiles.as_slice() else {
+        anyhow::bail!("two platforms: {}", profiles.len());
+    };
+    assert_eq!(
+        (architecture(x64)?.as_str(), architecture(arm64)?.as_str()),
+        ("x64", "arm64"),
+        "x64 is the first platform"
+    );
+    database.spare_runner("gh-pool", arm64, Some(10)).await?;
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database.pool, "gh-pool").await?,
+        2,
+        "the pool owns both jobs"
+    );
+
+    let listed = |profile_id: String| {
+        let database = &database;
+        let configured = &configured;
+        let profiles = &profiles;
+        async move {
+            Ok::<_, anyhow::Error>(
+                targets::platform_jobs(
+                    &database.pool,
+                    "gh-pool",
+                    configured,
+                    profiles,
+                    &profile_id,
+                )
+                .await?
+                .iter()
+                .map(|job| job.repository_id)
+                .collect::<Vec<_>>(),
+            )
+        }
+    };
+    assert_eq!(
+        listed(arm64.id.clone()).await?,
+        [10],
+        "the repository-10 runner stays with repository 10's job, not the GitLab job"
+    );
+    assert_eq!(
+        listed(x64.id.clone()).await?,
+        Vec::<i64>::new(),
+        "no GitHub job is pushed to x64"
+    );
+    database.finish().await
+}
+
+/// #181 (seam rule, inclusion half): a spare runner registered to no
+/// repository does cover a pending GitLab job, so the job stays on that
+/// runner's platform and no second runner is asked for.
+///
+/// A fleet GitLab pool has two Linux platforms, x64 first and arm64 second,
+/// and one pending job either can run. With no runner the job counts for x64
+/// (no room or machine anywhere: the first platform) and the pool is behind.
+/// Once a starting spare with no repository sits on arm64, it covers the job
+/// there, so no platform is behind. If that spare could not cover a GitLab
+/// job, the job would still count for x64, where nothing covers it, and the
+/// pool would stay behind. On one platform the two cases look the same,
+/// because the job lands on the spare's platform either way.
+#[tokio::test]
+async fn a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform() -> Result<()> {
+    let database = Database::new().await?;
+    sqlx::query(
+        "UPDATE runner_pools SET min_count=0,max_count=4,autoscaling_enabled=1 WHERE id='gl-pool'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let platform = |architecture: &str| {
+        json!({
+            "runtimeKind": "docker",
+            "executionOs": "linux",
+            "architecture": architecture,
+            "image": "",
+            "requiresDockerSocket": true,
+        })
+    };
+    let two_platforms: FleetSettingsInput = serde_json::from_value(json!({
+        "enabled": true,
+        "mode": "ephemeral",
+        "cpuMillis": 1000,
+        "memoryMib": 1024,
+        "diskBytes": 0,
+        "platforms": [platform("x64"), platform("arm64")],
+    }))?;
+    targets::save_pool_fleet(&database.pool, "gl-pool", &two_platforms).await?;
+    database
+        .pending_gitlab_job("conn-project", 504, &["docker"])
+        .await?;
+    let configured = ["docker".to_owned()];
+    let profiles = targets::pool_profiles(&database.pool, "gl-pool").await?;
+    let [x64, arm64] = profiles.as_slice() else {
+        anyhow::bail!("two platforms: {}", profiles.len());
+    };
+    assert_eq!(
+        (
+            serde_json::to_value(x64.input.architecture)?,
+            serde_json::to_value(arm64.input.architecture)?
+        ),
+        (json!("x64"), json!("arm64")),
+        "x64 is the first platform"
+    );
+    assert!(
+        behind(&database, "gl-pool", &configured).await?,
+        "one pending GitLab job and no runner: behind"
+    );
+
+    database.spare_runner("gl-pool", arm64, None).await?;
+    assert!(
+        !behind(&database, "gl-pool", &configured).await?,
+        "the arm64 spare with no repository covers the GitLab job: not behind"
     );
     database.finish().await
 }
