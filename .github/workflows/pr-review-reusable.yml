@@ -10,8 +10,10 @@ name: PR-Agent Spec Review (reusable)
 # parsers read only the Reviewer Guide's Score row (<strong>Score</strong>: N),
 # not the first "score" + number anywhere in the comment. The ticket-compliance
 # section quotes issue text before that row, and fleet-health issues say things
-# like "no score outside 0-100", which parsed as a score of 0. Drop this patch
-# once playbook's reusable anchors the same way.
+# like "no score outside 0-100", which parsed as a score of 0. Second LOCAL PATCH
+# (same PR): the banner and status steps write their scratch files under
+# $RUNNER_TEMP, not fixed /tmp paths, so two runners sharing /tmp cannot overwrite
+# each other's PR body or file list. Drop both once playbook's reusable does the same.
 # Called by each project's .github/workflows/pr-review.yml via:
 #   uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
 #   secrets:
@@ -1061,9 +1063,9 @@ jobs:
             NOW_DISPLAY="$NOW_UTC"
           fi
 
-          gh pr view "$PR_NUM" --json body --jq .body --repo "${REPO}" > /tmp/pr-body-current.md
-          sed -i.bak '/<!-- argos-status:start -->/,/<!-- argos-status:end -->/d' /tmp/pr-body-current.md
-          rm -f /tmp/pr-body-current.md.bak
+          gh pr view "$PR_NUM" --json body --jq .body --repo "${REPO}" > "${RUNNER_TEMP:-/tmp}/pr-body-current.md"
+          sed -i.bak '/<!-- argos-status:start -->/,/<!-- argos-status:end -->/d' "${RUNNER_TEMP:-/tmp}/pr-body-current.md"
+          rm -f "${RUNNER_TEMP:-/tmp}/pr-body-current.md.bak"
 
           {
             echo '<!-- argos-status:start -->'
@@ -1072,10 +1074,10 @@ jobs:
             echo "> **Triggered by** ${TRIGGER_DESC}${SPECIFIC} · run [#${RUN_ID}](${RUN_URL}) · ${NOW_DISPLAY}"
             echo '<!-- argos-status:end -->'
             echo
-          } > /tmp/pr-body-banner.md
+          } > "${RUNNER_TEMP:-/tmp}/pr-body-banner.md"
 
-          cat /tmp/pr-body-banner.md /tmp/pr-body-current.md > /tmp/pr-body-new.md
-          gh pr edit "$PR_NUM" --body-file /tmp/pr-body-new.md --repo "${REPO}"
+          cat "${RUNNER_TEMP:-/tmp}/pr-body-banner.md" "${RUNNER_TEMP:-/tmp}/pr-body-current.md" > "${RUNNER_TEMP:-/tmp}/pr-body-new.md"
+          gh pr edit "$PR_NUM" --body-file "${RUNNER_TEMP:-/tmp}/pr-body-new.md" --repo "${REPO}"
           echo "Banner injected (score $SCORE)"
 
       # ── Commit status check ──────────────────────────────────────────────────
@@ -1133,10 +1135,10 @@ jobs:
           # files. Any matcher error falls through to the failure path, so a
           # bug here can only reproduce today's behaviour, never mask a crash.
           gh pr view "$PR_NUM" --repo "${{ github.repository }}" \
-            --json files --jq '[.files[].path]' > /tmp/pr-files.json
+            --json files --jq '[.files[].path]' > "${RUNNER_TEMP:-/tmp}/pr-files.json"
 
           python3 << 'PYEOF'
-          import fnmatch, json, re
+          import fnmatch, json, os, re
 
           def read_ignore_section(path):
               # tomllib is 3.11+; self-hosted runners (vars.CI_RUNNER) may be older,
@@ -1162,18 +1164,18 @@ jobs:
               ignore = read_ignore_section('.pr_agent.toml')
               pats  = [re.compile(fnmatch.translate(g)) for g in ignore.get('glob', [])]
               pats += [re.compile(r) for r in ignore.get('regex', [])]
-              with open('/tmp/pr-files.json') as f:
+              with open(os.path.join(os.environ.get('RUNNER_TEMP', '/tmp'), 'pr-files.json')) as f:
                   files = json.load(f)
               if files and pats:
                   all_ignored = all(any(p.match(fp) for p in pats) for fp in files)
           except Exception as e:  # no .pr_agent.toml / bad pattern
               print(f'ignore-glob check unavailable ({e}) — treating diff as reviewable')
 
-          with open('/tmp/all_ignored.txt', 'w') as out:
+          with open(os.path.join(os.environ.get('RUNNER_TEMP', '/tmp'), 'all_ignored.txt'), 'w') as out:
               out.write('true' if all_ignored else 'false')
           PYEOF
 
-          if [[ "$(cat /tmp/all_ignored.txt)" == "true" ]]; then
+          if [[ "$(cat "${RUNNER_TEMP:-/tmp}/all_ignored.txt")" == "true" ]]; then
             gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
               -f state=success -f context="pr-agent/review" \
               -f description="Nothing reviewable — all changed files match .pr_agent.toml ignore globs" >/dev/null
