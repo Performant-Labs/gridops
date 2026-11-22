@@ -633,10 +633,16 @@ its retention cleanup on each pass.
   carries the same message. The reasons are `agent_reported`,
   `agent_outcome_unknown`, `prepare_deadline_expired`, `start_deadline_expired`,
   `agent_session_lost`, `host_epoch_changed`, `runner_removed_before_start`,
-  `operator_released` and `unknown`. The host detail read summarises them as
-  `failedPlacementsLastHour` and `recentPlacementFailures` (the last 24 hours,
-  grouped by reason). Only failures after the release that added this are
+  `operator_released`, `registration_timed_out` and `unknown`. The host detail
+  read summarises them as `failedPlacementsLastHour` and
+  `recentPlacementFailures` (the last 24 hours, grouped by reason). Only failures after the release that added this are
   recorded; earlier failed placements have no event.
+- A prepared runner that cannot be registered upstream and started within 10
+  minutes gives up its placement, which fails with `registration_timed_out`:
+  its message carries the last attempt's error, `elapsed_ms` and
+  `allowed_ms` hold the numbers, and its capacity is released. The pool then
+  replaces the runner, and any registration already made upstream is removed
+  with it. Until then the reconciler retries the registration every pass.
 - A runner whose placement failed to start is started again as a new runner
   (new name, new registration), placed with the machines its earlier attempts
   failed on tried last. That is only done once nothing of the failed
@@ -644,8 +650,9 @@ its retention cleanup on each pass.
   local absence and delayed-start exclusion are proven, its capacity is
   released and its prepare and start commands are settled. A runner gets at
   most three placements, and only failures the machine could have caused are
-  retried (not `runner_removed_before_start`, `operator_released`, `unknown`,
-  or an agent-reported `configuration`, `unsupported` or `cancelled` code).
+  retried (not `runner_removed_before_start`, `operator_released`,
+  `registration_timed_out`, `unknown`, or an agent-reported `configuration`,
+  `unsupported` or `cancelled` code).
   Each retry records a `placement_retried` event on the machine where the
   start failed; its detail holds `attempt`, `max_attempts`, `failure_reason`,
   `retry_runner_id`, `retry_operation_id`, `avoided_host_ids` and a `message`.
