@@ -108,3 +108,35 @@
   - **CI's clippy (1.98.1, `-D warnings`) is clean.**
   - **All throwaway code is reverted.** Only test files are staged.
   - **A seed correction:** a first reconciler seed failed with a setup error, because the credential verifier format trigger rejected it. I fixed it before declaring RED.
+
+## Phase 6 Feature Implementor (F) - 2026-11-22T11:24:05-08:00
+- **Decided:** implemented against T's RED; every authored test is GREEN (`docs/handoffs/152/handoff-F.md`).
+  - **Core:** new `fleet::registry::snapshot_retention`.
+    - `PRUNE_BATCH` is the brief's statement, ordered by `received_at`.
+    - `BATCH_SIZE` 500, `MAX_BATCHES` 40, `BATCH_PAUSE` 25 ms.
+    - The setting consts `RETENTION_DAYS_KEY`, `DEFAULT_RETENTION_DAYS` 7 and `RETENTION_DAYS` 1..=3650 are shared by the API and the reconciler, following the `tart_host::VM_SLOTS_KEY` precedent.
+    - `cutoff_millis` clamps the days.
+    - `prune_inventory_snapshots` runs one autocommit statement per batch, sleeps between batches, and stops on a partial batch or at `max_batches`. A `batch_size` below 1 deletes nothing, because a negative SQLite `LIMIT` is no limit.
+  - **Migration 0049:** exactly the brief's index.
+  - **Reconciler:** `cleanup_retention` runs the prune last. It logs a non-zero count at info and an error at warn, and never fails the pass.
+  - **API:** an optional `inventorySnapshotRetentionDays`. It defaults to 7, is range-checked by the existing 400, stored only when given, and audited.
+  - **Docs:** a "Inventory snapshot retention" section in `docs/fleet-api.md` (no doc listed the other retention settings), and CHANGELOG Upgrading and Changed entries.
+- **Assumed:**
+  - The local sqlite3 3.54.0 CLI timings carry over to the bundled 3.51.3. Plan test 5 confirms the plan on 3.51.3.
+  - Prod's ~170k eligible rows drain at 20,000 a pass, because `cleanup_retention` runs every reconcile pass (main.rs:640 and :697).
+- **Hedged:**
+  - The timings use a warm OS page cache. Mars's cold-cache per-batch hold will be higher; I estimate tens of ms at most, against a 5 s `busy_timeout`.
+  - The index-build estimate for prod (1 to 3 s) is extrapolated from 0.10 s on an 85 MB seed.
+  - `release_preflight::..._without_a_macos_arm64_machine` fails on this Mac whether or not my changes are present. I left it alone: it is outside scope and depends on the environment.
+- **Evidence:**
+  - **Verified readers:** `grep fleet_inventory_snapshots crates src` finds the same readers as the brief.
+  - **Resend path:** `load_current_session` requires `ended_at IS NULL` (inventory.rs:409), so the current snapshot of an ended session is prunable.
+  - **Timing** (scratchpad `f152/`, 20,000 × 3.9 KB rows, 85 MB):
+    - drain: 40 batches, 19,992 deleted, the 8 current kept, per batch median 2.3 / p90 4.4 / max 14.0 ms, 123 ms total;
+    - steady state: 1.7 ms, 62 page misses, 0 fullscan steps;
+    - index build: 0.10 s.
+  - **Tests:**
+    - core: 315 lib tests plus all integration binaries pass;
+    - reconciler: 127 pass;
+    - API: lib 130, control_plane_contracts 39, fleet_http 150/151 (the macOS-environment failure only);
+    - clippy 1.98.1 with `-D warnings` and `cargo fmt --check` are clean.
