@@ -40,3 +40,38 @@
   - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:300-360`.
   - actions/runner v2.338.2, fetched from raw.githubusercontent.com: `ContainerInfo.cs`, `ContainerOperationProvider.cs:290-322`, `NodeScriptActionHandler.cs`, `StepHost.cs`, `HostContext.cs:377-415`, `Runner.Listener/Program.cs:172-194`, `layoutroot/env.sh`.
   - Coexistence: `git worktree list`. None of the 7 worktrees changes `docker.rs`, `work_folder.rs` or `provisioning.rs`.
+
+## Phase 3 Architecture (A, up-front plan review, round 2) - 2026-11-22T11:19:17-08:00
+- **Decided:** PASS, with 0 block and 9 warn findings (docs/handoffs/126/handoff-A.md, which replaces the round-1 BLOCK from 449b48c).
+  - **Round-1 blocks resolved:**
+    - Block 1: the runner root is now outside the work folder (decision 1).
+    - Block 2: the externals fill now happens in Prepare, and Start only checks for the cache (decision 2, item 3).
+    - Round-1 warns 3 to 10 are now binding decisions 3 to 10.
+  - **Warns:**
+    - (1) The copy, link and `cd` go right after `IFS= read -r S`, in docker.rs's own setup strings. In persistent mode that is before `./config.sh`, which is inside setup. Core's `instrumented_runner_script` stays unchanged. The cache-path variable is `GRIDOPS_RUNNER_EXTERNALS`.
+    - (2) Prepare creates the cache folders plainly (`PermissionDenied` gives `Configuration, false`). Start creates the runner root with a generalised `create_shared_work_folder`, which keeps the move-aside.
+    - (3) Check the cache before creating either folder. On a failed `docker create` or `feed_secret`, remove both folders with the existing `remove_shared_work_folder`, or open a follow-up.
+    - (4) The fill container: named `gridops-externals-<name>`, `rm -f` before create, created with `--entrypoint ""` and a no-op command, no GridOps label, and removed on every exit path.
+    - (5) Names:
+      - the runner-root function takes `PreparedEnvironmentId`; the brief's "as shared_work_folder does" is inaccurate, because that function takes `impl Display`;
+      - the cache name is lowercase hex with no `sha256:`;
+      - staging is `<name>.partial`.
+    - (6) One predicate, shared by Prepare's fill and Start's check.
+    - (7) One private failure type carrying the code, the retryability and the reason.
+    - (8) The sweep runs under the fill's mutex guard.
+    - (9) Rename the cleanup functions and their log line so they cover both folders.
+- **Assumed:**
+  - With no `survey.md`, the objects the brief names, plus `NativeRuntime`, serve as the Reuse map.
+  - The actions/runner v2.338.2 behaviour cited in round 1 still holds. I did not fetch it again this round.
+- **Hedged:**
+  - Warn 4: whether `ghcr.io/actions/actions-runner` inherits a `Cmd` (which would let a bare `docker create` succeed) was not checked. The fix is safe either way.
+  - Warn 3: the size of the leak on a `feed_secret` failure depends on how far the script got before the container exited. Not measured.
+  - Whether a symlinked bind source resolves on the host at job-container creation is still the round-1 hedge. Not run.
+- **Evidence:**
+  - Read: the brief in full (sha256 42204bd2…c949); brief gate results r1, r2 and r3; round-1 handoff-A.md and decisions.md.
+  - Host agent: `docker.rs` in full; `native.rs:1-140` and `:470-600`; `dispatch.rs:175-300` and `:320-451`; `supervisor.rs:470-505`; `helper.rs:1-80`; `runtime.rs`; `main.rs:1-30`, `:75-95` and `:230-337`; `probe.rs`, by grep.
+  - Core: `work_folder.rs`; `fleet/mod.rs:15-30`; `ids.rs:29-95`; `provisioning.rs:280-375`; `protocol/agent.rs:255-300`; `start_health.rs:20-60`; `retry.rs:180-205`; the `is_github` and `is_gitlab` predicates.
+  - Reconciler: `fleet.rs:425-440`.
+  - Tests: `tests/docker_runtime.rs` in full.
+  - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:339-383`; `CHANGELOG.md:1-30`.
+  - Coexistence: `git worktree list` and a per-worktree diff. None of the 7 other worktrees changes the files this plan touches.
