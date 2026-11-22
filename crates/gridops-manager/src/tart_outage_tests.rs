@@ -114,12 +114,11 @@ async fn stand_in_tart(asleep: bool) -> anyhow::Result<StandInTart> {
 }
 
 /// An address on which nothing listens: connecting is refused at once, as
-/// it is when the Mac is awake but its agent is not running.
+/// it is when the Mac is awake but its agent is not running. The discard
+/// port, as the other tests use: a port bound and let go could be taken by
+/// another process before the test connects, and then it answers (#124).
 fn refused_url() -> anyhow::Result<Url> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(Url::parse(&format!("http://{address}/"))?)
+    Ok(Url::parse("http://127.0.0.1:9/")?)
 }
 
 /// The manager's client for the agent, configured as `main` configures it

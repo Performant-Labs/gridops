@@ -745,7 +745,7 @@ async fn an_api_restart_leaves_a_running_runner_alone() -> Result<()> {
     let before = session().await?.context("agent session")?;
 
     proxy.faults.refuse_results.store(true, Ordering::SeqCst);
-    placement::issue_command(
+    let inspect = placement::issue_command(
         &f.database,
         placement_id,
         AgentOperation::Inspect {
@@ -757,7 +757,8 @@ async fn an_api_restart_leaves_a_running_runner_alone() -> Result<()> {
         25_000,
     )
     .await?
-    .context("inspect command")?;
+    .context("inspect command")?
+    .to_string();
     let inspected = || async {
         Ok::<_, anyhow::Error>(
             sqlx::query_scalar::<_, String>(
@@ -768,9 +769,29 @@ async fn an_api_restart_leaves_a_running_runner_alone() -> Result<()> {
             .await?,
         )
     };
+    // The API marks the inspect delivered before its poll reply reaches the
+    // agent, so a restart then can lose the reply: the agent never runs the
+    // inspect and the reconnect cancels it. Restart only once the agent ran
+    // it and journaled the answer, which its refused result post shows.
     within("the inspect to reach the agent", || async {
         Ok((inspected().await? == "delivered").then_some(()))
     })
+    .await?;
+    within(
+        "the agent to run the inspect and post its answer",
+        || async {
+            let ran = runtime
+                .operations
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .contains(&"inspect");
+            let refused = proxy.faults.seen("/commands/result").iter().any(|seen| {
+                seen.status == StatusCode::SERVICE_UNAVAILABLE
+                    && String::from_utf8_lossy(&seen.body).contains(&inspect)
+            });
+            Ok((ran && refused).then_some(()))
+        },
+    )
     .await?;
 
     f.restart(Duration::from_secs(2)).await?;
@@ -937,10 +958,22 @@ async fn an_administrator_repairs_a_placement_the_agent_cannot_confirm() -> Resu
     let workload = Uuid::new_v4();
     let placement_id = prepared_placement(&f, &machine, workload).await?;
 
-    // The start's result never gets through, and its deadline passes.
+    // The start's result never gets through, and its deadline passes. The
+    // agent must have run it: a start still in the API's outbox at its
+    // deadline is cancelled, not held uncertain.
     proxy.faults.refuse_results.store(true, Ordering::SeqCst);
+    let issued = tokio::time::Instant::now();
     issue_start(&f, placement_id, workload, 7_000).await?;
-    tokio::time::sleep(Duration::from_millis(7_500)).await;
+    within("the start to run", || async {
+        Ok(runtime
+            .operations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .contains(&"start_runner")
+            .then_some(()))
+    })
+    .await?;
+    tokio::time::sleep_until(issued + Duration::from_millis(7_500)).await;
     let identity = machine.journal.identity().await?.context("identity")?;
     inventory::agent_post(
         &f,
