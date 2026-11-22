@@ -547,3 +547,70 @@ async fn a_spare_runner_registered_to_a_github_repository_does_not_cover_a_gitla
     );
     database.finish().await
 }
+
+/// #181 (seam rule, inclusion half): a spare runner registered to no
+/// repository does cover a pending GitLab job, so the job stays on that
+/// runner's platform and no second runner is asked for.
+///
+/// A fleet GitLab pool has two Linux platforms, x64 first and arm64 second,
+/// and one pending job either can run. With no runner the job counts for x64
+/// (no room or machine anywhere: the first platform) and the pool is behind.
+/// Once a starting spare with no repository sits on arm64, it covers the job
+/// there, so no platform is behind. If that spare could not cover a GitLab
+/// job, the job would still count for x64, where nothing covers it, and the
+/// pool would stay behind. On one platform the two cases look the same,
+/// because the job lands on the spare's platform either way.
+#[tokio::test]
+async fn a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform() -> Result<()> {
+    let database = Database::new().await?;
+    sqlx::query(
+        "UPDATE runner_pools SET min_count=0,max_count=4,autoscaling_enabled=1 WHERE id='gl-pool'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let platform = |architecture: &str| {
+        json!({
+            "runtimeKind": "docker",
+            "executionOs": "linux",
+            "architecture": architecture,
+            "image": "",
+            "requiresDockerSocket": true,
+        })
+    };
+    let two_platforms: FleetSettingsInput = serde_json::from_value(json!({
+        "enabled": true,
+        "mode": "ephemeral",
+        "cpuMillis": 1000,
+        "memoryMib": 1024,
+        "diskBytes": 0,
+        "platforms": [platform("x64"), platform("arm64")],
+    }))?;
+    targets::save_pool_fleet(&database.pool, "gl-pool", &two_platforms).await?;
+    database
+        .pending_gitlab_job("conn-project", 504, &["docker"])
+        .await?;
+    let configured = ["docker".to_owned()];
+    let profiles = targets::pool_profiles(&database.pool, "gl-pool").await?;
+    let [x64, arm64] = profiles.as_slice() else {
+        anyhow::bail!("two platforms: {}", profiles.len());
+    };
+    assert_eq!(
+        (
+            serde_json::to_value(x64.input.architecture)?,
+            serde_json::to_value(arm64.input.architecture)?
+        ),
+        (json!("x64"), json!("arm64")),
+        "x64 is the first platform"
+    );
+    assert!(
+        behind(&database, "gl-pool", &configured).await?,
+        "one pending GitLab job and no runner: behind"
+    );
+
+    database.spare_runner("gl-pool", arm64, None).await?;
+    assert!(
+        !behind(&database, "gl-pool", &configured).await?,
+        "the arm64 spare with no repository covers the GitLab job: not behind"
+    );
+    database.finish().await
+}

@@ -76,3 +76,30 @@ None.
 
 ## Advisory notes
 - S's A2 and A3 remain advisory and were not part of this round.
+
+## A4 (S re-audit advisory, closed): the inclusion half, "a spare with no repository covers a GitLab job"
+
+**Test added:** `a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform` in `crates/gridops-core/tests/gitlab_pool_fleet.rs`. It uses only the public result of `choose_platform`, through the existing `behind` helper.
+
+**Shape:**
+- `gl-pool` has two Linux Docker platforms, x64 first and arm64 second, and one pending GitLab job either can run.
+- With no runner, the pool is behind. This precondition holds with and without the mutation.
+- A starting spare with no repository is then put on arm64. It covers the job there, so `behind` turns false.
+- Without coverage, the job falls back to x64, the first platform (no room or machine anywhere). x64 has no runner, so the pool stays behind.
+- On one platform the two cases can't be told apart, because the job lands on the spare's platform either way. That is why the existing single-platform test passed under the mutation.
+
+**Mutation** (`crates/gridops-core/src/fleet/targets.rs:1456`, `FleetQueuedJob::Gitlab => repository.is_none(),` changed to `FleetQueuedJob::Gitlab => false,`; reverted with `git checkout --`):
+
+    test a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform ... FAILED
+    panicked at crates/gridops-core/tests/gitlab_pool_fleet.rs:611:5:
+    the arm64 spare with no repository covers the GitLab job: not behind
+    test result: FAILED. 6 passed; 1 failed
+
+The other 6 tests in the file stayed ok under the mutation, which confirms the gap S found. Unmutated, all 7 pass.
+
+**Runs** (`CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`, after the revert):
+- `cargo test -p gridops-core`: 423 passed, 0 failed, 1 ignored (it was ignored before this round). `gitlab_pool_fleet` has 7.
+- `cargo fmt --all -- --check`: clean.
+- `cargo +1.98.1 clippy -p gridops-core --all-targets --locked -- -D warnings`: clean.
+
+Both halves of the coverage arm (`targets.rs:1456`) are now pinned: the R2 test fails under `=> true` and the A4 test fails under `=> false`.

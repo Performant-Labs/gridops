@@ -141,3 +141,12 @@
   - All mutations were reverted, and `git status` was clean.
   - Core: 422 passed. Reconciler: 125 passed. fmt is clean. Clippy 1.98.1 is clean.
   - Details are in `docs/handoffs/181/handoff-S-r2.md`.
+
+## T (S advisory A4, test-only, requested by O) - 2026-11-21T19:22:47-08:00
+- **Decided:** added the core test `a_spare_runner_with_no_repository_covers_a_gitlab_job_on_its_own_platform`. On two platforms, a None spare on the second platform must clear `choose_platform`'s `behind` flag. Without coverage, the GitLab job falls back to the first platform and stays behind.
+- **Assumed:** with no hosts seeded, the attribution of a multi-platform job falls back to the first platform (`targets.rs:1462-1472`, already in `evidence.md`).
+- **Hedged:** none.
+- **Evidence:**
+  - Mutation `FleetQueuedJob::Gitlab => false` (`targets.rs:1456`): the new test fails at line 611 ("not behind"), and the other 6 stay ok. Reverted.
+  - Core: 423 passed, 0 failed. fmt is clean, and clippy 1.98.1 is clean on gridops-core.
+  - Details are in `docs/handoffs/181/handoff-T-rework.md` (A4 section).
