@@ -1,0 +1,22 @@
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T10:34:28-08:00
+- **Decided:** PASS, with 0 block and 8 warn findings (docs/handoffs/124/handoff-A.md).
+  - The Tart fix reuses `FAKE_TART`'s existing `always-busy` branch, and the counted `busy=2` case stays as it is. A `FakeTart::clear` helper replaces the one inline `fs::remove_file` at `main.rs:3646`.
+  - The two API fixtures share one helper in `crates/gridops-api/tests/support/<name>.rs`, included with `#[path]`. That is the `openapi_schema.rs` precedent.
+  - The warns:
+    - (1) keep the helper narrow: port, health, liveness, probe and retry. Fixture-specific spawn and seeding stay in each fixture. Every `pub` item must be used by both binaries, or `dead_code` fails clippy `-D warnings`;
+    - (2) `Fixture::restart` must keep its origin, so it verifies and fails clearly but never moves port;
+    - (3) seed once per fixture, or use a fresh database per attempt. The seeds are fixed-id `INSERT`s;
+    - (4) probe `GET /api/v1/auth/me` with a per-fixture token; no production change;
+    - (5) `fleet_http.rs:476`'s `!logs.contains(SESSION_TOKEN)` would pass without checking anything, so retarget it;
+    - (6) the sweep misses `gridops-manager/src/tart_outage_tests.rs:118` `refused_url()`; `http://127.0.0.1:9` is the existing "nothing listens" convention;
+    - (7) put the regression test in one binary, not in the support file, and treat it as required;
+    - (8) #134 adds `fleet_http/placement.rs` tests using `Fixture::new()` and `&f.cookie`, so keep those names.
+- **Assumed:** with no `survey.md`, the analogues the brief names serve as the Reuse map. #134's unmerged branch shows where that work is heading.
+- **Hedged:** the lead for `every_tart_command_gets_a_path_starting_with_tarts_directory` is unconfirmed. It is that `calls_to("stop")` counts a stop at its start, before that stop's `paths` line is written, while `wait_for_stops` counts at its end. A does not diagnose runtime causes; T confirms it or rules it out.
+- **Evidence:**
+  - Read: the brief; `docs/handoffs/142/decisions.md:95-115` and `handoff-S.md:155-175`; tart-agent `main.rs:2880-3320, :3500-3660, :3790-3844`; `gitlab_tests.rs:300-370`.
+  - API tests: `control_plane_contracts.rs:1-260, :296-330, :485-600, :2180-2260`; `fleet_http.rs:1-480`; `fleet_http/recovery.rs:740-800`; `tests/support/openapi_schema.rs`.
+  - API source: `main.rs:79-100, :185-205, :272-276`; `auth.rs:60-170`. Core: `db.rs:26-50`; `crypto.rs:41-110`; `tests/gitlab_runner_script.rs:440-460, :570-720`. Manager: `tart_outage_tests.rs:105-140, :250-262, :570-580`.
+  - Searched every crate for `TcpListener::bind` without `tokio::net`, for `127.0.0.1:9`, and for `SESSION_TOKEN`/`session_cookie` uses.
+  - Coexistence: `git worktree list`; the diffs of #134, #143, #183, #126, #130 and #152 against their merge-bases for the touched files; the #126, #130 and #152 briefs. #183 is already merged.
+  - `git diff origin/master HEAD -- crates scripts src tests .github` is empty.
