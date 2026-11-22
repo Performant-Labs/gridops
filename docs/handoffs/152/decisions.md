@@ -150,3 +150,9 @@
 ## A (Phase 7, anti-duplication gate) - PASS
 - F extended `cleanup_retention`, `setting_i64`, `SystemSettings`/`settings`/`save_settings` and the migration sequence. The only new object, `registry::snapshot_retention`, is justified in the brief. No parallel path.
 - Two warns (shared consts vs. per-crate literals; wrapper fn name equals the core fn name). Neither blocks.
+
+## F (Phase 6, S REWORK round)
+- **Decided:** make no production change. Both S findings are test-quality gaps in `snapshot_retention_tests.rs`: the pause test only checks constants, and the `batch_size < 1` guard has no test. F never edits tests, so I recorded both for T in handoff-F "Tests that look wrong" and reported `done: false`, which sends the round to T.
+- **Assumed:** S's mutant results (P removes the pause, G removes the guard, and all 4 core tests still pass either way) are accurate. I did not re-run them, because doing so means touching production code only to revert it.
+- **Hedged:** none.
+- **Evidence:** the guard is at `snapshot_retention.rs:78-80` and the inter-batch sleep is at `snapshot_retention.rs:84-86`. I read both at this round's HEAD, and both are unchanged.

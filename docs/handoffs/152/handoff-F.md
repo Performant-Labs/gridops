@@ -144,7 +144,16 @@ cargo fmt --all -- --check   -> exit 0
 **Reader list verified.** `grep fleet_inventory_snapshots crates src`, excluding tests, finds the same readers as the brief: `registry/mod.rs:1291`, `inventory.rs:98` (resend), `inventory.rs:171` (insert), and `queries.rs:1134`, `:1354` and `:1912`. There is no reader of a non-current row.
 
 ## Tests that look wrong (for T)
-None.
+**S REWORK round (Phase 6 rework, 2026-11-22): every finding is TEST-ONLY. F made no change, and the production diff is unchanged.** Route this to T. F does not edit tests.
+
+Both findings are in `crates/gridops-core/src/fleet/registry/snapshot_retention_tests.rs`. The production behaviour each test must pin is already in place in `crates/gridops-core/src/fleet/registry/snapshot_retention.rs`:
+
+1. **Replace `a_pass_is_bounded_to_forty_batches_of_five_hundred_with_a_pause_between`** (line 205). It asserts only constant equalities and never observes the pause.
+   - Production behaviour: `prune_inventory_snapshots` sleeps `BATCH_PAUSE` (25 ms, line 37) before every batch after the first (lines 84-86: `if batch > 0 { tokio::time::sleep(BATCH_PAUSE).await; }`). It stops early at the first batch that is not full (`if rows < full { break; }`).
+   - What T needs to know: seed at least 3 full batches plus one, so that batch 3 is still full and the loop does not stop early. For example, 7 eligible rows with `batch_size` 2 and `max_batches` 3 deletes 6 rows with two pauses. Then assert elapsed >= 2 * BATCH_PAUSE and give no upper bound. If exactly 6 rows are seeded, the third batch is full too, so 6 also works. The pause comes only *between* batches, so 3 batches give 2 pauses.
+2. **Add a test for the `batch_size < 1` guard.**
+   - Production behaviour: lines 78-80, `let Ok(full @ 1..) = u64::try_from(batch_size) else { return Ok(0); };`. It returns `Ok(0)` before any SQL runs for 0 and for every negative value.
+   - Expected assertions: `Ok(0)` for `batch_size` 0 and -1 with `max_batches > 0`, and every seeded row still present.
 
 ## Known issues
 - **`release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` fails on this Mac, and the failure predates this change.**
