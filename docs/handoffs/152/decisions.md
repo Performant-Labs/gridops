@@ -43,3 +43,32 @@
       - indexed and ordered by `received_at`: 21 page misses and 0 fullscan steps;
       - the drain case (9,000 eligible): 536 pages under either ordering.
   - **Scratch:** `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops/a9a4a0b8-80da-4ffe-92a0-a8c8dabe7437/scratchpad/a152/`
+
+## Phase 3 Architecture (A, up-front plan re-review) - 2026-11-22T10:36:33-08:00
+- **Decided:** PASS, with 0 block and 1 warn findings (`docs/handoffs/152/handoff-A.md`, which replaces the BLOCK version at 9a543bf).
+  - **Block 1 (unbounded scan) is resolved.** The amended brief:
+    - adds migration 0049 with `fleet_inventory_snapshots_received_idx ON fleet_inventory_snapshots(received_at)`;
+    - orders the batch subquery by `snap.received_at`;
+    - replaces the EXPLAIN criterion with plan test 5, which runs on a shared const and rejects any `SCAN ` step.
+  - **Warns 2 to 5 are resolved:**
+    - the prune is a new `pub mod snapshot_retention` with a free fn returning `sqlx::Error` and `pub const`s;
+    - a named-const `tokio::time::sleep` runs between batches, not `yield_now`;
+    - `inventorySnapshotRetentionDays` is in the `settings.updated` audit JSON;
+    - the timing estimate adds a steady-state measurement and the index build time, and the PR body gives the deploy-time build.
+  - **New warn 1:** test 5 says "a `SEARCH` of `fleet_observation_sessions`". The planner reports the step by its alias, `SEARCH s USING INDEX …`, so the assertion should match `s` and should not pin a sessions index name. The no-`SCAN` assertion is the real guard.
+- **Assumed:**
+  - SQLite 3.51.3, bundled by libsqlite3-sys 0.37.0, plans this statement the same way as the 3.54.0 CLI. Test 5 checks this on the real library.
+  - No other in-flight run will add a migration 0049. The #124 and #130 briefs say no migration, and no branch has 0049 or later.
+- **Hedged:** The steady-state page count (21 pages) comes from the earlier 10k-row seed with the same SQL. I did not re-seed, to save disk.
+- **Evidence:**
+  - **Planner run:** I applied all 48 migrations plus the proposed index to a fresh scratch database (`…/scratchpad/a152r/v.db`). `EXPLAIN QUERY PLAN` of the brief's exact statement gave:
+    - `SEARCH fleet_inventory_snapshots USING INTEGER PRIMARY KEY (rowid=?)`;
+    - `LIST SUBQUERY 2`;
+    - `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)`;
+    - `CORRELATED SCALAR SUBQUERY 1`;
+    - `SEARCH s USING INDEX sqlite_autoindex_fleet_observation_sessions_2 (host_id=? AND session_id=?)`.
+  - **Placement precedent:** the reconciler calls `fleet::retry::retry_failed_start`, whose `LAST_FAILURE` const is plan-tested in `registry/query_plan_tests.rs`.
+  - **Error-type precedent:** `fleet::ensure_control_plane` and `autoscaling::waiting_job_pools` return `sqlx::Error`.
+  - **Schema tests:** the upgrade tests in `tests/fleet_schema.rs` compare only the objects that existed before migrating, so the new index does not affect them.
+  - **Tokio:** the workspace pulls it in with `full` features.
+  - **Branches:** a scan of every local and remote branch found no `migrations/0049_` or later.
