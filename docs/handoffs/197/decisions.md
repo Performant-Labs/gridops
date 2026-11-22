@@ -1,0 +1,48 @@
+# Decision journal: #197 fleet health shared contract
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T13:44:49-08:00
+- **Decided:** BLOCK, with 4 block and 9 warn findings (`docs/handoffs/197/handoff-A.md`).
+  - **Block 1 [correctness]: the #190 insert sites are wrong.**
+    - Every `INSERT INTO workflow_jobs` in `autoscaling.rs` is inside `#[cfg(test)]`.
+    - The real poll writer is reconciler `main.rs:2133` (`upsert_workflow_job`), a file wave 1 must not edit.
+    - The GitLab writer is core `gitlab/jobs.rs` (`UPSERT`), not api `webhooks/gitlab.rs`.
+    - GitLab rows carry no job name to classify on.
+    - Fix: #197 wires `category` at all three real writers through a #190-owned seam, and the brief decides the GitLab name and timing columns.
+  - **Block 2 [correctness]: Vitest contract tests next to their components would never run.** `vitest.config.ts` includes only `tests/**/*.test.ts`. Fix: put them at `tests/fleet-health-<issue>-*.contract.test.ts`, in the createElement style.
+  - **Block 3 [completeness]: shared-file hooks are missing from the brief.**
+    - the `AppState` field (`state.rs`) and the fake's seams for #194's cache tests;
+    - a fleet-wide `queue_breakdown` (it is `pub(super)` and user-scoped today);
+    - the Overview tile wiring (`index.tsx:122`, the `MetricTile.to` union);
+    - a 422 error variant;
+    - contract-test `mod` lines placed in #197-owned parent files.
+  - **Block 4 [correctness]: the health endpoint's auth.** "Match `query::hosts`" (principal-scoped) over a fleet-wide, per-window shared cache exposes data to callers who shouldn't see it. Fix: admin-only, like `/api/v1/fleet/workload` (`require_admin`).
+  - **The warns:**
+    - (5) the job-category routes go in `session_routes()`, not `fleet::router()`;
+    - (6) `#[async_trait]` trait plus `Arc<dyn>`; `testdata.rs` and the speed-check helper behind `test-support`;
+    - (7) `run_pass(db, now)`, called next to `fleet::tick`, before the manager early return;
+    - (8) the speed-check helper's isolation, and timing transactions from outside;
+    - (9) add the `regex` crate and a per-rule error API; `proptest` is absent, so #192 uses seeded inputs;
+    - (10) the STRICT primary key needs a non-NULL unmanaged sentinel;
+    - (11) the fleet zod transport and CSS-token chart theme;
+    - (12) a unique nav shortcut and the double-active highlight;
+    - (13) a forecast that #204 will need the windowed reader in core.
+- **Assumed:**
+  - With no `survey.md`, the analogues are the #137 GitLab contract, `/api/v1/fleet/workload` end to end, and #152's retention.
+  - The issue bodies fetched on 2026-11-22 are current.
+  - The runner manager's early return at `main.rs:641` is the only path in `reconcile()` that skips later steps.
+- **Hedged:**
+  - Block 4 is a product-visible decision (who may see the page). I chose admin-only because the codebase's only fleet-wide aggregate (`workload`) is admin-only and its UI says "Only administrators can see machines". If the operator wants non-admin access, the cache has to be keyed by visibility instead.
+  - Warn 13 deliberately keeps the issue paths for wave 1 and defers relocation to #204, because changing paths now would contradict the wave-1 issue texts the GLM agents read.
+  - The four blocks stop the automated run for a human amendment. I chose block over warn because each one either puts wrong files into the guard's owners file, makes contract tests silently not run, or forces a wave-1 edit to an unowned file. A Phase 7 review can't undo any of these once wave 1 starts.
+- **Evidence:**
+  - **Read:**
+    - the brief, both brief-gate results, and issues #197, #198, #190-#195 and #199-#204 (`gh issue view`);
+    - `crates/gridops-core/src/{lib.rs,db.rs,autoscaling.rs (test-module bounds),gitlab/mod.rs,gitlab/jobs.rs,fleet/mod.rs}`;
+    - `crates/gridops-api/src/{main.rs,state.rs,error.rs,webhooks.rs:600-720,fleet/mod.rs,fleet/boundary.rs,fleet/query.rs,fleet/profiles.rs:330-360,fleet/openapi.rs,resources/overview_queue.rs,resources/gitlab_tests.rs (header)}`;
+    - `crates/gridops-reconciler/src/main.rs` (`run_pass`, `reconcile`, `upsert_workflow_job`, `cleanup_retention`) and `snapshot_retention_tests.rs`;
+    - `migrations/0047_gitlab.sql`, the 0022 `fleet_hosts` / `host_samples` DDL, and the `migrations/` listing on the branch, origin/master and every worktree (0050 is free);
+    - `vitest.config.ts`, `tsconfig.json`, `eslint.config.js`, `package.json`, `tests/api-tokens-section.test.ts`, `tests/navigation.test.ts`;
+    - `src/lib/navigation.ts`, `src/features/dashboard/metric-tiles.ts`, `src/features/fleet/{admin-api.ts,query-api.ts,fleet-workload-section.tsx}`, `src/styles/app.css` tokens, `src/routes/_app/fleet.index.tsx`.
+  - **Checked:**
+    - `Cargo.lock`: no `regex`, no `proptest`.
+    - `sqlite3`: a STRICT primary key rejects a NULL `pool_id`, and `window` works as a column name.
