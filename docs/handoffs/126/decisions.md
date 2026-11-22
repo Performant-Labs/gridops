@@ -156,3 +156,28 @@
   - `cargo test -p gridops-core --lib` 313 passed; `cargo test -p gridops-host-agent` all binaries green.
   - Mutation spot-checks (reverted): dropping the cache's `readonly` flag fails `a_shared_runner_gets_its_folders_at_host_paths_and_the_cache_read_only`; removing the `.env` rewrite fails `the_runner_resolves_its_tool_cache_to_the_work_folder_whatever_the_image_sets`.
   - Facts F used from unchanged code are in `evidence.md`; I checked the Start/Prepare wiring by reading `docker.rs` `start` and `shared_runner`.
+
+## Phase 3 Architecture (A, up-front plan review, round 3: re-entry after F's archChanged) - 2026-11-22T12:41:57-08:00
+- **Decided:** PASS, with 0 block and 2 warn findings (docs/handoffs/126/handoff-A.md, which replaces the round-2 PASS from 25e34e8).
+  - **Why A ran:** the outside diff gate (r1) BLOCKed on B-1, a missing failed-rename test. F had reported `archChanged`, so the driver routed the BLOCK to Phase 4 without classifying it. The brief is unchanged (sha256 42204bd2…c949), so the plan's round-2 PASS stands. This round checked F's architecture against the plan.
+  - **F's structure stays inside the planned seams:**
+    - core gains `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT` and `shared_runner_root(PreparedEnvironmentId)`; everything else is in `docker.rs`;
+    - there are no wire, protocol, `FailureCode`, server or reconciler changes;
+    - `instrumented_runner_script` is unchanged.
+  - **Round-2 warns 1-9 are all followed** (warn 9 only partly; see warn 2).
+  - **Warns:**
+    - (1) `remove_tree` (a blocking `remove_dir_all` over trees of about 600 MB) and `std::fs::rename` run directly in async code (`docker.rs:1169`, `:1177`, `:1208`, `:1325`). `NativeRuntime`'s fill uses `tokio::fs` and `spawn_blocking` (`native.rs:486`, `:528-529`, `:551`). Fix: wrap them in `spawn_blocking` and use `tokio::fs::rename`.
+    - (2) The rename stopped halfway: `create_shared_work_folder` and the `shared_work_folder_tests` module keep "work" names while the cleanup trio became `shared_folder(s)`.
+  - **Routing note for O and T:** B-1 is test-only (a regular file pre-created at `<cache_root>/<hex>` makes the rename fail, with no production change). Nothing routes it to T this cycle, so `handoff-A.md` "Notes for O" spells it out.
+- **Assumed:**
+  - The driver's fixed "before any code exists" task text is generic. The real input is the code at 3f00753 plus the unchanged brief.
+  - The actions/runner 2.338.2 behaviour cited in round 1 still holds. I did not fetch it again.
+- **Hedged:**
+  - Warn 1's cost (one tokio worker held for the length of a delete) is inferred from the multi-threaded runtime and the agent running one command at a time. It was not measured.
+  - The diff gate's NV-1 to NV-6 (real-daemon and third-party claims) are outside A's scope and were not re-checked.
+- **Evidence:**
+  - Read: the brief (hash checked); `handoff-A.md` at 25e34e8; `handoff-F.md`; `decisions.md`; `126-diff-result-r1.md`.
+  - Code: the `docker.rs` production diff 9e357e0..3f00753 in full; the core `work_folder.rs` / `fleet/mod.rs` diff; `docker.rs`@9e357e0 log lines; `native.rs` fs usage; `main.rs:45`.
+  - Searches: a repo-wide grep for `{{.Config.Image}}` readers; the crate module-layout precedent (`webhooks.rs` with `webhooks/gitlab_tests.rs`).
+  - Workflow: the release's `coding-pipeline.workflow.mjs` Phase 4/5/7 routing and `coding-pipeline-logic.mjs` (`F_RESULT_SCHEMA`, `nextPhase`, `archCarryNote`).
+  - Coexistence: the origin/master diff 9e357e0..fbacbc2 (only `CHANGELOG.md` is shared) and `git worktree list` (#124 shares none of these files).
