@@ -101,3 +101,18 @@ None. One environment-dependent test, which is not T's and predates #181, is not
 - `crates/gridops-core/src/fleet/targets.rs`
 - `crates/gridops-core/src/autoscaling_gitlab_tests.rs` (module doc comment only, as the brief asks)
 - `CHANGELOG.md`
+
+## Rework round (S REWORK, #670) - 2026-11-21
+
+**Result: test-only. No production change in this round. Route R1 and R2 to T.**
+
+Every finding in `docs/handoffs/181/handoff-S.md` is a test gap. S itself classed them as test-only, and the production code they name is correct and unchanged:
+
+- **R1** (`gitlab_lifecycle_tests.rs:2179`, `jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero`). The `NoDemand` guard at `crates/gridops-reconciler/src/main.rs:2450` (`if active >= pool.min_count`) is correct. The test does not reach it because `maybe_scale_down` resets desired to 0 before `provision` runs. The fix is to the fixture (a large `idle_timeout_minutes`, or move the check to a core `choose_platform` test), together with the doc comment and the T-red claim. All of that is T's.
+- **R2** (no test for the binding seam clause). The production arm `FleetQueuedJob::Gitlab => repository.is_none()` at `crates/gridops-core/src/fleet/targets.rs:1456` does what the brief says. What is missing is a core test with a starting spare runner registered to GitHub repository 10. That test belongs to T.
+- **A2** (comments over-attribute): these are test comments, so they belong to T.
+- **A3** (split the `attribute_queued_jobs` doc paragraph): S scoped this to "the next production touch, no behaviour change". This round has no production touch, so I did not make it. A doc-only production edit here would turn a test-only round into a production diff and confuse the routing. I am not deferring it as an open item; I am declining it for this cycle, as S's own wording allows.
+- **Bitbucket statement in the PR body**: this is for O. The CHANGELOG already states it.
+- **`release_preflight`**: host-dependent. It is unchanged from the Known issues above.
+
+Tests that look wrong (for T), this round: R1 and R2 above, as S described them. I did not edit any test.

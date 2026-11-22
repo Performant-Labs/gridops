@@ -105,3 +105,9 @@
 - **Assumed:** the `release_preflight` failure in `gridops-api` is host-dependent (macOS arm64 dev host), as F showed on master; I did not re-run it on master.
 - **Hedged:** none.
 - **Evidence:** `docs/handoffs/181/handoff-T-green.md`; the mutation was reverted and `git status` was clean.
+
+## Phase 6 Rework (F, S REWORK #670) - 2026-11-21T18:58:09-08:00
+- **Decided:** no production change. R1 and R2 are test gaps, so they go to T. The `NoDemand` guard (`main.rs:2450`) and the GitLab coverage arm (`targets.rs:1456`) are correct as written. I declined A3 this cycle, because S scoped it to a later production touch and making the edit now would hide the test-only routing.
+- **Assumed:** the driver sends a self-reported test-only S REWORK to T (#678).
+- **Hedged:** none.
+- **Evidence:** I checked both production lines S cites by grep, and they are present and unchanged. Before this round `git status` was clean, and no `src/` file was edited in it.
