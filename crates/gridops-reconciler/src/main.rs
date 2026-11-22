@@ -14,6 +14,8 @@ mod jit_conflict_tests;
 #[cfg(test)]
 mod log_filter_tests;
 #[cfg(test)]
+mod registration_cap_tests;
+#[cfg(test)]
 mod snapshot_retention_tests;
 #[cfg(test)]
 mod start_tests;

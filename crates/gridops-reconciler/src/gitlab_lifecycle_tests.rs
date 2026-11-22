@@ -1707,14 +1707,18 @@ const INCARNATION: &str = "b5000000-0000-4000-8000-000000000001";
 const PROFILE: &str = "b6000000-0000-4000-8000-000000000001";
 const BOOT: &str = "boot-gitlab-fleet";
 
-/// A GitLab pool (`pool-gl`) that runs on one approved, active Linux Docker
-/// machine with work authority, granted the pool's connection's target. From
-/// [`Fleet::new`] the pool keeps one runner (`min_count` 1, autoscaling off);
-/// from [`Fleet::autoscaling`] it scales from nothing on its pending jobs.
-struct Fleet {
-    setup: Setup,
+/// A pool that runs on one approved, active Linux Docker machine with work
+/// authority, granted the pool's target. The GitLab pool `pool-gl`, granted
+/// its connection's target: from [`Fleet::new`] it keeps one runner
+/// (`min_count` 1, autoscaling off); from [`Fleet::autoscaling`] it scales
+/// from nothing on its pending jobs. Or, from [`Fleet::github`], the GitHub
+/// organization pool `pool-gh` (#130), which keeps one runner.
+pub(crate) struct Fleet {
+    pub(crate) setup: Setup,
     registry: RegistryService,
     host: AuthenticatedHost,
+    /// The pool the machine serves.
+    pool: &'static str,
 }
 
 impl Fleet {
@@ -1746,6 +1750,52 @@ impl Fleet {
     async fn with_pool(requires_docker_socket: bool, pool_sql: &str) -> Result<Self> {
         let setup = gitlab_setup(pool_sql).await?;
         ACME.add(&setup, &["pool-gl"]).await?;
+        let target = targets::ensure_target(&setup.app.database, &ACME.target()?).await?;
+        Self::on_machine(
+            setup,
+            "pool-gl",
+            &target,
+            &["gitlab_project", "gitlab_group"],
+            requires_docker_socket,
+        )
+        .await
+    }
+
+    /// #130: a GitHub organization pool, `pool-gh` (Docker, Linux x64,
+    /// placed on fleet machines only), keeping one runner, registered with
+    /// the `Setup`'s fake GitHub.
+    pub(crate) async fn github() -> Result<Self> {
+        let setup = Setup::new(
+            r#"UPDATE runner_pools SET desired_count=0 WHERE id IN ('pool-mac','pool-linux');
+               INSERT INTO runner_pools (id,installation_id,name,scope,image,provider,providers,labels,docker_image,tart_image,desired_count,min_count,autoscaling_enabled,created_at,updated_at)
+                 VALUES ('pool-gh',1,'pool-gh','organization','runner:latest','docker','["docker"]','["linux-large"]','runner:latest','',1,1,0,10,10);"#,
+            tart_lane::SLOT_WATCH_INTERVAL,
+        )
+        .await?;
+        let target = targets::pool_targets(&setup.app.database, "pool-gh")
+            .await?
+            .into_iter()
+            .next()
+            .context("pool-gh has an organization fleet target")?;
+        Self::on_machine(
+            setup,
+            "pool-gh",
+            &target,
+            &["github_organization", "github_repository"],
+            true,
+        )
+        .await
+    }
+
+    /// The machine, serving `pool` on `target`, which its backend can run
+    /// runners of `target_kinds` for.
+    async fn on_machine(
+        setup: Setup,
+        pool: &'static str,
+        target: &str,
+        target_kinds: &[&str],
+        requires_docker_socket: bool,
+    ) -> Result<Self> {
         let database = &setup.app.database;
         let now = now_millis();
         sqlx::query(
@@ -1787,10 +1837,10 @@ impl Fleet {
             "runtime_kind": "docker",
             "execution_os": "linux",
             "architecture": "x64",
-            "supported_runners": [
-                {"target_kind": "gitlab_project", "mode": "ephemeral"},
-                {"target_kind": "gitlab_group", "mode": "ephemeral"},
-            ],
+            "supported_runners": target_kinds
+                .iter()
+                .map(|kind| json!({"target_kind": kind, "mode": "ephemeral"}))
+                .collect::<Vec<_>>(),
             "environments": [{"reference": RUNNER_IMAGE, "readiness": "ready", "version": null}],
             "resources": {"cpu": "reservation", "memory": "reservation", "disk": "estimate"},
             "interactive": "unsupported",
@@ -1822,28 +1872,28 @@ impl Fleet {
         .bind(now)
         .execute(database)
         .await?;
-        let target = targets::ensure_target(database, &ACME.target()?).await?;
         sqlx::query(
             "INSERT INTO host_target_grants (host_id,target_id,allow_schedule,allow_docker_socket,revision)
              VALUES (?,?,1,1,1)",
         )
         .bind(HOST)
-        .bind(&target)
+        .bind(target)
         .execute(database)
         .await?;
         sqlx::query(
             "INSERT INTO pool_execution_profiles (id,pool_id,name,revision,enabled,runtime_kind,execution_os,architecture,mode,
                requires_docker_socket,all_authorized_hosts,image,labels_json,cpu_millis,memory_mib,disk_bytes,placement,created_at,updated_at)
-             VALUES (?,'pool-gl','linux-x64-docker',1,1,'docker','linux','x64','ephemeral',?,1,?,'[]',1000,1024,0,'machines',1,1)",
+             VALUES (?,?,'linux-x64-docker',1,1,'docker','linux','x64','ephemeral',?,1,?,'[]',1000,1024,0,'machines',1,1)",
         )
         .bind(PROFILE)
+        .bind(pool)
         .bind(requires_docker_socket)
         .bind(RUNNER_IMAGE)
         .execute(database)
         .await?;
         sqlx::query("INSERT INTO profile_ci_targets (profile_id,target_id,enabled) VALUES (?,?,1)")
             .bind(PROFILE)
-            .bind(&target)
+            .bind(target)
             .execute(database)
             .await?;
         let registry = RegistryService::new(database.clone(), setup.app.vault.clone());
@@ -1854,6 +1904,7 @@ impl Fleet {
             setup,
             registry,
             host,
+            pool,
         })
     }
 
@@ -1876,26 +1927,31 @@ impl Fleet {
         Ok(())
     }
 
-    async fn pass(&self) -> Result<()> {
+    pub(crate) async fn pass(&self) -> Result<()> {
         self.fresh().await?;
         pass(&self.setup).await
     }
 
     /// The newest runner row of the pool and its placement.
-    async fn newest(&self) -> Result<(String, PlacementId)> {
+    pub(crate) async fn newest(&self) -> Result<(String, PlacementId)> {
         let Some((runner, placement)): Option<(String, String)> = sqlx::query_as(
             "SELECT r.id,p.id FROM runners r JOIN workload_placements p ON p.workload_id=r.id
-              WHERE r.pool_id='pool-gl' ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1",
+              WHERE r.pool_id=? ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1",
         )
+        .bind(self.pool)
         .fetch_optional(&self.setup.app.database)
         .await?
         else {
             let events: Vec<String> = sqlx::query_scalar(
-                "SELECT event||': '||message FROM runner_events WHERE pool_id='pool-gl' ORDER BY rowid",
+                "SELECT event||': '||message FROM runner_events WHERE pool_id=? ORDER BY rowid",
             )
+            .bind(self.pool)
             .fetch_all(&self.setup.app.database)
             .await?;
-            bail!("no placed runner in pool-gl; the pool's events: {events:?}");
+            bail!(
+                "no placed runner in {}; the pool's events: {events:?}",
+                self.pool
+            );
         };
         Ok((runner, placement.parse()?))
     }
@@ -1912,7 +1968,7 @@ impl Fleet {
         Ok(serde_json::from_str(&payload)?)
     }
 
-    async fn commands(&self, placement: PlacementId, kind: &str) -> Result<i64> {
+    pub(crate) async fn commands(&self, placement: PlacementId, kind: &str) -> Result<i64> {
         Ok(
             sqlx::query_scalar(
                 "SELECT COUNT(*) FROM host_commands WHERE placement_id=? AND kind=?",
@@ -1961,7 +2017,7 @@ impl Fleet {
         })
     }
 
-    async fn prepared(&self, placement: PlacementId) -> Result<()> {
+    pub(crate) async fn prepared(&self, placement: PlacementId) -> Result<()> {
         self.answer(
             placement,
             "prepare_environment",
@@ -1974,7 +2030,7 @@ impl Fleet {
         .await
     }
 
-    async fn started(&self, placement: PlacementId) -> Result<()> {
+    pub(crate) async fn started(&self, placement: PlacementId) -> Result<()> {
         let envelope = self.command(placement, "start_runner").await?;
         let AgentOperation::StartRunner(start) = &envelope.operation else {
             bail!("the start command is not a runner start");
@@ -2074,7 +2130,7 @@ impl Fleet {
     }
 
     async fn row(&self, runner: &str) -> Result<RunnerRow> {
-        rows(&self.setup, "pool-gl")
+        rows(&self.setup, self.pool)
             .await?
             .into_iter()
             .find(|row| row.id == runner)
@@ -2100,13 +2156,14 @@ impl Fleet {
     /// workload intent each.
     async fn placed(&self) -> Result<i64> {
         Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM workload_intents WHERE pool_id='pool-gl'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM workload_intents WHERE pool_id=?")
+                .bind(self.pool)
                 .fetch_one(&self.setup.app.database)
                 .await?,
         )
     }
 
-    async fn finish(self) -> Result<()> {
+    pub(crate) async fn finish(self) -> Result<()> {
         self.setup.finish().await
     }
 }
