@@ -111,3 +111,10 @@
 - **Evidence:**
   - Mutation: making `expire_registering` always return early fails both RED tests and leaves the guard green. Reverted.
   - Commands and results are in `handoff-T-green.md`.
+
+## A (Phase 7, anti-duplication gate)
+
+- **Decided:** PASS. The diff extends `abandon_unstarted`, `PlacementFailureReason`, the `QUEUE_TIMEOUT_MILLIS` / `expire_queued` pair and the existing `finish` / `delete_runner` path. No parallel path. Test fixtures were generalised (`Fleet::on_machine`, `Fleet::github`, configurable fake GitHub), not copied.
+- **Assumed:** None.
+- **Hedged:** None.
+- **Evidence:** `git diff 9e357e0..HEAD` read in full for `fleet.rs`, `failure.rs`, `start_health.rs`, the test modules, and the TS / OpenAPI / CHANGELOG surfaces. Written to `handoff-A-dup.md`.
