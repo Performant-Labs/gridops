@@ -49,6 +49,19 @@ Known problems in the current release are in the README's
 
 ### Fixed
 
+- **A fleet runner that cannot be registered no longer holds its machine's
+  capacity forever.** A prepared placement whose runner could not be
+  registered with GitHub or GitLab and started (for example, GitHub kept
+  answering 409 because a live runner held the name, the App credentials were
+  unavailable, or the machine had lost its work authority) was retried every
+  pass with its capacity held and its runner counted as starting. After 10
+  minutes in `registering` it is now given up: its capacity is released, it
+  records a `placement_failed` event with the new reason
+  `registration_timed_out` and the last error, and the pool replaces the
+  runner. Any registration already made upstream is removed by the usual
+  runner cleanup. The failure is not counted against the machine and is not
+  retried on another machine. See
+  [the fleet API](docs/fleet-api.md). (#130)
 - **A GitLab connection used on the fleet can be removed again.** Once the
   fleet's target list had been opened, every GitLab connection had a fleet
   target, and removing the connection was refused for good with "is a CI

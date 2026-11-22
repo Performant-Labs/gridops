@@ -12,6 +12,7 @@ const labels: Record<Reason, string> = {
   host_epoch_changed: "Machine re-enrolled or recovered",
   runner_removed_before_start: "Runner removed before it started",
   operator_released: "Released by an administrator",
+  registration_timed_out: "Registration timed out",
   unknown: "Cause not recorded",
 };
 

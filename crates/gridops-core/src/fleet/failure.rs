@@ -45,6 +45,9 @@ pub enum PlacementFailureReason {
     RunnerRemovedBeforeStart,
     /// An administrator released a start that was never confirmed.
     OperatorReleased,
+    /// The reconciler could not register the runner upstream and issue its
+    /// start within its cap, so it gave the placement up.
+    RegistrationTimedOut,
     /// No cause was available.
     Unknown,
 }
@@ -62,6 +65,7 @@ impl PlacementFailureReason {
             Self::HostEpochChanged => "host_epoch_changed",
             Self::RunnerRemovedBeforeStart => "runner_removed_before_start",
             Self::OperatorReleased => "operator_released",
+            Self::RegistrationTimedOut => "registration_timed_out",
             Self::Unknown => "unknown",
         }
     }
@@ -79,6 +83,7 @@ impl PlacementFailureReason {
             Self::HostEpochChanged,
             Self::RunnerRemovedBeforeStart,
             Self::OperatorReleased,
+            Self::RegistrationTimedOut,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == code)
@@ -138,6 +143,29 @@ impl PlacementFailure {
             "An administrator released this placement because its start was never confirmed.",
         )
         .with("cancelled_commands", json!(cancelled))
+    }
+
+    /// The reconciler gave up a placement that spent `allowed_ms` in
+    /// `registering` without its runner being registered and started.
+    /// `last_error` is what the last attempt failed with; `None` when it made
+    /// no attempt, such as when the machine had no work authority.
+    #[must_use]
+    pub fn registration_timed_out(
+        elapsed_ms: i64,
+        allowed_ms: i64,
+        last_error: Option<&str>,
+    ) -> Self {
+        let within = format!(
+            "The runner could not be registered and started within {} minutes",
+            allowed_ms / 60_000
+        );
+        let message = match last_error {
+            Some(error) => format!("{within}: {error}"),
+            None => format!("{within}; no start could be issued."),
+        };
+        Self::new(PlacementFailureReason::RegistrationTimedOut, message)
+            .with("elapsed_ms", elapsed_ms)
+            .with("allowed_ms", allowed_ms)
     }
 
     #[must_use]

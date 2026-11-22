@@ -75,3 +75,26 @@
     - `tsc` on the changed test file: only the expected RED type error at line 43.
   - Every RED failure is an assertion at the feature boundary: `"registering" != "failed"` at `registration_cap_tests.rs:102`, `from_code` returning `Unknown`, a `ZodError` on the new code, and the OpenAPI enum lacking it.
   - Satisfiability: under a reverted sketch of D3/D4/D6, all 5 Rust tests passed. The production files match origin/master again.
+
+## Phase 5 Implementation (F) - 2026-11-22T11:11:37-08:00
+- **Decided:** implemented D1-D10 (`docs/handoffs/130/handoff-F.md`):
+  - **The cap:** `REGISTRATION_TIMEOUT_MILLIS = 10 min` in reconciler `fleet.rs`. `expire_registering` runs after every `register_and_start` attempt in `tick`, whatever it returned. It measures the age from `Placement.updated_at` and gives the placement up through `abandon_unstarted` with `PlacementFailure::registration_timed_out(elapsed, cap, last_error)`. It warns once, when the call returns `true`.
+  - **The reason:** `RegistrationTimedOut` / `registration_timed_out` lands on all six D5 surfaces. `is_start_failure` is `false` for it.
+  - **Docs:** the CHANGELOG (Unreleased → Fixed) and `docs/fleet-api.md`.
+  - **Errors in the helper:** an error from `expire_registering` is logged at warn and the loop continues. It is not propagated with `?`, so one placement cannot abort the pass.
+- **Assumed:**
+  - `{error:#}` (the anyhow chain) is the right "last error" to record. It keeps the `.context` text, and `PlacementFailure::new` truncates it to 240 characters.
+  - No separate `last_error` fact is needed, because the message carries the error.
+- **Hedged:**
+  - 8 files changed, over the role's ~6-file scope cap. D5 requires the contract surfaces to land together, and the edits outside `fleet.rs` and `failure.rs` are one-line list entries or doc text, so I proposed no split.
+- **Evidence:**
+  - Commands:
+    - `cargo test -p gridops-core --lib`: 313 passed;
+    - `cargo test -p gridops-reconciler`: 128 passed, including the 3 `registration_cap_tests`;
+    - `cargo test -p gridops-api --test control_plane_contracts`: 39 passed, after a forced rebuild because the shared target dir had served the gridops-124 binary;
+    - `npx vitest run`: 626 passed;
+    - `cargo fmt --check`: ok;
+    - clippy: no findings in a changed file;
+    - eslint: ok;
+    - tsc: no errors in changed files.
+  - The source facts relied on are in `docs/handoffs/130/evidence.md`.

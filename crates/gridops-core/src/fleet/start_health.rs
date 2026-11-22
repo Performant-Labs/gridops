@@ -52,6 +52,7 @@ pub fn is_start_failure(reason: PlacementFailureReason, agent_code: Option<&str>
         | PlacementFailureReason::HostEpochChanged => true,
         PlacementFailureReason::RunnerRemovedBeforeStart
         | PlacementFailureReason::OperatorReleased
+        | PlacementFailureReason::RegistrationTimedOut
         | PlacementFailureReason::Unknown => false,
     }
 }
