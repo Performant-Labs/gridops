@@ -41,3 +41,37 @@
     - every place a reason code is listed (`operator_released` / `runner_removed_before_start`);
     - `git diff origin/master -- crates src migrations` is empty;
     - `git worktree list`, plus each sibling worktree's status and its brief, for overlap.
+
+## Phase 4 Tests RED (T) - 2026-11-22T10:57:00-08:00
+- **Decided:** RED is valid (`docs/handoffs/130/handoff-T-red.md`). The tests:
+  - **Reconciler integration**, in the new module `registration_cap_tests.rs`:
+    - a GitHub JIT that always returns 409 is held before the cap and given up past it;
+    - a registration that succeeds within the cap starts normally (a guard);
+    - a machine without authority is given up past the cap (D3).
+  - **Core unit:**
+    - `failure.rs`: the `registration_timed_out` code is known and round-trips;
+    - `start_health.rs`: the timeout is not a start failure (D6).
+  - **TS:**
+    - a host read carrying the code parses, and its label is "Registration timed out";
+    - the OpenAPI reason enum equals `placementFailureReasons` and contains the code.
+- **Fixtures were extended, not copied** (A's finding 5):
+  - `Setup`'s fake GitHub gained `github_registrations`, with a `conflict` switch (409, plus the name listed as an online runner) and an `asked` counter. While `conflict` is off, the list route answers 404, as before.
+  - The `Fleet` machine seeding moved into `Fleet::on_machine`, shared by the GitLab `with_pool` and the new `Fleet::github()` (`pool-gh`).
+  - `Fleet` is `pub(crate)` and gains a `pool` field.
+- **Assumed:**
+  - The tests spell the cap out as `CAP_MILLIS = 600000` (D1), because `fleet::REGISTRATION_TIMEOUT_MILLIS` is private and doesn't exist yet. Referencing it would make RED a compile error.
+  - The variant is named by its code (`from_code`) for the same reason. In Phase 6, T adds `RegistrationTimedOut` to the existing reason-list tests (D5).
+- **Hedged:**
+  - The within-cap test passes on master by design, because nothing gives up today. Mutating a throwaway sketch shows it catches age measured from `created_at` (D2) and a cap that fires too early. The RED tests catch `is_start_failure == true` (D6) through the `placement_retried` assertion.
+  - The label wording "Registration timed out" is pinned from A's D5 example.
+  - Five clippy 0.1.99 findings sit in files this branch doesn't touch (`autoscaling.rs:1890`, `:1976`; `autoscaling_gitlab_tests.rs:289`, `:385`; `builtin_host.rs:119`). They will fail `check:rust` whatever F does. Flagged for O, not routed to F.
+- **Evidence:**
+  - Commands:
+    - `cargo test -p gridops-reconciler`: 126 passed, 2 failed (both new);
+    - `cargo test -p gridops-core --lib`: 311 passed, 2 failed (both new);
+    - `npx vitest run`: 624 passed, 2 failed (both new);
+    - `cargo fmt --check`: pass;
+    - `eslint` on the changed test file: pass;
+    - `tsc` on the changed test file: only the expected RED type error at line 43.
+  - Every RED failure is an assertion at the feature boundary: `"registering" != "failed"` at `registration_cap_tests.rs:102`, `from_code` returning `Unknown`, a `ZodError` on the new code, and the OpenAPI enum lacking it.
+  - Satisfiability: under a reverted sketch of D3/D4/D6, all 5 Rust tests passed. The production files match origin/master again.

@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import fixture from "./fixtures/fleet-query-contracts.json";
-import { hostQueryResultSchema } from "../src/features/fleet/query-contracts";
+import { hostQueryResultSchema, placementFailureReasons } from "../src/features/fleet/query-contracts";
 import {
   failureReasonLabel,
   failureSummary,
@@ -28,6 +30,26 @@ describe("placement failures on a machine", () => {
     if (!first) throw new Error("fixture has no recorded failure");
     first.reason = "made_up";
     expect(() => hostQueryResultSchema.parse(body)).toThrow();
+  });
+
+  it("reads a machine whose runners could not register in time (#130)", () => {
+    const body = structuredClone(fixture.hostResults[0]) as unknown as { item: { recentPlacementFailures: Array<{ reason: string }> } };
+    const first = body.item.recentPlacementFailures[0];
+    if (!first) throw new Error("fixture has no recorded failure");
+    first.reason = "registration_timed_out";
+    const item = hostQueryResultSchema.parse(body).item;
+    if (item.projection !== "host") throw new Error("fixture is not a host");
+    expect(item.recentPlacementFailures[0]?.reason).toBe("registration_timed_out");
+    expect(failureReasonLabel("registration_timed_out")).toBe("Registration timed out");
+  });
+
+  it("accepts exactly the reasons the published API serves", () => {
+    const spec = JSON.parse(readFileSync(fileURLToPath(new URL("../docs/openapi/gridops-v1.json", import.meta.url)), "utf8")) as {
+      components: { schemas: { PlacementFailureGroup: { properties: { reason: { enum: string[] } } } } };
+    };
+    const published = spec.components.schemas.PlacementFailureGroup.properties.reason.enum;
+    expect(published).toContain("registration_timed_out");
+    expect([...placementFailureReasons].sort()).toEqual([...published].sort());
   });
 
   it("names every reason in words an operator can act on", () => {

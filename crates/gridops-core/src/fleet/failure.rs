@@ -260,6 +260,24 @@ mod tests {
         );
     }
 
+    /// #130: a runner the reconciler could not register and start within
+    /// its cap is a reason of its own, under a stable code, not `unknown`.
+    /// Named by its code because the closed set is what clients parse.
+    #[test]
+    fn a_registration_timeout_has_its_own_stable_code() {
+        let reason = PlacementFailureReason::from_code("registration_timed_out");
+        assert_ne!(
+            reason,
+            PlacementFailureReason::Unknown,
+            "registration_timed_out is in the closed set"
+        );
+        assert_eq!(reason.as_str(), "registration_timed_out");
+        assert_eq!(
+            serde_json::to_value(reason).ok(),
+            Some(json!("registration_timed_out"))
+        );
+    }
+
     #[test]
     fn detail_holds_reason_message_and_facts_and_reserves_its_keys() {
         let failure = PlacementFailure::new(PlacementFailureReason::AgentReported, "It failed.")
