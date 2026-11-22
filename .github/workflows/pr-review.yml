@@ -57,7 +57,7 @@ jobs:
     concurrency:
       group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
-    uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
+    uses: ./.github/workflows/pr-review-reusable.yml
     permissions:
       contents: read
       pull-requests: write

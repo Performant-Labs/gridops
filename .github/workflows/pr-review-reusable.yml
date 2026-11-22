@@ -1,0 +1,1409 @@
+name: PR-Agent Spec Review (reusable)
+# VENDORED COPY of Performant-Labs/playbook .github/workflows/pr-review-reusable.yml
+# at playbook commit 2a40a739 (2026-11-22). GridOps is public, and a public repo cannot
+# call a reusable workflow in a private repo (it fails with "workflow file issue";
+# playbook's "organization" access doesn't extend to public callers). Same fix as
+# FreeToken-Intel and performantlabs.com. Not auto-synced: re-copy from playbook
+# by hand, unchanged, when playbook's reusable changes.
+# Called by each project's .github/workflows/pr-review.yml via:
+#   uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
+#   secrets:
+#     ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+#     ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#     CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # default reviewer
+#   with:                                          # optional — see inputs below
+#     aftersight_pr_review_enabled: false          # per-project opt-out, wins over any var
+# GITHUB_TOKEN is automatically available — do not pass it via secrets.
+#
+# All behaviour is driven by .agents/pr-review.yml in the CALLING repo.
+# Concurrency and triggers live in the thin caller; this file is pure logic.
+#
+# ── Aftersight reporting — naming convention ──────────────────────────────
+# Playbook reports to Aftersight from more than one pipeline stage, and each
+# stage's reporting must be independently settable and independently
+# turn-off-able — a project running only PR review, or only UI-walkthrough
+# (Playwright) checks, must be able to configure one without touching the
+# other. Every var/input/CTRF-token name below therefore carries an explicit
+# `_PR_REVIEW` (or, in a future workflow, `_TEST_RESULTS`) segment — never a
+# bare `AFTERSIGHT_INGEST_URL` / `AFTERSIGHT_REPORTING_ENABLED` / `aftersight_enabled`.
+#   - THIS workflow owns the `_PR_REVIEW` channel (PR-Agent review outcomes).
+#   - A future UI-walkthrough/Playwright reporting workflow (not yet built —
+#     no test-results-to-Aftersight integration exists today) owns the
+#     `_TEST_RESULTS` channel: reserve `AFTERSIGHT_INGEST_URL_TEST_RESULTS`,
+#     `AFTERSIGHT_REPORTING_ENABLED_TEST_RESULTS`, and an
+#     `aftersight_test_results_enabled` input there, mirroring this file's
+#     shape exactly. Do not reuse or genericize any `_PR_REVIEW` name for it.
+
+on:
+  workflow_call:
+    inputs:
+      # Aftersight CTRF reporting on/off switch for the PR-review channel,
+      # resolved in the "Build Aftersight CTRF payload" step with this
+      # precedence (highest wins):
+      #   1. Per-project override — a calling repo's own pr-review.yml passes
+      #      `with: aftersight_pr_review_enabled: false` (or true). Wins over
+      #      both vars below, unconditionally, because it's the one signal a
+      #      caller had to go out of its way to set.
+      #   2. Repo-level var `AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW` on the
+      #      calling repo.
+      #   3. Org-level var `AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW` — the
+      #      global default, set once (`gh variable set
+      #      AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW --org Performant-Labs
+      #      --value true`) and applied everywhere unless overridden. (2) and
+      #      (3) are ONE var name — GitHub resolves repo-over-org automatically,
+      #      no extra logic needed to get both levels from it.
+      #   4. If none of the above are set anywhere: enabled (preserves the
+      #      original rollout default — reporting is opt-out, not opt-in).
+      # No `default:` here on purpose — an unset input must render as an
+      # empty string, distinguishable from an explicit `false`, so tier 1
+      # can be told apart from "caller didn't pass anything."
+      aftersight_pr_review_enabled:
+        description: "Report PR-Agent review outcomes to Aftersight as CTRF (per-project override — wins over AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW org/repo vars)"
+        type: boolean
+        required: false
+    secrets:
+      ZAI_API_KEY:
+        required: false
+      # DEPRECATED and UNUSED since the 2026-11 GLM switch (playbook#978): no step reads it, so no
+      # review can spend DeepSeek money. It stays declared only because callers still pass it, and a
+      # caller passing an undeclared secret fails before any job starts. Remove it once no caller's
+      # pr-review.yml passes DEEPSEEK_API_KEY.
+      DEEPSEEK_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      # DEFAULT reviewer. A long-lived `claude setup-token` subscription token. When
+      # it is present the review runs PR-Agent through the Claude Code CLI via
+      # akalongman/pr-agent-cli-handlers (see the "Claude CLI" steps below); when it
+      # is absent the job falls back to the API-key path (ZAI/ANTHROPIC) so
+      # a caller that has not been given the secret yet keeps working unchanged.
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  pr-agent:
+    # Filter bots and non-slash-command issue comments here — these are fixed
+    # and not configurable. Draft filtering and skip_paths are handled inside
+    # the gate step so they can read project config first.
+    if: |
+      github.event.sender.type != 'Bot' &&
+      (github.event_name != 'issue_comment' ||
+       startsWith(github.event.comment.body, '/review') ||
+       startsWith(github.event.comment.body, '/describe') ||
+       startsWith(github.event.comment.body, '/improve') ||
+       startsWith(github.event.comment.body, '/ask'))
+    # A PR-Agent review waits on the model, not the CPU: it runs on the calling repo's
+    # CI_RUNNER_LIGHT when set (a repository variable only, never org level; see ci-reusable.yml's header), else CI_RUNNER.
+    runs-on: ${{ vars.CI_RUNNER_LIGHT || vars.CI_RUNNER }}
+    # 75, not 30. The API steps run describe, review and improve in turn (auto_describe is unset, which PR-Agent reads as on),
+    # and each model call may take up to CONFIG.AI_TIMEOUT (600 s). PR-Agent v0.50.0 replays a timed-out call once on the
+    # same model (MODEL_RETRIES = 2) before fallback_models, so a glm-5.3 that stalls on every call costs 3 tools x
+    # (2 x 10 min + ~3 min glm-5.3-flash fallback) = ~69 min, and the fallback is still reached. Only a fallback that also stalls
+    # hits this cap. The Claude CLI step's calls are capped by PR_AGENT_CLI_TIMEOUT (900 s).
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Ensure pyyaml is available
+        # Self-hosted runners (vars.CI_RUNNER) may ship a PEP-668
+        # externally-managed system Python (Python 3.12+), which makes a plain
+        # `pip install` hard-fail with "This environment is externally managed"
+        # and kills the job before PR-Agent ever runs. Try a normal install
+        # first; if it's blocked, retry with --break-system-packages. CI runners
+        # are disposable, so mutating the system site-packages is safe here.
+        run: |
+          python3 -m pip install pyyaml --quiet --disable-pip-version-check \
+            || python3 -m pip install pyyaml --quiet --disable-pip-version-check --break-system-packages
+
+      # ── Read project config ──────────────────────────────────────────────────
+      # Parses .agents/pr-review.yml with PyYAML.
+      # Falls back to safe defaults when the file is absent.
+      - name: Read pr-review config
+        id: cfg
+        env:
+          # Only whether the token EXISTS is read here, never its value: `!= ''` is
+          # evaluated by Actions and the step sees just the string true/false.
+          CLAUDE_TOKEN_SET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          python3 << 'PYEOF'
+          import yaml, json, os, sys
+
+          cfg = {}
+          try:
+              with open('.agents/pr-review.yml') as f:
+                  cfg = yaml.safe_load(f) or {}
+          except FileNotFoundError:
+              pass
+
+          pa   = cfg.get('pr_agent', {})
+          proj = cfg.get('project', {})
+
+          # ── Warn on keys nothing reads (#490) ────────────────────────────────
+          # `.agents/pr-review.yml` is ONE file with FOUR consumers: this
+          # workflow (pr_agent.* + project.timezone), pr-review.sh
+          # (local_review.*), dual-review.sh (dual_review.reasoning_effort) and
+          # check-pr-review-readiness.sh (dual_review.enabled). Until #490 this
+          # parser read its own subtree and DISCARDED the rest in silence, so a
+          # key that did nothing was indistinguishable from a key that worked —
+          # 24 of 27 repos carried `skip_docs_only` believing docs-only diffs
+          # skipped review, because playbook's own wizard emitted it.
+          #
+          # The check is deliberately SCOPED to the subtrees this workflow owns.
+          # A flat unknown-key check would warn on local_review/dual_review/dco/
+          # pr_template/test_tiers/spec — real keys belonging to the other three
+          # consumers — in every repo on every PR, and would be tuned out within
+          # a week. Top-level sections are checked against the union of all four
+          # consumers, which is what catches a mistyped SECTION name (the most
+          # expensive typo available here: it silently disables everything under
+          # it). Warnings never fail the parse.
+          KNOWN_SECTIONS = {
+              'project', 'pr_agent',       # this workflow
+              'local_review',              # pipelines/pr-reviewer/scripts/pr-review.sh
+              'dual_review',               # workflow/dual-review.sh + check-pr-review-readiness.sh
+              'dco', 'pr_template', 'test_tiers', 'spec',
+          }
+          KNOWN_PR_AGENT = {
+              'model', 'high_stakes_model', 'fallback_model', 'high_stakes_label',
+              'max_tokens', 'output_tokens', 'auto_improve', 'review_drafts',
+              'score_labels', 'score_banner', 'status_check', 'skip_paths',
+              'skip_docs_only', 'claude_model', 'claude_high_stakes_model',
+              'repo_context_files', 'repo_context_max_lines', 'num_max_findings',
+          }
+          KNOWN_PROJECT = {'name', 'timezone'}
+
+          def warn(scope, keys, known):
+              unknown = sorted(k for k in keys if k not in known)
+              if unknown:
+                  print(f'::warning file=.agents/pr-review.yml::Unrecognised '
+                        f'{scope}: {", ".join(unknown)} — nothing reads '
+                        f'{"it" if len(unknown) == 1 else "them"}. See '
+                        f'pipelines/pr-reviewer/README.md for the keys each '
+                        f'consumer actually reads.')
+
+          if isinstance(cfg, dict):
+              warn('top-level section(s) in .agents/pr-review.yml',
+                   cfg.keys(), KNOWN_SECTIONS)
+          if isinstance(pa, dict):
+              warn('pr_agent key(s)', pa.keys(), KNOWN_PR_AGENT)
+          if isinstance(proj, dict):
+              warn('project key(s)', proj.keys(), KNOWN_PROJECT)
+
+          model    = pa.get('model', 'openai/glm-5.3')
+          hs_model = pa.get('high_stakes_model', model)
+          # The fallback is glm-5.3-flash on the same z.ai GLM Coding Plan as the primary (same
+          # OPENAI.KEY / OPENAI.API_BASE), so a glm-5.3 timeout or HTTP 429 never spends
+          # DeepSeek money. It was deepseek/deepseek-flash until the 2026-11 GLM switch. The PR-Agent
+          # steps no longer receive DEEPSEEK_API_KEY, so a deepseek/* model here fails rather than
+          # spends. "Report model used" shows when a fallback answered.
+          fb       = pa.get('fallback_model', 'openai/glm-5.3-flash')
+          # Only emit a fallback if it's set and differs from the primary.
+          fallback_models = json.dumps([fb]) if fb and fb != model else json.dumps([model])
+
+          # ── Reviewer backend ────────────────────────────────────────────────
+          # claude-cli (DEFAULT): CLAUDE_CODE_OAUTH_TOKEN was passed, so PR-Agent
+          # runs through the Claude Code CLI (pr-agent-cli-handlers). It only
+          # accepts Claude model ids, so the API-path `model` / `high_stakes_model`
+          # (e.g. openai/glm-5.3) are replaced by `claude_model` /
+          # `claude_high_stakes_model`; `model`/`hs_model` below are what the score
+          # banner and the Aftersight payload report, so they follow the backend.
+          # api: no token -> the original LiteLLM/API-key path, untouched.
+          backend = 'claude-cli' if os.environ.get('CLAUDE_TOKEN_SET') == 'true' else 'api'
+          if backend == 'claude-cli':
+              model    = pa.get('claude_model', 'claude-opus-5-5')
+              hs_model = pa.get('claude_high_stakes_model', model)
+              # Fallback models must be ones the CLI accepts; PR-Agent's default
+              # (an OpenAI model) is rejected by the claude_code handler.
+              fallback_models = '[]'
+
+          # ── Repo context files and findings cap ─────────────────────────────
+          # PR-Agent's config.repo_context_files (v0.50.0 default ["AGENTS.md"])
+          # puts repository instruction files in the review prompt. Callers that
+          # keep their rules in CLAUDE.md got none of them, so the default lists
+          # both. Per PR-Agent's docs a missing file is skipped and files are read
+          # from the DEFAULT branch. The list is passed through as JSON unchanged:
+          # [] turns the feature off, and a nested list (PR-Agent's "first of
+          # these alternatives" form) is not flattened. repo_context_max_lines is
+          # ONE total budget across all files (PR-Agent's own 500 truncates a
+          # long CLAUDE.md). num_max_findings: PR-Agent's own default is 3.
+          rcf = pa.get('repo_context_files')
+          if rcf is None:
+              rcf = ['AGENTS.md', 'CLAUDE.md']
+          elif isinstance(rcf, str):
+              rcf = [rcf]
+          elif not isinstance(rcf, list):
+              print('::warning file=.agents/pr-review.yml::pr_agent.repo_context_files '
+                    'must be a list of paths; using the default ["AGENTS.md", "CLAUDE.md"].')
+              rcf = ['AGENTS.md', 'CLAUDE.md']
+          # json.dumps never emits a newline, so this stays one GITHUB_OUTPUT line.
+          repo_context_files = json.dumps(rcf)
+
+          # Integer keys: a missing or empty value uses the default; a bool, non-number
+          # or non-positive value falls back to it with a warning, so the step never
+          # emits "None" or "True". A quoted number ("131072") is still accepted, as
+          # it was before this check existed.
+          def pos_int(key, default):
+              v = pa.get(key)
+              if v is None:
+                  return str(default)
+              if isinstance(v, str) and v.strip().isdigit():
+                  v = int(v.strip())
+              if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                  print(f'::warning file=.agents/pr-review.yml::pr_agent.{key} must be a '
+                        f'positive integer; using the default {default}.')
+                  return str(default)
+              return str(v)
+
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          def w(k, v): out.write(f'{k}={v}\n')
+
+          w('backend',         backend)
+          w('model',           model)
+          w('hs_model',        hs_model)
+          w('hs_label',        pa.get('high_stakes_label', 'high-stakes'))
+          w('fallback_models', fallback_models)
+          w('max_tokens',      pos_int('max_tokens', 131072))
+          w('output_tokens',   pos_int('output_tokens', 64000))
+          w('auto_improve',    'true' if pa.get('auto_improve', False) else 'false')
+          w('review_drafts',   'true' if pa.get('review_drafts', False) else 'false')
+          w('score_labels',    'true' if pa.get('score_labels', True) else 'false')
+          w('score_banner',    'true' if pa.get('score_banner', True) else 'false')
+          w('status_check',    'true' if pa.get('status_check', True) else 'false')
+          w('skip_paths',      json.dumps(pa.get('skip_paths', [])))
+          w('skip_docs_only',  'true' if pa.get('skip_docs_only', False) else 'false')
+          w('timezone',        proj.get('timezone', ''))
+          w('repo_context_files',     repo_context_files)
+          w('repo_context_max_lines', pos_int('repo_context_max_lines', 1500))
+          w('num_max_findings',       pos_int('num_max_findings', 6))
+          out.close()
+          PYEOF
+
+      # ── Sync high-stakes label from a linked issue ───────────────────────────
+      # GitHub does NOT copy an issue's labels onto the PR that closes it. Without
+      # this, a PR closing a high-stakes-labeled issue would silently get the
+      # default review unless someone remembered to label the PR by hand — and
+      # "Resolve PR labels" below only ever looks at the PR's OWN live labels.
+      # Parses the PR body for closing keywords (close/fix/resolve #N, GitHub's
+      # own recognized syntax); if any linked issue carries the configured
+      # high_stakes_label, copies it onto the PR. One-way sync (adds, never
+      # removes) so it can't fight a manually-applied or manually-removed label.
+      - name: Sync high-stakes label from linked issue
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HS_LABEL: ${{ steps.cfg.outputs.hs_label }}
+        run: |
+          if [[ -z "$HS_LABEL" ]]; then
+            echo "high_stakes_label not configured — nothing to sync."
+            exit 0
+          fi
+
+          BODY=$(gh pr view "$PR_NUM" --repo "$REPO" --json body --jq '.body // ""')
+          ISSUES=$(printf '%s' "$BODY" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+            | grep -oE '[0-9]+' | sort -u)
+
+          if [[ -z "$ISSUES" ]]; then
+            echo "No linked issues found in PR body — nothing to sync."
+            exit 0
+          fi
+
+          for ISSUE_NUM in $ISSUES; do
+            HAS_LABEL=$(HS_LABEL="$HS_LABEL" gh issue view "$ISSUE_NUM" --repo "$REPO" --json labels \
+              --jq '[.labels[].name] | index($ENV.HS_LABEL) != null' 2>/dev/null || echo "false")
+            if [[ "$HAS_LABEL" == "true" ]]; then
+              echo "Issue #$ISSUE_NUM carries '$HS_LABEL' — applying to PR #$PR_NUM"
+              gh label create "$HS_LABEL" --color '5319e7' \
+                --description 'High-stakes review-rigor (see project pr-review config)' \
+                --repo "$REPO" 2>/dev/null || true
+              gh pr edit "$PR_NUM" --repo "$REPO" --add-label "$HS_LABEL"
+              exit 0
+            fi
+          done
+          echo "No linked issue carries '$HS_LABEL' — leaving PR labels as-is."
+
+      # ── Resolve high-stakes label ────────────────────────────────────────────
+      # github.event.pull_request.labels is null for issue_comment events;
+      # fetch live labels so the high-stakes path works for /review too.
+      - name: Resolve PR labels
+        id: labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HS_LABEL: ${{ steps.cfg.outputs.hs_label }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          if [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]]; then
+            echo "high_stakes=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          LABELS=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" \
+            --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+          if echo "$LABELS" | grep -qF "$HS_LABEL"; then
+            echo "high_stakes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "high_stakes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Gate: draft check + skip_paths + skip_docs_only ─────────────────────
+      # Slash commands (/review etc.) always bypass both skip mechanisms — the
+      # user is explicitly requesting a review regardless of what changed.
+      - name: Gate — draft and skip_paths check
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEW_DRAFTS: ${{ steps.cfg.outputs.review_drafts }}
+          SKIP_PATHS_JSON: ${{ steps.cfg.outputs.skip_paths }}
+          SKIP_DOCS_ONLY: ${{ steps.cfg.outputs.skip_docs_only }}
+        run: |
+          # Bash prepares inputs; Python does the PurePath glob matching.
+          # python3 << 'PYEOF' must be at the run: block's base indent so that
+          # PYEOF lands at column 0 in the generated bash script (heredoc rule).
+          # Scratch files live under RUNNER_TEMP (set by Actions) so the gate's
+          # Python is hermetic and can be exercised directly by
+          # evals/harness/pr-review-skip-docs.test.mjs.
+          TMP="${RUNNER_TEMP:-/tmp}"
+          DRAFT_SKIP="false"
+          DO_CHECK="false"
+
+          if [[ "${{ github.event.pull_request.draft }}" == "true" && "$REVIEW_DRAFTS" != "true" ]]; then
+            echo "Draft PR with review_drafts=false — skipping"
+            DRAFT_SKIP="true"
+          fi
+
+          PR_NUM="${{ github.event.pull_request.number }}"
+          if [[ "$DRAFT_SKIP" == "false" \
+             && "${{ github.event_name }}" != "issue_comment" \
+             && ( "$SKIP_PATHS_JSON" != "[]" || "$SKIP_DOCS_ONLY" == "true" ) \
+             && -n "$PR_NUM" && "$PR_NUM" != "null" ]]; then
+            CHANGED=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" \
+              --json files --jq '[.files[].path]' 2>/dev/null || echo '[]')
+            printf '%s' "$CHANGED"         > "$TMP/changed.json"
+            printf '%s' "$SKIP_PATHS_JSON" > "$TMP/skip_paths.json"
+            DO_CHECK="true"
+          fi
+
+          printf '%s' "$DRAFT_SKIP" > "$TMP/draft_skip.txt"
+          printf '%s' "$DO_CHECK"   > "$TMP/do_check.txt"
+
+          python3 << 'PYEOF'
+          import json, os
+          from pathlib import PurePath
+
+          tmp = os.environ.get('RUNNER_TEMP') or '/tmp'
+          def _read(name):
+              with open(os.path.join(tmp, name)) as f:
+                  return f.read().strip()
+
+          draft_skip = _read('draft_skip.txt')
+          do_check   = _read('do_check.txt')
+          skip       = draft_skip
+
+          # ── skip_docs_only (#490) ────────────────────────────────────────────
+          # Implemented in the parser rather than expressed as skip_paths on
+          # purpose. skip_paths matches with PurePath.match(), which is anchored
+          # at the RIGHT and treats "**" as a single "*": "docs/**" matches
+          # docs/foo.md but NOT docs/handoffs/x/foo.md, so every directory depth
+          # has to be spelled out by hand. Making 24 repos each maintain their
+          # own depth ladder would hand every one of them the same trap. This
+          # predicate is depth-independent by construction.
+          #
+          # A file is documentation if it carries a prose extension at any depth,
+          # sits anywhere under a documentation directory (so images and other
+          # assets in docs/ count), or is one of the conventional root files.
+          DOC_SUFFIXES = {'.md', '.mdx', '.markdown', '.rst', '.adoc', '.txt'}
+          DOC_DIRS     = ('docs', 'doc', 'planning')
+          DOC_NAMES    = {'LICENSE', 'NOTICE', 'AUTHORS', 'CHANGELOG'}
+
+          def is_doc(fp):
+              p = PurePath(fp)
+              if p.suffix.lower() in DOC_SUFFIXES:
+                  return True
+              if p.name in DOC_NAMES:
+                  return True
+              return any(part in DOC_DIRS for part in p.parts[:-1])
+
+          if skip == 'false' and do_check == 'true':
+              files    = json.loads(_read('changed.json'))
+              patterns = json.loads(_read('skip_paths.json'))
+              docs_only = os.environ.get('SKIP_DOCS_ONLY') == 'true'
+              if files and (patterns or docs_only):
+                  # Either mechanism can excuse a file; the review is skipped
+                  # only when EVERY changed file is excused by one of them.
+                  def skippable(fp):
+                      if any(PurePath(fp).match(p) for p in patterns):
+                          return True
+                      return docs_only and is_doc(fp)
+
+                  if all(skippable(fp) for fp in files):
+                      skip = 'true'
+                      print('All changed files are skippable '
+                            '(skip_paths / skip_docs_only) — skipping review')
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'should_skip={skip}\n')
+          PYEOF
+
+      # ── Run-start anchor (#433) ──────────────────────────────────────────────
+      # Every score consumer below (label, banner, status check) used to read
+      # "the last bot comment containing 'Reviewer Guide'" with NO recency
+      # bound. When a review CRASHES, `continue-on-error: true` lets the job
+      # proceed, the lookup finds the PREVIOUS run's still-present Reviewer
+      # Guide comment, and that stale score is reported as this run's result —
+      # a green `pr-agent/review` for a review that produced nothing (#433:
+      # "pass — Reviewed — score 95" sitting beside the bot's own no-score
+      # comment). It reproduced under `/review` on #429 and did NOT reproduce
+      # on #437 because #437 was a fresh PR with no earlier comment to go
+      # stale. That is the entirety of the "intermittent" behaviour: it
+      # misfires exactly on PRs that already have a successful review.
+      #
+      # (The three consumers now share ONE paginated comment fetch — see
+      # "Fetch PR comments (shared)" below — but each still applies its own
+      # `updated_at >= run_start` bound independently; the anchor and its
+      # semantics here are unchanged.)
+      #
+      # Prefer GITHUB'S clock over the runner's, so the anchor and the comment
+      # timestamps it is compared against come from one source and a self-hosted
+      # runner's unsynced clock (vars.CI_RUNNER may be older hardware) cannot
+      # shift the comparison.
+      #
+      # Read it from the `Date` RESPONSE HEADER of an ordinary API call. Two
+      # earlier attempts failed and are recorded so neither is tried again:
+      #
+      #   1. `gh api repos/…/actions/runs/${{ github.run_id }}` (#444) needs the
+      #      `actions: read` permission. The thin callers grant only
+      #      contents/pull-requests/issues/statuses, so it was DENIED in every
+      #      consumer repo — the anchor exited 1 and, because the consumers run
+      #      under always(), each failed the job.
+      #   2. `${{ github.run_started_at }}` (#448) is not a populated github
+      #      context property. It expanded to the empty string, producing the
+      #      same hard failure by a different route.
+      #
+      # The Date header comes back on ANY authenticated request, so it needs no
+      # permission beyond what the callers already grant.
+      #
+      # Fallback order is deliberate. The property that actually matters for
+      # #433 is that the lookup is BOUNDED AT ALL; whose clock supplies the
+      # bound is a refinement. So an unavailable header degrades to the runner
+      # clock — still bounded, still excludes prior runs — rather than failing
+      # the job. Only a total failure of both is fatal, and that cannot happen
+      # while `date` exists. Two consecutive outages here were caused by
+      # fail-closed behaviour on a NON-ESSENTIAL input; this keeps fail-closed
+      # for the thing that matters and stops treating clock provenance as
+      # load-bearing.
+      - name: Record run-start anchor
+        id: runstart
+        if: always() && steps.gate.outputs.should_skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          START=""
+          HDR=$(gh api "repos/${{ github.repository }}" -i --silent 2>/dev/null \
+                | grep -i '^date:' | head -1 | sed 's/^[Dd]ate:[[:space:]]*//' | tr -d '\r' || true)
+          if [[ -n "$HDR" ]]; then
+            START=$(date -u -d "$HDR" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+          fi
+          if [[ -n "$START" ]]; then
+            echo "Run-start anchor: $START (GitHub clock, Date header)"
+          else
+            START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            echo "::warning::could not read GitHub's clock; falling back to the runner clock. The lookup stays bounded (#433); only skew resistance is reduced."
+            echo "Run-start anchor: $START (runner clock, fallback)"
+          fi
+          # Only unreachable if `date` itself failed. Fail closed here: with no
+          # anchor at all the lookup would be unbounded, which is exactly #433.
+          if [[ -z "$START" ]]; then
+            echo "::error::no clock available — refusing an unbounded comment lookup (#433)"
+            exit 1
+          fi
+          echo "run_start=$START" >> "$GITHUB_OUTPUT"
+
+      # ── PR-Agent review via the Claude Code CLI (DEFAULT when the token is set) ──
+      # PR-Agent is run through akalongman/pr-agent-cli-handlers, which swaps PR-Agent's
+      # LiteLLM call for `claude -p` (tools off, empty working directory), authenticated
+      # with CLAUDE_CODE_OAUTH_TOKEN, a long-lived `claude setup-token` subscription
+      # token for the owner's Claude account. Active only when steps.cfg.outputs.backend
+      # is claude-cli, i.e. the caller passed the secret; otherwise the API-key steps
+      # further down run exactly as before. Rotation: pipelines/pr-reviewer/README.md.
+      #
+      # Supply chain: the wrapper has no release and is not on PyPI, so it is pinned by
+      # COMMIT; its only dependency (pr-agent) is pinned by version, the Claude Code CLI by
+      # version. Everything installs in steps BEFORE the one that holds the token, and the
+      # token is never in the environment of an install step. To move a pin, bump the
+      # PR_AGENT_VERSION / HANDLERS_COMMIT / CLAUDE_CLI_VERSION values in the install step.
+      - name: Refuse untrusted triggers before the token is used
+        if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          # A subscription token cannot be scoped or capped like an API key, so only the
+          # repository's own people may spend it: a comment from OWNER/MEMBER/COLLABORATOR,
+          # on a pull request whose head is a branch of THIS repository (never a fork).
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            case "$ASSOCIATION" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *) echo "::error::comment author association '${ASSOCIATION}' may not spend the Claude subscription token"; exit 1 ;;
+            esac
+          fi
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.head.repo.full_name // ""')
+          if [[ "$head" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::PR #${PR} comes from '${head}', not ${GITHUB_REPOSITORY}; refusing to review it with the Claude subscription token"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
+        with:
+          node-version: "24"
+          # Only the CLI is installed; do not cache the calling repository's dependencies.
+          package-manager-cache: false
+
+      - name: Install PR-Agent, the CLI handler and the Claude Code CLI
+        if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
+        env:
+          # Must match the `uses:` SHA of the two API-key review steps (v0.50.0) and the CTRF
+          # tool version. Do not move past 0.50.0 without re-running pr-agent-cli-handlers' seam
+          # scan: the pinned HANDLERS_COMMIT (declares pr-agent>=0.48,<1) passed it on 0.50.0, but
+          # the handler's upstream-main CI failed 2026-11-16 with "seam gone: PRReviewer.__init__".
+          PR_AGENT_VERSION: "0.50.0"
+          HATCHLING_VERSION: "1.33.0"
+          HANDLERS_COMMIT: "0b10c1b658bd4aba8fb93a6d439499c48f06dfcb"
+          CLAUDE_CLI_VERSION: "2.1.302"
+          # The smoke check below (`pr-agent-cli-handlers --help`) exits 2 ("PR_AGENT_CLI_HANDLER must be one of claude_code,
+          # codex; it is unset") without this, which failed every review before the review step ran. Not a secret; the token
+          # is still only in the review step.
+          PR_AGENT_CLI_HANDLER: claude_code
+        run: |
+          # hatchling is the wrapper's build backend; installing it first lets the wrapper
+          # be built with --no-build-isolation so no unpinned build tool is fetched.
+          python3 -m pip install --quiet --disable-pip-version-check \
+            "pr-agent[github]==${PR_AGENT_VERSION}" "hatchling==${HATCHLING_VERSION}"
+          python3 -m pip install --quiet --disable-pip-version-check --no-deps --no-build-isolation \
+            "git+https://github.com/akalongman/pr-agent-cli-handlers@${HANDLERS_COMMIT}"
+          npm install --global --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"
+          # --ignore-scripts also skips the CLI's own postinstall, which puts the platform binary in place; without it
+          # `claude --version` fails with "claude native binary not installed". Run exactly that one script, by path
+          # (local file copy of the binary npm already downloaded, no network); no other package's scripts run. The package is
+          # found from the `claude` link npm made (bin/claude.exe sits one level inside it), not from `npm root -g`, whose
+          # printed path npm can mask.
+          node "$(dirname "$(readlink -f "$(command -v claude)")")/../install.cjs"
+          pr-agent-cli-handlers --help >/dev/null
+          claude --version
+
+      - name: PR-Agent review (Claude CLI)
+        id: review-cli
+        if: steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'claude-cli'
+        continue-on-error: true
+        env:
+          PR_AGENT_CLI_HANDLER: claude_code
+          # A review of a large diff at high effort takes minutes per call.
+          PR_AGENT_CLI_TIMEOUT: "900"
+          # The handler reads PR_AGENT_CLI_TIMEOUT first and falls back to config.ai_timeout only when it is unset
+          # (environment.read_timeout), so the API steps' CONFIG.AI_TIMEOUT is deliberately not set here.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Normal PRs use claude_model; PRs carrying the high-stakes label use
+          # claude_high_stakes_model (cfg already resolved both for this backend).
+          CONFIG__MODEL: ${{ steps.labels.outputs.high_stakes == 'true' && steps.cfg.outputs.hs_model || steps.cfg.outputs.model }}
+          CONFIG__FALLBACK_MODELS: "[]"
+          CONFIG__REASONING_EFFORT: high
+          # PR-Agent does not know Claude model ids; give it a context budget, or the default
+          # is far smaller and silently drops files. Same mapping as the API steps (#920).
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          CONFIG__MAX_MODEL_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened","reopened","ready_for_review","review_requested","synchronize"]'
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: ${{ steps.cfg.outputs.auto_improve }}
+          # Check the diff against the PR's linked issue (ticket analysis).
+          PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW: "true"
+          PR_REVIEWER__REQUIRE_SCORE_REVIEW: "true"
+          PR_REVIEWER__NUM_MAX_FINDINGS: ${{ steps.cfg.outputs.num_max_findings }}
+          # Repository instruction files in the prompt; see the cfg step. This env value
+          # overrides a caller's .pr_agent.toml, so set it in .agents/pr-review.yml.
+          CONFIG__REPO_CONTEXT_FILES: ${{ steps.cfg.outputs.repo_context_files }}
+          CONFIG__REPO_CONTEXT_MAX_LINES: ${{ steps.cfg.outputs.repo_context_max_lines }}
+          # PR-Agent exits 0 on a failed review; make the step fail so outcome != success.
+          CONFIG__PROPAGATE_TOOL_ERRORS: "true"
+        run: pr-agent-cli-handlers action
+
+      # ── PR-Agent review (API key, fallback) ────────────────────────────────────────────
+      # Pinned by SHA (the `uses:` lines below; their trailing comment names the tag).
+      # qodo-ai/pr-agent is now The-PR-Agent/pr-agent; GitHub redirects the old name.
+      # Resolve a tag with:
+      #   gh api repos/The-PR-Agent/pr-agent/commits/<tag> -q '.sha'
+      #
+      # HELD AT v0.50.0. pr-agent-cli-handlers (akalongman, pinned HANDLERS_COMMIT,
+      # declares pr-agent>=0.48,<1) passed its seam scan on 0.50.0, but its
+      # upstream-main CI failed 2026-11-16 with "seam gone: PRReviewer.__init__".
+      # Do not move past 0.50.0 without re-running the handler's seam scan. Move
+      # this pin, PR_AGENT_VERSION in the CLI install step and the CTRF tool
+      # version together: they must name the same release.
+      #
+      # Dependabot normally owns forward drift on action pins under ⛔ D4 (#421:
+      # weekly, patch and minor accepted, majors never), but .github/dependabot.yml
+      # ignores pr-agent versions > 0.50.0 for the reason above.
+      #
+      # This comment named v0.39.0 for a while after the pin itself moved, which
+      # is the specific hazard of restating a version in prose beside the thing
+      # that states it: the `uses:` line is the source of truth, and Dependabot
+      # updates that line but not the sentence above it. If they disagree, the
+      # `uses:` line is right.
+      #
+      # ⛔ D3 (#421) — the MODEL pin is a separate decision and is NOT Dependabot's
+      # to move: stay on glm-5.3 (z.ai coding endpoint via the OpenAI-compatible route, switched from deepseek-flash on 2026-11-05 by the owner; glm-5.3-flash on the same endpoint is the fallback). Rolling the action forward must not roll
+      # the model forward with it.
+      - name: PR-Agent review (default)
+        id: review-default
+        if: |
+          steps.gate.outputs.should_skip != 'true' &&
+          steps.cfg.outputs.backend == 'api' &&
+          steps.labels.outputs.high_stakes != 'true'
+        continue-on-error: true
+        uses: qodo-ai/pr-agent@e673a02076ce09a4726c3d0c3cc85780e59ca52b  # v0.50.0
+        env:
+          OPENAI.KEY: ${{ secrets.ZAI_API_KEY }}
+          OPENAI.API_BASE: https://api.z.ai/api/coding/paas/v4
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIG.MODEL: ${{ steps.cfg.outputs.model }}
+          # max_tokens is the context window: CUSTOM_MODEL_MAX_TOKENS sizes a model PR-Agent's
+          # table does not know, and MAX_MODEL_TOKENS clamps every model to it (PR-Agent's
+          # max_model_tokens is a context clamp, not an output cap). output_tokens is the
+          # completion cap, MAX_OUTPUT_TOKENS. Until #920 output_tokens went to MAX_MODEL_TOKENS,
+          # which made every review's whole window 64K.
+          CONFIG.CUSTOM_MODEL_MAX_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          CONFIG.MAX_MODEL_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          CONFIG.MAX_OUTPUT_TOKENS: ${{ steps.cfg.outputs.output_tokens }}
+          # Per model call; PR-Agent's default is 120 s, and glm-5.3 on z.ai often runs longer, which timed the call out
+          # and fell back. Host-only key (config_security.py), so a caller's .pr_agent.toml cannot change it.
+          CONFIG.AI_TIMEOUT: "600"
+          CONFIG.FALLBACK_MODELS: ${{ steps.cfg.outputs.fallback_models }}
+          # Appends PR-Agent's "Agent run details" section (model that answered, "(fallback)" when a
+          # fallback model did) to each comment it posts; "Report model used" reads it.
+          CONFIG.OUTPUT_RUN_DETAILS: "true"
+          GITHUB_ACTION_CONFIG.PR_ACTIONS: '["opened","reopened","ready_for_review","review_requested","synchronize"]'
+          GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: ${{ steps.cfg.outputs.auto_improve }}
+          # Check the diff against the PR's linked issue (ticket analysis).
+          PR_REVIEWER.REQUIRE_TICKET_ANALYSIS_REVIEW: "true"
+          PR_REVIEWER.REQUIRE_SCORE_REVIEW: "true"
+          PR_REVIEWER.NUM_MAX_FINDINGS: ${{ steps.cfg.outputs.num_max_findings }}
+          # Repository instruction files in the prompt; see the cfg step. This env value
+          # overrides a caller's .pr_agent.toml, so set it in .agents/pr-review.yml.
+          CONFIG.REPO_CONTEXT_FILES: ${{ steps.cfg.outputs.repo_context_files }}
+          CONFIG.REPO_CONTEXT_MAX_LINES: ${{ steps.cfg.outputs.repo_context_max_lines }}
+
+      # ── PR-Agent review (high-stakes) ────────────────────────────────────────
+      # Uses high_stakes_model from config — set to a more capable model for
+      # critical changes. Apply the high_stakes_label to a PR to activate.
+      - name: PR-Agent review (high-stakes)
+        id: review-highstakes
+        if: |
+          steps.gate.outputs.should_skip != 'true' &&
+          steps.cfg.outputs.backend == 'api' &&
+          steps.labels.outputs.high_stakes == 'true'
+        continue-on-error: true
+        uses: qodo-ai/pr-agent@e673a02076ce09a4726c3d0c3cc85780e59ca52b  # v0.50.0
+        env:
+          OPENAI.KEY: ${{ secrets.ZAI_API_KEY }}
+          OPENAI.API_BASE: https://api.z.ai/api/coding/paas/v4
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIG.MODEL: ${{ steps.cfg.outputs.hs_model }}
+          # Same mapping as the default step above (#920).
+          CONFIG.CUSTOM_MODEL_MAX_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          CONFIG.MAX_MODEL_TOKENS: ${{ steps.cfg.outputs.max_tokens }}
+          CONFIG.MAX_OUTPUT_TOKENS: ${{ steps.cfg.outputs.output_tokens }}
+          # Per model call; PR-Agent's default is 120 s, and glm-5.3 on z.ai often runs longer, which timed the call out
+          # and fell back. Host-only key (config_security.py), so a caller's .pr_agent.toml cannot change it.
+          CONFIG.AI_TIMEOUT: "600"
+          # Same fallback chain as the default step. Without it PR-Agent used its own default
+          # fallback_models (an OpenAI model id), which the z.ai endpoint rejects.
+          CONFIG.FALLBACK_MODELS: ${{ steps.cfg.outputs.fallback_models }}
+          CONFIG.OUTPUT_RUN_DETAILS: "true"
+          GITHUB_ACTION_CONFIG.PR_ACTIONS: '["opened","reopened","ready_for_review","review_requested","synchronize"]'
+          GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: ${{ steps.cfg.outputs.auto_improve }}
+          # Check the diff against the PR's linked issue (ticket analysis).
+          PR_REVIEWER.REQUIRE_TICKET_ANALYSIS_REVIEW: "true"
+          PR_REVIEWER.REQUIRE_SCORE_REVIEW: "true"
+          PR_REVIEWER.NUM_MAX_FINDINGS: ${{ steps.cfg.outputs.num_max_findings }}
+          # Repository instruction files in the prompt; see the cfg step. This env value
+          # overrides a caller's .pr_agent.toml, so set it in .agents/pr-review.yml.
+          CONFIG.REPO_CONTEXT_FILES: ${{ steps.cfg.outputs.repo_context_files }}
+          CONFIG.REPO_CONTEXT_MAX_LINES: ${{ steps.cfg.outputs.repo_context_max_lines }}
+
+      # ── Shared PR-comments fetch ─────────────────────────────────────────────
+      # Label, banner, and status-check below all need "the full, paginated
+      # list of this PR's issue comments" to find the score. They used to each
+      # run their own `gh api --paginate ... | jq -s '.'` — three identical,
+      # separately-paginated GitHub API round-trips per invocation whenever
+      # more than one consumer was enabled. Fetch it ONCE here into a shared
+      # scratch file; each consumer below still does its OWN jq filtering
+      # (label wants SCORE, banner wants REVIEW_BODY + REVIEW_URL, status uses
+      # a slightly different score regex) — only the network fetch is shared.
+      #
+      # Gating: this step's `if:` must be a SUPERSET of the union of all three
+      # consumers' conditions, or a consumer could run while this file doesn't
+      # exist. The status-check consumer runs whenever should_skip != 'true'
+      # (deliberately NOT gated on review success — it's what REPORTS a crash),
+      # so this step can't require review success either; it uses the same
+      # `always() && should_skip != 'true'` as "Record run-start anchor".
+      #
+      # Position: must run AFTER both PR-Agent review steps, since the comment
+      # being searched for is the one THIS run's review step just posted — a
+      # fetch placed before the review steps would never see it.
+      #
+      # Failure mode: if `gh api --paginate` fails or the PR has no comments,
+      # this writes no/empty file and every consumer's jq lookup degrades the
+      # same way it already does today (empty match -> "no score" -> skip
+      # label / skip banner / status check's own no-score-with-reviewable-diff
+      # path) — no new hard failure is introduced.
+      - name: Fetch PR comments (shared)
+        id: comments
+        if: always() && steps.gate.outputs.should_skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          if [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]]; then
+            echo "No PR — nothing to fetch"
+            echo '[]' > "$TMP/pr-comments-shared.json"
+            exit 0
+          fi
+          gh api --paginate "repos/${{ github.repository }}/issues/$PR_NUM/comments" --jq '.[]' \
+            | jq -s '.' > "$TMP/pr-comments-shared.json" \
+            || echo '[]' > "$TMP/pr-comments-shared.json"
+
+      # ── Model used / fallback visibility ─────────────────────────────────────
+      # The configured model is not proof of the model that answered: on a glm-5.3 timeout or
+      # HTTP 429 PR-Agent moves on to fallback_models, and only its own log said so. With
+      # CONFIG.OUTPUT_RUN_DETAILS on (both API steps), every comment PR-Agent posts ends in an
+      # "Agent run details" section naming the model that answered, marked "(fallback)" /
+      # "(includes fallback)" when a fallback did. This step reads that section from THIS run's
+      # comments (review, improve; bounded by the run-start anchor like every score consumer)
+      # and, on pull_request events, from the PR description, but only when the description's
+      # own edit time (GraphQL PullRequest.lastEditedAt, which only body edits move; the PR's
+      # updatedAt also moves on comments, labels and pushes) is at or after the run-start anchor,
+      # i.e. describe rewrote it this run. This step runs before the banner edits the body, so a
+      # body last edited by an earlier run (its describe or banner) is ignored and a failed
+      # describe cannot report the previous run's model (#433). Only the LAST run-details section of each source is read: PR-Agent
+      # appends it at the end, and the human "User description" above it is not parsed.
+      # It writes the result to the step summary and raises a ::warning when a fallback ran.
+      # API backend only: the Claude CLI step has no fallback chain. Never fails the job.
+      - name: Report model used
+        id: modelused
+        if: always() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'api'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
+          RUN_START: ${{ steps.runstart.outputs.run_start }}
+          CONFIGURED_MODEL: ${{ steps.labels.outputs.high_stakes == 'true' && steps.cfg.outputs.hs_model || steps.cfg.outputs.model }}
+          FALLBACK_MODELS: ${{ steps.cfg.outputs.fallback_models }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          export COMMENTS_FILE="$TMP/pr-comments-shared.json"
+          export PR_BODY_FILE="$TMP/pr-body-model-used.json"
+          echo '{}' > "$PR_BODY_FILE"
+          if [[ "$EVENT_NAME" == pull_request* && -n "$PR_NUM" && "$PR_NUM" != "null" ]]; then
+            gh api graphql -F owner="${REPO%%/*}" -F name="${REPO#*/}" -F number="$PR_NUM" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){body lastEditedAt}}}' \
+              --jq '.data.repository.pullRequest' > "$PR_BODY_FILE" 2>/dev/null || echo '{}' > "$PR_BODY_FILE"
+          fi
+          python3 << 'PYEOF'
+          import json, os, re
+
+          def load_comments(path):
+              try:
+                  with open(path) as f:
+                      data = json.load(f)
+                  return data if isinstance(data, list) else []
+              except (OSError, ValueError):
+                  return []
+
+          since = os.environ.get('RUN_START', '')
+          sources = []
+          for c in load_comments(os.environ['COMMENTS_FILE']):
+              if not isinstance(c, dict):
+                  continue
+              if (c.get('user') or {}).get('login') != 'github-actions[bot]':
+                  continue
+              if not since or (c.get('updated_at') or '') < since:
+                  continue
+              body = c.get('body') or ''
+              if 'Reviewer Guide' in body:
+                  tool = 'review'
+              elif 'Code Suggestions' in body:
+                  tool = 'improve'
+              else:
+                  tool = 'comment'
+              sources.append((tool, body))
+          # The PR description counts only if its BODY was edited during this run (describe ran).
+          # lastEditedAt, not updatedAt: updatedAt also moves when this run's review comment lands.
+          try:
+              with open(os.environ['PR_BODY_FILE']) as f:
+                  pr = json.load(f)
+          except (OSError, ValueError):
+              pr = {}
+          if isinstance(pr, dict) and since and (pr.get('lastEditedAt') or '') >= since:
+              sources.append(('describe', pr.get('body') or ''))
+
+          # PR-Agent v0.50.0 run_output.show_run_details():
+          #   "- Model: <model>[ (fallback)]"  or  "- Models: <a>, <b>[ (includes fallback)]"
+          line_re = re.compile(r'^\s*-\s*Models?:\s*(.+?)\s*$', re.M)
+          rows, fallback = [], False
+          for tool, body in sources:
+              idx = body.rfind('Agent run details')
+              if idx < 0:
+                  continue
+              m = line_re.search(body, idx)
+              if not m:
+                  continue
+              val = m.group(1)
+              fb = val.endswith('(fallback)') or val.endswith('(includes fallback)')
+              models = re.sub(r'\s*\((?:includes )?fallback\)$', '', val)
+              fallback = fallback or fb
+              rows.append((tool, models, fb))
+
+          configured = os.environ.get('CONFIGURED_MODEL', '')
+          chain = os.environ.get('FALLBACK_MODELS', '')
+          used = sorted({m.strip() for _, models, _ in rows for m in models.split(',') if m.strip()})
+          fb_models = sorted({m for m in used if m != configured})
+
+          out = [
+              '### PR-Agent model used',
+              '',
+              f'- Configured model: `{configured}`',
+              f'- Fallback chain: `{chain}`',
+          ]
+          if rows:
+              out += ['', '| Tool | Model that answered | Fallback |', '| --- | --- | --- |']
+              out += [f'| {t} | `{m}` | {"**yes**" if fb else "no"} |' for t, m, fb in rows]
+          else:
+              out += ['', 'No "Agent run details" section in this run\'s PR-Agent output, so the model '
+                          'that answered is not known (the review may have failed or been skipped).']
+          if fallback:
+              out += ['', f'> ⚠️ **Fallback used:** {", ".join(fb_models) or "see table"} answered instead of `{configured}`.']
+              print(f'::warning title=PR-Agent fallback used::{", ".join(fb_models) or "a fallback model"} '
+                    f'answered instead of {configured}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('\n'.join(out) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'fallback={"true" if fallback else "false"}\n')
+              f.write(f'fallback_models={",".join(fb_models)}\n')
+              f.write(f'models_used={",".join(used)}\n')
+          print('\n'.join(out))
+          PYEOF
+
+      # ── Score-bracket label ──────────────────────────────────────────────────
+      - name: Apply score-bracket label
+        if: |
+          always() &&
+          steps.gate.outputs.should_skip != 'true' &&
+          steps.cfg.outputs.score_labels == 'true' &&
+          (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]] && { echo "No PR — skip"; exit 0; }
+
+          gh label create 'score-90+'      --color '0e8a16' --description 'PR-Agent score 90-100 (ship)'                --repo "${{ github.repository }}" 2>/dev/null || true
+          gh label create 'score-80-89'    --color 'fbca04' --description 'PR-Agent score 80-89 (review carefully)'     --repo "${{ github.repository }}" 2>/dev/null || true
+          gh label create 'score-70-79'    --color 'e99695' --description 'PR-Agent score 70-79 (address suggestions)'  --repo "${{ github.repository }}" 2>/dev/null || true
+          gh label create 'score-below-70' --color 'b60205' --description 'PR-Agent score <70 (probable blocking issues)' --repo "${{ github.repository }}" 2>/dev/null || true
+
+          # #433: bound by this run's anchor, and require the comment to be an
+          # actual review ("Reviewer Guide") rather than any bot comment — the
+          # old filter would happily match this workflow's OWN "produced no
+          # score" failure comment from an earlier run and label off it.
+          # Comments come from the shared fetch step above (one paginated
+          # fetch reused by all three score consumers).
+          RUN_START="${{ steps.runstart.outputs.run_start }}"
+          [[ -z "$RUN_START" ]] && { echo "::error::missing run-start anchor (#433)"; exit 1; }
+          LATEST=$(jq -r --arg since "$RUN_START" \
+            '[.[] | select(.user.login=="github-actions[bot]")
+                  | select(.updated_at >= $since)
+                  | select(.body | contains("Reviewer Guide"))] | last.body // ""' \
+            "$TMP/pr-comments-shared.json")
+          SCORE=$(echo "$LATEST" | grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' | grep -oE '[0-9]+' | head -1)
+          [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip label"; exit 0; }
+
+          for L in 'score-90+' 'score-80-89' 'score-70-79' 'score-below-70'; do
+            gh issue edit "$PR_NUM" --remove-label "$L" --repo "${{ github.repository }}" 2>/dev/null || true
+          done
+
+          if   (( SCORE >= 90 )); then BRACKET='score-90+'
+          elif (( SCORE >= 80 )); then BRACKET='score-80-89'
+          elif (( SCORE >= 70 )); then BRACKET='score-70-79'
+          else                         BRACKET='score-below-70'
+          fi
+          gh issue edit "$PR_NUM" --add-label "$BRACKET" --repo "${{ github.repository }}"
+          echo "Applied: $BRACKET"
+
+      # ── Score banner ─────────────────────────────────────────────────────────
+      - name: Inject score banner into PR description
+        if: |
+          always() &&
+          steps.gate.outputs.should_skip != 'true' &&
+          steps.cfg.outputs.score_banner == 'true' &&
+          (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          DISPLAY_TZ: ${{ vars.DISPLAY_TZ }}
+          MODEL: ${{ steps.cfg.outputs.model }}
+          HS_MODEL: ${{ steps.cfg.outputs.hs_model }}
+          HIGH_STAKES: ${{ steps.labels.outputs.high_stakes }}
+          TIMEZONE: ${{ steps.cfg.outputs.timezone }}
+          FALLBACK_USED: ${{ steps.modelused.outputs.fallback }}
+          FALLBACK_MODELS_USED: ${{ steps.modelused.outputs.fallback_models }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]] && { echo "No PR — skip"; exit 0; }
+          FALLBACK_SHORT=$(printf '%s' "$FALLBACK_MODELS_USED" | sed -E 's#(^|,)[^,/]*/#\1#g')
+
+          # #433: recency-bounded to this run (see "Record run-start anchor").
+          # A banner is the most visible artefact here — rendering a previous
+          # run's score into the PR description after a crash is the single
+          # most misleading thing this workflow can do. Comments come from the
+          # shared fetch step (one paginated fetch reused by all three score
+          # consumers).
+          RUN_START="${{ steps.runstart.outputs.run_start }}"
+          [[ -z "$RUN_START" ]] && { echo "::error::missing run-start anchor (#433)"; exit 1; }
+          THIS_RUN='[.[] | select(.user.login=="github-actions[bot]")
+                         | select(.updated_at >= $since)
+                         | select(.body | contains("Reviewer Guide"))]'
+          REVIEW_BODY=$(jq -r --arg since "$RUN_START" "${THIS_RUN} | last.body // \"\"" "$TMP/pr-comments-shared.json")
+          REVIEW_URL=$(jq  -r --arg since "$RUN_START" "${THIS_RUN} | last.html_url // \"\"" "$TMP/pr-comments-shared.json")
+          SCORE=$(printf '%s' "$REVIEW_BODY" | grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' | grep -oE '[0-9]+' | head -1)
+          [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip banner"; exit 0; }
+
+          if   (( SCORE >= 90 )); then BRACKET='score-90+';     EMOJI='🟢'
+          elif (( SCORE >= 80 )); then BRACKET='score-80-89';   EMOJI='🟡'
+          elif (( SCORE >= 70 )); then BRACKET='score-70-79';   EMOJI='🟠'
+          else                         BRACKET='score-below-70'; EMOJI='🔴'
+          fi
+
+          YES="⚠️ [yes](${REVIEW_URL})"
+          printf '%s' "$REVIEW_BODY" | grep -qi  'No security concerns' && SEC="none ✅"   || SEC="$YES"
+          printf '%s' "$REVIEW_BODY" | grep -qi  'No major issues'      && MAJOR="none ✅" || MAJOR="$YES"
+          printf '%s' "$REVIEW_BODY" | grep -qiE 'Key issues to review' && MINOR="$YES"    || MINOR="none ✅"
+
+          case "$EVENT_NAME" in
+            issue_comment)
+              CMD=$(printf '%s' "$COMMENT_BODY" | grep -oE '^/[a-zA-Z]+' | head -1)
+              [[ -z "$CMD" ]] && CMD='comment'
+              TRIGGER_DESC="\`${CMD}\` by @${COMMENT_USER}"
+              SPECIFIC=" · [comment](${COMMENT_URL})" ;;
+            pull_request|pull_request_target)
+              TRIGGER_DESC="\`pull_request.${EVENT_ACTION}\`"
+              [[ -n "$HEAD_SHA" && "$HEAD_SHA" != "null" ]] \
+                && SPECIFIC=" · [commit ${HEAD_SHA:0:7}](https://github.com/${REPO}/commit/${HEAD_SHA})" \
+                || SPECIFIC="" ;;
+            *) TRIGGER_DESC="\`${EVENT_NAME}\`"; SPECIFIC="" ;;
+          esac
+
+          # Use high_stakes_model label when applicable
+          [[ "$HIGH_STAKES" == "true" ]] && ACTIVE_MODEL="$HS_MODEL" || ACTIVE_MODEL="$MODEL"
+          MODEL_SHORT="${ACTIVE_MODEL##*/}"
+          # "Report model used" found a fallback answer in this run's PR-Agent output.
+          if [[ "$FALLBACK_USED" == "true" ]]; then
+            MODEL_SHORT="${MODEL_SHORT}\` · ⚠️ fallback: \`${FALLBACK_SHORT:-unknown}"
+          fi
+
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+          NOW_UTC=$(date -u '+%Y-%m-%d %H:%M UTC')
+          _tz="${DISPLAY_TZ:-}"
+          # Fall back to project.timezone from config if DISPLAY_TZ repo var is unset
+          [[ -z "$_tz" ]] && _tz="${TIMEZONE:-}"
+          if [[ -n "$_tz" ]]; then
+            NOW_LOCAL=$(TZ="$_tz" date '+%Y-%m-%d %H:%M %Z')
+            NOW_DISPLAY="${NOW_LOCAL} / ${NOW_UTC}"
+          else
+            NOW_DISPLAY="$NOW_UTC"
+          fi
+
+          gh pr view "$PR_NUM" --json body --jq .body --repo "${REPO}" > /tmp/pr-body-current.md
+          sed -i.bak '/<!-- argos-status:start -->/,/<!-- argos-status:end -->/d' /tmp/pr-body-current.md
+          rm -f /tmp/pr-body-current.md.bak
+
+          {
+            echo '<!-- argos-status:start -->'
+            echo "> ${EMOJI} **PR-Agent Score: ${SCORE}** \`${BRACKET}\` · model: \`${MODEL_SHORT}\`"
+            echo "> 🔒 **Security:** ${SEC} · ⚡ **Major:** ${MAJOR} · 🔍 **Minor:** ${MINOR}"
+            echo "> **Triggered by** ${TRIGGER_DESC}${SPECIFIC} · run [#${RUN_ID}](${RUN_URL}) · ${NOW_DISPLAY}"
+            echo '<!-- argos-status:end -->'
+            echo
+          } > /tmp/pr-body-banner.md
+
+          cat /tmp/pr-body-banner.md /tmp/pr-body-current.md > /tmp/pr-body-new.md
+          gh pr edit "$PR_NUM" --body-file /tmp/pr-body-new.md --repo "${REPO}"
+          echo "Banner injected (score $SCORE)"
+
+      # ── Commit status check ──────────────────────────────────────────────────
+      # Green = PR-Agent ran and returned a score, OR the PR diff is entirely
+      #         covered by the repo's .pr_agent.toml [ignore] globs/regex — then
+      #         pr-agent logs "Empty diff for PR", reviews nothing, and no score
+      #         is expected (e.g. a docs-only PR /review'd by hand; slash
+      #         commands bypass the skip_paths gate on purpose).
+      # Red   = no score with a reviewable diff — crashed or returned empty,
+      #         not a clean pass.
+      #
+      # "Returned a score" means A SCORE FROM THIS RUN (#433). Every lookup
+      # below is bounded by steps.runstart.outputs.run_start; a Reviewer Guide
+      # comment left by an earlier run is invisible here. Without that bound a
+      # crash inherited the last green score and reported it as its own.
+      - name: PR-Agent review status check
+        if: always() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.status_check == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]] && { echo "No PR — skip"; exit 0; }
+
+          SHA="${{ github.event.pull_request.head.sha }}"
+          if [[ -z "$SHA" || "$SHA" == "null" ]]; then
+            SHA=$(gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json headRefOid --jq .headRefOid)
+          fi
+
+          # #433: the score MUST come from a review comment this run produced.
+          # Unbounded, a crashed run read the previous run's Reviewer Guide
+          # comment and reported its score as a pass. Comments come from the
+          # shared fetch step (one paginated fetch reused by all three score
+          # consumers).
+          RUN_START="${{ steps.runstart.outputs.run_start }}"
+          [[ -z "$RUN_START" ]] && { echo "::error::missing run-start anchor (#433)"; exit 1; }
+          BODY=$(jq -r --arg since "$RUN_START" \
+            '[.[] | select(.user.login=="github-actions[bot]")
+                  | select(.updated_at >= $since)
+                  | select(.body | contains("Reviewer Guide"))] | last.body // ""' \
+            "$TMP/pr-comments-shared.json")
+          SCORE=$(printf '%s' "$BODY" | grep -oiE 'score[^0-9]{0,20}[0-9]{1,3}' | grep -oE '[0-9]{1,3}' | head -1)
+
+          if [[ -n "$SCORE" ]]; then
+            gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
+              -f state=success -f context="pr-agent/review" \
+              -f description="Reviewed — score $SCORE" >/dev/null
+            exit 0
+          fi
+
+          # No score. Distinguish "nothing reviewable" from a genuine crash:
+          # pr-agent drops [ignore]-matched files before reviewing (see its
+          # algo/file_filter.py: fnmatch.translate + re.match for glob, plain
+          # re.match for regex) — mirror that filter over the PR's changed
+          # files. Any matcher error falls through to the failure path, so a
+          # bug here can only reproduce today's behaviour, never mask a crash.
+          gh pr view "$PR_NUM" --repo "${{ github.repository }}" \
+            --json files --jq '[.files[].path]' > /tmp/pr-files.json
+
+          python3 << 'PYEOF'
+          import fnmatch, json, re
+
+          def read_ignore_section(path):
+              # tomllib is 3.11+; self-hosted runners (vars.CI_RUNNER) may be older,
+              # so fall back to extracting the [ignore] glob/regex string arrays.
+              try:
+                  import tomllib
+                  with open(path, 'rb') as f:
+                      return tomllib.load(f).get('ignore', {})
+              except ImportError:
+                  text = open(path).read()
+                  m = re.search(r'^\[ignore\]\s*$(.*?)(?=^\[|\Z)', text, re.M | re.S)
+                  section = m.group(1) if m else ''
+                  out = {}
+                  for key in ('glob', 'regex'):
+                      arr = re.search(rf'^{key}\s*=\s*\[(.*?)\]', section, re.M | re.S)
+                      if arr:
+                          out[key] = [a or b for a, b in
+                                      re.findall(r"'([^']*)'|\"([^\"]*)\"", arr.group(1))]
+                  return out
+
+          all_ignored = False
+          try:
+              ignore = read_ignore_section('.pr_agent.toml')
+              pats  = [re.compile(fnmatch.translate(g)) for g in ignore.get('glob', [])]
+              pats += [re.compile(r) for r in ignore.get('regex', [])]
+              with open('/tmp/pr-files.json') as f:
+                  files = json.load(f)
+              if files and pats:
+                  all_ignored = all(any(p.match(fp) for p in pats) for fp in files)
+          except Exception as e:  # no .pr_agent.toml / bad pattern
+              print(f'ignore-glob check unavailable ({e}) — treating diff as reviewable')
+
+          with open('/tmp/all_ignored.txt', 'w') as out:
+              out.write('true' if all_ignored else 'false')
+          PYEOF
+
+          if [[ "$(cat /tmp/all_ignored.txt)" == "true" ]]; then
+            gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
+              -f state=success -f context="pr-agent/review" \
+              -f description="Nothing reviewable — all changed files match .pr_agent.toml ignore globs" >/dev/null
+            gh pr comment "$PR_NUM" --repo "${{ github.repository }}" \
+              --body "> ℹ️ **PR-Agent had nothing to review** — every changed file matches this repo's \`.pr_agent.toml\` \`[ignore]\` globs (docs/config-only diff), so no score is expected. Not a failure."
+            echo "Empty-after-ignore diff — status set to success"
+            exit 0
+          fi
+
+          gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
+            -f state=failure -f context="pr-agent/review" \
+            -f description="No score parsed — review failed or empty (not a clean pass)" >/dev/null
+          gh pr comment "$PR_NUM" --repo "${{ github.repository }}" \
+            --body "> ❌ **PR-Agent produced no score** — it likely crashed or returned an empty review. Re-run with \`/review\`."
+          exit 1
+
+      # ── Aftersight CTRF payload ──────────────────────────────────────────────
+      # Builds a CTRF (Common Test Report Format) report modelling this review's
+      # outcome as three synthetic checks (no security/major/minor issues), for
+      # ingestion by Aftersight's POST /api/runs. Not a test framework — CTRF's
+      # `results.tool.name` exists exactly to distinguish sources like this from
+      # real test runs, and `extra` is a spec-sanctioned extension point, not a
+      # weakening of the schema.
+      #
+      # SCORE/REVIEW_BODY extraction mirrors the label/banner/status-check
+      # consumers above (same shared file, same #433 recency bound) rather than
+      # reusing their step outputs, because none of those steps currently
+      # expose one — duplicating the ~6-line jq lookup here was judged simpler
+      # and lower-risk than adding new outputs to three already-working,
+      # independently-gated steps for a fourth consumer.
+      #
+      # Booleans use the SAME string markers as the score-banner step
+      # ("No security concerns" / "No major issues" / "Key issues to review")
+      # so the two stay in sync by construction — if pr-agent's phrasing ever
+      # changes, both break together and get caught together, rather than one
+      # silently drifting from the other.
+      - name: Build Aftersight CTRF payload
+        id: aftersight_payload
+        if: |
+          always() &&
+          steps.gate.outputs.should_skip != 'true' &&
+          (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_START: ${{ steps.runstart.outputs.run_start }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          MODEL: ${{ steps.cfg.outputs.model }}
+          HS_MODEL: ${{ steps.cfg.outputs.hs_model }}
+          HIGH_STAKES: ${{ steps.labels.outputs.high_stakes }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Tier 1 (highest precedence): explicit per-caller override. Empty
+          # string when the caller didn't pass `with:` at all — see the input's
+          # own doc comment above for why `default:` is deliberately omitted.
+          ENABLED_INPUT_OVERRIDE: ${{ inputs.aftersight_pr_review_enabled }}
+          # Tier 2/3: ONE var name, repo-over-org resolution is GitHub's own
+          # built-in vars precedence — nothing extra to do here for that part.
+          ENABLED_VAR: ${{ vars.AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW }}
+        run: |
+          TMP="${RUNNER_TEMP:-/tmp}"
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          echo "should_send=false" >> "$GITHUB_OUTPUT"
+
+          # Precedence: explicit override > org/repo var > default-on (tier 4).
+          if [[ -n "$ENABLED_INPUT_OVERRIDE" ]]; then
+            ENABLED="$ENABLED_INPUT_OVERRIDE"; SOURCE="caller with: override"
+          elif [[ -n "$ENABLED_VAR" ]]; then
+            ENABLED="$ENABLED_VAR"; SOURCE="AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW var"
+          else
+            ENABLED="true"; SOURCE="default (nothing set)"
+          fi
+          if [[ "$ENABLED" != "true" ]]; then
+            echo "Aftersight PR-review reporting disabled via $SOURCE — skip"
+            exit 0
+          fi
+
+          [[ -z "$PR_NUM" || "$PR_NUM" == "null" ]] && { echo "No PR — skip"; exit 0; }
+          [[ -z "$RUN_START" ]] && { echo "::error::missing run-start anchor (#433)"; exit 1; }
+
+          THIS_RUN='[.[] | select(.user.login=="github-actions[bot]")
+                         | select(.updated_at >= $since)
+                         | select(.body | contains("Reviewer Guide"))]'
+          jq -r --arg since "$RUN_START" "${THIS_RUN} | last.body // \"\"" \
+            "$TMP/pr-comments-shared.json" > "$TMP/aftersight-review-body.txt"
+          REVIEW_URL=$(jq -r --arg since "$RUN_START" "${THIS_RUN} | last.html_url // \"\"" \
+            "$TMP/pr-comments-shared.json")
+          SCORE=$(grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' "$TMP/aftersight-review-body.txt" \
+            | grep -oE '[0-9]+' | head -1)
+          [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip Aftersight report"; exit 0; }
+
+          SEC_PASS=true; grep -qi  'No security concerns' "$TMP/aftersight-review-body.txt" || SEC_PASS=false
+          MAJOR_PASS=true; grep -qi 'No major issues'      "$TMP/aftersight-review-body.txt" || MAJOR_PASS=false
+          MINOR_PASS=true; grep -qiE 'Key issues to review' "$TMP/aftersight-review-body.txt" && MINOR_PASS=false
+
+          [[ "$HIGH_STAKES" == "true" ]] && ACTIVE_MODEL="$HS_MODEL" || ACTIVE_MODEL="$MODEL"
+          # GNU date only (`-d`, `%N`) — deliberate, not an oversight: this step
+          # runs exclusively on the self-hosted Linux runner (vars.CI_RUNNER),
+          # unlike the run-start-anchor step above, which additionally falls
+          # back to a runner clock because ITS input (an HTTP Date header) can
+          # come from anywhere. RUN_START here is always this workflow's own
+          # previously-generated `%Y-%m-%dT%H:%M:%SZ` string, so there's a
+          # single known format and no cross-platform input to guard against.
+          STOP_MS=$(($(date -u +%s%N) / 1000000))
+          START_MS=$(($(date -u -d "$RUN_START" +%s%N) / 1000000))
+          DURATION_MS=$(( STOP_MS - START_MS ))
+          [[ $DURATION_MS -lt 0 ]] && DURATION_MS=0
+
+          {
+            echo "pr_num=$PR_NUM"
+            echo "score=$SCORE"
+            echo "sec_pass=$SEC_PASS"
+            echo "major_pass=$MAJOR_PASS"
+            echo "minor_pass=$MINOR_PASS"
+            echo "review_url=$REVIEW_URL"
+            echo "active_model=$ACTIVE_MODEL"
+            echo "start_ms=$START_MS"
+            echo "stop_ms=$STOP_MS"
+            echo "duration_ms=$DURATION_MS"
+          } > "$TMP/aftersight-vars.env"
+
+          # Python reads everything from env/files rather than bash-interpolating
+          # values into the heredoc, matching the "Read pr-review config" step's
+          # convention above — avoids quoting/injection hazards entirely (a PR
+          # title or review body containing a stray backtick or `$(...)` cannot
+          # reach the python source this way).
+          python3 << 'PYEOF'
+          import json, os, uuid
+          from datetime import datetime, timezone
+
+          v = {}
+          with open(os.path.join(os.environ.get('RUNNER_TEMP', '/tmp'), 'aftersight-vars.env')) as f:
+              for line in f:
+                  k, _, val = line.strip().partition('=')
+                  if k:
+                      v[k] = val
+
+          def as_test(name, passed):
+              return {
+                  'name': name,
+                  'status': 'passed' if passed == 'true' else 'failed',
+                  'duration': int(v['duration_ms']),
+                  'suite': ['pr-agent-review'],
+                  'extra': {
+                      'repo': os.environ['REPO'],
+                      'prNumber': int(v['pr_num']),
+                      'runUrl': f"https://github.com/{os.environ['REPO']}/actions/runs/{os.environ['RUN_ID']}",
+                      'model': v['active_model'],
+                      'score': int(v['score']),
+                  },
+              }
+
+          tests = [
+              as_test('no security issues', v['sec_pass']),
+              as_test('no major issues', v['major_pass']),
+              as_test('no minor issues (informational)', v['minor_pass']),
+          ]
+          passed_n = sum(1 for t in tests if t['status'] == 'passed')
+
+          report = {
+              'reportFormat': 'CTRF',
+              'specVersion': '1.0.0',
+              'reportId': str(uuid.uuid4()),
+              'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'generatedBy': 'playbook-pr-review',
+              'results': {
+                  'tool': {'name': 'pr-agent', 'version': '0.50.0'},
+                  'summary': {
+                      'tests': len(tests), 'passed': passed_n, 'failed': len(tests) - passed_n,
+                      'skipped': 0, 'pending': 0, 'other': 0,
+                      'start': int(v['start_ms']), 'stop': int(v['stop_ms']),
+                  },
+                  'tests': tests,
+                  'environment': {
+                      'repositoryName': os.environ['REPO'].split('/')[-1],
+                      'repositoryUrl': f"https://github.com/{os.environ['REPO']}",
+                      'commit': os.environ.get('HEAD_SHA') or '',
+                      'buildUrl': f"https://github.com/{os.environ['REPO']}/actions/runs/{os.environ['RUN_ID']}",
+                  },
+                  'extra': {'reviewUrl': v['review_url']},
+              },
+          }
+
+          payload = json.dumps(report)
+          # Prefix matches results.tool.name above (the actual review tool),
+          # not a generic "pr-review" label — that's what keeps this
+          # inherently distinct from a future _TEST_RESULTS channel's own
+          # idempotency keys (which would prefix on ITS tool, e.g. "playwright:"),
+          # with zero risk of collision without needing a shared convention.
+          idem_key = f"pr-agent:{os.environ['REPO']}:{v['pr_num']}:{os.environ['RUN_ID']}"
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              # Multi-line output — delimiter must not collide with payload content.
+              delim = f"PAYLOAD_{uuid.uuid4().hex}"
+              out.write(f"payload<<{delim}\n{payload}\n{delim}\n")
+              out.write(f"idempotency_key={idem_key}\n")
+              out.write("should_send=true\n")
+          PYEOF
+
+      # ── Report review outcome to Aftersight (PR-review channel) ──────────────
+      # AFTERSIGHT_INGEST_URL_PR_REVIEW — same repo-over-org precedence as
+      # AFTERSIGHT_REPORTING_ENABLED_PR_REVIEW above, via GitHub's built-in vars
+      # resolution (no extra code needed):
+      #   - Global default: `gh variable set AFTERSIGHT_INGEST_URL_PR_REVIEW
+      #     --org Performant-Labs --value ...`. Applies to every repo that
+      #     doesn't set its own.
+      #   - Per-project override: `gh variable set AFTERSIGHT_INGEST_URL_PR_REVIEW
+      #     --repo <owner>/<repo> --value ...` in one specific repo (e.g. it
+      #     reports to a different Aftersight instance). A repo-level var of the
+      #     same name always wins over the org-level one for that repo.
+      # Deliberately unset today — Aftersight's POST /api/runs isn't deployed
+      # anywhere reachable yet (see the handoff thread). Until the org-level
+      # variable is set, this step's `if:` short-circuits to a clean no-op
+      # rather than POSTing to an empty URL — no workflow edit needed once it is.
+      #
+      # The three-tier enabled/disabled decision (override > var > default-on)
+      # lives entirely in the payload step above — should_send == 'true' already
+      # reflects it. Not re-checked here: a single source of truth for a
+      # three-way precedence beats two copies that could drift out of sync.
+      #
+      # Best-effort by design: a failure to write telemetry must never fail a PR
+      # review. continue-on-error is the outer guard; ignoreStatusCodes and
+      # preventFailureOnNoResponse handle it inside the action too, so a 4xx/5xx
+      # or a dead endpoint degrades to a logged warning, not a red job.
+      - name: Report review outcome to Aftersight
+        if: |
+          steps.aftersight_payload.outputs.should_send == 'true' &&
+          vars.AFTERSIGHT_INGEST_URL_PR_REVIEW != ''
+        continue-on-error: true
+        uses: fjogeleit/http-request-action@f98bb26551cd1af7d3eb2674578a80754ece88db  # v2.0.1
+        with:
+          url: ${{ vars.AFTERSIGHT_INGEST_URL_PR_REVIEW }}
+          method: POST
+          contentType: application/json
+          data: ${{ steps.aftersight_payload.outputs.payload }}
+          customHeaders: '{"Idempotency-Key": "${{ steps.aftersight_payload.outputs.idempotency_key }}"}'
+          timeout: 10000
+          retry: 2
+          retryWait: 3000
+          preventFailureOnNoResponse: true
+          ignoreStatusCodes: "400,401,403,404,409,422,429,500,502,503,504"
