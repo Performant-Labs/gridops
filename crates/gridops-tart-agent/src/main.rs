@@ -3431,8 +3431,9 @@ exit 0
     /// So `tart run` must only read that state; the test alone changes it.
     #[tokio::test]
     async fn tart_run_never_writes_the_state_a_held_slot_is_kept_in() -> Result<()> {
-        // Every file a test may set, as opposed to the scripts and the logs
-        // the fake appends to on every command.
+        // Every top-level file a test may set, as opposed to the scripts and
+        // the `calls` and `paths` log directories the fake writes to on every
+        // command (directories are skipped below).
         async fn test_state(tart: &FakeTart) -> Result<std::collections::BTreeMap<String, String>> {
             let mut state = std::collections::BTreeMap::new();
             let mut entries = fs::read_dir(&tart.dir).await?;
