@@ -84,3 +84,34 @@
     - **No overlapping 0048 migration.** No worktree has one, and every other worktree is clean.
     - **Nothing pins the removed refusal message.** "is a CI target of the fleet" appears only in the handler.
     - **Only the admission reader touches session grants.** `host_session_target_grants` appears in production code only at `admission.rs:825`, which reads it.
+
+## Phase 4 Tests RED (T) - 2026-11-22T09:11:00-08:00
+- **Decided:** the RED is valid (`docs/handoffs/183/handoff-T-red.md`). 10 failing tests, each failing for the right reason. The diff is test files only: `control_plane_contracts.rs`, `gitlab_pool_fleet.rs`, `fleet/admission_tests.rs` and `fleet_schema.rs`.
+  - **HTTP (next to `:2345`, OpenAPI-checked):** (a) the prod case retires the target and revokes the grant; (b) history is kept and the profile link is revoked; the refusals run in order pool → runner → queued intent / running placement / unreleased allocation, with no change after each 409 and a 204 once drained; the existing DELETE test also covers the never-used target that `list_targets` creates.
+  - **Core:** the key path, `list_targets`, `pool_targets` and `save_pool_fleet` never revive or offer a retired target. `ensure_target_identity_for_pool` answers `NotFound` for one, and `link_pool_target` never links one.
+  - **Schema:** `FLEET_ADDED_COLUMNS` gains `retired_at`; the 0047→latest rebuild keeps rows and FKs; the retire transition is allowed and final; 0048 has an FK guard.
+  - **Pinned contract details F must meet:**
+    - the audit keys `retiredTargetIds`, `hostGrantsRevoked`, `sessionGrantsRevoked`, `profileLinksRevoked`;
+    - `fleet.target.retired` with no host and the deleting user as actor;
+    - grant `revision+1` on revoke;
+    - a grant on a retired target answers 404 `not_found`;
+    - the live-work 409 contains the running workload's pool name;
+    - refusal order pool → runner → live work;
+    - exactly one `migrations/0048_*.sql` with a `*_fk_guard`.
+- **Assumed:**
+  - "A message naming what is running" means the operator-facing pool name of the live workload. The test asserts only that the name is present, not the wording.
+  - The new live-work refusal comes after today's two refusals, from "Keep today's refusals and their order … Add a refusal".
+  - In the HTTP tests, two DB writes stand in for real paths: removing the pool's membership with SQL stands in for the pool update, which does the same replace at `resources.rs:1883-1895`; `delete_pool` is called directly rather than through the pool route.
+- **Hedged:**
+  - The copy, OpenAPI description, docs and CHANGELOG items get no automated test (wording tests are brittle, and none exist today). S checks them.
+  - `link_pool_target` and the GitLab arm of admission already refuse a NULL-connection row. So for those two, the RED comes from the missing schema, and the tests act as regression guards. The `NotFound` assertion is what proves the identity-check guard exists.
+  - I did not run a schema-only stub migration in the repo to prove the core guard assertions fail once the schema exists, because that would mean writing production SQL. I checked their logic by reading the code instead, and I replayed the schema test's statements against A's design in `sqlite3`.
+- **Evidence:**
+  - **Commands:**
+    - `cargo test -p gridops-core`: `fleet_schema` 13 pass / 4 fail, `gitlab_pool_fleet` 7/1, lib 310/1, all other binaries pass.
+    - `cargo test -p gridops-api`: `control_plane_contracts` 35/4; `fleet_http` 149/1 (`release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine`, which fails only on a macOS host because the test agent reports its compile-time OS (`release_preflight.rs:63-65`); not touched by this diff).
+    - `cargo fmt --check` is clean.
+    - `cargo +1.98.1 clippy --all-targets --locked -D warnings` (the CI flags) is clean for both crates.
+  - **Checks run:**
+    - A temporary test-only probe, since deleted, confirmed the later-step seeds: the liveness transitions, the event insert, grant route 200 and 404 `{"code":"not_found"}`, the target list, and `delete_pool` from the test process.
+    - A `sqlite3` replay of A's CHECK and trigger matched all 10 refusals and 2 successes in the retire test.

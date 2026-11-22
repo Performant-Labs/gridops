@@ -2433,6 +2433,14 @@ async fn gitlab_connection_list_shows_seeded_connections_and_delete_answers_404_
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     openapi_schema::check_response(GITLAB_CONNECTION, "delete", 409, &body)?;
 
+    // #183: opening the fleet's target list gives every GitLab connection a
+    // fleet target. A connection that nothing else ever used still removes.
+    let (status, targets) = fixture
+        .gitlab_request(Method::GET, FLEET_TARGETS, "", None, true)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{targets}");
+    let listed_target = gitlab_target(&database, SEEDED_GITLAB_CONNECTION).await?;
+    assert!(listed(&targets, &listed_target), "{targets}");
     let (status, body) = fixture
         .gitlab_request(
             Method::DELETE,
@@ -2444,6 +2452,570 @@ async fn gitlab_connection_list_shows_seeded_connections_and_delete_answers_404_
         .await?;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     openapi_schema::check_response(GITLAB_CONNECTION, "delete", 204, &body)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #183: removing a GitLab connection retires its fleet targets
+// ---------------------------------------------------------------------------
+
+const FLEET_TARGETS: &str = "/api/v1/fleet/targets";
+const OTHER_GITLAB_CONNECTION: &str = "d1000000-0000-4000-8000-000000000002";
+const FLEET_MACHINE: &str = "c1830000-0000-4000-8000-000000000001";
+const FLEET_MACHINE_DOMAIN: &str = "c1830000-0000-4000-8000-000000000002";
+const FLEET_MACHINE_BACKEND: &str = "c1830000-0000-4000-8000-000000000003";
+
+/// A `fleet.target.retired` event: target, host, placement, actor, detail.
+type RetiredEvent = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+/// Whether a `GET /api/v1/fleet/targets` body offers `target`.
+fn listed(body: &Value, target: &str) -> bool {
+    body["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["id"] == target))
+}
+
+/// The fleet target of GitLab connection `connection`.
+async fn gitlab_target(database: &SqlitePool, connection: &str) -> Result<String> {
+    sqlx::query_scalar("SELECT id FROM fleet_ci_targets WHERE gitlab_connection_id=?")
+        .bind(connection)
+        .fetch_optional(database)
+        .await?
+        .with_context(|| format!("{connection} has a fleet target"))
+}
+
+/// The two GitLab connections of these tests: a project one ("Acme app") and
+/// a group one ("Acme group").
+async fn seed_two_gitlab_connections(database: &SqlitePool) -> Result<()> {
+    seed_gitlab_connection(
+        database,
+        SEEDED_GITLAB_CONNECTION,
+        "Acme app",
+        "https://gitlab.example.com",
+        "project",
+        42,
+        "acme/app",
+    )
+    .await?;
+    seed_gitlab_connection(
+        database,
+        OTHER_GITLAB_CONNECTION,
+        "Acme group",
+        "https://gitlab.example.com",
+        "group",
+        7,
+        "acme",
+    )
+    .await
+}
+
+/// An approved fleet machine ("callisto") with one Linux Docker backend.
+async fn seed_fleet_machine(database: &SqlitePool) -> Result<()> {
+    seed(database, &[format!(
+        "INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at)
+           VALUES ('{FLEET_MACHINE}','callisto','linux','x64','approved','active','verified',1,1);
+         INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes)
+           VALUES ('{FLEET_MACHINE_DOMAIN}','{FLEET_MACHINE}',NULL,'Physical',4000,8192,107374182400);
+         INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
+           VALUES ('{FLEET_MACHINE_BACKEND}','{FLEET_MACHINE}','{FLEET_MACHINE_DOMAIN}','docker','linux','x64','ready',1,1,1);"
+    )]).await
+}
+
+/// A GitLab pool of installation 42 that uses `connections`.
+fn gitlab_pool_rows(pool_id: &str, connections: &[&str]) -> Vec<String> {
+    let mut rows = vec![format!(
+        "INSERT INTO runner_pools (id,installation_id,name,scope,provider,providers,labels,image,docker_image,tart_image,created_at,updated_at)
+           VALUES ('{pool_id}',42,'{pool_id}','gitlab','docker','[\"docker\"]','[\"docker\"]','registry.example.test/gitlab-runner:v17','registry.example.test/gitlab-runner:v17','',1,1);"
+    )];
+    for connection in connections {
+        rows.push(format!(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('{pool_id}','{connection}',1);"
+        ));
+    }
+    rows
+}
+
+/// A GitLab pool on fleet machines: the pool, its connection, and its fleet
+/// settings saved (one Linux Docker platform), which links the connection's
+/// target to the platform. Returns the platform's profile id.
+async fn gitlab_fleet_pool(
+    database: &SqlitePool,
+    pool_id: &str,
+    connection: &str,
+) -> Result<String> {
+    seed(database, &gitlab_pool_rows(pool_id, &[connection])).await?;
+    let settings: gridops_core::fleet::targets::FleetSettingsInput =
+        serde_json::from_value(json!({
+            "enabled": true,
+            "mode": "ephemeral",
+            "cpuMillis": 1000,
+            "memoryMib": 1024,
+            "diskBytes": 0,
+            "platforms": [{
+                "runtimeKind": "docker",
+                "executionOs": "linux",
+                "architecture": "x64",
+                "image": "registry.example.test/gitlab-runner:v17",
+            }],
+        }))?;
+    gridops_core::fleet::targets::save_pool_fleet(database, pool_id, &settings).await?;
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM pool_execution_profiles WHERE pool_id=? AND archived_at IS NULL",
+    )
+    .bind(pool_id)
+    .fetch_one(database)
+    .await?)
+}
+
+/// What the pool update does to a pool's GitLab connections: it replaces
+/// them (`update_runner_pool`, resources.rs), leaving the platform's links
+/// to the old targets as they were.
+async fn switch_gitlab_connection(
+    database: &SqlitePool,
+    pool_id: &str,
+    connection: &str,
+) -> Result<()> {
+    seed(database, &[format!(
+        "DELETE FROM runner_pool_gitlab_connections WHERE pool_id='{pool_id}';
+         INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('{pool_id}','{connection}',3);"
+    )]).await
+}
+
+/// A CI workload of `pool` on `target`: its operation and intent (`status`),
+/// and when `placement` names a state, its placement on the fleet machine.
+/// Returns (intent id, placement id).
+async fn fleet_workload(
+    database: &SqlitePool,
+    pool: &str,
+    profile: &str,
+    target: &str,
+    status: &str,
+    placement: Option<&str>,
+) -> Result<(String, String)> {
+    let intent = Uuid::new_v4().to_string();
+    let placement_id = Uuid::new_v4().to_string();
+    let mut rows = vec![format!(
+        "INSERT INTO fleet_operations (id,kind,principal_kind,principal_scope,idempotency_key,request_hash,status,created_at,updated_at)
+           VALUES ('{intent}','submit_workload','autoscaler','{pool}','{intent}','hash','succeeded',1,1);
+         INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,target_id,expected_profile_revision,status,created_at,updated_at)
+           VALUES ('{intent}','{intent}',1,'ci_runner','{pool}','{profile}','{target}',1,'{status}',1,1);"
+    )];
+    if let Some(state) = placement {
+        rows.push(format!(
+            "INSERT INTO workload_placements (id,intent_id,workload_id,generation,host_id,backend_id,host_epoch,profile_revision,target_id,config_snapshot_json,cpu_millis,memory_mib,disk_bytes,state,created_at,updated_at)
+               VALUES ('{placement_id}','{intent}','{intent}',1,'{FLEET_MACHINE}','{FLEET_MACHINE_BACKEND}',1,1,'{target}','{{}}',1000,1024,0,'{state}',1,1);"
+        ));
+    }
+    seed(database, &rows).await?;
+    Ok((intent, placement_id))
+}
+
+/// Everything removing a connection may change: the connections, each
+/// target's connection, the machine grants, the platform links, the
+/// retirement events, the removal audit events and the stored secrets.
+async fn removal_state(database: &SqlitePool) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT json_object(
+           'connections',(SELECT json_group_array(id) FROM (SELECT id FROM gitlab_connections ORDER BY id)),
+           'targets',(SELECT json_group_array(json_array(id,gitlab_connection_id)) FROM (SELECT * FROM fleet_ci_targets ORDER BY id)),
+           'grants',(SELECT json_group_array(json_array(host_id,target_id,revision,revoked_at)) FROM (SELECT * FROM host_target_grants ORDER BY host_id,target_id)),
+           'links',(SELECT json_group_array(json_array(profile_id,target_id,enabled,revoked_at)) FROM (SELECT * FROM profile_ci_targets ORDER BY profile_id,target_id)),
+           'retiredEvents',(SELECT COUNT(*) FROM fleet_events WHERE kind='fleet.target.retired'),
+           'removals',(SELECT COUNT(*) FROM audit_events WHERE action='gitlab.connection_deleted'),
+           'secrets',(SELECT json_group_array(key) FROM (SELECT key FROM runtime_secrets ORDER BY key)))",
+    )
+    .fetch_one(database)
+    .await?)
+}
+
+/// The metadata of the `gitlab.connection_deleted` audit event of `connection`.
+async fn removal_audit(database: &SqlitePool, connection: &str) -> Result<Value> {
+    let metadata: String = sqlx::query_scalar(
+        "SELECT metadata FROM audit_events WHERE action='gitlab.connection_deleted' AND target_id=?",
+    )
+    .bind(connection)
+    .fetch_one(database)
+    .await?;
+    Ok(serde_json::from_str(&metadata)?)
+}
+
+/// #183 (a), the issue's case as found on prod: a GitLab connection whose
+/// pool ran on fleet machines and was then deleted, so all that is left is
+/// one machine's grant on the connection's target (schedule, native and
+/// Docker socket all off). Removing the connection answers 204 instead of a
+/// 409. The target row stays, retired and without a connection; the grant is
+/// revoked with its revision bumped; one `fleet.target.retired` event (no
+/// host, the deleting user as actor) and the audit event record it. The
+/// retired target is no longer offered for granting machines, and a grant on
+/// it is a 404 that changes nothing.
+#[tokio::test]
+async fn removing_a_gitlab_connection_retires_its_fleet_target_and_revokes_its_grant() -> Result<()>
+{
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    fixture.make_admin().await?;
+    let database = fixture.database().await?;
+    seed_gitlab_connection(
+        &database,
+        SEEDED_GITLAB_CONNECTION,
+        "gridops-e2e (prod check)",
+        "https://gitlab.example.com",
+        "project",
+        42,
+        "acme/app",
+    )
+    .await?;
+    seed_fleet_machine(&database).await?;
+    gitlab_fleet_pool(&database, "gl-prod", SEEDED_GITLAB_CONNECTION).await?;
+    let target = gitlab_target(&database, SEEDED_GITLAB_CONNECTION).await?;
+    let (status, targets) = fixture
+        .gitlab_request(Method::GET, FLEET_TARGETS, "", None, true)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{targets}");
+    assert!(listed(&targets, &target), "offered before: {targets}");
+    let grant = format!("/api/v1/fleet/hosts/{FLEET_MACHINE}/grants/{target}");
+    let all_off = json!({"allowSchedule": false, "allowNative": false, "allowDockerSocket": false});
+    let (status, body) = fixture
+        .gitlab_request(Method::POST, &grant, "", Some(all_off.clone()), true)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "granting the live target: {body}");
+    assert!(
+        gridops_core::fleet::targets::delete_pool(&database, "gl-prod").await?,
+        "the pool deletes"
+    );
+
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::DELETE,
+            GITLAB_CONNECTION,
+            SEEDED_GITLAB_CONNECTION,
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 204, &body)?;
+
+    let row: (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT kind,gitlab_connection_id,retired_at IS NOT NULL FROM fleet_ci_targets WHERE id=?",
+    )
+    .bind(&target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(row, ("gitlab_project".to_owned(), None, true), "retired");
+    let grant_row = || {
+        sqlx::query_as::<_, (i64, bool)>(
+            "SELECT revision,revoked_at IS NOT NULL FROM host_target_grants WHERE host_id=? AND target_id=?",
+        )
+        .bind(FLEET_MACHINE)
+        .bind(target.clone())
+    };
+    assert_eq!(
+        grant_row().fetch_one(&database).await?,
+        (2, true),
+        "grant revoked"
+    );
+    let events: Vec<RetiredEvent> = sqlx::query_as(
+        "SELECT target_id,host_id,placement_id,actor_user_id,detail_json FROM fleet_events WHERE kind='fleet.target.retired'",
+    )
+    .fetch_all(&database)
+    .await?;
+    let [(event_target, host, placement, actor, detail)] = events.as_slice() else {
+        anyhow::bail!("one fleet.target.retired event: {events:?}");
+    };
+    assert_eq!(
+        (event_target, host, placement, actor.as_deref()),
+        (&target, &None, &None, Some("user-1")),
+    );
+    assert!(detail.contains(SEEDED_GITLAB_CONNECTION), "{detail}");
+    let audit = removal_audit(&database, SEEDED_GITLAB_CONNECTION).await?;
+    assert_eq!(
+        (
+            &audit["retiredTargetIds"],
+            &audit["hostGrantsRevoked"],
+            &audit["sessionGrantsRevoked"],
+            &audit["profileLinksRevoked"],
+        ),
+        (&json!([target]), &json!(1), &json!(0), &json!(0)),
+        "{audit}"
+    );
+    let left: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM gitlab_connections WHERE id=?1),(SELECT COUNT(*) FROM runtime_secrets WHERE key LIKE 'test.gitlab.' || ?1 || '.%')",
+    )
+    .bind(SEEDED_GITLAB_CONNECTION)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(left, (0, 0), "the connection and its secrets are gone");
+
+    let (status, targets) = fixture
+        .gitlab_request(Method::GET, FLEET_TARGETS, "", None, true)
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{targets}");
+    assert!(!listed(&targets, &target), "not offered after: {targets}");
+    let (status, body) = fixture
+        .gitlab_request(Method::POST, &grant, "", Some(all_off), true)
+        .await?;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "granting a retired target: {body}"
+    );
+    assert_eq!(body["code"], "not_found", "{body}");
+    assert_eq!(
+        grant_row().fetch_one(&database).await?,
+        (2, true),
+        "the refused grant changed nothing"
+    );
+    Ok(())
+}
+
+/// #183 (b), the history case: a GitLab pool ran a workload on a fleet
+/// machine (its intent admitted, its placement cleaned, a fleet event
+/// written), then moved to another connection through the pool update, which
+/// leaves its platform's link to the old target enabled. Removing the old
+/// connection answers 204: the intent, the placement and the event still name
+/// the target, now retired; the platform link and the machine grant are
+/// revoked. The other connection's target is untouched.
+#[tokio::test]
+async fn removing_a_gitlab_connection_keeps_its_fleet_history_and_revokes_its_platform_link()
+-> Result<()> {
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    fixture.make_admin().await?;
+    let database = fixture.database().await?;
+    seed_two_gitlab_connections(&database).await?;
+    seed_fleet_machine(&database).await?;
+    let profile = gitlab_fleet_pool(&database, "gl-history", SEEDED_GITLAB_CONNECTION).await?;
+    let target = gitlab_target(&database, SEEDED_GITLAB_CONNECTION).await?;
+    let other_target = gitlab_target(&database, OTHER_GITLAB_CONNECTION).await?;
+    let (intent, placement) = fleet_workload(
+        &database,
+        "gl-history",
+        &profile,
+        &target,
+        "admitted",
+        Some("cleaned"),
+    )
+    .await?;
+    seed(&database, &[format!(
+        "INSERT INTO host_target_grants (host_id,target_id,allow_schedule,granted_by) VALUES ('{FLEET_MACHINE}','{target}',1,'user-1');
+         INSERT INTO fleet_events (id,host_id,placement_id,target_id,kind,created_at) VALUES ('{}','{FLEET_MACHINE}','{placement}','{target}','placement.cleaned',2);",
+        Uuid::new_v4()
+    )]).await?;
+    switch_gitlab_connection(&database, "gl-history", OTHER_GITLAB_CONNECTION).await?;
+
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::DELETE,
+            GITLAB_CONNECTION,
+            SEEDED_GITLAB_CONNECTION,
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 204, &body)?;
+
+    let history: (String, String, i64) = sqlx::query_as(
+        "SELECT (SELECT target_id FROM workload_intents WHERE id=?1),
+                (SELECT target_id FROM workload_placements WHERE id=?2),
+                (SELECT COUNT(*) FROM fleet_events WHERE placement_id=?2 AND target_id=?3)",
+    )
+    .bind(&intent)
+    .bind(&placement)
+    .bind(&target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(history, (target.clone(), target.clone(), 1), "history kept");
+    let retired: (Option<String>, bool) = sqlx::query_as(
+        "SELECT gitlab_connection_id,retired_at IS NOT NULL FROM fleet_ci_targets WHERE id=?",
+    )
+    .bind(&target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(retired, (None, true), "the target is retired");
+    let link: (i64, bool) = sqlx::query_as(
+        "SELECT enabled,revoked_at IS NOT NULL FROM profile_ci_targets WHERE profile_id=? AND target_id=?",
+    )
+    .bind(&profile)
+    .bind(&target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(link, (0, true), "the platform link is revoked");
+    let grant: (i64, bool) = sqlx::query_as(
+        "SELECT revision,revoked_at IS NOT NULL FROM host_target_grants WHERE host_id=? AND target_id=?",
+    )
+    .bind(FLEET_MACHINE)
+    .bind(&target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(grant, (2, true), "the machine grant is revoked");
+    let untouched: (Option<String>, bool) = sqlx::query_as(
+        "SELECT gitlab_connection_id,retired_at IS NOT NULL FROM fleet_ci_targets WHERE id=?",
+    )
+    .bind(&other_target)
+    .fetch_one(&database)
+    .await?;
+    assert_eq!(
+        untouched,
+        (Some(OTHER_GITLAB_CONNECTION.to_owned()), false),
+        "the other connection's target"
+    );
+    let audit = removal_audit(&database, SEEDED_GITLAB_CONNECTION).await?;
+    assert_eq!(
+        (
+            &audit["retiredTargetIds"],
+            &audit["hostGrantsRevoked"],
+            &audit["profileLinksRevoked"],
+        ),
+        (&json!([target]), &json!(1), &json!(1)),
+        "{audit}"
+    );
+    Ok(())
+}
+
+/// Removes `connection` expecting a 409 that leaves everything as `before`;
+/// returns the error message.
+async fn refused_removal(
+    fixture: &ApiFixture,
+    database: &SqlitePool,
+    connection: &str,
+    before: &str,
+) -> Result<String> {
+    let (status, body) = fixture
+        .gitlab_request(
+            reqwest::Method::DELETE,
+            GITLAB_CONNECTION,
+            connection,
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    openapi_schema::check_response(GITLAB_CONNECTION, "delete", 409, &body)?;
+    assert_eq!(
+        removal_state(database).await?,
+        before,
+        "a refused removal changes nothing: {body}"
+    );
+    Ok(body["error"].as_str().context("error message")?.to_owned())
+}
+
+/// #183 item 2: removing a GitLab connection is refused, changing nothing,
+/// while anything may still run through it, and each 409 says what to clear.
+/// In order: a pool that uses it and a live runner registered through it (both
+/// as before #183), then work of another pool on its fleet target: a queued
+/// intent, a placement still running, and a cleaned placement whose capacity
+/// is not released yet, each named by its pool. Once the capacity is
+/// released, the admitted intent left behind is history and the connection
+/// removes.
+#[tokio::test]
+async fn a_gitlab_connection_is_not_removed_while_anything_still_runs_through_it() -> Result<()> {
+    use reqwest::Method;
+    let fixture = ApiFixture::start().await?;
+    fixture.make_admin().await?;
+    let database = fixture.database().await?;
+    seed_two_gitlab_connections(&database).await?;
+    seed_fleet_machine(&database).await?;
+    let profile = gitlab_fleet_pool(&database, "gl-live", SEEDED_GITLAB_CONNECTION).await?;
+    let target = gitlab_target(&database, SEEDED_GITLAB_CONNECTION).await?;
+    switch_gitlab_connection(&database, "gl-live", OTHER_GITLAB_CONNECTION).await?;
+    let mut rows = gitlab_pool_rows("gl-member", &[SEEDED_GITLAB_CONNECTION]);
+    rows.push(format!(
+        "INSERT INTO runners (id,pool_id,name,ci_platform,gitlab_connection_id,gitlab_runner_id,status,created_at,updated_at)
+           VALUES ('gl-runner','gl-member','gl-runner','gitlab','{SEEDED_GITLAB_CONNECTION}',77,'online',1,1);
+         INSERT INTO host_target_grants (host_id,target_id,allow_schedule,granted_by) VALUES ('{FLEET_MACHINE}','{target}',1,'user-1');"
+    ));
+    seed(&database, &rows).await?;
+    let (queued, _) =
+        fleet_workload(&database, "gl-live", &profile, &target, "queued", None).await?;
+    let before = removal_state(&database).await?;
+
+    let message = refused_removal(&fixture, &database, SEEDED_GITLAB_CONNECTION, &before).await?;
+    assert!(
+        message.contains("gl-member"),
+        "the pool comes first: {message}"
+    );
+
+    seed(
+        &database,
+        &["DELETE FROM runner_pool_gitlab_connections WHERE pool_id='gl-member';".to_owned()],
+    )
+    .await?;
+    let message = refused_removal(&fixture, &database, SEEDED_GITLAB_CONNECTION, &before).await?;
+    assert!(
+        message.contains("1 runner registered through Acme app"),
+        "then the live runner: {message}"
+    );
+
+    seed(
+        &database,
+        &["UPDATE runners SET deleted_at=5 WHERE id='gl-runner';".to_owned()],
+    )
+    .await?;
+    let message = refused_removal(&fixture, &database, SEEDED_GITLAB_CONNECTION, &before).await?;
+    assert!(message.contains("gl-live"), "a queued intent: {message}");
+
+    seed(
+        &database,
+        &[format!(
+            "UPDATE workload_intents SET status='cancelled' WHERE id='{queued}';"
+        )],
+    )
+    .await?;
+    let (_, placement) = fleet_workload(
+        &database,
+        "gl-live",
+        &profile,
+        &target,
+        "admitted",
+        Some("running"),
+    )
+    .await?;
+    let allocation = Uuid::new_v4();
+    seed(&database, &[format!(
+        "INSERT INTO capacity_allocations (id,placement_id,host_id,backend_id,host_epoch,domain_id,policy_revision,cpu_millis,memory_mib,disk_bytes,state,created_at,updated_at)
+           VALUES ('{allocation}','{placement}','{FLEET_MACHINE}','{FLEET_MACHINE_BACKEND}',1,'{FLEET_MACHINE_DOMAIN}',1,1000,1024,0,'committed',1,1);"
+    )]).await?;
+    let message = refused_removal(&fixture, &database, SEEDED_GITLAB_CONNECTION, &before).await?;
+    assert!(
+        message.contains("gl-live"),
+        "a running placement: {message}"
+    );
+
+    seed(
+        &database,
+        &[format!(
+            "UPDATE workload_placements SET state='cleaned' WHERE id='{placement}';"
+        )],
+    )
+    .await?;
+    let message = refused_removal(&fixture, &database, SEEDED_GITLAB_CONNECTION, &before).await?;
+    assert!(
+        message.contains("gl-live"),
+        "capacity still charged: {message}"
+    );
+
+    seed(&database, &[format!(
+        "UPDATE workload_placements SET local_absence_proven_at=6,delayed_starts_excluded_at=6 WHERE id='{placement}';
+         UPDATE capacity_allocations SET state='released',released_at=6 WHERE id='{allocation}';"
+    )]).await?;
+    let (status, body) = fixture
+        .gitlab_request(
+            Method::DELETE,
+            GITLAB_CONNECTION,
+            SEEDED_GITLAB_CONNECTION,
+            None,
+            true,
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT, "once drained: {body}");
     Ok(())
 }
 

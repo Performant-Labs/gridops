@@ -260,6 +260,92 @@ async fn the_target_list_for_granting_machines_includes_gitlab_connections() -> 
     database.finish().await
 }
 
+/// #183 decisions 1 and 6: once a GitLab connection's target is retired
+/// (`retired_at` set and its connection dropped, in one UPDATE) the key path
+/// never revives it. Here the connection row is still there under the same
+/// id (as a restore could bring it back), so its canonical key resolves to
+/// the retired row:
+/// `gitlab_connection_target` answers `None` and inserts nothing, the target
+/// list for granting machines and `pool_targets` leave the retired target
+/// out, and saving the pool's fleet settings does not re-link it. The
+/// connection-group target beside it is unaffected.
+#[tokio::test]
+async fn a_retired_gitlab_target_is_never_revived_offered_or_relinked() -> Result<()> {
+    let database = Database::new().await?;
+    let settings = docker_platform("registry.example.test/gitlab-runner:v17")?;
+    targets::save_pool_fleet(&database.pool, "gl-pool", &settings).await?;
+    let (retired, _, _) = database
+        .gitlab_target("conn-project")
+        .await?
+        .context("the project connection's target exists")?;
+    let (group, _, _) = database
+        .gitlab_target("conn-group")
+        .await?
+        .context("the group connection's target exists")?;
+    // The retire and the profile-link revoke that removing the connection
+    // performs (decision 1, brief item 2).
+    sqlx::query("UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL WHERE id=?")
+        .bind(&retired)
+        .execute(&database.pool)
+        .await
+        .context("0048 lets a GitLab target retire")?;
+    sqlx::query("UPDATE profile_ci_targets SET enabled=0,revoked_at=10 WHERE target_id=?")
+        .bind(&retired)
+        .execute(&database.pool)
+        .await?;
+    let gitlab_rows = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM fleet_ci_targets WHERE kind IN ('gitlab_project','gitlab_group')",
+        )
+    };
+    assert_eq!(gitlab_rows().fetch_one(&database.pool).await?, 2);
+
+    assert_eq!(
+        targets::gitlab_connection_target(&database.pool, "conn-project").await?,
+        None,
+        "the key path does not hand back a retired target"
+    );
+    let listed = targets::list_targets(&database.pool).await?;
+    assert!(
+        listed.iter().all(|target| target.id != retired),
+        "a retired target is not offered for granting machines: {listed:?}"
+    );
+    assert!(
+        listed.iter().any(|target| target.id == group),
+        "the group connection's target is still listed: {listed:?}"
+    );
+    let pool_targets = targets::pool_targets(&database.pool, "gl-pool").await?;
+    assert_eq!(pool_targets, std::slice::from_ref(&group), "pool_targets");
+    targets::save_pool_fleet(&database.pool, "gl-pool", &settings).await?;
+    assert_eq!(
+        database.linked_kinds("gl-pool").await?,
+        [(group.clone(), "gitlab_group".to_owned())],
+        "saving the pool again links only the live target"
+    );
+    let link: (i64, Option<i64>) =
+        sqlx::query_as("SELECT enabled,revoked_at FROM profile_ci_targets WHERE target_id=?")
+            .bind(&retired)
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(
+        link,
+        (0, Some(10)),
+        "the retired target's link stays revoked"
+    );
+    assert_eq!(
+        gitlab_rows().fetch_one(&database.pool).await?,
+        2,
+        "nothing re-created the retired target under a new id"
+    );
+    let state: (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT gitlab_connection_id,retired_at FROM fleet_ci_targets WHERE id=?")
+            .bind(&retired)
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(state, (None, Some(10)), "the target stays retired");
+    database.finish().await
+}
+
 /// Round-2 block 2 and brief-gate B-2 (a), (c): a Docker platform saved
 /// without an image takes the pool's Docker image. A GitLab pool with no
 /// Docker image of its own (here a Tart pool, whose `docker_image` is empty)

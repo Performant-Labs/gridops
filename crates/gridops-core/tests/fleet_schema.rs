@@ -232,8 +232,10 @@ const RUNNERS_FOREIGN_KEYS: [(&str, &str, &str, &str); 5] = [
     ("target_repository_id", "repositories", "id", "SET NULL"),
 ];
 
-/// The columns 0047 adds to tables that already hold rows, with the value
-/// every existing row must have afterwards (`None` = NULL).
+/// The columns 0047 and later migrations add to tables that already hold
+/// rows, with the value every existing row must have afterwards (`None` =
+/// NULL). #183: 0048 appends `fleet_ci_targets.retired_at`, NULL for every
+/// target that exists when it runs.
 type AddedColumns = &'static [(
     &'static str,
     &'static [(&'static str, &'static str, Option<i64>)],
@@ -265,6 +267,7 @@ const FLEET_ADDED_COLUMNS: AddedColumns = &[
             ("gitlab_connection_id", "TEXT", None),
             ("gitlab_project_id", "INTEGER", None),
             ("gitlab_group_id", "INTEGER", None),
+            ("retired_at", "INTEGER", None),
         ],
     ),
 ];
@@ -1228,6 +1231,38 @@ async fn the_0047_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
         "/../../migrations/0047_gitlab.sql"
     );
     let migration = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    assert_foreign_key_guard(&migration, "_gitlab_0047_fk_guard", "0047").await
+}
+
+/// #183: 0048 rebuilds `fleet_ci_targets` with foreign keys off, as 0047 did,
+/// so it carries the same guard: a temp table whose CHECK refuses to commit
+/// while `pragma_foreign_key_check` reports any dangling reference.
+#[tokio::test]
+async fn the_0048_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()> {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        let numbered = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("0048_"));
+        if numbered && path.extension().is_some_and(|extension| extension == "sql") {
+            found.push(path);
+        }
+    }
+    let [path] = found.as_slice() else {
+        anyhow::bail!("expected exactly one migration 0048 in {directory}, found {found:?}");
+    };
+    let migration =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    assert_foreign_key_guard(&migration, "_fk_guard", "0048").await
+}
+
+/// The statements of `migration` that mention `marker` are its foreign-key
+/// guard (create, fill, drop), and run on their own they refuse a database
+/// with a dangling reference and accept a clean one.
+async fn assert_foreign_key_guard(migration: &str, marker: &str, name: &str) -> Result<()> {
     // Comments are dropped first, so a `;` inside one cannot split a statement.
     let code: String = migration
         .lines()
@@ -1236,7 +1271,7 @@ async fn the_0047_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
         .join("\n");
     let guard: Vec<String> = code
         .split(';')
-        .filter(|statement| statement.contains("_gitlab_0047_fk_guard"))
+        .filter(|statement| statement.contains(marker))
         .map(|statement| statement.trim().to_owned())
         .collect();
     let starts: Vec<_> = guard
@@ -1246,7 +1281,7 @@ async fn the_0047_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
     assert_eq!(
         starts,
         ["CREATE", "INSERT", "DROP"],
-        "0047's guard: {guard:?}"
+        "{name}'s guard: {guard:?}"
     );
     let guard = format!("{};", guard.join(";\n"));
     for dangling in [false, true] {
@@ -1296,4 +1331,219 @@ async fn the_0047_foreign_key_guard_fails_on_a_dangling_reference() -> Result<()
         std::fs::remove_dir_all(directory)?;
     }
     Ok(())
+}
+
+/// A GitLab project target of `gl-a`, beside the fixture's GitHub and
+/// Bitbucket targets.
+const GITLAB_TARGET: &str = "30000000-0000-4000-8000-000000000003";
+
+/// #183, 0048: the `fleet_ci_targets` rebuild that adds `retired_at`, run on
+/// a 0047 database that already holds a GitLab target with a machine grant,
+/// a profile link and a fleet event. Every row and every foreign key survives
+/// it, `retired_at` is appended last and NULL on every existing target, the
+/// identity trigger is back under its name, and the table stays STRICT.
+#[tokio::test]
+async fn the_0048_rebuild_keeps_every_target_and_reference() -> Result<()> {
+    let db = Database::legacy().await?;
+    MIGRATOR.run_to(47, &db.pool).await?;
+    sqlx::raw_sql(include_str!("fixtures/fleet_ready.sql"))
+        .execute(&db.pool)
+        .await?;
+    gitlab_connection(
+        &db.pool,
+        "gl-a",
+        "https://gitlab.example.com",
+        ("project", 42),
+    )
+    .await?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES (?,'gitlab_project','gitlab:project:gl-a:42','gl-a',42)")
+        .bind(GITLAB_TARGET).execute(&db.pool).await?;
+    sqlx::query("INSERT INTO host_target_grants (host_id,target_id,allow_schedule) VALUES (?,?,1)")
+        .bind(HOST)
+        .bind(GITLAB_TARGET)
+        .execute(&db.pool)
+        .await?;
+    sqlx::query("INSERT INTO profile_ci_targets (profile_id,target_id) VALUES ('40000000-0000-4000-8000-000000000001',?)")
+        .bind(GITLAB_TARGET).execute(&db.pool).await?;
+    sqlx::query(
+        "INSERT INTO fleet_events (id,target_id,kind,created_at) VALUES ('gl-event',?,'test',1)",
+    )
+    .bind(GITLAB_TARGET)
+    .execute(&db.pool)
+    .await?;
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY name")
+        .fetch_all(&db.pool).await?;
+    let old_schema = schema(&db.pool).await?;
+    let old_columns = table_columns(&db.pool, &tables).await?;
+    let old_records = records(&db.pool, &tables).await?;
+    let mut old_foreign_keys = BTreeMap::new();
+    for table in &tables {
+        old_foreign_keys.insert(table.clone(), foreign_keys(&db.pool, table).await?);
+    }
+
+    MIGRATOR.run(&db.pool).await?;
+
+    assert_eq!(records_on(&db.pool, &old_columns).await?, old_records);
+    assert_added_columns(
+        &db.pool,
+        &old_columns,
+        &[("fleet_ci_targets", &[("retired_at", "INTEGER", None)])],
+    )
+    .await?;
+    let new_schema = schema(&db.pool).await?;
+    for (name, definition) in &old_schema {
+        if name == "fleet_ci_targets" || name == "fleet_ci_targets_immutable_identity" {
+            continue;
+        }
+        assert_eq!(
+            new_schema.get(name),
+            Some(definition),
+            "changed schema: {name}"
+        );
+    }
+    assert!(
+        new_schema.contains_key("fleet_ci_targets_immutable_identity"),
+        "the immutable-identity trigger is recreated under its name"
+    );
+    for table in &tables {
+        assert_eq!(
+            Some(&foreign_keys(&db.pool, table).await?),
+            old_foreign_keys.get(table),
+            "{table} foreign keys"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT strict FROM pragma_table_list WHERE name='fleet_ci_targets'"
+        )
+        .fetch_one(&db.pool)
+        .await?,
+        1,
+        "fleet_ci_targets stays STRICT"
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&db.pool)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_one(&db.pool)
+            .await?,
+        "ok"
+    );
+    assert_foreign_keys_on_every_connection(&db.pool).await?;
+    db.close().await
+}
+
+/// #183 decision 1: retiring a GitLab target is one UPDATE that sets
+/// `retired_at` and drops its connection. After it the connection can be
+/// deleted while every reference to the target stays, and the retired row
+/// never changes again: no un-retiring, no re-retiring, no new connection, no
+/// identity edit. Dropping the connection without retiring, or retiring while
+/// changing an identity column, is refused; an unretired target still blocks
+/// its connection's delete.
+#[tokio::test]
+async fn retiring_a_gitlab_target_frees_its_connection_and_is_final() -> Result<()> {
+    let db = Database::ready().await?;
+    let pool = &db.pool;
+    let base = "https://gitlab.example.com";
+    gitlab_connection(pool, "gl-a", base, ("project", 42)).await?;
+    gitlab_connection(pool, "gl-b", base, ("group", 7)).await?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id) VALUES ('gl-project','gitlab_project','gitlab:project:gl-a:42','gl-a',42)")
+        .execute(pool).await?;
+    sqlx::query("INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_group_id) VALUES ('gl-group','gitlab_group','gitlab:group:gl-b:7','gl-b',7)")
+        .execute(pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO host_target_grants (host_id,target_id,allow_schedule) VALUES ('{HOST}','gl-project',1);
+         INSERT INTO profile_ci_targets (profile_id,target_id) VALUES ('40000000-0000-4000-8000-000000000001','gl-project');
+         INSERT INTO fleet_events (id,target_id,kind,created_at) VALUES ('gl-event','gl-project','test',1);"
+    )))
+    .execute(pool)
+    .await?;
+
+    for sql in [
+        // The connection cannot be dropped from a target that isn't retired.
+        "UPDATE fleet_ci_targets SET gitlab_connection_id=NULL WHERE id='gl-project'",
+        // A retire cannot carry an identity change with it.
+        "UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL,gitlab_project_id=43 WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL,canonical_key='renamed' WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL,kind='gitlab_group',gitlab_project_id=NULL,gitlab_group_id=42 WHERE id='gl-project'",
+    ] {
+        rejected(pool, sql).await;
+    }
+
+    let retired = sqlx::query(
+        "UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL WHERE id='gl-project'",
+    )
+    .execute(pool)
+    .await
+    .context("0048 allows the retire: retired_at set and the connection dropped in one UPDATE")?;
+    assert_eq!(retired.rows_affected(), 1);
+    let row: (String, String, Option<String>, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT kind,canonical_key,gitlab_connection_id,gitlab_project_id,retired_at FROM fleet_ci_targets WHERE id='gl-project'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "gitlab_project".to_owned(),
+            "gitlab:project:gl-a:42".to_owned(),
+            None,
+            Some(42),
+            Some(10)
+        ),
+        "the retired row keeps its identity"
+    );
+
+    let deleted = sqlx::query("DELETE FROM gitlab_connections WHERE id='gl-a'")
+        .execute(pool)
+        .await
+        .context("a connection whose only target is retired deletes")?;
+    assert_eq!(deleted.rows_affected(), 1);
+    for table in ["host_target_grants", "profile_ci_targets", "fleet_events"] {
+        // Names come from the list above, never request input.
+        let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {table} WHERE target_id='gl-project'"
+        )))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(rows, 1, "{table} keeps its reference to the retired target");
+    }
+    let refused = sqlx::query("DELETE FROM gitlab_connections WHERE id='gl-b'")
+        .execute(pool)
+        .await;
+    assert!(
+        refused
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("FOREIGN KEY constraint failed")),
+        "an unretired target still blocks its connection's delete: {refused:?}"
+    );
+
+    let before = records(pool, &["fleet_ci_targets".to_owned()]).await?;
+    for sql in [
+        "UPDATE fleet_ci_targets SET retired_at=NULL WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET retired_at=11 WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET gitlab_connection_id='gl-b' WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET retired_at=NULL,gitlab_connection_id='gl-b' WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET canonical_key='gitlab:project:gl-b:42' WHERE id='gl-project'",
+        "UPDATE fleet_ci_targets SET gitlab_project_id=43 WHERE id='gl-project'",
+    ] {
+        rejected(pool, sql).await;
+    }
+    assert_eq!(
+        records(pool, &["fleet_ci_targets".to_owned()]).await?,
+        before,
+        "a retired target never changes again"
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(pool)
+            .await?
+            .is_empty()
+    );
+    db.close().await
 }
