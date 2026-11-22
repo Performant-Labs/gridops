@@ -1,0 +1,45 @@
+# Decision journal: #152 prune fleet_inventory_snapshots
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T10:29:31-08:00
+- **Decided:** BLOCK, with 1 block and 4 warn findings (`docs/handoffs/152/handoff-A.md`).
+  - **Block 1 [correctness]: the specified batched DELETE does not bound its scan.**
+    - **The defect:** the inner `SELECT … WHERE snap.received_at < ? AND NOT EXISTS (…) ORDER BY snap.rowid LIMIT ?` plans as `SCAN snap`. Every batch that finds fewer than 500 rows walks the whole retained table while it holds the write lock. That is the last batch of each drain pass and the only batch of every steady-state pass.
+    - **The cost on prod:** about 190 MB at the 7-day default, every 30 s pass, and it grows with the setting.
+    - **Precedent:** this is the defect class `migrations/0034_retention_indexes.sql` was written to fix.
+    - **Why the brief misses it:** its `EXPLAIN QUERY PLAN` criterion (outer rowid lookup, sessions index) accepts this plan.
+    - **The fix:**
+      - migration 0049 adds `fleet_inventory_snapshots_received_idx ON fleet_inventory_snapshots(received_at)`;
+      - the subquery orders by `snap.received_at`;
+      - a core test in `query_plan_tests.rs` style pins `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)` and allows no `SCAN ` step.
+  - **The warns:**
+    - (2) a new `pub mod snapshot_retention` in `fleet::registry` with a free fn over `&SqlitePool` returning `sqlx::Error`, not inside the private, transactional `inventory.rs`;
+    - (3) `tokio::time::sleep` of a named const of 25 ms or more between batches, not `yield_now()`, because the API's writers are in another process and SQLite's busy handler polls with 1 to 100 ms sleeps;
+    - (4) add the field to `save_settings`'s `settings.updated` audit JSON, like `macosVmSlots`;
+    - (5) the timing estimate also measures a steady-state call and the one-time index build, and the PR body states the deploy-time index build.
+- **Assumed:**
+  - Prod's 7-day steady state is about 49k rows of about 3.9 KB, derived from the brief's 711 MB / 181,546 rows and 7,000 rows a day.
+  - The reconcile interval is the 30 s default on Mars.
+  - The crate's bundled SQLite (libsqlite3-sys) plans these statements the same way as the sqlite3 3.54 CLI I used.
+- **Hedged:**
+  - The steady-state lock time (about 70 to 290 ms warm) is an extrapolation from a 10k-row local seed, not a prod measurement.
+  - I chose block over warn because:
+    - the brief's own headline requirement is that "every delete holds the write lock only briefly";
+    - the brief explicitly steers F away from the index;
+    - T would otherwise pin a plan test that accepts the scan.
+  - The alternative of bounding by rowid without an index (a `rowid <` the first recent row) would also avoid the scan. I did not recommend it, because the index follows the documented 0034 precedent and needs no time-order invariant.
+- **Evidence:**
+  - **Files read:**
+    - the brief;
+    - `migrations/0026_fleet_inventory.sql` (the session and snapshot schema, and the triggers), `0034_retention_indexes.sql`, `0036`, `0045` and the latest, `0048`;
+    - `registry/{mod.rs, inventory.rs (submit_inventory, load_current_session), logs.rs, unconfirmed.rs, query_plan_tests.rs, invariants_tests.rs}` and `queries.rs` :1110-1160, :1345-1365, :1900-1915;
+    - reconciler `main.rs` (`reconcile`, `cleanup_retention`, `enforce_log_storage_budget`, `setting_i64`);
+    - api `resources.rs` (`SystemSettings`, `get_settings`, `save_settings`);
+    - `db.rs` (WAL, `busy_timeout` 5 s, `SLOW_STATEMENT` 100 ms);
+    - `fleet/targets.rs` signatures and `fleet/mod.rs`.
+  - **Commands run:**
+    - I applied all 48 migrations to a scratch DB. `EXPLAIN QUERY PLAN` of the brief's statement gave `SCAN snap`. With a `received_at` index plus `ORDER BY snap.rowid` it was still `SCAN snap`. With the index plus `ORDER BY snap.received_at` it gave `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)`.
+    - On a 10k-row, roughly 4 KB-per-row seed (41.5 MB) with 3 eligible rows, `.stats` showed:
+      - the brief's statement: 10,044 page misses and 9,999 fullscan steps;
+      - indexed and ordered by `received_at`: 21 page misses and 0 fullscan steps;
+      - the drain case (9,000 eligible): 536 pages under either ordering.
+  - **Scratch:** `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops/a9a4a0b8-80da-4ffe-92a0-a8c8dabe7437/scratchpad/a152/`
