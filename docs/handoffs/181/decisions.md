@@ -99,3 +99,9 @@
   - gridops-api `fleet_http`: 149 passed. The one failure also fails on master.
   - `cargo fmt --check` is clean, and CI's exact clippy command on 1.98.1 is clean.
   - Source facts are in `docs/handoffs/181/evidence.md`.
+
+## T (Phase 7, GREEN)
+- **Decided:** return PASS. The suite is GREEN (core 310 lib + integration, reconciler 125, 5 new tests), fmt and CI-pinned clippy are clean, and a mutation (count only GitHub jobs in `choose_platform`) makes both new core tests fail.
+- **Assumed:** the `release_preflight` failure in `gridops-api` is host-dependent (macOS arm64 dev host), as F showed on master; I did not re-run it on master.
+- **Hedged:** none.
+- **Evidence:** `docs/handoffs/181/handoff-T-green.md`; the mutation was reverted and `git status` was clean.
