@@ -232,3 +232,9 @@
 - **Assumed:** a re-run of the full workspace is not needed: round 2 touched only private `docker.rs` items and docs. The one earlier workspace failure (`release_preflight`, macOS host) is environmental.
 - **Hedged:** the new test runs the script under the host's bash (3.2 on macOS) only, not the pool image's bash.
 - **Evidence:** `cargo test -p gridops-host-agent` (lib 29, others unchanged), `cargo test -p gridops-core --lib` (313), fmt and clippy clean. After a mid-task mistaken `git checkout` I restored HEAD and re-ran everything on the final tree; only `externals_tests.rs` differs from HEAD.
+
+## A, Phase 7 (anti-duplication gate, after diff gate r2)
+- **Decided:** PASS, 0 block and 1 warn (docs/handoffs/126/handoff-A-dup.md). F extended Prepare, Start, the shared-folder create/parse/remove functions and `work_folder.rs` in place. The inline GitHub scripts became one `github_runner_script`. No parallel path.
+- **Assumed:** with no survey.md, the brief's named objects and `NativeRuntime`'s staged fill are the Reuse map.
+- **Hedged:** runtime behaviour (NV-1 to NV-5) is outside this gate and was not checked.
+- **Evidence:** read the full `docker.rs` and `work_folder.rs` diffs against the merge-base, and grepped for other tree-removal helpers (none in the host agent).
