@@ -146,3 +146,7 @@
 - **Assumed:** none beyond F's stash experiment for that test's pre-existence; I confirmed from the output that the failure is the preflight seeing this Mac as the macOS machine.
 - **Hedged:** timings are F's (sqlite3 CLI 3.54.0, warm cache), not re-measured.
 - **Evidence:** full core+reconciler suite exit 0; API suite 150/151; clippy and fmt clean; mutation `ended_at IS NULL` -> `1=1` fails the retention-rule test; evidence.md entries spot-checked against source.
+
+## A (Phase 7, anti-duplication gate) - PASS
+- F extended `cleanup_retention`, `setting_i64`, `SystemSettings`/`settings`/`save_settings` and the migration sequence. The only new object, `registry::snapshot_retention`, is justified in the brief. No parallel path.
+- Two warns (shared consts vs. per-crate literals; wrapper fn name equals the core fn name). Neither blocks.
