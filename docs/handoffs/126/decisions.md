@@ -204,3 +204,25 @@
     - `cargo +1.98.1 clippy -p gridops-host-agent --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl`.
   - Mutations M1-M4 each failed the targeted test. `git status` after the revert shows only the test file changed.
   - M4 also proves the Prepare test runs here rather than skipping: non-root user, `/var/lib` is `root:wheel 755`, and there is no `/var/lib/gridops-agent`.
+
+## Phase 6 Implementation (F, round 2: rework after diff gate r1) - 2026-11-22T12:51:35-08:00
+- **Decided:**
+  - **A round-3 warn 1:** `remove_tree` is now an async wrapper that runs `remove_tree_blocking` under `spawn_blocking`. The cache rename uses `tokio::fs::rename`, and the staging folder is created with `tokio::fs`. All three callers await it.
+  - **A round-3 warn 2:** `create_shared_work_folder` became `create_shared_folder`, and the test module `shared_work_folder_tests` became `shared_folder_tests`. Only the module name and its `use` line changed in test code.
+  - **Diff gate W-1:** added the `..?*` glob arm, so entries named `..x` reach the runner root.
+  - **Diff gate NV-6:** the docs mark the sizes as estimates from the runner 2.338.2 release tarball.
+  - **Diff gate NIT-1:** the `link_out_of` doc comment explains how links are checked.
+  - **Diff gate W-2 not changed:** brief decision 8 sweeps after a new fill only, and the leak is bounded (see handoff-F).
+  - **NIT-2 not changed:** A disproved it in round 3.
+- **Assumed:** A's assignment of warn 2 to F covers the test module's mechanical rename. No assertion or test body changed.
+- **Hedged:**
+  - NV-1 to NV-5 still need a real daemon or the third-party sources; none was available.
+  - The W-1 glob was checked under bash 3.2 on macOS only, not in the pool image's bash.
+- **Evidence:**
+  - Commands, all green:
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl`;
+    - `cargo test -p gridops-host-agent`: lib 28, dispatch 8, docker_gitlab 10, docker_runtime 1+1+2, version 1;
+    - `cargo test -p gridops-core --lib`: 313.
+  - T's two round-2 tests pass when run by name.
+  - A direct run of the copy loop under `/bin/bash` 3.2.57 copied `..c`, which the old arms miss.

@@ -1,4 +1,91 @@
-# Handoff-F: Phase 6 - Container jobs on the linux pool: runner externals and tool cache at host-valid paths
+# Handoff-F: Phase 6 (round 2, rework after diff gate r1) - Container jobs on the linux pool: runner externals and tool cache at host-valid paths
+
+**Date:** 2026-11-22
+**Branch:** claude/fix-126-externals (on 5535839, T's round-2 RED)
+**Issue:** #126
+
+Round 1 of this handoff (the full implementation) is kept below, after the divider.
+
+## What was done
+- `crates/gridops-host-agent/src/docker.rs`:
+  - **A round-3 warn 1 (blocking tree removal on the async runtime).**
+    - `remove_tree` is now an `async fn` that runs the old body, renamed `remove_tree_blocking`, under `tokio::task::spawn_blocking`.
+    - All three callers await it: the staging removal in `fill_externals_cache`, the staging reset in `fill_staging`, and `sweep_externals_caches`.
+    - The cache rename is now `tokio::fs::rename`.
+    - `fill_staging` creates the cache root and the staging folder with `tokio::fs::create_dir_all` / `tokio::fs::create_dir` in one `async` block. The `PermissionDenied` → `Configuration, false` and other → `Runtime, true` mapping reads the same `io::Error` as before.
+  - **A round-3 warn 2 (the half-finished rename).** `create_shared_work_folder` is now `create_shared_folder`, with its parameter `work` renamed `folder`. The inline test module `shared_work_folder_tests` is now `shared_folder_tests`. Its `use` line follows the rename; no test body or assertion changed.
+  - **Diff gate W-1 (glob misses `..name`).** The runner-root copy loop gets a third arm, `"$gridops_image_dir"/..?*`, behind the same `-e`/`-L` existence guard. The doc comment says every entry is copied, dot-entries included.
+  - **Diff gate NIT-1.** The `link_out_of` doc comment says links to folders are checked, not traversed.
+- `docs/fleet-agent.md` (**diff gate NV-6**): the per-start and per-cache sizes are now marked as estimates from the official runner 2.338.2 release tarball, not the pool image, as brief item 6 requires ("otherwise estimated, saying which"). The text also says an image that adds files copies more.
+
+## Design decisions
+- **One async wrapper, not `spawn_blocking` at each call site.** A offered both. One wrapper keeps the three call sites one-liners and means no future caller can run the walk on a worker by mistake. The sync body stays a plain function because its chmod-and-retry walk is all blocking calls.
+- **`spawn_blocking(...).await?` turns a `JoinError` into an `io::Error`** through tokio's `From` impl. That is the pattern `NativeRuntime::install` already uses (`native.rs:551`, see the evidence entry). A panicked removal therefore reaches the callers as an IO error, and they already handle that (staging: ignored; prepare: `Runtime, true` unless permission; sweep: a warn).
+- **Diff gate W-2 (sweep only after a new fill): not changed, on purpose.** Brief decision 8 says the sweep runs "after a new fill", and A's round-2 warn 8 and round-3 review accept that. A `.partial` can outlive a crash only for an image that is never prepared again: the next fill of the same image removes its own staging first (`fill_staging`), and the next fill of any image sweeps all of them. Changing the warm-cache path would deviate from the brief and need a T pass for a new test, for a leak bounded by one crashed fill per image.
+- **Diff gate NIT-2: not changed.** A's round 3 showed that every `warn!` in `docker.rs` on master is a formatted message with no named fields, so the finding's premise does not hold.
+- **Diff gate NV-1 to NV-5: unchanged.** They need a real daemon or the third-party runner and Docker sources, which this phase does not have. They stay under Known issues, as in round 1.
+
+## Reuse / extend-vs-new
+- No new objects. The async `remove_tree` follows `NativeRuntime`'s staged fill (`native.rs:527-551`: `tokio::fs::rename`, and a tree walk under `spawn_blocking`), the analogue decision 6 names.
+- `create_shared_folder` is the same function as before, renamed. No second path was added.
+
+## Architecture notes for A
+- **None that change structure.** All edits are inside `docker.rs` private items and the docs.
+- `remove_tree` changed from sync to async. It is private, with three callers, all already async. No public interface, module boundary or dependency direction changed, and no crate was added.
+
+## Deviations from spec / wireframe
+None. W-2 is left as the brief's decision 8 states it (see Design decisions). No wireframe (no UI).
+
+## Tier 1 self-check (incl. tests now GREEN)
+All runs used `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`, as a non-root user on a machine with no `/var/lib/gridops-agent`, so the Prepare wiring test ran in full rather than skipping.
+
+    cargo fmt --all -- --check                         -> clean
+    cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl
+                                                       -> Finished, no warnings
+    cargo test -p gridops-host-agent
+      lib            28 passed (externals_tests 19, shared_folder_tests 6, 3 others)
+      main            0
+      dispatch        8 passed
+      docker_gitlab  10 passed
+      docker_runtime  1 + 1 + 2 passed
+      version         1 passed
+    cargo test -p gridops-core --lib                   -> 313 passed; 0 failed
+
+T's two round-2 tests, run by name, are green:
+
+    docker::externals_tests::a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging ... ok
+    docker::externals_tests::a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache ... ok
+
+The failed-rename test runs exactly the lines warn 1 changed: the `tokio::fs::rename` and the awaited `remove_tree` of the staging folder.
+
+**The W-1 glob, checked directly** under `/bin/bash` 3.2.57 (the oldest bash the script meets). The loop ran over an image directory holding `a`, `.b`, `..c`, `.env`, `bin` and `externals`. The runner root received `..c .b .env a bin`, with `externals` skipped. The old two arms miss `..c`.
+
+No server applies: the host agent's Docker paths need a daemon and a fleet host (brief constraint).
+
+## Evidence appendix
+`docs/handoffs/126/evidence.md` (one entry added this round: the `spawn_blocking(...).await?` / `tokio::fs::rename` pattern in `native.rs`).
+
+## Tests that look wrong (for T)
+None.
+- The only test-code text touched is A warn 2's mechanical rename. The inline module's name and its `use` line changed so that it still compiles against `create_shared_folder`; A assigned this rename to F.
+- No test body, assertion or fixture changed, and `externals_tests.rs` and `tests/*.rs` are untouched.
+
+## Known issues
+Unchanged from round 1:
+- **Not exercised:**
+  - a real Docker daemon (`docker cp -L`, `--mount … readonly`, and the host resolving the runner root's `externals` link; diff gate NV-1, NV-2 and NV-5);
+  - the runner and Docker source claims (NV-3 and NV-4);
+  - Start's success path, which writes `/var/lib/gridops-agent`;
+  - any fleet host.
+- **The sizes are estimates** from the release tarball, because the pool image could not be pulled ("unauthorized"). The docs now say so.
+
+## Files changed
+- `crates/gridops-host-agent/src/docker.rs`
+- `docs/fleet-agent.md`
+
+---
+
+# Round 1 - Handoff-F: Phase 6 - Container jobs on the linux pool: runner externals and tool cache at host-valid paths
 
 **Date:** 2026-11-22
 **Branch:** claude/fix-126-externals (on 55ce0ed, the T-red commit)

@@ -749,11 +749,8 @@ fn diagnostic(code: DiagnosticCode) -> Option<DiagnosticReference> {
 /// that was started without the shared folder (an older agent) is told to use one. The agent owns
 /// the directory that holds `root`, so it can move such a root-owned `root` aside and start a fresh
 /// one. Nothing of ours can be inside it: the agent could not have created anything there.
-fn create_shared_work_folder(
-    root: &std::path::Path,
-    work: &std::path::Path,
-) -> std::io::Result<()> {
-    match std::fs::create_dir_all(work) {
+fn create_shared_folder(root: &std::path::Path, folder: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::create_dir_all(folder) {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -766,7 +763,7 @@ fn create_shared_work_folder(
                 root.display(),
                 std::path::Path::new(&aside).display()
             );
-            std::fs::create_dir_all(work)
+            std::fs::create_dir_all(folder)
         }
         other => other,
     }
@@ -977,12 +974,12 @@ fn shared_socket_args(
 /// The runner gives job containers its own install root's `externals` as `/__e`, and the daemon
 /// resolves that path on the host. So the runner runs from its runner root, at the same path on
 /// the host: a copy of the image's runner directory (the image's working directory, `$PWD` here;
-/// `bin` is copied, not linked) whose `externals` is a link to the image's externals cache, which
-/// the host kernel follows when the daemon mounts it. The runner applies its root's `.env` over
+/// every entry, dot-entries included; `bin` is copied, not linked) whose `externals` is a link to
+/// the image's externals cache, which the host kernel follows when the daemon mounts it. The runner applies its root's `.env` over
 /// its environment, so any tool-cache line the image's `.env` has is replaced by the work folder's
 /// `_tool`. Only `cp`, `ln`, `grep`, `mv` and `printf` are used, as in GNU and BSD userlands.
 const SHARED_RUNNER_ROOT_SETUP: &str = r#"gridops_image_dir=$PWD
-for gridops_entry in "$gridops_image_dir"/* "$gridops_image_dir"/.[!.]*; do
+for gridops_entry in "$gridops_image_dir"/* "$gridops_image_dir"/.[!.]* "$gridops_image_dir"/..?*; do
   [ -e "$gridops_entry" ] || [ -L "$gridops_entry" ] || continue
   [ "${gridops_entry##*/}" = externals ] && continue
   cp -a "$gridops_entry" "$GRIDOPS_RUNNER_ROOT/"
@@ -1076,13 +1073,13 @@ async fn shared_runner(
             ))
         })?;
     let cache = externals_cache(&paths.cache_root, &image_id)?;
-    create_shared_work_folder(&paths.work_root, &paths.work).map_err(|error| {
+    create_shared_folder(&paths.work_root, &paths.work).map_err(|error| {
         Refusal::configuration(format!(
             "Could not create the runner work folder {}: {error}",
             paths.work.display()
         ))
     })?;
-    if let Err(error) = create_shared_work_folder(&paths.runners_root, &paths.runner_root) {
+    if let Err(error) = create_shared_folder(&paths.runners_root, &paths.runner_root) {
         let _ = std::fs::remove_dir(&paths.work);
         return Err(Refusal::configuration(format!(
             "Could not create the runner root {}: {error}",
@@ -1166,15 +1163,17 @@ impl DockerRuntime {
         let staging = cache_root.join(format!("{name}.partial"));
         let filled = fill_staging(image, id, &name, &working_dir, cache_root, &staging).await;
         let placed = match filled {
-            Ok(externals) => std::fs::rename(&externals, &target).map_err(|error| {
-                Refusal::runtime(format!(
-                    "Could not move the externals of the image {image} into {}: {error}",
-                    target.display()
-                ))
-            }),
+            Ok(externals) => tokio::fs::rename(&externals, &target)
+                .await
+                .map_err(|error| {
+                    Refusal::runtime(format!(
+                        "Could not move the externals of the image {image} into {}: {error}",
+                        target.display()
+                    ))
+                }),
             Err(refusal) => Err(refusal),
         };
-        let _ = remove_tree(&staging);
+        let _ = remove_tree(&staging).await;
         placed?;
         tracing::info!(
             "Filled the externals cache {} from the image {image}",
@@ -1204,10 +1203,12 @@ async fn fill_staging(
     };
     // Created before anything else, so a folder the agent may not create is told apart from a
     // Docker error.
-    if let Err(error) = std::fs::create_dir_all(cache_root)
-        .and_then(|()| remove_tree(staging))
-        .and_then(|()| std::fs::create_dir(staging))
-    {
+    let created = async {
+        tokio::fs::create_dir_all(cache_root).await?;
+        remove_tree(staging).await?;
+        tokio::fs::create_dir(staging).await
+    };
+    if let Err(error) = created.await {
         let reason = format!(
             "Could not create the externals cache folder {} for the image {image} ({id}): {error}",
             staging.display()
@@ -1276,6 +1277,8 @@ async fn fill_staging(
 }
 
 /// The first symlink under `tree` that is absolute or does not resolve to a path inside `tree`.
+/// Links to folders are checked like any other link, not traversed: what one leads to is either
+/// outside `tree` (refused) or a folder under `tree` that the walk reaches by its real path.
 fn link_out_of(tree: &Path) -> std::io::Result<Option<PathBuf>> {
     let top = std::fs::canonicalize(tree)?;
     let mut pending = vec![tree.to_path_buf()];
@@ -1322,7 +1325,7 @@ async fn sweep_externals_caches(cache_root: &Path, kept: &str) {
             false
         };
         if stale {
-            match remove_tree(&entry.path()) {
+            match remove_tree(&entry.path()).await {
                 Ok(()) => tracing::info!(
                     "Removed the stale externals cache {}",
                     entry.path().display()
@@ -1336,9 +1339,16 @@ async fn sweep_externals_caches(cache_root: &Path, kept: &str) {
     }
 }
 
+/// [`remove_tree_blocking`] on a blocking thread: a cache is hundreds of megabytes in thousands of
+/// files, too long a delete for an async worker (as `NativeRuntime` copies its tree).
+async fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || remove_tree_blocking(&path)).await?
+}
+
 /// Removes `path` and everything in it, if it exists. Folders the image shipped read-only are
 /// made writable first when that is what stops it.
-fn remove_tree(path: &Path) -> std::io::Result<()> {
+fn remove_tree_blocking(path: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(path).is_err() {
         return Ok(());
     }
@@ -1459,8 +1469,8 @@ const fn failed_because(
 mod externals_tests;
 
 #[cfg(test)]
-mod shared_work_folder_tests {
-    use super::{create_shared_work_folder, parse_shared_folders_leftover};
+mod shared_folder_tests {
+    use super::{create_shared_folder, parse_shared_folders_leftover};
 
     #[test]
     fn finds_the_image_and_the_shared_folder() {
@@ -1537,7 +1547,7 @@ mod shared_work_folder_tests {
         let dir = scratch_dir("fresh")?;
         let root = dir.join("work");
         let work = root.join("env1");
-        create_shared_work_folder(&root, &work)?;
+        create_shared_folder(&root, &work)?;
         assert!(work.is_dir());
         std::fs::remove_dir_all(&dir)
     }
@@ -1555,7 +1565,7 @@ mod shared_work_folder_tests {
             return std::fs::remove_dir_all(&dir);
         }
         let work = root.join("env1");
-        create_shared_work_folder(&root, &work)?;
+        create_shared_folder(&root, &work)?;
         assert!(work.is_dir());
         let mut aside = Vec::new();
         for entry in std::fs::read_dir(&dir)? {

@@ -73,3 +73,10 @@
   **Verbatim excerpt:**
   > "--entrypoint".into(),
   > String::new(),
+
+- **Fact:** the analogous `NativeRuntime` fill renames its staged tree with `tokio::fs::rename` and walks a tree under `spawn_blocking`, turning the `JoinError` into an `io::Error` with `?`. The async `remove_tree` uses the same pattern.
+  **Source:** `crates/gridops-host-agent/src/native.rs:529` and `crates/gridops-host-agent/src/native.rs:551`
+  **Verbatim excerpt:**
+  > tokio::fs::rename(&staging, target).await?;
+
+  > tokio::task::spawn_blocking(move || copy(&from, &to)).await??;

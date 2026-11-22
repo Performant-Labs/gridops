@@ -366,14 +366,19 @@ whose profile shares the socket, the agent therefore:
 - **Runs each runner from a runner root.** Each runner gets `/var/lib/gridops-agent/runners/<environment id>`,
   mounted at the same path. When the runner container starts, it copies the image's runner directory there,
   except `externals`, which is a link to the image's cache, mounted read-only. The runner then registers and
-  runs from that folder. The copy is the runner's `bin` and scripts. For runner 2.338.2 that is about
-  85 MB in 272 files per runner start.
+  runs from that folder. The copy is the runner's `bin` and scripts: about 85 MB in 272 files per runner
+  start.
 - **Keeps the tool cache in the work folder** (`<work folder>/_tool`), not in the image's
   `/opt/hostedtoolcache`.
 
 The agent removes the runner root with the work folder when the runner is cleaned up. It never removes a
-cache that an image on the machine still uses. Each image's cache takes about 600 MB (9,122 files for runner
-2.338.2) under `/var/lib/gridops-agent/externals`.
+cache that an image on the machine still uses. Each image's cache takes about 600 MB (9,122 files) under
+`/var/lib/gridops-agent/externals`.
+
+These sizes are estimates. They were measured from the official runner 2.338.2 release
+(`actions-runner-linux-x64-2.338.2.tar.gz`), the release the pool image installs, not from the pool image
+itself. An image that adds files to its runner directory copies more on each start, and one that adds files
+to `externals` has a larger cache.
 
 If the agent cannot fill the cache, the prepare fails and the agent logs why. This happens when the image
 has no working directory, has no `externals` there, or has a link in `externals` that leads outside it,
