@@ -226,3 +226,9 @@
     - `cargo test -p gridops-core --lib`: 313.
   - T's two round-2 tests pass when run by name.
   - A direct run of the copy loop under `/bin/bash` 3.2.57 copied `..c`, which the old arms miss.
+
+## T, Phase 7 (round 2, after diff gate r1)
+- **Decided:** added one test, `the_runner_root_gets_every_entry_of_the_image_dot_entries_included`, for diff gate W-1 (the `..?*` glob arm F added had no test). It fails with the arm removed and passes with it.
+- **Assumed:** a re-run of the full workspace is not needed: round 2 touched only private `docker.rs` items and docs. The one earlier workspace failure (`release_preflight`, macOS host) is environmental.
+- **Hedged:** the new test runs the script under the host's bash (3.2 on macOS) only, not the pool image's bash.
+- **Evidence:** `cargo test -p gridops-host-agent` (lib 29, others unchanged), `cargo test -p gridops-core --lib` (313), fmt and clippy clean. After a mid-task mistaken `git checkout` I restored HEAD and re-ran everything on the final tree; only `externals_tests.rs` differs from HEAD.

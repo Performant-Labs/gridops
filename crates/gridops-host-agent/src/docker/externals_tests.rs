@@ -314,6 +314,32 @@ fn a_shared_runner_gets_its_folders_at_host_paths_and_the_cache_read_only() -> R
     Ok(())
 }
 
+/// Diff gate W-1: every entry of the image's runner directory reaches the runner root, whatever
+/// its name starts with: a plain name, a dot-name and a `..name` (which `.[!.]*` alone misses).
+/// `externals` is the one entry that is not copied: the root's is the link to the cache.
+#[test]
+fn the_runner_root_gets_every_entry_of_the_image_dot_entries_included() -> Result<()> {
+    let runner = RunnerDirs::new("dots")?;
+    for name in ["plain-file", ".dot-file", "..double-dot-file"] {
+        fs::write(runner.image.join(name), name)?;
+    }
+    let output = runner.run(RunnerMode::Ephemeral, true, "jit-token\n", &[])?;
+    let log = runner.log()?;
+    ensure!(
+        output.status.success(),
+        "the script failed: {}\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for name in ["plain-file", ".dot-file", "..double-dot-file"] {
+        ensure!(
+            fs::read_to_string(runner.root.join(name)).is_ok_and(|text| text == name),
+            "{name} of the image's runner directory was not copied into the runner root"
+        );
+    }
+    runner.root_is_a_runner_linked_to_the_cache()?;
+    runner.remove()
+}
+
 /// Decision 4 / A warn 1, JIT: after reading the secret, the script makes the runner root a copy
 /// of the image's runner directory (with `bin` copied, not linked) whose `externals` is a link to
 /// the cache, and runs `run.sh` there; the live job log is read from there too. The image's own
