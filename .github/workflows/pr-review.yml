@@ -1,11 +1,12 @@
-# Thin caller — copy this to .github/workflows/pr-review.yml in the consuming repo.
+# PR-Agent review caller for GridOps.
 #
-# Post-centralization (#120), all review LOGIC lives in the reusable workflow:
-#   Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml
-# This caller only owns the things a caller MUST own: the event triggers and
-# the concurrency group, with the job `if` that guards it. All behaviour is
-# driven by .agents/pr-review.yml in the calling repo. Do not inline the
-# reusable's logic here.
+# The review LOGIC lives in the VENDORED copy next to this file,
+# ./.github/workflows/pr-review-reusable.yml, not in playbook's reusable: GridOps is
+# public and cannot call a workflow in the private playbook repo. That copy carries
+# LOCAL PATCHES listed in its header; when re-syncing it from playbook, keep them or
+# confirm playbook now has the same fixes. This caller only owns the event triggers,
+# the concurrency group and the job `if` that guards it. All behaviour is driven by
+# .agents/pr-review.yml. Do not inline the reusable's logic here.
 #
 # NOTE: `concurrency` sits on the JOB, behind an `if`, and `cancel-in-progress` is
 # event-scoped, both on purpose — see the job below and the pr-reviewer README

@@ -4,7 +4,7 @@ name: PR-Agent Spec Review (reusable)
 # call a reusable workflow in a private repo (it fails with "workflow file issue";
 # playbook's "organization" access doesn't extend to public callers). Same fix as
 # FreeToken-Intel and performantlabs.com. Not auto-synced: re-copy from playbook
-# by hand when playbook's reusable changes, keeping the LOCAL PATCH below.
+# by hand when playbook's reusable changes, keeping the LOCAL PATCHES below.
 #
 # LOCAL PATCH (2026-11-22, found by PR-Agent on gridops#208): all four score
 # parsers read only the Reviewer Guide's Score row (<strong>Score</strong>: N),
@@ -13,7 +13,10 @@ name: PR-Agent Spec Review (reusable)
 # like "no score outside 0-100", which parsed as a score of 0. Second LOCAL PATCH
 # (same PR): the banner and status steps write their scratch files under
 # $RUNNER_TEMP, not fixed /tmp paths, so two runners sharing /tmp cannot overwrite
-# each other's PR body or file list. Drop both once playbook's reusable does the same.
+# each other's PR body or file list. Third LOCAL PATCH (same PR): every step that
+# ran under `always()` now runs under `!cancelled()`, so a review cancelled by a newer
+# push no longer posts a failed pr-agent/review status and a false "crashed" comment.
+# Drop all three once playbook's reusable does the same.
 # Called by each project's .github/workflows/pr-review.yml via:
 #   uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
 #   secrets:
@@ -512,7 +515,7 @@ jobs:
       # load-bearing.
       - name: Record run-start anchor
         id: runstart
-        if: always() && steps.gate.outputs.should_skip != 'true'
+        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -774,7 +777,7 @@ jobs:
       # exist. The status-check consumer runs whenever should_skip != 'true'
       # (deliberately NOT gated on review success — it's what REPORTS a crash),
       # so this step can't require review success either; it uses the same
-      # `always() && should_skip != 'true'` as "Record run-start anchor".
+      # `!cancelled() && should_skip != 'true'` as "Record run-start anchor".
       #
       # Position: must run AFTER both PR-Agent review steps, since the comment
       # being searched for is the one THIS run's review step just posted — a
@@ -787,7 +790,7 @@ jobs:
       # path) — no new hard failure is introduced.
       - name: Fetch PR comments (shared)
         id: comments
-        if: always() && steps.gate.outputs.should_skip != 'true'
+        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -820,7 +823,7 @@ jobs:
       # API backend only: the Claude CLI step has no fallback chain. Never fails the job.
       - name: Report model used
         id: modelused
-        if: always() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'api'
+        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.backend == 'api' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -928,7 +931,7 @@ jobs:
       # ── Score-bracket label ──────────────────────────────────────────────────
       - name: Apply score-bracket label
         if: |
-          always() &&
+          !cancelled() &&
           steps.gate.outputs.should_skip != 'true' &&
           steps.cfg.outputs.score_labels == 'true' &&
           (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
@@ -975,7 +978,7 @@ jobs:
       # ── Score banner ─────────────────────────────────────────────────────────
       - name: Inject score banner into PR description
         if: |
-          always() &&
+          !cancelled() &&
           steps.gate.outputs.should_skip != 'true' &&
           steps.cfg.outputs.score_banner == 'true' &&
           (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
@@ -1094,7 +1097,7 @@ jobs:
       # comment left by an earlier run is invisible here. Without that bound a
       # crash inherited the last green score and reported it as its own.
       - name: PR-Agent review status check
-        if: always() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.status_check == 'true'
+        if: ${{ !cancelled() && steps.gate.outputs.should_skip != 'true' && steps.cfg.outputs.status_check == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -1215,7 +1218,7 @@ jobs:
       - name: Build Aftersight CTRF payload
         id: aftersight_payload
         if: |
-          always() &&
+          !cancelled() &&
           steps.gate.outputs.should_skip != 'true' &&
           (steps.review-default.outcome == 'success' || steps.review-highstakes.outcome == 'success' || steps.review-cli.outcome == 'success')
         env:

@@ -1,5 +1,5 @@
 # .agents/pr-review.yml — PR automation config for GridOps
-# Read by: .github/workflows/pr-review.yml (CI), via the playbook's reusable workflow.
+# Read by: .github/workflows/pr-review.yml (CI), via the vendored ./.github/workflows/pr-review-reusable.yml.
 #
 # This repo runs the playbook's DEFAULT reviewer: PR-Agent through the Claude Code
 # CLI (akalongman/pr-agent-cli-handlers), authenticated by the CLAUDE_CODE_OAUTH_TOKEN
