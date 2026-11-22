@@ -147,3 +147,13 @@
   - full `cargo test` for core, api and reconciler is green except the one known macOS-only failure;
   - fmt and clippy are clean;
   - a temporary mutation of the `list_targets` and key-path filters failed `a_retired_gitlab_target_is_never_revived_offered_or_relinked`, and production was restored.
+
+## Phase 7 Architecture (A, anti-duplication gate) - 2026-11-22
+- **Decided:** PASS, with 0 block and 2 warn findings (`docs/handoffs/183/handoff-A-dup.md`). F extended the named analogues and built no parallel path:
+  - the retire function sits in `fleet::targets` beside `delete_pool`;
+  - the liveness clause comes from one `live_placement!()` fragment shared with `LIVE_WORKLOADS`;
+  - the guards are inline `retired_at IS NULL` predicates;
+  - the migration follows 0047;
+  - there is no new route and no new helper layer.
+- **Assumed:** the stale-test deletion in `gitlab_tests.rs` is intended (T-green). The F handoff prose saying it was not edited is out of date.
+- **Hedged:** the trigger permits a retire that keeps the connection id. It is reachable only by ad-hoc SQL and matches decision §1. Tightening it is left as optional follow-up work.
