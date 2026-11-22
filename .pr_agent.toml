@@ -4,13 +4,12 @@
 #
 # Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/
 #
-# The model lines below are the template's, untouched. GridOps runs the playbook's
-# default reviewer (the Claude Code CLI, CLAUDE_CODE_OAUTH_TOKEN), which replaces them
-# with pr_agent.claude_model; they apply only to the API-key fallback.
+# No model lines here on purpose. In CI the workflow picks the model: the Claude Code
+# CLI path uses pr_agent.claude_model, and the API-key fallback sets CONFIG.MODEL and
+# CONFIG.FALLBACK_MODELS from .agents/pr-review.yml. A model set in this file would
+# never take effect in CI (gridops#208).
 
 [config]
-model = "openai/glm-5.3"
-fallback_models = ["deepseek/deepseek-flash"]
 verbosity_level = 1
 max_description_tokens = 1500
 max_commits_tokens = 1500
