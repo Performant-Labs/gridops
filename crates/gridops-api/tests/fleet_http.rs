@@ -3,7 +3,6 @@
 
 use std::{
     fs,
-    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -22,7 +21,12 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 const SESSION_SECRET: &str = "fleet-http-test-session-key";
-const SESSION_TOKEN: &str = "fleet-http-test-session-token";
+
+/// How long one start of the API may take to be healthy.
+const HEALTH_WAIT: Duration = Duration::from_secs(5);
+
+#[path = "support/api_process.rs"]
+mod api_process;
 
 #[path = "fleet_http/agent.rs"]
 mod agent;
@@ -94,7 +98,7 @@ fn start_api(
     origin: &str,
     manager: Option<&str>,
     env: &[(String, String)],
-) -> Result<ApiProcess> {
+) -> Result<Child> {
     let log = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -108,49 +112,25 @@ fn start_api(
     } else {
         command.env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9");
     }
-    Ok(ApiProcess(
-        command
-            .env("GRIDOPS_BASE_URL", origin)
-            .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
-            .env("GRIDOPS_API_BIND", origin.trim_start_matches("http://"))
-            .env("GRIDOPS_DATABASE_PATH", directory.join("db.sqlite"))
-            .env("GRIDOPS_LOG_DIRECTORY", directory.join("logs"))
-            // GitHub is unreachable, so job views use what GridOps holds.
-            .env("HTTPS_PROXY", "http://127.0.0.1:9")
-            .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
-            .env(
-                "GRIDOPS_ENCRYPTION_KEY",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            )
-            .env("GITHUB_CLIENT_ID", "fleet-http-client")
-            .env("GITHUB_CLIENT_SECRET", "fleet-http-synthetic-secret")
-            .env("GRIDOPS_GITHUB_WEBHOOK_ACTIVE", "false")
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .spawn()?,
-    ))
-}
-
-async fn wait_until_healthy(
-    client: &Client,
-    origin: &str,
-    directory: &std::path::Path,
-) -> Result<()> {
-    for _ in 0..100 {
-        if client
-            .get(format!("{origin}/api/health"))
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success())
-        {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    bail!(
-        "fleet API did not start; see {}",
-        directory.join("api.log").display()
-    )
+    Ok(command
+        .env("GRIDOPS_BASE_URL", origin)
+        .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
+        .env("GRIDOPS_API_BIND", origin.trim_start_matches("http://"))
+        .env("GRIDOPS_DATABASE_PATH", directory.join("db.sqlite"))
+        .env("GRIDOPS_LOG_DIRECTORY", directory.join("logs"))
+        // GitHub is unreachable, so job views use what GridOps holds.
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
+        .env(
+            "GRIDOPS_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .env("GITHUB_CLIENT_ID", "fleet-http-client")
+        .env("GITHUB_CLIENT_SECRET", "fleet-http-synthetic-secret")
+        .env("GRIDOPS_GITHUB_WEBHOOK_ACTIVE", "false")
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .spawn()?)
 }
 
 impl Fixture {
@@ -175,54 +155,81 @@ impl Fixture {
     }
 
     async fn start(manager: Option<String>, env: Vec<(String, String)>) -> Result<Self> {
-        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
         let directory = std::env::temp_dir().join(format!("gridops-fleet-http-{}", Uuid::new_v4()));
         fs::create_dir(&directory)?;
-        let origin = format!("http://127.0.0.1:{port}");
-        let process = start_api(&directory, &origin, manager.as_deref(), &env)?;
+        // Unique to this fixture, so no other API knows it (#124). The
+        // cookie splits on the first `.`, which a simple UUID never holds.
+        let session = format!("fleet-http-session-{}", Uuid::new_v4().simple());
         let mut mac = Hmac::<Sha256>::new_from_slice(SESSION_SECRET.as_bytes())?;
-        mac.update(SESSION_TOKEN.as_bytes());
+        mac.update(session.as_bytes());
         let cookie = format!(
-            "gridops_session={SESSION_TOKEN}.{}",
+            "gridops_session={session}.{}",
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
+        // Seeded once, before the API starts: every attempt to start it runs
+        // on this database, and its identity check needs the session.
+        let database = connect_database_path(&directory.join("db.sqlite")).await?;
+        Self::seed(&database, &session).await?;
         let client = Client::new();
-        wait_until_healthy(&client, &origin, &directory).await?;
-        let fixture = Self {
-            process,
-            database: connect_database_path(&directory.join("db.sqlite")).await?,
+        let (child, origin) = api_process::start(
+            &client,
+            std::iter::repeat(None),
+            HEALTH_WAIT,
+            &cookie,
+            |origin| start_api(&directory, origin, manager.as_deref(), &env),
+        )
+        .await
+        .with_context(|| format!("see {}", directory.join("api.log").display()))?;
+        Ok(Self {
+            process: ApiProcess(child),
+            database,
             directory,
             client,
             origin,
             cookie,
             manager,
             env,
-        };
-        fixture.seed().await?;
-        Ok(fixture)
+        })
     }
 
     /// Stops the API and starts it again on the same database and address,
-    /// as a deploy does. Agents see it unreachable in between.
+    /// as a deploy does. Agents see it unreachable in between. The address
+    /// is kept, so if another process answers there once the API is back,
+    /// the restart fails and names it rather than moving.
     async fn restart(&mut self, downtime: Duration) -> Result<()> {
         self.process.0.kill()?;
         self.process.0.wait()?;
         tokio::time::sleep(downtime).await;
-        self.process = start_api(
-            &self.directory,
-            &self.origin,
-            self.manager.as_deref(),
-            &self.env,
-        )?;
-        wait_until_healthy(&self.client, &self.origin, &self.directory).await
+        let port = self
+            .origin
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .with_context(|| format!("no port in {}", self.origin))?;
+        let (child, _) = api_process::start(
+            &self.client,
+            [Some(port)],
+            HEALTH_WAIT,
+            &self.cookie,
+            |origin| start_api(&self.directory, origin, self.manager.as_deref(), &self.env),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "the API did not come back on {}; see {}",
+                self.origin,
+                self.directory.join("api.log").display()
+            )
+        })?;
+        self.process = ApiProcess(child);
+        Ok(())
     }
 
-    async fn seed(&self) -> Result<()> {
+    async fn seed(database: &SqlitePool, session: &str) -> Result<()> {
         let now = gridops_core::now_millis();
         sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('fleet-user',1,'fleet-admin','admin','',?,?,?)")
-            .bind(now).bind(now).bind(now).execute(&self.database).await?;
+            .bind(now).bind(now).bind(now).execute(database).await?;
         sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES ('fleet-session',?,'fleet-user',?,?,?)")
-            .bind(hash_token(SESSION_TOKEN)).bind(now+3_600_000).bind(now).bind(now).execute(&self.database).await?;
+            .bind(hash_token(session)).bind(now+3_600_000).bind(now).bind(now).execute(database).await?;
         Ok(())
     }
 

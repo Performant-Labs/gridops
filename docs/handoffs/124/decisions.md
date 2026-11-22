@@ -39,3 +39,17 @@
   - Base `9e357e0`, `RUST_TEST_THREADS=2`, load about 6.7: the full tart suite had 2 of 25 waiting-test failures; the sibling alone had 7 of 300; a shell lost-update repro hit 1 of 40; partial-tail reads were 65 of 35 252.
   - RED runs: `cargo test -p gridops-tart-agent` gave 52 passed and 2 failed (R1, R2). `cargo test -p gridops-api` gave unit tests 130 passed; control_plane_contracts 39 passed and 2 failed (R3, R4); fleet_http 149 passed and 3 failed (R5, R6, plus the pre-existing preflight test).
   - Read: brief; handoff-A; `main.rs:2880-3320, 3520-3560, 3630-3655, 1830-1860`; `control_plane_contracts.rs:1-260, 300-600, 2195-2230`; `fleet_http.rs:1-260, 455-480`; `auth.rs:60-150`; `tart_outage_tests.rs:105-130`; `gitlab_runner_script.rs:660-720`; `ci.yml`.
+
+## Phase 6 Implementation (F) - 2026-11-22
+- **Decided:**
+  - Tart: `hold_slot`/`free_slot` set and clear `always-busy` (the existing branch), so `tart run` only reads the held-slot state. `FAKE_TART` logs each call and each PATH as one file per entry in `calls/` and `paths/`, written under a `.<pid>-<n>` name and renamed into place. `FakeTart::logged` reads whole entries by write time. `calls` was hardened too: it has the same concurrent-append shape (brief §1 sweep).
+  - API: one shared helper, `tests/support/api_process.rs`, with a single `pub fn start(client, ports, health_wait, cookie, spawn)`. It checks health, then that the child is alive, then probes `GET /api/v1/auth/me` with the fixture's own cookie, and moves to the next offered port, at most 5 attempts. `ApiFixture` offers `first_port` and then free ports; fleet `start` offers free ports; fleet `restart` offers only its own port, so it never moves and fails naming the origin.
+  - Each fixture seeds a per-fixture session (simple UUID, no `.`) once, before it spawns. Health budgets are unchanged (3 s and 5 s, 50 ms polls).
+- **Assumed:** the API's startup writes nothing that conflicts with rows seeded before it starts (`ensure_control_plane` is `ON CONFLICT DO NOTHING` on `fleet_control_plane`), and `connect_database_path` migrates (evidence.md).
+- **Hedged:**
+  - A first `mktemp`-based logger made each fake command about 2.6x slower (17 ms against 6.5 ms) and failed the 0.3 s `provisioning_gives_up...` test once under load. The final PID-named writer costs about 9.5 ms. Its stress results are in handoff-F.
+  - API stress runs use the `CARGO_BIN_EXE_gridops-api` path in the shared target dir.
+- **Evidence:**
+  - handoff-F.md Tier 1 section: fmt, clippy 1.98.1 with CI flags, `cargo test -p gridops-tart-agent` 54/54, `cargo test -p gridops-api` with all new tests green and only the pre-existing macOS `release_preflight` failure;
+  - the stress counts;
+  - docs/handoffs/124/evidence.md.

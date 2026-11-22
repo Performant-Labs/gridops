@@ -1,7 +1,6 @@
 use std::{
     env, fs,
-    net::TcpListener,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
     time::Duration,
@@ -31,6 +30,8 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[path = "support/api_process.rs"]
+mod api_process;
 #[path = "support/openapi_schema.rs"]
 mod openapi_schema;
 
@@ -64,66 +65,71 @@ impl ApiFixture {
     }
 
     async fn start_on(first_port: Option<u16>, extra_env: &[(&str, String)]) -> Result<Self> {
-        let port = match first_port {
-            Some(port) => port,
-            None => TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port(),
-        };
         let database_path =
             env::temp_dir().join(format!("gridops-api-test-{}.sqlite", Uuid::new_v4()));
-        let base_url = format!("http://127.0.0.1:{port}");
-        let binary = env!("CARGO_BIN_EXE_gridops-api");
-        let child = Command::new(binary)
-            .env("GRIDOPS_BASE_URL", &base_url)
-            .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
-            .env("GRIDOPS_API_BIND", format!("127.0.0.1:{port}"))
-            .env("GRIDOPS_DATABASE_PATH", &database_path)
-            .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
-            .env("GRIDOPS_ENCRYPTION_KEY", ENCRYPTION_KEY)
-            .env("GITHUB_CLIENT_ID", "integration-client")
-            .env("GITHUB_CLIENT_SECRET", "integration-secret")
-            .env("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
-            .env("GRIDOPS_WEBHOOK_ACTIVE", "false")
-            .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
-            .envs(extra_env.iter().map(|(name, value)| (*name, value)))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to start the API fixture")?;
+        // Unique to this fixture, so no other API knows it (#124). The
+        // cookie splits on the first `.`, which a simple UUID never holds.
+        let session_token = format!("fixture-session-{}", Uuid::new_v4().simple());
         let client = Client::builder().build()?;
-        let fixture = Self {
+        // Seeded once, before the API starts: every attempt below runs on
+        // this database, and its identity check needs the session.
+        let started = async {
+            Self::seed_identity(&database_path, &session_token, "member").await?;
+            let cookie = session_cookie_for(&session_token)?;
+            let binary = env!("CARGO_BIN_EXE_gridops-api");
+            api_process::start(
+                &client,
+                first_port
+                    .into_iter()
+                    .map(Some)
+                    .chain(std::iter::repeat(None)),
+                Duration::from_secs(3),
+                &cookie,
+                |base_url| {
+                    Command::new(binary)
+                        .env("GRIDOPS_BASE_URL", base_url)
+                        .env("GRIDOPS_FLEET_ALLOW_LOOPBACK_HTTP", "true")
+                        .env("GRIDOPS_API_BIND", base_url.trim_start_matches("http://"))
+                        .env("GRIDOPS_DATABASE_PATH", &database_path)
+                        .env("GRIDOPS_SESSION_SECRET", SESSION_SECRET)
+                        .env("GRIDOPS_ENCRYPTION_KEY", ENCRYPTION_KEY)
+                        .env("GITHUB_CLIENT_ID", "integration-client")
+                        .env("GITHUB_CLIENT_SECRET", "integration-secret")
+                        .env("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+                        .env("GRIDOPS_WEBHOOK_ACTIVE", "false")
+                        .env("GRIDOPS_MANAGER_URL", "http://127.0.0.1:9")
+                        .envs(extra_env.iter().map(|(name, value)| (*name, value)))
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .context("failed to start the API fixture")
+                },
+            )
+            .await
+        }
+        .await;
+        let (child, base_url) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                remove_database(&database_path);
+                return Err(error);
+            }
+        };
+        Ok(Self {
             child,
             client,
             base_url,
             database_path,
-            session_token: "fixture-session-token".to_owned(),
-        };
-        fixture.wait_until_healthy().await?;
-        fixture.seed_identity("member").await?;
-        Ok(fixture)
-    }
-
-    async fn wait_until_healthy(&self) -> Result<()> {
-        for _ in 0..60 {
-            if let Ok(response) = self
-                .client
-                .get(format!("{}/api/health", self.base_url))
-                .send()
-                .await
-                && response.status().is_success()
-            {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-        Err(anyhow!("API fixture did not become healthy"))
+            session_token,
+        })
     }
 
     async fn database(&self) -> Result<SqlitePool> {
         connect_database_path(&self.database_path).await
     }
 
-    async fn seed_identity(&self, role: &str) -> Result<()> {
-        let database = self.database().await?;
+    async fn seed_identity(database_path: &FsPath, session_token: &str, role: &str) -> Result<()> {
+        let database = connect_database_path(database_path).await?;
         let now = gridops_core::now_millis();
         sqlx::query("INSERT INTO users (id,github_id,login,role,access_token,last_login_at,created_at,updated_at) VALUES ('user-1',1,'fixture',?,?, ?,?,?)")
             .bind(role)
@@ -142,27 +148,21 @@ impl ApiFixture {
             .bind(now)
             .execute(&database)
             .await?;
-        let token = self.session_token.as_str();
         sqlx::query("INSERT INTO sessions (id,token_hash,user_id,expires_at,last_seen_at,created_at) VALUES ('session-1',?,?, ?,?,?)")
-            .bind(hash_token(token))
+            .bind(hash_token(session_token))
             .bind("user-1")
             .bind(now + 3_600_000)
             .bind(now)
             .bind(now)
             .execute(&database)
             .await?;
+        database.close().await;
         Ok(())
     }
 
     /// The cookie of the session this fixture seeded in its own database.
     fn session_cookie(&self) -> Result<String> {
-        let token = self.session_token.as_str();
-        let mut mac = HmacSha256::new_from_slice(SESSION_SECRET.as_bytes())?;
-        mac.update(token.as_bytes());
-        Ok(format!(
-            "gridops_session={token}.{}",
-            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
-        ))
+        session_cookie_for(&self.session_token)
     }
 
     fn webhook_signature(body: &str) -> Result<String> {
@@ -203,13 +203,27 @@ impl ApiFixture {
     }
 }
 
+/// The signed cookie that carries `token`.
+fn session_cookie_for(token: &str) -> Result<String> {
+    let mut mac = HmacSha256::new_from_slice(SESSION_SECRET.as_bytes())?;
+    mac.update(token.as_bytes());
+    Ok(format!(
+        "gridops_session={token}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    ))
+}
+
+fn remove_database(database_path: &FsPath) {
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(database_path.with_extension("sqlite-shm"));
+    let _ = fs::remove_file(database_path.with_extension("sqlite-wal"));
+}
+
 impl Drop for ApiFixture {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = fs::remove_file(&self.database_path);
-        let _ = fs::remove_file(self.database_path.with_extension("sqlite-shm"));
-        let _ = fs::remove_file(self.database_path.with_extension("sqlite-wal"));
+        remove_database(&self.database_path);
     }
 }
 
