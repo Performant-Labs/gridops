@@ -140,3 +140,9 @@
     - reconciler: 127 pass;
     - API: lib 130, control_plane_contracts 39, fleet_http 150/151 (the macOS-environment failure only);
     - clippy 1.98.1 with `-D warnings` and `cargo fmt --check` are clean.
+
+## T (Phase 7, GREEN + Tier 2)
+- **Decided:** treat `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` as a pre-existing, macOS-host-dependent failure, not blocking: its test and fixture are outside the diff and it asserts on the host OS.
+- **Assumed:** none beyond F's stash experiment for that test's pre-existence; I confirmed from the output that the failure is the preflight seeing this Mac as the macOS machine.
+- **Hedged:** timings are F's (sqlite3 CLI 3.54.0, warm cache), not re-measured.
+- **Evidence:** full core+reconciler suite exit 0; API suite 150/151; clippy and fmt clean; mutation `ended_at IS NULL` -> `1=1` fails the retention-rule test; evidence.md entries spot-checked against source.
