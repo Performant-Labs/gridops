@@ -915,17 +915,41 @@ const fn failed_because(
 }
 
 #[cfg(test)]
+mod externals_tests;
+
+#[cfg(test)]
 mod shared_work_folder_tests {
-    use super::{create_shared_work_folder, parse_shared_work_leftover};
+    use super::{create_shared_work_folder, parse_shared_folders_leftover};
 
     #[test]
     fn finds_the_image_and_the_shared_folder() {
         let inspect = "harbor.example/pl-runner:1.70.4\n/var/run/docker.sock\n/var/lib/gridops-agent/work/0a1b\n";
         assert_eq!(
-            parse_shared_work_leftover(inspect),
+            parse_shared_folders_leftover(inspect),
             Some((
-                "/var/lib/gridops-agent/work/0a1b".to_owned(),
-                "harbor.example/pl-runner:1.70.4".to_owned()
+                "harbor.example/pl-runner:1.70.4".to_owned(),
+                vec!["/var/lib/gridops-agent/work/0a1b".to_owned()]
+            ))
+        );
+    }
+
+    /// #126 item 5: Cleanup finds the runner root beside the work folder, and never the externals
+    /// cache, which every runner of the image shares.
+    #[test]
+    fn finds_the_work_folder_and_the_runner_root_but_never_the_externals_cache() {
+        let inspect = "harbor.example/pl-runner:1.70.4\n/var/run/docker.sock\n/var/lib/gridops-agent/work/0a1b\n/var/lib/gridops-agent/runners/0a1b\n/var/lib/gridops-agent/externals/2f529cfa\n";
+        let found = parse_shared_folders_leftover(inspect).map(|(image, mut folders)| {
+            folders.sort();
+            (image, folders)
+        });
+        assert_eq!(
+            found,
+            Some((
+                "harbor.example/pl-runner:1.70.4".to_owned(),
+                vec![
+                    "/var/lib/gridops-agent/runners/0a1b".to_owned(),
+                    "/var/lib/gridops-agent/work/0a1b".to_owned(),
+                ]
             ))
         );
     }
@@ -933,24 +957,35 @@ mod shared_work_folder_tests {
     #[test]
     fn a_runner_without_a_shared_folder_has_nothing_to_remove() {
         assert_eq!(
-            parse_shared_work_leftover("img\n/var/run/docker.sock\n"),
+            parse_shared_folders_leftover("img\n/var/run/docker.sock\n"),
             None
         );
-        assert_eq!(parse_shared_work_leftover(""), None);
+        assert_eq!(
+            parse_shared_folders_leftover("img\n/var/lib/gridops-agent/externals/2f529cfa\n"),
+            None
+        );
+        assert_eq!(parse_shared_folders_leftover(""), None);
     }
 
     #[test]
-    fn only_a_direct_child_of_the_work_root_is_ever_removed() {
+    fn only_a_direct_child_of_the_work_or_runners_root_is_ever_removed() {
         for source in [
             "/var/lib/gridops-agent/work",
             "/var/lib/gridops-agent/work/",
             "/var/lib/gridops-agent/work/a/b",
             "/var/lib/gridops-agent/work/..",
             "/var/lib/gridops-agent/workaround/x",
+            "/var/lib/gridops-agent/runners",
+            "/var/lib/gridops-agent/runners/",
+            "/var/lib/gridops-agent/runners/a/b",
+            "/var/lib/gridops-agent/runners/..",
+            "/var/lib/gridops-agent/runnersx/a",
+            "/var/lib/gridops-agent/externals/2f529cfa",
+            "/var/lib/gridops-agent",
             "/etc",
         ] {
             assert_eq!(
-                parse_shared_work_leftover(&format!("img\n{source}\n")),
+                parse_shared_folders_leftover(&format!("img\n{source}\n")),
                 None,
                 "{source}"
             );

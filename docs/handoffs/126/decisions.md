@@ -75,3 +75,44 @@
   - Tests: `tests/docker_runtime.rs` in full.
   - Deployment and docs: `deploy/systemd/gridops-host-agent.service`; `docs/fleet-agent.md:339-383`; `CHANGELOG.md:1-30`.
   - Coexistence: `git worktree list` and a per-worktree diff. None of the 7 other worktrees changes the files this plan touches.
+
+## Phase 4 Tests RED (T) - 2026-11-22T11:48:14-08:00
+- **Decided:** RED is valid (docs/handoffs/126/handoff-T-red.md).
+  - **What was written:**
+    - 2 core tests in `work_folder.rs`.
+    - 18 host-agent tests in the new child module `docker::externals_tests` (`src/docker/externals_tests.rs`).
+    - 1 new parse test plus 3 renamed or extended ones in `docker.rs` `shared_work_folder_tests`.
+    - Guard extensions in `tests/docker_runtime.rs` and `tests/docker_gitlab.rs`.
+  - **The contract F must provide:**
+    - core: `SHARED_RUNNERS_ROOT`, `EXTERNALS_CACHE_ROOT` and `shared_runner_root(PreparedEnvironmentId)`, re-exported;
+    - docker.rs: `Refusal`, `externals_cache_name`, `externals_cache`, `uses_externals_cache`, `shared_socket_args`, `github_runner_script(mode, shared)`, `DockerRuntime::fill_externals_cache` and `parse_shared_folders_leftover` (image, folders).
+  - **Results:**
+    - Compile RED on those items only.
+    - Runtime RED with today's-behaviour stubs: 17 fail on the feature assertion; the guards are green by design.
+    - A throwaway reference implementation passes everything.
+    - 9 targeted mutations are each caught.
+    - Clippy is clean with CI 1.98.1 flags.
+    - All stubs and the reference were reverted.
+- **Assumed:**
+  - Names follow A's suggestions (warns 5, 7 and 9), including the cleanup rename. A allowed F to keep the old names. These tests fix the new ones.
+  - The pool image's ENV `AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache` is part of the container env the scripts see (the brief's facts).
+  - The runner applies its root's `.env` over its environment (A's reading of Program.cs:172-194). The tool-cache test resolves the tool directory that way.
+- **Hedged:**
+  - The symlinked-`externals` test accepts follow or refuse. It is narrowed to F's documented choice in Phase 6.
+  - Three things in Start's success path are pinned only through the pure functions, because that path needs a writable `/var/lib/gridops-agent`. The diff gate and S check the wiring by reading:
+    - the use of the builders;
+    - the container created from the resolved id;
+    - A warn 3's folder removal when `docker create` or `feed_secret` fails.
+  - Not tested:
+    - warn 8 (the sweep under the lock);
+    - a failed `rename`;
+    - the order of the secret read before the copy.
+  - Two stand-in tests skip as root or where `/var/lib/gridops-agent` exists, and the 0555 test skips as root.
+- **Evidence:**
+  - Read: the brief in full, handoff-A (round 2), decisions.md, `docker.rs` in full, `work_folder.rs`, `fleet/mod.rs:15-30`, `ids.rs:29-95` and `provisioning.rs:300-375`.
+  - Read: `native.rs:30-140` and `:475-540`, `tests/docker_runtime.rs` in full, `tests/docker_gitlab.rs:1-400` and `:470-530`, `gridops-manager/src/main.rs:3240-3280`, and `protocol/agent.rs` (RunnerMode, PreparedWorkload, ExecutionConfiguration, FixSandbox rules).
+  - Real Docker 29.8.2 on this Mac, read-only, with local images and one throwaway container (removed). It showed:
+    - the WorkingDir template error;
+    - "No such image" versus "no such object";
+    - `rm -f` of a missing container exits 0;
+    - `docker cp`'s "Could not find the file" message and its symlink and nesting behaviour.

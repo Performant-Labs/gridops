@@ -58,6 +58,67 @@ mod tests {
         );
     }
 
+    /// #126 decision 1: a runner's root is one folder per environment, directly under its own
+    /// root, built from the typed environment id.
+    #[test]
+    fn a_runner_root_is_a_direct_child_of_the_runners_root()
+    -> Result<(), crate::fleet::ids::NilFleetUuid> {
+        let environment = crate::fleet::ids::PreparedEnvironmentId::try_new(
+            uuid::Uuid::from_u128(0x0a1b_2c3d_4e5f_4061_8293_a4b5_c6d7_e8f9),
+        )?;
+        let root = shared_runner_root(environment);
+        assert_eq!(
+            root,
+            "/var/lib/gridops-agent/runners/0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9"
+        );
+        let path = std::path::Path::new(&root);
+        assert_eq!(
+            path.parent(),
+            Some(std::path::Path::new(SHARED_RUNNERS_ROOT))
+        );
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(environment.to_string().as_str())
+        );
+        Ok(())
+    }
+
+    /// #126 decision 1 and item 5: the runner's root must not sit inside a work folder (runner
+    /// 2.338.2 maps Work before Externals, so a root there turns the node path into `/__w/...`),
+    /// and the externals cache must not sit under the work root (whose children Cleanup removes).
+    /// All three roots are in the agent's `StateDirectory`, and none contains another.
+    #[test]
+    fn the_runner_root_and_the_externals_cache_are_never_under_a_work_folder()
+    -> Result<(), crate::fleet::ids::NilFleetUuid> {
+        use std::path::Path;
+        let environment =
+            crate::fleet::ids::PreparedEnvironmentId::try_new(uuid::Uuid::from_u128(7))?;
+        assert_eq!(EXTERNALS_CACHE_ROOT, "/var/lib/gridops-agent/externals");
+        let runner_root = shared_runner_root(environment);
+        let work = shared_work_folder(environment);
+        assert!(
+            !Path::new(&runner_root).starts_with(&work),
+            "{runner_root} is under {work}"
+        );
+        assert!(!Path::new(&runner_root).starts_with(SHARED_WORK_ROOT));
+        assert!(!Path::new(EXTERNALS_CACHE_ROOT).starts_with(SHARED_WORK_ROOT));
+        assert!(!Path::new(EXTERNALS_CACHE_ROOT).starts_with(SHARED_RUNNERS_ROOT));
+        let roots = [SHARED_WORK_ROOT, SHARED_RUNNERS_ROOT, EXTERNALS_CACHE_ROOT];
+        for root in roots {
+            assert!(
+                Path::new(root).starts_with("/var/lib/gridops-agent"),
+                "{root}"
+            );
+            for other in roots {
+                assert!(
+                    root == other || !Path::new(root).starts_with(other),
+                    "{root} is under {other}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn every_other_runner_keeps_the_relative_default() {
         assert_eq!(job_work_folder(&RuntimeKind::Docker, false, "x"), "_work");
