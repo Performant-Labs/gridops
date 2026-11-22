@@ -83,10 +83,16 @@ impl Database {
         Ok(())
     }
 
-    /// A fleet runner of the pool on `profile`, starting and not on a job,
+    /// A fleet runner of the pool on `profile`, starting and not on a job: a
+    /// spare runner that can take a queued job. With `repository` `None` it is
     /// registered to no GitHub repository (an organization GitHub runner or a
-    /// GitLab runner): a spare runner that can take a queued job.
-    async fn spare_runner(&self, pool_id: &str, profile: &targets::Profile) -> Result<()> {
+    /// GitLab runner); otherwise to that GitHub repository.
+    async fn spare_runner(
+        &self,
+        pool_id: &str,
+        profile: &targets::Profile,
+        repository: Option<i64>,
+    ) -> Result<()> {
         let target = profile
             .target_ids
             .first()
@@ -94,10 +100,11 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO runners (id,pool_id,target_repository_id,name,provider,status,busy,created_at,updated_at)
-             VALUES (?1,?2,NULL,?1,'docker','starting',0,20,20)",
+             VALUES (?1,?2,?3,?1,'docker','starting',0,20,20)",
         )
         .bind(&id)
         .bind(pool_id)
+        .bind(repository)
         .execute(&self.pool)
         .await?;
         sqlx::query(
@@ -350,7 +357,7 @@ async fn a_pending_gitlab_job_puts_a_fleet_platform_behind_until_a_spare_runner_
 
     let profiles = targets::pool_profiles(&database.pool, "gl-pool").await?;
     database
-        .spare_runner("gl-pool", profiles.first().context("a platform")?)
+        .spare_runner("gl-pool", profiles.first().context("a platform")?, None)
         .await?;
     assert!(
         !behind(&database, "gl-pool", &configured).await?,
@@ -394,7 +401,7 @@ async fn a_pool_with_github_and_gitlab_jobs_counts_both_and_lists_only_github_jo
     let configured = ["docker".to_owned()];
     let profiles = targets::pool_profiles(&database.pool, "gh-pool").await?;
     let profile = profiles.first().context("a platform")?;
-    database.spare_runner("gh-pool", profile).await?;
+    database.spare_runner("gh-pool", profile, None).await?;
     assert_eq!(
         gridops_core::assigned_queued_jobs(&database.pool, "gh-pool").await?,
         2,
@@ -419,6 +426,124 @@ async fn a_pool_with_github_and_gitlab_jobs_counts_both_and_lists_only_github_jo
     assert!(
         behind(&database, "gh-pool", &configured).await?,
         "two queued jobs (one GitHub, one GitLab) and one spare runner: behind"
+    );
+    database.finish().await
+}
+
+/// #181 (seam rule): only a spare runner registered to no repository covers a
+/// pending GitLab job, never one registered to a GitHub repository.
+///
+/// An organization pool linked to a GitLab connection has two Linux platforms
+/// (x64 first, arm64 second) that can both run its two jobs: a pending GitLab
+/// job, queued first, and a queued GitHub job of repository 10. Its only
+/// runner is a starting spare on the arm64 platform, registered to repository
+/// 10. The GitLab job, attributed first, must not take that runner, so it
+/// counts for the first platform as a job with no runner; the repository-10
+/// runner stays with repository 10's job, so `platform_jobs` lists that job on
+/// the arm64 platform and nothing on x64. If the repository runner covered the
+/// GitLab job, the GitHub job would lose it and move to x64.
+///
+/// The observable is the attribution, not `choose_platform`'s `behind` flag:
+/// on one platform every queued job adds to the deficit whichever runner
+/// covers it, and a repository runner with no job of its repository waiting
+/// is not counted against the deficit, so the flag cannot show this rule.
+#[tokio::test]
+async fn a_spare_runner_registered_to_a_github_repository_does_not_cover_a_gitlab_job() -> Result<()>
+{
+    let database = Database::new().await?;
+    sqlx::raw_sql(
+        r#"
+        UPDATE runner_pools SET min_count=0,max_count=4,autoscaling_enabled=1,labels='["docker"]' WHERE id='gh-pool';
+        INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES ('gh-pool','conn-project',3);
+        INSERT INTO repositories (id,installation_id,owner,name,full_name,private,default_branch,html_url,last_synced_at,created_at,updated_at)
+          VALUES (10,1,'octo-org','gridops','octo-org/gridops',0,'master','https://github.com/octo-org/gridops',1,1,1);
+        INSERT INTO workflow_runs (id,repository_id,workflow_name,run_number,event,status,head_sha,html_url,github_created_at,github_updated_at,created_at,updated_at)
+          VALUES (20,10,'CI',1,'push','queued','abc123','https://github.com/octo-org/gridops/actions/runs/20',1,1,1,1);
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    // The GitLab job (queued at 10) is older, so it is attributed first.
+    database
+        .pending_gitlab_job("conn-project", 503, &["docker"])
+        .await?;
+    sqlx::query(
+        r#"INSERT INTO workflow_jobs (id,run_id,name,status,labels,html_url,created_at,updated_at)
+             VALUES (200,20,'build','queued','["self-hosted","linux"]','https://github.com/octo-org/gridops/actions/runs/20/job/200',?1,?1)"#,
+    )
+    .bind(gridops_core::now_millis())
+    .execute(&database.pool)
+    .await?;
+    let platform = |architecture: &str| {
+        json!({
+            "runtimeKind": "docker",
+            "executionOs": "linux",
+            "architecture": architecture,
+            "image": "",
+            "requiresDockerSocket": true,
+        })
+    };
+    let two_platforms: FleetSettingsInput = serde_json::from_value(json!({
+        "enabled": true,
+        "mode": "ephemeral",
+        "cpuMillis": 1000,
+        "memoryMib": 1024,
+        "diskBytes": 0,
+        "platforms": [platform("x64"), platform("arm64")],
+    }))?;
+    targets::save_pool_fleet(&database.pool, "gh-pool", &two_platforms).await?;
+    let configured = ["docker".to_owned()];
+    let profiles = targets::pool_profiles(&database.pool, "gh-pool").await?;
+    let architecture = |profile: &targets::Profile| -> Result<String> {
+        Ok(serde_json::to_value(profile.input.architecture)?
+            .as_str()
+            .context("an architecture name")?
+            .to_owned())
+    };
+    let [x64, arm64] = profiles.as_slice() else {
+        anyhow::bail!("two platforms: {}", profiles.len());
+    };
+    assert_eq!(
+        (architecture(x64)?.as_str(), architecture(arm64)?.as_str()),
+        ("x64", "arm64"),
+        "x64 is the first platform"
+    );
+    database.spare_runner("gh-pool", arm64, Some(10)).await?;
+    assert_eq!(
+        gridops_core::assigned_queued_jobs(&database.pool, "gh-pool").await?,
+        2,
+        "the pool owns both jobs"
+    );
+
+    let listed = |profile_id: String| {
+        let database = &database;
+        let configured = &configured;
+        let profiles = &profiles;
+        async move {
+            Ok::<_, anyhow::Error>(
+                targets::platform_jobs(
+                    &database.pool,
+                    "gh-pool",
+                    configured,
+                    profiles,
+                    &profile_id,
+                )
+                .await?
+                .iter()
+                .map(|job| job.repository_id)
+                .collect::<Vec<_>>(),
+            )
+        }
+    };
+    assert_eq!(
+        listed(arm64.id.clone()).await?,
+        [10],
+        "the repository-10 runner stays with repository 10's job, not the GitLab job"
+    );
+    assert_eq!(
+        listed(x64.id.clone()).await?,
+        Vec::<i64>::new(),
+        "no GitHub job is pushed to x64"
     );
     database.finish().await
 }

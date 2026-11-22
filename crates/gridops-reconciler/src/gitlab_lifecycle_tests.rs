@@ -2173,20 +2173,40 @@ async fn pending_jobs_scale_a_fleet_gitlab_pool_up_to_max_count() -> Result<()> 
 
 /// #181: only `pending` GitLab jobs are fleet demand. A fleet GitLab pool at
 /// `min_count` 0 whose jobs are `created` or `manual` places nothing, even
-/// with its desired count still raised from earlier work: `provision` runs,
-/// and its platform is not behind.
+/// with its desired count still raised from earlier work: `provision` runs
+/// (desired 2 is above the 0 active runners), its platform is not behind, so
+/// the `NoDemand` guard (`active >= min_count`) stops it.
+///
+/// The idle timeout is set far beyond the age of any timestamp, so
+/// `maybe_scale_down` keeps `desired_count` at 2 through both passes. With
+/// the default 5 minutes it would reset desired to `min_count` 0 first and
+/// `provision` would never run, leaving the guard untested.
 #[tokio::test]
 async fn jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero() -> Result<()> {
     let fleet = Fleet::autoscaling(3).await?;
     fleet.gitlab_jobs(&["created", "manual"]).await?;
-    sqlx::query("UPDATE runner_pools SET desired_count=2 WHERE id='pool-gl'")
-        .execute(&fleet.setup.app.database)
-        .await?;
+    sqlx::query(
+        "UPDATE runner_pools SET desired_count=2,idle_timeout_minutes=100000000 WHERE id='pool-gl'",
+    )
+    .execute(&fleet.setup.app.database)
+    .await?;
 
     fleet.pass().await?;
     fleet.pass().await?;
 
-    assert_eq!(fleet.placed().await?, 0);
+    let desired: i64 =
+        sqlx::query_scalar("SELECT desired_count FROM runner_pools WHERE id='pool-gl'")
+            .fetch_one(&fleet.setup.app.database)
+            .await?;
+    assert_eq!(
+        desired, 2,
+        "desired stays above min_count, so provision ran and the guard decided"
+    );
+    assert_eq!(
+        fleet.placed().await?,
+        0,
+        "the platform is not behind, so the NoDemand guard places nothing"
+    );
     assert_eq!(gitlab_calls(&fleet.setup, FakeMethod::CreateRunner), []);
     fleet.finish().await
 }

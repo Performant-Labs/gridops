@@ -111,3 +111,19 @@
 - **Assumed:** the driver sends a self-reported test-only S REWORK to T (#678).
 - **Hedged:** none.
 - **Evidence:** I checked both production lines S cites by grep, and they are present and unchanged. Before this round `git status` was clean, and no `src/` file was edited in it.
+
+## T (S REWORK, test-only, dispatched by O after router misroute) - 2026-11-21T19:07:09-08:00
+- **Decided:**
+  - R1: repaired `jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero` in place (S's option 1). `idle_timeout_minutes=100000000` keeps `maybe_scale_down` from resetting desired, so `provision` runs and the `NoDemand` guard decides. Added a `desired_count == 2` check so the test can't go vacuous again, and fixed the doc comment. Also corrected T-red's claim about this test in `handoff-T-rework.md`.
+  - R2: added `a_spare_runner_registered_to_a_github_repository_does_not_cover_a_gitlab_job` (core). `spare_runner` gained an `Option<i64>` repository.
+  - R2 asserts attribution through `platform_jobs` on a two-platform pool, not S's suggested "stays behind". The single-platform `behind` version passed under M2, because `deficit` counts every queued job and ignores a repository runner with nothing of its repository waiting.
+- **Assumed:** the brief's "never one registered to a GitHub repository" rule is met by pinning attribution (the GitHub job keeps its repository runner, and the GitLab job does not take it). That is the only place the rule is observable.
+- **Hedged:**
+  - R2 relies on owners being oldest first and on the first-platform fallback with no machines. Both are recorded in `evidence.md`.
+  - Local clippy 1.99.1 reports 5 lints outside the changed files. CI-pinned 1.98.1 is clean.
+- **Evidence:**
+  - M1 (main.rs:2450 guard disabled): the R1 test fails, 2 runners placed against 0 expected.
+  - M2 (targets.rs:1456 `=> true`): the R2 test fails, `platform_jobs(arm64)` returns `[]` against `[10]`.
+  - Both mutations were reverted with `git checkout --`.
+  - Core: 422 passed, 0 failed. Reconciler: 125 passed, 0 failed. fmt is clean, and clippy 1.98.1 is clean.
+  - Details are in `docs/handoffs/181/handoff-T-rework.md`.

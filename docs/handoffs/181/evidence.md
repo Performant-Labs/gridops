@@ -83,3 +83,70 @@ Facts the diff relies on that live in unchanged code.
   >         for _ in active.len()..desired as usize {
   >             let mut attempt = provision(app, view, pool, builtin_enabled).await?;
   > ```
+
+## Added by T (S test-only rework, R1 and R2)
+
+- **Fact:** `maybe_scale_down` resets `desired_count` to `min_count` once the idle timeout has elapsed since the newest runner update (0 with no runners), and returns early otherwise. With a huge `idle_timeout_minutes` the timeout never elapses, so the desired count stays raised and `provision` runs (R1).
+  **Source:** `crates/gridops-reconciler/src/main.rs:1533-1535`, `crates/gridops-reconciler/src/main.rs:1552-1563`, `crates/gridops-reconciler/src/main.rs:4033-4035`
+  **Verbatim excerpt:**
+  > ```
+  > async fn maybe_scale_down(app: &Reconciler, pool: &Pool, runners: &[Runner]) -> Result<()> {
+  >     if !pool.autoscaling_enabled || pool.paused || pool.desired_count <= pool.min_count {
+  >         return Ok(());
+  > ...
+  >     let last_activity = runners
+  >         .iter()
+  >         .map(|runner| runner.updated_at)
+  >         .max()
+  >         .unwrap_or(0);
+  >     if !idle_period_elapsed(now_millis(), pool.idle_timeout_minutes, last_activity) {
+  >         return Ok(());
+  >     }
+  >     sqlx::query("UPDATE runner_pools SET desired_count=?,state='scaling',updated_at=? WHERE id=?")
+  >         .bind(pool.min_count)
+  > ...
+  > fn idle_period_elapsed(now: i64, idle_timeout_minutes: i64, last_activity: i64) -> bool {
+  >     now.saturating_sub(last_activity) >= idle_timeout_minutes.saturating_mul(60_000)
+  > }
+  > ```
+
+- **Fact:** owners are listed oldest job first, so a GitLab job recorded at time 10 is attributed before a GitHub job queued now (R2).
+  **Source:** `crates/gridops-core/src/autoscaling.rs:315`
+  **Verbatim excerpt:**
+  > ```
+  > /// The one pool that counts each queued job, oldest job first. Every view of
+  > ```
+
+- **Fact:** `attribute_queued_jobs` puts single-platform jobs first (a stable sort, so multi-platform jobs keep owner order), and an uncovered multi-platform job with no room and no machine available counts for the first platform (R2: the uncovered GitLab job lands on x64).
+  **Source:** `crates/gridops-core/src/fleet/targets.rs:1444`, `crates/gridops-core/src/fleet/targets.rs:1462-1472`
+  **Verbatim excerpt:**
+  > ```
+  >     jobs.sort_by_key(|(platforms, _)| platforms.len() > 1);
+  > ...
+  >             let index = if let [only] = platforms.as_slice() {
+  >                 *only
+  >             } else {
+  >                 platforms
+  >                     .iter()
+  >                     .copied()
+  >                     .filter(|index| room.slots(*index) > 0)
+  >                     .max_by_key(|index| (room.slots(*index), std::cmp::Reverse(*index)))
+  >                     .or_else(|| platforms.iter().copied().find(|index| available[*index]))
+  >                     .or_else(|| platforms.first().copied())?
+  >             };
+  > ```
+
+- **Fact:** in `choose_platform`'s deficit, an idle runner registered to a repository counts as active only when a job of that repository waits on its platform. So on one platform the `behind` flag cannot tell whether a repository runner "covered" a GitLab job, which is why R2 asserts the attribution through `platform_jobs` instead.
+  **Source:** `crates/gridops-core/src/fleet/targets.rs:1539-1547`
+  **Verbatim excerpt:**
+  > ```
+  >             let is_busy = row.get::<bool, _>("busy");
+  >             let useful = is_busy
+  >                 || row
+  >                     .get::<Option<i64>, _>("target_repository_id")
+  >                     .is_none_or(|repository| waiting[index].contains(&repository));
+  >             if useful {
+  >                 active += 1;
+  >                 busy += i64::from(is_busy);
+  >             }
+  > ```
