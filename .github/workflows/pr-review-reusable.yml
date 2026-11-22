@@ -4,7 +4,14 @@ name: PR-Agent Spec Review (reusable)
 # call a reusable workflow in a private repo (it fails with "workflow file issue";
 # playbook's "organization" access doesn't extend to public callers). Same fix as
 # FreeToken-Intel and performantlabs.com. Not auto-synced: re-copy from playbook
-# by hand, unchanged, when playbook's reusable changes.
+# by hand when playbook's reusable changes, keeping the LOCAL PATCH below.
+#
+# LOCAL PATCH (2026-11-22, found by PR-Agent on gridops#208): the three score
+# parsers read only the Reviewer Guide's Score row (<strong>Score</strong>: N),
+# not the first "score" + number anywhere in the comment. The ticket-compliance
+# section quotes issue text before that row, and fleet-health issues say things
+# like "no score outside 0-100", which parsed as a score of 0. Drop this patch
+# once playbook's reusable anchors the same way.
 # Called by each project's .github/workflows/pr-review.yml via:
 #   uses: Performant-Labs/playbook/.github/workflows/pr-review-reusable.yml@main
 #   secrets:
@@ -948,7 +955,7 @@ jobs:
                   | select(.updated_at >= $since)
                   | select(.body | contains("Reviewer Guide"))] | last.body // ""' \
             "$TMP/pr-comments-shared.json")
-          SCORE=$(echo "$LATEST" | grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' | grep -oE '[0-9]+' | head -1)
+          SCORE=$(echo "$LATEST" | grep -oE '<strong>Score</strong>[^0-9]{0,20}[0-9]{1,3}' | grep -oE '[0-9]{1,3}$' | head -1)
           [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip label"; exit 0; }
 
           for L in 'score-90+' 'score-80-89' 'score-70-79' 'score-below-70'; do
@@ -1006,7 +1013,7 @@ jobs:
                          | select(.body | contains("Reviewer Guide"))]'
           REVIEW_BODY=$(jq -r --arg since "$RUN_START" "${THIS_RUN} | last.body // \"\"" "$TMP/pr-comments-shared.json")
           REVIEW_URL=$(jq  -r --arg since "$RUN_START" "${THIS_RUN} | last.html_url // \"\"" "$TMP/pr-comments-shared.json")
-          SCORE=$(printf '%s' "$REVIEW_BODY" | grep -oE '[Ss]core[^0-9]{0,30}[0-9]+' | grep -oE '[0-9]+' | head -1)
+          SCORE=$(printf '%s' "$REVIEW_BODY" | grep -oE '<strong>Score</strong>[^0-9]{0,20}[0-9]{1,3}' | grep -oE '[0-9]{1,3}$' | head -1)
           [[ -z "$SCORE" ]] && { echo "No score from THIS run — skip banner"; exit 0; }
 
           if   (( SCORE >= 90 )); then BRACKET='score-90+';     EMOJI='🟢'
@@ -1110,7 +1117,7 @@ jobs:
                   | select(.updated_at >= $since)
                   | select(.body | contains("Reviewer Guide"))] | last.body // ""' \
             "$TMP/pr-comments-shared.json")
-          SCORE=$(printf '%s' "$BODY" | grep -oiE 'score[^0-9]{0,20}[0-9]{1,3}' | grep -oE '[0-9]{1,3}' | head -1)
+          SCORE=$(printf '%s' "$BODY" | grep -oE '<strong>Score</strong>[^0-9]{0,20}[0-9]{1,3}' | grep -oE '[0-9]{1,3}$' | head -1)
 
           if [[ -n "$SCORE" ]]; then
             gh api -X POST "repos/${{ github.repository }}/statuses/$SHA" \
