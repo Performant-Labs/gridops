@@ -134,6 +134,37 @@ The owners file starts from this table. Paths are as the issues give them; crate
 4. **`gitlab_jobs` has no `started_at` or `completed_at` column** (`migrations/0047_gitlab.sql`: `status_changed_at`, `created_at`, `updated_at` only), so "the `gitlab_jobs` equivalent" of the `workflow_jobs(completed_at)` index, and #191's GitLab queue wait and duration, have no column to use. Also, `gitlab_jobs` in 0047 is not `STRICT` (only `fleet_ci_targets_new` is). The plan states what the migration adds for GitLab jobs and why, and the design doc records it.
 5. **Job-category routes:** #197's table says the three routes go in `gridops-api/src/fleet/mod.rs`, but their paths are `/api/v1/settings/job-categories…` and every other `/api/v1/settings…` route is registered in `gridops-api/src/main.rs`. Either file works (`fleet::router()` is merged into the app in `main.rs`); the plan picks one and no wave-1 issue edits it.
 
+## Decisions after the first architect review (2026-11-22, orchestrating session)
+
+The Phase 3 review of the first plan (`docs/handoffs/197/handoff-A.md`) returned four BLOCK findings. Each is decided here; these decisions override the ownership table and the overlap list above wherever they disagree.
+
+### D-1. Job classification is wired at the three real writers, through one seam #190 owns
+
+- The production writers are `process_workflow_job` in `crates/gridops-api/src/webhooks.rs` (~`:645`), `upsert_workflow_job` in `crates/gridops-reconciler/src/main.rs` (~`:2133`) and the `UPSERT` / `record_gitlab_job` in `crates/gridops-core/src/gitlab/jobs.rs` (~`:155`, `:202`). The `INSERT INTO workflow_jobs` statements in `crates/gridops-core/src/autoscaling.rs` are all in `#[cfg(test)]` and are not insert sites. `crates/gridops-api/src/webhooks/gitlab.rs` has no INSERT.
+- #197 adds the `category` column to each of the three writers' statements and binds a value from one function in `crates/gridops-core/src/fleet_health/classifier_cache.rs` (for example `category_for_insert(db, job_name, workflow_name, repository, labels) -> Option<JobCategory>`, one per source if the shapes differ). The stub returns `None`. #190 fills in the body. **#190 owns no shared-file lines**: its owners entry is `classifier_cache.rs`, `fleet_health_backfill.rs` and its contract test files only (this settles overlap 3).
+- **GitLab names and timing.** Today `gridops-core::gitlab::Job` and `JobObservation` carry no job name or project path, and `gitlab_jobs` has no start or finish time. Migration 0050 adds nullable `gitlab_jobs.job_name`, `gitlab_jobs.project_path`, `gitlab_jobs.started_at` and `gitlab_jobs.completed_at` (epoch ms), plus the `completed_at` index. #197 extends `gitlab::Job` (`name`, serde default), `JobObservation` (`job_name`, `project_path`, both `Option`, `None` keeps the stored value), and the writer. The webhook passes `build_name` and `project.path_with_namespace`, which `webhooks/gitlab.rs` already reads. The poll passes the job API's `name` and the project path where it has them. The writer sets `started_at` the first time the status becomes `running`, and `completed_at` the first time it becomes terminal, both from `status_changed_at`. It never overwrites a set value. Existing rows stay NULL; #190's backfill classifies them from whatever is there (tags at least). Test all of this here: it is #197's code, not a stub. Record it in the design doc.
+- After this story's plan passes, the orchestrating session posts a comment on #190 that corrects its insert-site list. That is not this pipeline's job.
+
+### D-2. Frontend contract tests live in `tests/`, where Vitest collects them
+
+`vitest.config.ts` only includes `tests/**/*.test.ts`, and the existing tests use `createElement`, `createRoot` and `act` in jsdom with no testing-library. Put frontend contract tests at `tests/fleet-health-<issue>-*.contract.test.ts` (one or more per frontend wave-1 issue), in the existing style, and give each frontend wave-1 issue its own `tests/fleet-health-<issue>-*.test.ts` glob in the owners file for the tests it adds. Contract test files stay #197's whatever glob they match, and the guard checks that. Don't change the Vitest config.
+
+### D-3. #197 wires every hook a wave-1 issue would otherwise need in a shared file
+
+- (a) An `AppState` field in `crates/gridops-api/src/state.rs` for the health source and #194's cache, following the `gitlab` / `with_gitlab` precedent. `FakeFleetHealthSource` gets the seams #194's tests need (a call count, fail-next, held calls, a settable clock), like `FakeGitLab`.
+- (b) A fleet-wide queue breakdown #201 can call from `collect_live(db, now)`. `queue_breakdown` in `resources/overview_queue.rs` is `pub(super)` and scoped to one user. #197 exposes a fleet-wide variant (or a signature #201 fills in) from a file #201 owns, or makes the existing one reusable without changing its current behavior. Either way, #201 must not need to edit `overview_queue.rs`.
+- (c) The Overview tile. #197 calls `useFleetHealth("24h")` in `src/routes/_app/index.tsx`, adds the optional second parameter to `metricTiles`, and widens the `MetricTile.to` union. #203's change to `metric-tiles.ts` is then add-only, and the guard enforces it. Until #203 lands, the tile renders nothing.
+- (d) A 422 error variant in `ApiError` (and the fleet `ErrorCode` if the category routes use the fleet envelope; see W-5 below), for #199's invalid-regex response.
+- (e) Contract-test `mod` declarations sit in #197-owned parent files, as `gitlab/mod.rs:22-26` does, so a wave-1 agent can't unhook its own tests.
+
+### D-4. The health endpoint is admin-only
+
+`GET /api/v1/fleet/health` returns fleet-wide data cached once per window, so it uses the `GET /api/v1/fleet/workload` pattern: `FleetUser<Read>` plus `require_admin` (`fleet/profiles.rs:330-349`). Make `require_admin` `pub(super)` (or move it into a shared fleet module). A non-admin gets 403; add that case to #194's contract tests. The page and the Overview tile hide on 403, as the workload UI does. If the route accepts `fleet:read` tokens, add the `TOKEN_SCOPED_ROUTES` row, both `docs/fleet-api.md` tables and the OpenAPI security entry. The job-category routes are admin-only too.
+
+### The review's WARN findings are adopted as guidance
+
+W-5: register the category routes in `session_routes()` in `crates/gridops-api/src/main.rs` (under `refuse_bearer`), not in `fleet::router()`. This replaces overlap 5. W-6 to W-13 are adopted as written in `handoff-A.md`: an `async_trait` source behind `Arc<dyn …>`; `testdata.rs` and the speed-check helper behind `cfg(any(test, feature = "test-support"))`; `run_pass(&SqlitePool, now: i64)` called log-and-continue next to `fleet::tick` and before the manager-unavailable early return; the speed-check helper doesn't rely on a thread-local subscriber and its slow self-test runs in its own test binary; add `regex`, and expose per-rule compile errors from `category.rs`; no `proptest`, so #192 uses 1,000 seeded inputs; STRICT primary keys get non-NULL sentinels for an unmanaged runner's host and pool, with no FK on `host_id`; zod schemas and the fleet `request` transport in `types.ts`; chart theme on the existing `var(--…)` tokens; a unique nav shortcut and correct active state for Machines vs Health; the guard's tests run with `node --test`; one contract-test file per crate for #190.
+
 ## Registration points that exist today (verified at `83149f5`)
 
 So that every hook can be wired here, these are where they go:
