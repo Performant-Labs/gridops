@@ -127,3 +127,17 @@
   - Both mutations were reverted with `git checkout --`.
   - Core: 422 passed, 0 failed. Reconciler: 125 passed, 0 failed. fmt is clean, and clippy 1.98.1 is clean.
   - Details are in `docs/handoffs/181/handoff-T-rework.md`.
+
+## S (re-audit after test-only rework) - 2026-11-21T19:19:12-08:00
+- **Decided:**
+  - PASS. R1 and R2 are closed, and production code is unchanged since the first audit (`git diff 35c3891..HEAD -- crates/` touches tests only).
+  - I accepted T's two-platform `platform_jobs` shape for R2. My suggested single-platform "stays behind" shape could not detect M2: `deficit` adds every attributed job to `queued`, and it ignores a repository runner unless that repository is waiting. So the coverage rule only shows in attribution.
+- **Assumed:** the brief's binding clause is the exclusion ("never one registered to a GitHub repository"). The inclusion half (a `None` spare covers a GitLab job) survives M2b (`=> false`). I recorded it as advisory A4 because the brief's required core test is met as worded and R2 did not ask for it.
+- **Hedged:** `fleet_http::busy_database::a_result_the_api_cannot_take_still_ends_the_session` failed once in the full `fleet_http` run (148/150; the other failure is the known host-dependent `release_preflight`). The `busy_database` module passed 3/3 in isolated reruns and has no scaling path, so I classified it as a load flake.
+- **Evidence:**
+  - M1 (main.rs:2450 guard disabled): the R1 test fails, 2 runners placed against 0 expected.
+  - M2 (targets.rs:1456 `=> true`): the R2 test fails, `[]` against `[10]`.
+  - M2b (`=> false`): all tests pass (advisory A4).
+  - All mutations were reverted, and `git status` was clean.
+  - Core: 422 passed. Reconciler: 125 passed. fmt is clean. Clippy 1.98.1 is clean.
+  - Details are in `docs/handoffs/181/handoff-S-r2.md`.
