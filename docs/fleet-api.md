@@ -587,6 +587,27 @@ offline, and the start grant can't exceed local authority.
 | Local authority without contact | 90 s | 90 s |
 | Heartbeat / stale / offline | 15 s / 45 s / 90 s | same |
 
+## Inventory snapshot retention
+
+Every inventory report an agent submits is kept as a snapshot. GridOps reads
+only a session's current snapshot, so the reconciler deletes older ones during
+its retention cleanup on each pass.
+
+- **Setting:** `inventorySnapshotRetentionDays` in the system settings
+  (`GET`/`PUT /api/v1/settings`). It defaults to **7** days, and a save accepts
+  **1 to 3,650**; anything else answers 400. The field is optional in a `PUT`:
+  left out, the stored value stays as it is. The settings page doesn't show it
+  yet, so set it through the API.
+- **What goes:** a snapshot received more than that many days ago, unless it
+  is the current snapshot of a session that has not ended. The current
+  snapshot of an ended session is deleted like any other once it is old
+  enough.
+- **How:** in batches of 500 rows, one short write each, with a 25 ms pause
+  between batches so agent requests get the database in between. A pass
+  deletes at most 20,000 rows; anything left over goes on the next pass.
+- **Disk:** SQLite reuses the freed space, so the database stops growing, but
+  the file does not shrink. GridOps never runs `VACUUM` itself.
+
 ## Domain relationships
 
 - A **host** is one physical or virtual machine running the agent. It has an

@@ -56,6 +56,8 @@ mod query;
 mod recovery;
 #[path = "fleet_http/release_preflight.rs"]
 mod release_preflight;
+#[path = "fleet_http/snapshot_retention_setting.rs"]
+mod snapshot_retention_setting;
 #[path = "fleet_http/start_retry.rs"]
 mod start_retry;
 #[path = "fleet_http/tart_outage.rs"]

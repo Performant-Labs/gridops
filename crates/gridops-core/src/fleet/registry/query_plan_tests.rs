@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::super::commands::{NEXT_DELIVERY, UNDELIVERABLE, UNRECEIVED};
 use super::*;
+use crate::fleet::registry::snapshot_retention::PRUNE_BATCH;
 use crate::fleet::retry::LAST_FAILURE;
 use crate::fleet::{
     ids::{AuthoritySessionId, CommandId, HostEpoch, OperationId},
@@ -84,6 +85,35 @@ async fn the_start_retry_reads_one_hosts_events_not_the_whole_table() -> Result<
             .iter()
             .any(|step| step.starts_with("SCAN fleet_events")),
         "the failure lookup must not scan fleet_events: {plan:?}"
+    );
+    f.close().await
+}
+
+/// The reconciler prunes old inventory snapshots one batch at a time under
+/// the write lock (#152). A batch must reach only rows older than the cutoff,
+/// through `received_at`'s index, however many recent rows the table holds;
+/// and it checks each one against its session by key. A scan here reads the
+/// whole retained table (about 190 MB on prod at the 7-day default) under
+/// the lock on every pass.
+#[tokio::test]
+async fn a_snapshot_prune_batch_reads_only_rows_older_than_the_cutoff() -> Result<()> {
+    let f = Fixture::new(NOW).await?;
+    let plan = plan(&f.pool, PRUNE_BATCH).await?;
+    assert!(
+        plan.iter().any(|step| step
+            == "SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)"),
+        "the batch must search snapshots by received_at: {plan:?}"
+    );
+    // The planner names the sessions step by its alias. Any of the table's
+    // indexes bounds the lookup, so none is named here.
+    assert!(
+        plan.iter()
+            .any(|step| step.starts_with("SEARCH s USING ") && step.contains("INDEX")),
+        "the batch must look each session up through an index: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|step| step.starts_with("SCAN ")),
+        "the batch must scan nothing: {plan:?}"
     );
     f.close().await
 }

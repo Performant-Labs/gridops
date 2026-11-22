@@ -66,6 +66,9 @@ pub fn boot_id() -> String {
 /// One reading of the host's capacity and use. Missing values stay unknown.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Measurement {
+    /// The CPUs this process may use, in thousandths of a CPU: the physical
+    /// domain's CPU capacity.
+    pub cpu_total_millis: Option<u64>,
     pub memory_total_mib: Option<u64>,
     pub memory_used_mib: Option<u64>,
     /// One-minute load average as CPU demand, in thousandths of a CPU.
@@ -82,6 +85,14 @@ pub struct Measurement {
 #[cfg(unix)]
 fn disk_bytes() -> Option<(u64, u64)> {
     gridops_core::disk::filesystem_bytes(std::path::Path::new("/"))
+}
+
+/// The CPUs this process may use, in thousandths of a CPU.
+fn cpu_total_millis() -> Option<u64> {
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|count| u64::try_from(count.get()).ok())
+        .and_then(|count| count.checked_mul(1000))
 }
 
 /// Reads memory and load without privileges.
@@ -107,6 +118,7 @@ pub fn measure() -> Measurement {
             .and_then(|value| value.split_whitespace().next().map(str::to_owned));
         let (disk_total_bytes, disk_free_bytes) = disk_bytes().unzip();
         return Measurement {
+            cpu_total_millis: cpu_total_millis(),
             memory_total_mib: total,
             memory_used_mib: total
                 .zip(available)
@@ -145,6 +157,7 @@ pub fn measure() -> Measurement {
         });
         let (disk_total_bytes, disk_free_bytes) = disk_bytes().unzip();
         return Measurement {
+            cpu_total_millis: cpu_total_millis(),
             memory_total_mib: total,
             memory_used_mib: used,
             cpu_used_millis: load,
@@ -172,6 +185,7 @@ pub fn measure() -> Measurement {
         );
         let cores = std::thread::available_parallelism().map_or(1, |count| count.get()) as f64;
         return Measurement {
+            cpu_total_millis: cpu_total_millis(),
             memory_total_mib: total.map(|kib| (kib / 1024.0) as u64),
             memory_used_mib: total
                 .zip(free)
@@ -183,7 +197,10 @@ pub fn measure() -> Measurement {
         };
     }
     #[allow(unreachable_code)]
-    Measurement::default()
+    Measurement {
+        cpu_total_millis: cpu_total_millis(),
+        ..Measurement::default()
+    }
 }
 
 /// Runs one PowerShell expression and returns its trimmed output.
@@ -232,10 +249,9 @@ fn millis(load: &str) -> Option<u64> {
 }
 
 pub fn root_domain(name: &str, measurement: Measurement) -> anyhow::Result<ObservedDomain> {
-    let cpu_millis = std::thread::available_parallelism()
-        .ok()
-        .and_then(|count| u64::try_from(count.get()).ok())
-        .map(|count| BrowserUint53::new(count * 1000))
+    let cpu_millis = measurement
+        .cpu_total_millis
+        .map(BrowserUint53::new)
         .transpose()?;
     Ok(ObservedDomain {
         local_key: UpstreamText::new(ROOT_DOMAIN)?,
@@ -300,6 +316,7 @@ mod tests {
     fn disk_reaches_the_domain_budget_and_the_sample() -> anyhow::Result<()> {
         use gridops_core::fleet::protocol::primitives::WireTimestamp as Timestamp;
         let measurement = Measurement {
+            cpu_total_millis: Some(2000),
             memory_total_mib: Some(1024),
             memory_used_mib: Some(512),
             cpu_used_millis: Some(1000),
@@ -308,6 +325,10 @@ mod tests {
             disk_free_bytes: Some(400_000_000_000),
         };
         let domain = root_domain("io", measurement)?;
+        assert_eq!(
+            domain.capacity.cpu_millis.map(|value| value.get()),
+            Some(2000)
+        );
         assert_eq!(
             domain.capacity.disk_bytes.map(|value| value.get()),
             Some(1_000_000_000_000)

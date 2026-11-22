@@ -26,6 +26,14 @@ Known problems in the current release are in the README's
 - Migration `0048` adds `retired_at` to fleet CI targets. It rebuilds the
   `fleet_ci_targets` table, copying every row; existing targets stay
   unretired. (#183)
+- Migration `0049` adds an index on fleet inventory snapshots' `received_at`.
+  The index is built once, when the services start on the new version, while
+  the database is locked for writes. Expect a second or two for a 700 MB
+  snapshot table. (#152)
+- The first reconcile passes after the upgrade delete the backlog of old
+  inventory snapshots, at most 20,000 rows a pass. The database file does not
+  shrink: SQLite reuses the freed space. To get the space back, `VACUUM` the
+  database while GridOps is stopped. (#152)
 
 ### Added
 
@@ -42,6 +50,14 @@ Known problems in the current release are in the README's
 
 ### Changed
 
+- **Old fleet inventory snapshots are deleted.** Snapshots grew without
+  bound, by about 27 MB a day on an 8-machine fleet. The reconciler now
+  deletes those older than the new `inventorySnapshotRetentionDays` system
+  setting (7 days by default, 1 to 3,650; set through `PUT /api/v1/settings`).
+  It always keeps the current snapshot of a session that has not ended, and it
+  deletes in small batches so that agent requests are not locked out. See
+  [Inventory snapshot retention](docs/fleet-api.md#inventory-snapshot-retention).
+  (#152)
 - Runner pool API: `runnerGroupId` may be left out. A GitHub pool without one
   gets the 400 "Runner group ID must be positive." instead of a
   422. An invalid update sent to a pool that does not exist, or that the caller
