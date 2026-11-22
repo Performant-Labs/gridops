@@ -80,3 +80,40 @@
     - `grep`: the production `INSERT INTO workflow_jobs` sites;
     - `grep`: tokio `test-util` is only in the manager and tart-agent crates;
     - `grep`: no public, principal-free reader of `capacity_allocations` or the latest `host_samples` row exists in core.
+
+## Phase 3 Architecture (A, up-front plan review, round 3) - 2026-11-22T14:23:09-08:00
+- **Decided:** PASS, with 0 block findings and 6 new warns (`docs/handoffs/197/handoff-A.md`, rewritten). Warns 5 to 13 and 15 to 21 are carried unchanged under their numbers, because the brief cites them by number.
+  - **Resolved: round-2 block 14, by D-3(f).**
+    - Every `host_projection` helper takes a transaction plus a `Snapshot`.
+    - An admin snapshot passes every `?=1` gate and takes `CountScope::Host`, so "equals `list_hosts` for an admin" is testable.
+    - `start_health::start_gate` and `disk::alarm_for` are already public.
+  - **The new warns:**
+    - (22) `src/lib/api.ts`'s `api()` drops `details` and `code` from error bodies, so D-3(d)'s per-rule 422 can't reach #199 unless #197 extends the browser `ApiError`. This corrects W-20's client-side half.
+    - (23) D-3(f) should be a free function (`pool`, `now`), because `RegistryService::new` needs a `Vault` and #201 fixes `collect_live(db, now)`.
+    - (24) D-3(b) is the first edge from `fleet/` into `resources`. Return a plain error rather than `ApiResult`, add queued counts by category, and record the edge.
+    - (25) Nothing indexes `category IS NULL`, and the applied rules version has nowhere to live. 0050 or the design doc must decide both, because #190 can't add a migration.
+    - (26) D-3(a)'s first bullet still puts the clock on the fake.
+    - (27) The fleet `request` transport is private in each module, so `fleet-health/api.ts` gets its own copy, and the three existing copies are left alone.
+- **Assumed:**
+  - This is a fresh pass on the amended brief. The task text names no earlier BLOCK findings to mark, so I list round 2's block under "Resolved findings".
+  - The issue bodies are unchanged: their last update was at 12:54 PM PST (20:54 UTC), before round 1.
+- **Hedged:**
+  - **Warn 22 is a warn, not a block, even though it is the same class as block 14 (a wave-1 issue would have to edit a shared file).**
+    - It needs no decision in the brief: the one fix is a few lines in `src/lib/api.ts`, inside #197's own diff.
+    - I put it on the Phase 7 check list, and I block it there if it is missing.
+    - Round 2 used the same criterion for warns 15 to 21. Block 14 needed a choice between two designs, written into the brief.
+  - Warn 24 qualifies my own round-2 W-17 rather than reversing it. The placement stays; only the return type and the category split change.
+- **Evidence:**
+  - **Read:**
+    - the amended brief (1867382), both brief-gate results, round 2's `handoff-A.md` and `decisions.md`, and issue bodies #197, #190, #199 and #201 (`gh issue view`; update times for all 13 issues);
+    - `crates/gridops-core/src/fleet/registry/{mod.rs:1-80,queries.rs (list_hosts, open_snapshot, readable_targets_cte, visible_host_ids, host_visibility, allocation_read, counts, root_budget, latest_measurement, measurement_from_row, sample_provenance, placement_failures, host_projection head)}`;
+    - `crates/gridops-core/src/gitlab/{mod.rs:1-40,130-160,jobs.rs:1-60}`;
+    - `crates/gridops-api/src/{state.rs:1-160,error.rs,fleet/mod.rs:1-160,fleet/profiles.rs:68-95,320-365,resources.rs:70-100,resources/overview_queue.rs:1-20,200-332,webhooks.rs:622-690}`, and reconciler `main.rs:2133-2150`;
+    - `src/lib/api.ts`, `src/features/fleet/{admin-api.ts:1-60,registry-api.ts (exports),query-api.ts (exports),contracts.ts:128-141}`, `src/features/operations/operations.functions.ts:229-244`, `src/routes/settings.general.tsx` (imports, save path), `src/features/dashboard/metric-tiles.ts`, `src/routes/_app/index.tsx`, and the `src/routes` listing;
+    - `.github/workflows/ci.yml` (triggers and jobs).
+  - **Checked:**
+    - `grep`: api `fleet/` has no `crate::resources` import today;
+    - `grep`: `ApiError` from `~/lib/api` is read only for `status` (`router.tsx:15`, `job-log-viewer.tsx:126`);
+    - `grep`: the `CREATE INDEX` listing across `migrations/`;
+    - `workflow_jobs.id` is an integer primary key (`0001_initial.sql:220`);
+    - `ls migrations`: 0049 is still the last.

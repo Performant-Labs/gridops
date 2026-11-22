@@ -1,28 +1,31 @@
 ## Brief Review (Round 1)
 
 ### BLOCK findings
-**[B-1]** Two parts of the brief disagree about where frontend contract tests live and how many there are per issue. The acceptance-criteria section states: "contract tests are marked `#[ignore = "contract: #<issue>"]` (Rust) or `it.skip(...)` (Vitest), live in `*_contract_tests.rs` / `*.contract.test.ts(x)` files **next to the module they test**, **one per wave-1 issue**." D-2 then says: "Put frontend contract tests at `tests/fleet-health-<issue>-*.contract.test.ts` (one **or more** per frontend wave-1 issue) ... Don't change the Vitest config." The "Decisions after the first architect review" preamble says those decisions "override **the ownership table and the overlap list** above wherever they disagree" — it does *not* claim to override the copied acceptance criteria, so within this prompt the two requirements conflict, and a reviewer of the eventual diff cannot tell which one to enforce (guard rules, file globs like `machine-*.contract.test.tsx` from overlap 1, and the "fails once marker removed" check all depend on the answer). Fix: add one sentence to the Decisions section (or amend the acceptance copy) stating explicitly that D-2 supersedes the "next to the module they test" and "one per wave-1 issue" clauses for all frontend contract tests, and say what the Rust-side placement rule remains.
+None.
 
 ### Needs-verification findings
-**[NV-1]** Claim: the `INSERT INTO workflow_jobs` statements in `crates/gridops-core/src/autoscaling.rs` are all inside `#[cfg(test)]` and are not production insert sites (D-1 contradicts the copied issue text, which lists them as shared insert sites) — settle with the actual `crates/gridops-core/src/autoscaling.rs` around the `INSERT INTO workflow_jobs` occurrences.
-**[NV-2]** Claim: `crates/gridops-api/src/webhooks/gitlab.rs` contains no `INSERT` and already reads `build_name` and `project.path_with_namespace` — settle with the file's text (grep for `INSERT` and `path_with_namespace`).
-**[NV-3]** Claim: the third production writer is `upsert_workflow_job` at `crates/gridops-reconciler/src/main.rs:~2133` and `record_gitlab_job`/`UPSERT` at `crates/gridops-core/src/gitlab/jobs.rs:~155/:202`, and that `gitlab::Job`/`JobObservation` currently carry no job name or project path — settle with those file excerpts.
-**[NV-4]** Claim: `vitest.config.ts` only includes `tests/**/*.test.ts` (the whole basis of D-2) — settle with `vitest.config.ts`.
-**[NV-5]** Claim: `require_admin` exists at `crates/gridops-api/src/fleet/profiles.rs:330-349` and `RegistryService::list_hosts`'s `open_snapshot` refuses a principal with no user id (D-3(f), D-4) — settle with `fleet/profiles.rs` and `fleet/registry/queries.rs` excerpts.
-**[NV-6]** Claim: `queue_breakdown` in `resources/overview_queue.rs` is `pub(super)` and user-scoped — settle with the file.
-**[NV-7]** Claim: migrations `0047_gitlab.sql` gives `gitlab_jobs` only `status_changed_at, created_at, updated_at` and is not STRICT — the brief "read in part" but quotes no text; settle with the `0047_gitlab.sql` table definition.
-**[NV-8]** Claim: `axum` matches the specific `/api/v1/fleet/{...}` route before the catch-all regardless of registration order ("Registration points") — settle with axum routing documentation/source for path-priority vs registration-order matching.
+**[NV-1]** Migration numbering: that `0047_gitlab.sql`, `0048_fleet_target_retire.sql`, `0049_fleet_inventory_snapshot_retention.sql` are the last three and no `0050` exists — an `ls migrations` listing or repo tree at `83149f5`.
+**[NV-2]** D-1's insert-site claims: `process_workflow_job` at `webhooks.rs:~645`, `upsert_workflow_job` at `reconciler/main.rs:~2133`, `UPSERT`/`record_gitlab_job` at `gitlab/jobs.rs:~155/:202`, that the `autoscaling.rs` INSERTs are all `#[cfg(test)]`, and that `webhooks/gitlab.rs` has no INSERT — the cited file:line excerpts.
+**[NV-3]** `gitlab_jobs` in `0047` lacks `started_at`/`completed_at` and is not STRICT — the text of `migrations/0047_gitlab.sql`.
+**[NV-4]** `vitest.config.ts`'s include is verbatim `["tests/**/*.test.ts"]` and would not collect `.test.tsx` or `src/` files — the file's `test` block.
+**[NV-5]** D-4: `require_admin` exists at `fleet/profiles.rs:330-349` and the workload route uses `FleetUser<Read>` + it — that excerpt.
+**[NV-6]** D-3(e): `gitlab/mod.rs:22-26` shows the mod-declaration precedent — that excerpt.
+**[NV-7]** D-3(f): `RegistryService::list_hosts`' `open_snapshot` refuses principals without a user id, and the named helpers are private in `registry/queries.rs` — those excerpts.
+**[NV-8]** Registration-point claims: `fleet/mod.rs` router ends in a `/api/v1/fleet/{*path}` catch-all; `reconcile()` sequences `fleet::tick`/`cleanup_retention`; `db.rs` has `SLOW_STATEMENT = 100 ms` with `.log_slow_statements(...)`; `navigation.ts` is a `NavGroup[]` array — the cited files.
+**[NV-9]** `webhooks/gitlab.rs` "already reads" `build_name` and `project.path_with_namespace`, and the GitLab job API exposes `name` and project path to the poll — the corresponding source excerpts.
+**[NV-10]** `axum` behavior: "specific route matched first regardless of order" vs the trailing catch-all — axum routing documentation/source.
+**[NV-11]** The Mars recipe (`VACUUM INTO` via throwaway nginx container, ~93 s at 1.5 GB, last run 2026-11-15) — the project memory entry itself; the brief itself flags it as not dry-run.
 
 ### WARN findings
-**[W-1]** D-3(b) contradicts itself within the brief: bullet (b) originally permits "a signature #201 fills in", then "(b), closed. Per W-17 ... **Don't add a stub signature for #201 to fill in**." The "closed" version is clearly later, but a wave-1 agent reading top-down could implement the stub. Recommendation: strike or annotate the superseded text.
-**[W-2]** The guard-check test-PR mechanism is unspecified: the acceptance criterion says `Fleet health guard` "fails on a test PR that edits a file outside an issue's list", but nothing in the brief says how the guard maps a PR/branch to a wave-1 issue (branch-name convention? PR body? issue reference?). Without that, "outside an issue's list" is unenforceable and the two throwaway PRs can't be built deterministically. Recommendation: specify the PR→issue mapping and include it in the guard's tests.
-**[W-3]** #190's criterion "nothing is recompiled when nothing changed" is not obviously expressible as a deterministic contract test (recompilation is a build-system side effect). Recommendation: define the observable proxy (e.g. cache hit on an unchanged rules file / classifier rebuilt only on mtime change) in `docs/design/fleet-health.md` before writing the test.
-**[W-4]** The Mars-copy recipe is self-admittedly un-dry-run and the DB has ~doubled since the last measurement; the "under a minute" migration criterion is measured on a loaded Mac with no stated load ceiling beyond recording `uptime`. Recommendation: record load and, if the run exceeds a minute under load, re-measure on an idle machine rather than treating the first number as final.
-**[W-5]** The brief copies wave-1 issue numbers 190–195 and 199–203; nothing confirms whether #196–#198-adjacent numbers (#196) exist as wave-1 issues that were skipped. Recommendation: confirm the wave-1 issue list against the epic so the owners file and contract-test coverage are complete.
+**[W-1]** Single-story scope is very large (migration + schema changes to live GitLab ingestion path, guard script, ~13 contract-test files, source-trait refactor, principal-free registry read, two throwaway PRs, a 2.9 GB DB timing run). Consider explicitly sequencing the riskiest verifications (migration timing, D-3(f)) early in the plan so failure doesn't strand the rest.
+**[W-2]** "The migration applies in under a minute" is measured on a borrowed Mac under unknown load; the criterion records load but sets no pass condition for it (e.g., retry under low load vs. accept). Define what load conditions make the number valid.
+**[W-3]** "Prove it by removing all markers on a scratch branch" — specify the proof artifact (CI run link, command output in PR description), otherwise it's unverifiable after the fact.
+**[W-4]** Guard test-PR procedure requires re-opening both PRs after any post-HEAD change to the guard/owners/contract files (including rebases); this is easy to miss late. Recommend the plan carry an explicit checklist item keyed on merge-to-branch time.
+**[W-5]** "Whole speed-check set stays under 60 s in CI" — no stated measurement method (CI job timing? local timed run?). Name where the number is read from.
 
 ### NIT findings
-**[NIT-1]** "one contract-test file per crate for #190" appears only in the W-guidance paragraph; the acceptance-criteria section still says "one per wave-1 issue". Harmless once B-1 is fixed, but fold it into the same clarification.
-**[NIT-2]** The brief says disk is tight (~29 GB) and asks for a 2.9 GB DB copy plus scratch branches; a one-line note on where the copy lands and that it is deleted even on failure (not just "afterwards") would close the error path.
+**[NIT-1]** "Migration number … re-check with `ls migrations | sort | tail -1`" sorts lexically, which breaks past 0099; harmless today, but note it.
+**[NIT-2]** The brief says the owners file "starts from this table" but D-1/D-2/W-5 already amend it in three places; the plan should print the final table once rather than leave the delta implicit.
 
 ### Verdict
-BLOCK — 1 blocking finding (B-1); must resolve before implementation starts.
+PASS — no BLOCK findings; implementation may proceed.
