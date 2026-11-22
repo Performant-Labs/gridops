@@ -59,3 +59,9 @@
 - **Assumed:** the pre-existing macOS `release_preflight` failure is out of scope, as T-red established on base `9e357e0`.
 - **Hedged:** my stress counts (40/40/30) are smaller than F's; they agree with F's 0-failure results and the old-fixture rates are T-red's measurements. `FakeTart::logged` orders by mtime, which can tie on a coarse-clock filesystem, but no caller depends on order (checked every `calls()`/`calls_to()` use).
 - **Evidence:** handoff-T-green.md; mutation checks (counter-based slot hold fails R1; disabled identity probe fails R3 and R6).
+
+## Phase 7 Anti-duplication gate (A) - 2026-11-22
+- **Decided:** PASS. F extended `always-busy` / `FakeTart::flag` and put the API guard in one shared `tests/support/api_process.rs`; the old fleet health loop and `SESSION_TOKEN` are gone, so no parallel path. No production changes.
+- **Assumed:** no survey.md exists, so the brief and handoff-A.md served as the Reuse map.
+- **Hedged:** two warns (heavier per-entry fake logger, justified by stress evidence; `session_cookie` vs `session_cookie_for` could share a body).
+- **Evidence:** diff 9e357e0..8233328 read in full for the helper, fleet_http, gitlab_runner_script, tart_outage_tests; handoff-A-dup.md.
