@@ -6,7 +6,7 @@
 //! profile covers the pool's repositories (or its organization).
 
 use serde::{Deserialize, Serialize};
-use sqlx::{Row as _, SqlitePool};
+use sqlx::{Row as _, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::autoscaling::FleetQueuedJob;
@@ -70,7 +70,8 @@ pub async fn sync_gitlab_targets(pool: &SqlitePool) -> Result<(), FleetError> {
 }
 
 /// The fleet target of GitLab connection `connection_id` (its own project or
-/// group), created on first use; `None` when the connection does not exist.
+/// group), created on first use; `None` when the connection does not exist
+/// or its target is retired (#183: a retired target is never revived).
 pub async fn gitlab_connection_target(
     pool: &SqlitePool,
     connection_id: &str,
@@ -97,12 +98,25 @@ pub async fn gitlab_connection_target(
         },
         _ => return Err(FleetError::InvalidRequest("GitLab scope kind")),
     };
-    ensure_target(pool, &target).await.map(Some)
+    ensure_live_target(pool, &target).await
 }
 
 /// The fleet target ID for `target`, created on first use. GitHub and GitLab
-/// targets are stored; Bitbucket targets are refused.
+/// targets are stored; Bitbucket targets are refused. A retired target is
+/// never revived: its key answers `NotFound` (#183).
 pub async fn ensure_target(pool: &SqlitePool, target: &CiTarget) -> Result<String, FleetError> {
+    ensure_live_target(pool, target)
+        .await?
+        .ok_or(FleetError::NotFound)
+}
+
+/// [`ensure_target`], with `None` when `target`'s key belongs to a retired
+/// row. The insert does nothing on a taken key, so a retired row is never
+/// replaced either.
+async fn ensure_live_target(
+    pool: &SqlitePool,
+    target: &CiTarget,
+) -> Result<Option<String>, FleetError> {
     let key = target.canonical_key();
     let (kind, installation, repository, organization) = match target {
         CiTarget::GitlabProject {
@@ -181,7 +195,7 @@ async fn ensure_gitlab_target(
     connection_id: &str,
     project_id: Option<i64>,
     group_id: Option<i64>,
-) -> Result<String, FleetError> {
+) -> Result<Option<String>, FleetError> {
     sqlx::query(
         "INSERT INTO fleet_ci_targets (id,kind,canonical_key,gitlab_connection_id,gitlab_project_id,gitlab_group_id)
          VALUES (?,?,?,?,?,?) ON CONFLICT(canonical_key) DO NOTHING",
@@ -197,16 +211,17 @@ async fn ensure_gitlab_target(
     target_id_for_key(pool, key).await
 }
 
-async fn target_id_for_key(pool: &SqlitePool, key: &str) -> Result<String, FleetError> {
-    Ok(
-        sqlx::query_scalar("SELECT id FROM fleet_ci_targets WHERE canonical_key=?")
-            .bind(key)
-            .fetch_one(pool)
-            .await?,
+/// The unretired target with canonical key `key`.
+async fn target_id_for_key(pool: &SqlitePool, key: &str) -> Result<Option<String>, FleetError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM fleet_ci_targets WHERE canonical_key=? AND retired_at IS NULL",
     )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?)
 }
 
-/// Targets with a readable label, for granting hosts.
+/// Unretired targets with a readable label, for granting hosts.
 pub async fn list_targets(pool: &SqlitePool) -> Result<Vec<TargetSummary>, FleetError> {
     sync_github_targets(pool).await?;
     sync_gitlab_targets(pool).await?;
@@ -215,6 +230,7 @@ pub async fn list_targets(pool: &SqlitePool) -> Result<Vec<TargetSummary>, Fleet
            FROM fleet_ci_targets t
            LEFT JOIN repositories r ON r.id=t.repository_id
            LEFT JOIN installations i ON i.id=t.installation_id AND t.kind='github_organization'
+          WHERE t.retired_at IS NULL
           ORDER BY label",
     )
     .fetch_all(pool)
@@ -699,8 +715,10 @@ pub async fn save_pool_fleet(
             .execute(&mut *tx)
             .await?;
         for target in &targets {
+            // A retired target is never re-linked (#183).
             sqlx::query(
-                "INSERT INTO profile_ci_targets (profile_id,target_id,enabled) VALUES (?,?,1)
+                "INSERT INTO profile_ci_targets (profile_id,target_id,enabled)
+                 SELECT ?,id,1 FROM fleet_ci_targets WHERE id=? AND retired_at IS NULL
                  ON CONFLICT(profile_id,target_id) DO UPDATE SET enabled=1,revoked_at=NULL",
             )
             .bind(&id)
@@ -792,13 +810,159 @@ pub fn platform_supports_labels(
     })
 }
 
-/// Whether one of the pool's fleet workloads may still be on a machine: a
-/// placement that hasn't finished, or capacity still charged to a host.
-const LIVE_WORKLOADS: &str = "SELECT EXISTS (
+/// Whether placement `p` may still be on a machine: it hasn't finished, or
+/// capacity is still charged to a host for it. The one list of finished
+/// placement states every fleet liveness check shares.
+macro_rules! live_placement {
+    () => {
+        "(p.state NOT IN ('stopped','cleaned','failed')
+          OR EXISTS (SELECT 1 FROM capacity_allocations a
+                     WHERE a.placement_id=p.id AND a.state<>'released'))"
+    };
+}
+
+/// Whether one of the pool's fleet workloads may still be on a machine.
+const LIVE_WORKLOADS: &str = concat!(
+    "SELECT EXISTS (
        SELECT 1 FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id
-       WHERE i.pool_id=?1 AND (p.state NOT IN ('stopped','cleaned','failed')
-         OR EXISTS (SELECT 1 FROM capacity_allocations a
-                    WHERE a.placement_id=p.id AND a.state<>'released')))";
+       WHERE i.pool_id=?1 AND ",
+    live_placement!(),
+    ")"
+);
+
+/// The names of the pools with work on a target of GitLab connection `?1`
+/// that may still be on a machine, or that is queued for one. An admitted
+/// intent is history: its placement says whether it is still live.
+const LIVE_CONNECTION_WORK: &str = concat!(
+    "SELECT DISTINCT rp.name AS pool FROM (
+       SELECT i.pool_id FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id
+        WHERE p.target_id IN (SELECT id FROM fleet_ci_targets WHERE gitlab_connection_id=?1)
+          AND ",
+    live_placement!(),
+    "
+       UNION
+       SELECT pool_id FROM workload_intents
+        WHERE status='queued'
+          AND target_id IN (SELECT id FROM fleet_ci_targets WHERE gitlab_connection_id=?1)
+     ) work JOIN runner_pools rp ON rp.id=work.pool_id
+     ORDER BY lower(pool)"
+);
+
+/// The fleet event written for each target that retires.
+pub const TARGET_RETIRED_EVENT: &str = "fleet.target.retired";
+
+/// What retiring a GitLab connection's fleet targets did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetiredTargets {
+    pub target_ids: Vec<String>,
+    pub host_grants_revoked: u64,
+    pub session_grants_revoked: u64,
+    pub profile_links_revoked: u64,
+}
+
+/// The outcome of [`retire_gitlab_connection_targets`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionTargetsRetirement {
+    /// Every target of the connection is retired and its grants and platform
+    /// links revoked; the connection no longer blocks its own delete.
+    Retired(RetiredTargets),
+    /// Nothing changed: work of these pools (by name) may still be on a
+    /// machine or is queued for one, on a target of the connection.
+    LiveWork(Vec<String>),
+}
+
+/// Retires every fleet target of GitLab connection `connection_id`, in the
+/// caller's transaction, as removing the connection does (#183). Refuses,
+/// changing nothing, while work on one of them may still be on a machine or is
+/// queued. Otherwise each target is retired (`retired_at` set and its
+/// connection dropped in one UPDATE, so the connection can be deleted), its
+/// machine and session grants are revoked with their revision bumped, its
+/// platform links are disabled and revoked, and one `fleet.target.retired`
+/// event records it. The target row stays, so fleet history keeps its
+/// references.
+pub async fn retire_gitlab_connection_targets(
+    conn: &mut SqliteConnection,
+    connection_id: &str,
+    actor_user_id: &str,
+    now: i64,
+) -> Result<ConnectionTargetsRetirement, FleetError> {
+    let pools: Vec<String> = sqlx::query_scalar(LIVE_CONNECTION_WORK)
+        .bind(connection_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    if !pools.is_empty() {
+        return Ok(ConnectionTargetsRetirement::LiveWork(pools));
+    }
+    let target_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM fleet_ci_targets WHERE gitlab_connection_id=? ORDER BY id",
+    )
+    .bind(connection_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut retired = RetiredTargets::default();
+    for target_id in &target_ids {
+        let host_grants = sqlx::query(
+            "UPDATE host_target_grants SET revoked_at=?,revision=revision+1
+              WHERE target_id=? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(target_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        let session_grants = sqlx::query(
+            "UPDATE host_session_target_grants SET revoked_at=?,revision=revision+1
+              WHERE target_id=? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(target_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        let profile_links = sqlx::query(
+            "UPDATE profile_ci_targets SET enabled=0,revoked_at=?
+              WHERE target_id=? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(target_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        sqlx::query(
+            "UPDATE fleet_ci_targets SET retired_at=?,gitlab_connection_id=NULL
+              WHERE id=? AND retired_at IS NULL",
+        )
+        .bind(now)
+        .bind(target_id)
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fleet_events (id,target_id,actor_user_id,kind,detail_json,created_at)
+             VALUES (?,?,?,?,?,?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(target_id)
+        .bind(actor_user_id)
+        .bind(TARGET_RETIRED_EVENT)
+        .bind(
+            serde_json::json!({
+                "gitlabConnectionId": connection_id,
+                "hostGrantsRevoked": host_grants,
+                "sessionGrantsRevoked": session_grants,
+                "profileLinksRevoked": profile_links,
+            })
+            .to_string(),
+        )
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+        retired.host_grants_revoked += host_grants;
+        retired.session_grants_revoked += session_grants;
+        retired.profile_links_revoked += profile_links;
+    }
+    retired.target_ids = target_ids;
+    Ok(ConnectionTargetsRetirement::Retired(retired))
+}
 
 pub async fn pool_has_live_workloads(pool: &SqlitePool, pool_id: &str) -> Result<bool, FleetError> {
     Ok(sqlx::query_scalar::<_, bool>(LIVE_WORKLOADS)
@@ -911,7 +1075,7 @@ pub async fn link_pool_target(
          SELECT p.id,t.id,1 FROM pool_execution_profiles p
            JOIN runner_pools rp ON rp.id=p.pool_id
            JOIN fleet_ci_targets t ON t.id=?2
-          WHERE p.pool_id=?1 AND p.archived_at IS NULL
+          WHERE p.pool_id=?1 AND p.archived_at IS NULL AND t.retired_at IS NULL
             AND ((t.kind='github_repository'
                   AND (rp.repository_id=t.repository_id OR EXISTS (
                     SELECT 1 FROM runner_pool_repositories pr

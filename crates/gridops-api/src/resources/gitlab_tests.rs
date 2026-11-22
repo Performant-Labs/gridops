@@ -22,7 +22,7 @@ use axum::{
 };
 use gridops_core::{
     BitbucketClient, Config, GitHubClient, Vault,
-    fleet::{CiTarget, ExternalId, GitlabConnectionId},
+    fleet::ExternalId,
     gitlab::{
         GitLabApi as _, GitLabCredentials, GitLabError, Scope,
         fake::{FakeGitLab, FakeMethod},
@@ -1216,25 +1216,6 @@ async fn a_connection_a_pool_targets_cannot_be_deleted() -> Result<()> {
         "the pool keeps its target"
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn a_connection_a_fleet_target_references_is_refused_with_409_not_500() -> Result<()> {
-    let h = harness().await?;
-    let created = h
-        .create(GITLAB, project(42, "acme/app")?, "Acme app")
-        .await?;
-    let id = connection_id(&created)?;
-    gridops_core::fleet::targets::ensure_target(
-        &h.database,
-        &CiTarget::GitlabProject {
-            connection_id: GitlabConnectionId::new(&id).map_err(|error| anyhow!("{error}"))?,
-            project_id: external_id(42)?,
-        },
-    )
-    .await
-    .map_err(|error| anyhow!("{error}"))?;
-    assert_delete_refused(&h, &id, "a fleet target references it").await
 }
 
 #[tokio::test]

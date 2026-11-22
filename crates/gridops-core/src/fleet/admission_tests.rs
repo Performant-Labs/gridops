@@ -3613,3 +3613,47 @@ async fn link_pool_target_links_a_gitlab_target_only_for_a_pool_of_its_connectio
     assert_eq!(links(&linked[0]).fetch_one(&database.pool).await?, 1);
     database.close().await
 }
+
+/// #183 decision 6: a retired GitLab target (`retired_at` set and its
+/// connection dropped, decision 1) is unknown to new work. Its pool's target
+/// identity check, which submit, the admission re-checks and operation access
+/// all go through, answers `NotFound` even though the pool still lists the
+/// connection, and `link_pool_target` does not link it. The pool's other
+/// GitLab target stays valid.
+#[tokio::test]
+async fn a_retired_gitlab_target_is_not_valid_for_its_pool_and_is_never_linked() -> Result<()> {
+    use crate::fleet::{service::ensure_target_identity_for_pool, targets::link_pool_target};
+    let database = Database::ready().await?;
+    let (linked, _) = gitlab_targets_for_legacy_pool(&database).await?;
+    let (retired, live) = (&linked[0], &linked[1]);
+    sqlx::query("UPDATE fleet_ci_targets SET retired_at=10,gitlab_connection_id=NULL WHERE id=?")
+        .bind(retired)
+        .execute(&database.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!("0048 lets a GitLab target retire: {error}"))?;
+
+    let mut tx = database.pool.begin().await?;
+    let decision = ensure_target_identity_for_pool(&mut tx, "legacy-pool", retired).await;
+    tx.rollback().await?;
+    assert!(
+        matches!(decision, Err(FleetError::NotFound)),
+        "a retired target is not found for new work: {decision:?}"
+    );
+    let mut tx = database.pool.begin().await?;
+    let decision = ensure_target_identity_for_pool(&mut tx, "legacy-pool", live).await;
+    tx.rollback().await?;
+    assert!(
+        decision.is_ok(),
+        "the live target stays valid: {decision:?}"
+    );
+
+    link_pool_target(&database.pool, "legacy-pool", retired).await?;
+    let links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM profile_ci_targets WHERE target_id=? AND enabled=1 AND revoked_at IS NULL",
+    )
+    .bind(retired)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(links, 0, "a retired target is never linked to a platform");
+    database.close().await
+}

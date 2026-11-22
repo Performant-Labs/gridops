@@ -348,9 +348,10 @@ mod tests {
             "POST 409 on a duplicate scope"
         );
         assert!(
-            conflicts(GITLAB_CONNECTION, "delete")
-                .is_some_and(|text| text.contains("while a pool or a fleet target references it")),
-            "DELETE 409 covers pools and fleet targets"
+            conflicts(GITLAB_CONNECTION, "delete").is_some_and(|text| {
+                text.contains("a pool uses it") && text.contains("fleet work on its fleet targets")
+            }),
+            "DELETE 409 covers pools, live runners and live fleet work"
         );
         for (path, method) in [
             (GITLAB_CONNECTION, "patch"),

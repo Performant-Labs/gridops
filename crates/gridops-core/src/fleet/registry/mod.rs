@@ -1170,7 +1170,7 @@ impl RegistryService {
         ensure_system_admin(&mut tx, user_id).await?;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM fleet_hosts WHERE id=? AND lifecycle_state!='retired' AND deleted_at IS NULL)
-                AND EXISTS (SELECT 1 FROM fleet_ci_targets WHERE id=?)",
+                AND EXISTS (SELECT 1 FROM fleet_ci_targets WHERE id=? AND retired_at IS NULL)",
         )
         .bind(host_id.to_string())
         .bind(target_id)

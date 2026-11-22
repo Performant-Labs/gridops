@@ -212,6 +212,33 @@ the jobs need in the base image. Prepare the image with
 in a fresh clone of it and deletes the image if `gitlab-runner` is missing
 there; see [macOS runners](macos-runners.md#gitlab).
 
+## Removing a connection
+
+**Remove** on a GitLab connection under **Settings → Connections** is refused
+while anything still runs through it:
+
+- a runner pool still uses the connection;
+- a runner registered through the connection still exists;
+- fleet work on the connection's fleet target is still on a machine (a
+  placement that hasn't finished, or capacity not yet released), or is queued
+  for one.
+
+The error names the pools to change or the work to stop. Remove a connection
+in this order:
+
+1. Delete the pool, or edit it to drop the connection.
+2. Let its runners leave service: each one finishes its job or idles out and is
+   deleted from GitLab, and its fleet placement is cleaned up.
+3. Remove the connection.
+
+Removing it retires the connection's fleet target. Every machine grant and
+pool platform link on the target is revoked, and the target is no longer
+offered when granting machines. Its fleet history (workloads, placements and
+events) is kept. GridOps deletes the stored token and webhook secret, but not
+the webhook in GitLab; remove it there too. Connecting the same project or
+group again creates a new connection with a new fleet target, which machines
+have to be granted again.
+
 ## Known limits
 
 - **No instance runners.** GridOps creates project and group runners only. It
