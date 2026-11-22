@@ -102,3 +102,77 @@ Non-blocking; none needs action for the verdict.
 - **`the_stand_in_answers_like_docker_29`** checks the stand-in against recorded Docker 29.8 messages. It is a fidelity pin on a test double and can only fail when the double is edited. Keeping it is defensible; deleting it would lose no production signal.
 - **`only_a_github_runner_that_shares_the_socket_uses_the_externals_cache`** has 7 rows for one predicate; the org and group rows add no branch beyond `is_gitlab()`. Cheap, left as is.
 - The runner scripts' forwarder state is the fixed `/tmp/gridops-forwarded-job-state` (core's script). The new script tests serialise within one process with `SCRIPT_LOCK`, but two worktrees running these tests at once would share that path, as the manager's existing forwarder test already does.
+
+---
+
+# Handoff-S: Round 2 - Container jobs on the linux pool (#126)
+
+**Date:** 2026-11-22
+**Branch:** claude/fix-126-externals (HEAD e61d84a)
+**Issue:** #126
+**Handoff-T reviewed:** docs/handoffs/126/handoff-T-green.md (round-3 section)
+**Handoff-F reviewed:** docs/handoffs/126/handoff-F.md (round-3 section: no production change, S-1 routed back to T)
+**Round 1 reviewed:** this file, finding S-1
+
+## Routing note
+The pipeline sent round 1's test-only REWORK to F. F correctly made no production change and flagged it for T (decisions.md, F Phase 6 round 3). T then repaired the test directly in e61d84a. S was dispatched directly for this round.
+
+## A precondition
+Confirmed. No production code changed since A's PASS (A round 3) and A-dup's PASS, so the architecture verdict still holds.
+
+## T precondition
+Confirmed. T-green round 3 reports zero blocking issues.
+
+## Visual-diff-tool precondition
+N/A. Host-agent change with no visual surface.
+
+## Production code unchanged since round 1
+`git diff f55f5d7..HEAD -- ':!docs' ':!*externals_tests.rs'` is empty. `git diff --stat f55f5d7..HEAD` shows only `externals_tests.rs` (+104/-2: the new test and two added imports) and three handoff docs. Round 1's spec-compliance and production-code findings therefore stand unchanged.
+
+## S-1 resolution check
+New test: `a_shared_start_uses_the_id_the_tag_resolves_to_now_and_its_cache` (externals_tests.rs:1049). I checked it against each item S-1 required:
+
+| Required by S-1 | Present | Where |
+|---|---|---|
+| Calls `shared_runner` with `SharedPaths` built from temp roots, using the existing `StandIn` | YES | Paths sit under the stand-in's scratch directory. `SharedPaths::of` and `/var/lib/gridops-agent` are not used |
+| Case 1: `Ok`; `image_id == "sha256:<HEX>"`, not `TAG` | YES | `ensure!(runner.image_id == format!("sha256:{HEX}"))` |
+| Case 1: read-only `--mount` of `<cache_root>/<HEX>` | YES | bind, source and target equal the cache path, `readonly` |
+| Case 1: `folders` lists the work folder and the runner root, and both exist | YES | Exact equality on the list, plus `is_dir()` on both |
+| Case 2: tag moved with `docker.set("id", ...)` while the `HEX` cache stays | YES | Resolves to `sha256:<HEX_A>`. The `HEX` cache directory is still present |
+| Case 2: `Err` with `Runtime, true` | YES | |
+| Case 2: reason names the new `sha256:<id>` and its cache path | YES | This also separates "no cache for the resolved id" from "inspect failed", the ambiguity S-1 raised about `a_shared_start_without_a_cache_...` |
+| Case 2: an `image inspect` call for the tag | YES | Asserted in both cases |
+| Case 2: neither folder created | YES | `!moved.work.exists() && !moved.runner_root.exists()`. This checks "cache before folders" whether or not `/var/lib/gridops-agent` is writable |
+
+**Can it fail for the right reason?** T's two mutation checks (`image_id` returning the tag; the cache check moved after folder creation) each turned the test red with the matching message, and `docker.rs` was restored afterwards (the production diff is empty, confirmed above). The test cannot skip silently: `stand_in` reruns it in a child process and fails unless the child reports `1 passed`, and the test has no root or `/var/lib` early return.
+
+**Test quality (rubric section 7).** The test covers one behaviour: Start resolves the id itself, uses that id's cache, and checks the cache before creating folders. It runs at the cheapest tier that reaches the helper. It does not duplicate `a_shared_start_without_a_cache_...`, which stays as the end-to-end `call` check across both runner modes. The suite grew by one test, which is proportionate to a test-only finding. Nothing to delete or merge.
+
+The remaining unpinned line is `image = runner.image_id` in `start` (docker.rs:203). It stays verified by reading, as round 1 directed.
+
+**S-1: RESOLVED.**
+
+## Tier 1 re-run by S (`CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`, shared target from the worktree's `.cargo/config.toml`, `CARGO_TARGET_DIR` unset)
+`cargo test -p gridops-host-agent`: PASS. Results: lib 30 passed (includes the new test and `a_shared_start_without_a_cache_...`), main 0, dispatch 8, docker_gitlab 10, docker_runtime 1+1+2, version 1. 0 failed.
+
+## Quality audit (delta from round 1)
+| Area | Result | Notes |
+|------|--------|-------|
+| Architecture gate | PASS | A round 3 and A-dup PASS. No production change since |
+| Test quality (`testing/test-quality.md` section 7) | PASS | S-1 closed as specified. No new smells |
+| Everything else | Unchanged from round 1 | No production, doc or CHANGELOG change since round 1 |
+
+## Scope check
+Round 2 added one test and handoff docs, nothing more. The phase scope is unchanged from round 1: no over-delivery and no under-delivery.
+
+## Verdict
+
+PASS. S-1 is resolved as specified. Spec-compliant; production code, docs and CHANGELOG are unchanged and were already acceptable in round 1. Ready for O to commit.
+
+## Advisory notes (round 2)
+- **Live evidence from the orchestrator, which closes part of round 1's "not exercised" list:**
+  - Callisto, Docker 29.9.2: a bind source reached through a symlink (`<tmp>/root/externals -> <tmp>/cache`) exposed the cache's files at `/__e` both when mounted with `-v` and when mounted with `--mount type=bind,...,readonly`. This confirms the fix's premise: the daemon resolves a host bind source through the runner root's `externals` link, and `--mount ...,readonly` works on a real engine.
+  - Callisto: `--mount` with a missing source refused to start. A missing cache therefore fails loudly at the engine as well, not only at the agent's own check.
+  - actions/runner v2.338.2 source: `ContainerInfo.cs:54-56` adds the path mappings Work (`/__w`), Tools (`/__t`) and Externals (`/__e`), in that order. `HostContext.cs:387-395` sets Externals = Root/externals and Root = the parent of Bin, the entry assembly's directory. This confirms the runner derives the externals host path from its install root, which is why the per-runner root with an `externals` link is the right seam.
+- **Still not exercised:** Start's full success path through `call` on a real host (it needs a writable `/var/lib/gridops-agent`), `docker cp -L` filling the cache from a real runner image, and an end-to-end `container:` job on a fleet host. The first fleet host to take this build should still run one `container:` job before the issue is called fixed.
+- Round 1's other advisories stand: the upgrade window, silent skips on root, the `.partial` filter, the stand-in fidelity pin, the 7-row predicate table, and the shared forwarder state path.
