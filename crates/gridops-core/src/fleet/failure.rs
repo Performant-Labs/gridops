@@ -270,6 +270,7 @@ mod tests {
             PlacementFailureReason::HostEpochChanged,
             PlacementFailureReason::RunnerRemovedBeforeStart,
             PlacementFailureReason::OperatorReleased,
+            PlacementFailureReason::RegistrationTimedOut,
             PlacementFailureReason::Unknown,
         ] {
             assert_eq!(PlacementFailureReason::from_code(reason.as_str()), reason);
@@ -286,23 +287,10 @@ mod tests {
             PlacementFailureReason::StartDeadlineExpired.as_str(),
             "start_deadline_expired"
         );
-    }
-
-    /// #130: a runner the reconciler could not register and start within
-    /// its cap is a reason of its own, under a stable code, not `unknown`.
-    /// Named by its code because the closed set is what clients parse.
-    #[test]
-    fn a_registration_timeout_has_its_own_stable_code() {
-        let reason = PlacementFailureReason::from_code("registration_timed_out");
-        assert_ne!(
-            reason,
-            PlacementFailureReason::Unknown,
-            "registration_timed_out is in the closed set"
-        );
-        assert_eq!(reason.as_str(), "registration_timed_out");
+        // #130: clients parse this code, so the literal is pinned.
         assert_eq!(
-            serde_json::to_value(reason).ok(),
-            Some(json!("registration_timed_out"))
+            PlacementFailureReason::RegistrationTimedOut.as_str(),
+            "registration_timed_out"
         );
     }
 

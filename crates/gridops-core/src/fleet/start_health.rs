@@ -241,21 +241,10 @@ mod tests {
         assert!(is_start_failure(R::AgentOutcomeUnknown, None));
         assert!(!is_start_failure(R::RunnerRemovedBeforeStart, None));
         assert!(!is_start_failure(R::OperatorReleased, None));
+        // #130: a registration that timed out says nothing about its machine
+        // (the cause is usually GitHub, or the whole organization), so it
+        // neither counts towards the start gate nor is retried elsewhere.
+        assert!(!is_start_failure(R::RegistrationTimedOut, None));
         assert!(!is_start_failure(R::Unknown, None));
-    }
-
-    /// #130: a runner given up because it could not be registered within the
-    /// reconciler's cap says nothing about its machine (the cause is usually
-    /// GitHub, or the whole organization), so it neither counts towards the
-    /// machine's start gate nor is retried on another machine.
-    #[test]
-    fn a_registration_timeout_is_not_the_machines_fault() {
-        let reason = PlacementFailureReason::from_code("registration_timed_out");
-        assert_eq!(
-            reason.as_str(),
-            "registration_timed_out",
-            "the code is known, so the check below is about it"
-        );
-        assert!(!is_start_failure(reason, None));
     }
 }

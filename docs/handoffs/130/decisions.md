@@ -98,3 +98,16 @@
     - eslint: ok;
     - tsc: no errors in changed files.
   - The source facts relied on are in `docs/handoffs/130/evidence.md`.
+
+## T (Phase 7, GREEN + Tier 2)
+
+- **Decided:**
+  - Folded the two Phase-4 core tests into the existing ones, as handoff-T-red promised. `RegistrationTimedOut` is now in `reason_codes_are_stable_and_round_trip` (plus a pinned literal for the wire code) and in `only_failures_the_machine_could_have_caused_count`. The two by-code tests were deleted, because the variant now exists and they duplicated those assertions. Core is 311 passed (313 less the 2 removed).
+  - No production code changed by T. No test was wrong.
+- **Assumed:**
+  - `docs/fleet-api.md` is "the closest fleet doc" for the brief's docs note (`docs/fleet-automation.md` does not discuss `registering`).
+- **Hedged:**
+  - The GitLab branch is not covered by a reconciler test. It is a no-op under the cap (the rollback already fails the placement), as handoff-A and F's D9 table state.
+- **Evidence:**
+  - Mutation: making `expire_registering` always return early fails both RED tests and leaves the guard green. Reverted.
+  - Commands and results are in `handoff-T-green.md`.
