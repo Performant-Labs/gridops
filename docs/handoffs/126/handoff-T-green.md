@@ -48,3 +48,41 @@ None.
 ## Advisory notes
 - Not exercised by any test, needing a real Docker daemon or fleet host: Start's success path (needs a writable `/var/lib/gridops-agent`), `docker cp -L` and `--mount ...,readonly` on a real engine, and a host bind source resolved through the runner root's `externals` link (the premise of the fix). The brief forbids live fleet verification from the Mac.
 - Diff gate W-2 (sweep only after a new fill) is left as brief decision 8 states it; the leak is bounded to one crashed fill per image.
+
+---
+
+# Handoff-T-green: Round 3 (test-only rework, S-1) - Container jobs on the linux pool (#126)
+
+**Date:** 2026-11-22
+**Branch:** claude/fix-126-externals
+**Issue:** #126
+**Finding addressed:** handoff-S.md S-1 (TEST-ONLY). No production (`src/` non-test) change.
+
+## What changed
+One test added to `crates/gridops-host-agent/src/docker/externals_tests.rs`:
+`a_shared_start_uses_the_id_the_tag_resolves_to_now_and_its_cache`. It calls `shared_runner` (docker.rs:1063) directly against the existing stand-in `docker`, with `SharedPaths` built from temp roots under the stand-in's scratch directory, so it never touches `/var/lib/gridops-agent` and does not depend on that path being unwritable.
+
+1. **Cache present for the id the tag resolves to:** `Ok`; `image_id == "sha256:<HEX>"` (not `TAG`); `args` holds a read-only bind `--mount` of `<cache_root>/<HEX>` at its own path; `folders` is exactly `[work folder, runner root]` and both directories exist; an `image inspect ... TAG` call was made.
+2. **Tag moved** (`docker.set("id", "sha256:<HEX_A>")`, the `HEX` cache still present): `Err` with `Runtime, true`; the reason names `sha256:<HEX_A>` and `<cache_root>/<HEX_A>`; an `image inspect ... TAG` call was made; neither the work folder nor the runner root exists.
+
+The F-suggested narrowing of the symlinked-externals test was already done in round 1 (renamed to `a_symlinked_externals_is_followed_and_the_cache_never_holds_a_dangling_link`, requires the `Ok`/follow branch; see decisions.md). Nothing further to change there.
+
+## Mutation checks (production edited temporarily, then restored from a copy; `git diff -- docker.rs` empty afterwards)
+- `shared_runner` returns `image.to_owned()` (the tag) as `image_id`: the new test FAILS with `the runner must be created from the resolved id, not "harbor.example/performantlabs/pl-runner:1.70.4"`.
+- The cache check moved after the folder creation: the new test FAILS with `a refused Start created its folders` (the existing `a_shared_start_without_a_cache_...` also fails, answering `Configuration, false` on this Mac).
+
+## GREEN / Tier 1 (`CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`, non-root, no `/var/lib/gridops-agent`)
+| Check | Result |
+|---|---|
+| `cargo test -p gridops-host-agent` | PASS: lib 30 (29 + the new test), dispatch 8, docker_gitlab 10, docker_runtime 1+1+2, version 1 |
+| `cargo test -p gridops-core --lib fleet` | PASS: 196 passed, 0 failed |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo +1.98.1 clippy -p gridops-host-agent --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` | PASS, no warnings |
+
+## Tier 2
+- **Coverage:** item 1 / decision 7 ("Start resolves `{{.Id}}` itself and uses that id and its cache") is now pinned by a test, closing S-1. The one line still verified by reading is `image = runner.image_id` in `start` (docker.rs:203), which needs a writable `/var/lib/gridops-agent`; S said not to add a production seam for it this cycle.
+- **Test quality:** one behavior (Start's id resolution and cache-before-folders ordering) at the cheapest tier that reaches it (the helper against the stand-in, not the full `call`). It does not duplicate `a_shared_start_without_a_cache_...`, which stays as the end-to-end `call` check of both runner modes; the new test adds what that one cannot tell apart (no cache for the resolved id vs a failed inspect), plus the reason text and the inspect call.
+- **Evidence appendix:** the test relies on nothing outside the diff (`shared_runner`, `SharedPaths`, `externals_cache` are all part of #126's diff).
+
+## Blocking issues
+None. S-1 is addressed.

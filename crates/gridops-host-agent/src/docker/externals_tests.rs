@@ -37,8 +37,8 @@ use gridops_core::fleet::{
 };
 
 use super::{
-    DockerRuntime, Refusal, externals_cache, externals_cache_name, github_runner_script,
-    shared_socket_args, uses_externals_cache,
+    DockerRuntime, Refusal, SharedPaths, externals_cache, externals_cache_name,
+    github_runner_script, shared_runner, shared_socket_args, uses_externals_cache,
 };
 use crate::helper::{Bootstrap, HelperRequest, HelperResponse, RuntimeHelper as _};
 
@@ -1039,6 +1039,106 @@ async fn a_shared_start_without_a_cache_fails_retryably_and_creates_nothing() ->
             docker.calls()?
         );
     }
+    Ok(())
+}
+
+/// Item 1 and decision 7 (S-1): Start's socket branch resolves the tag to its id itself, uses the
+/// cache of that id and creates the runner from the id, never the tag. When a re-pull has moved
+/// the tag to an id with no cache, it refuses `Runtime, true` naming that id and its cache path,
+/// and creates neither folder, even though the old id's cache is still there.
+#[tokio::test]
+async fn a_shared_start_uses_the_id_the_tag_resolves_to_now_and_its_cache() -> Result<()> {
+    let Some(directory) =
+        stand_in("a_shared_start_uses_the_id_the_tag_resolves_to_now_and_its_cache")?
+    else {
+        return Ok(());
+    };
+    let state = directory.join("state");
+    let cache_root = state.join("externals");
+    fs::create_dir_all(cache_root.join(HEX))?;
+    let paths = |name: &str| SharedPaths {
+        work_root: state.join("work"),
+        work: state.join("work").join(name),
+        runners_root: state.join("runners"),
+        runner_root: state.join("runners").join(name),
+        cache_root: cache_root.clone(),
+    };
+
+    // The tag resolves to the id whose cache Prepare filled.
+    let docker = StandIn::new(&directory, "/actions-runner", Docker::V29)?;
+    let found = paths("found");
+    let runner = match shared_runner(SOCKET, TAG, &found).await {
+        Ok(runner) => runner,
+        Err(refusal) => bail!(
+            "the cache of sha256:{HEX} was not used: {}",
+            describe(&refusal)
+        ),
+    };
+    ensure!(
+        runner.image_id == format!("sha256:{HEX}"),
+        "the runner must be created from the resolved id, not {:?}",
+        runner.image_id
+    );
+    let cache = cache_root.join(HEX).display().to_string();
+    ensure!(
+        mounts(&runner.args).iter().any(|mount| mount.bind
+            && mount.source == cache
+            && mount.target == cache
+            && mount.readonly),
+        "the cache of the resolved id is not a read-only --mount: {:?}",
+        runner.args
+    );
+    ensure!(
+        runner.folders
+            == [
+                found.work.display().to_string(),
+                found.runner_root.display().to_string(),
+            ]
+            && found.work.is_dir()
+            && found.runner_root.is_dir(),
+        "the work folder and the runner root must be created and listed: {:?}",
+        runner.folders
+    );
+    ensure!(
+        docker
+            .calls_of("inspect")?
+            .iter()
+            .any(|call| call.starts_with("image inspect") && call.ends_with(TAG)),
+        "Start did not resolve the tag itself: {:?}",
+        docker.calls()?
+    );
+
+    // A re-pull moved the tag to an id Prepare never filled; the old id's cache is still there.
+    let docker = StandIn::new(&directory, "/actions-runner", Docker::V29)?;
+    docker.set("id", &format!("sha256:{HEX_A}"))?;
+    let moved = paths("moved");
+    let refused = shared_runner(SOCKET, TAG, &moved).await;
+    let Err(refusal) = &refused else {
+        bail!("a Start whose tag moved to sha256:{HEX_A} was served by another image's cache");
+    };
+    ensure!(
+        refusal.code == FailureCode::Runtime && refusal.retryable,
+        "{}",
+        describe(refusal)
+    );
+    let path = cache_root.join(HEX_A).display().to_string();
+    ensure!(
+        refusal.reason.contains(&format!("sha256:{HEX_A}")) && refusal.reason.contains(&path),
+        "the reason must name sha256:{HEX_A} and {path}: {}",
+        refusal.reason
+    );
+    ensure!(
+        docker
+            .calls_of("inspect")?
+            .iter()
+            .any(|call| call.starts_with("image inspect") && call.ends_with(TAG)),
+        "Start did not resolve the tag itself: {:?}",
+        docker.calls()?
+    );
+    ensure!(
+        !moved.work.exists() && !moved.runner_root.exists(),
+        "a refused Start created its folders"
+    );
     Ok(())
 }
 
