@@ -1,3 +1,50 @@
+# Handoff-F: Phase 6 (round 3, spec-audit rework S-1) - Container jobs on the linux pool: runner externals and tool cache at host-valid paths
+
+**Date:** 2026-11-22
+**Branch:** claude/fix-126-externals (on f55f5d7, S verdict REWORK)
+**Issue:** #126
+
+Rounds 2 and 1 are kept below, after the dividers.
+
+## What was done
+- Nothing in production code. S-1, the only blocking finding, is test-only: S states "no `src/` change required" and "do not add a production seam in this cycle".
+
+## Design decisions
+None this round.
+
+## Reuse / extend-vs-new
+Unchanged from rounds 1 and 2.
+
+## Architecture notes for A
+None. No file under `crates/` changed.
+
+## Deviations from spec / wireframe
+None.
+
+## Tier 1 self-check (incl. tests now GREEN)
+Not re-run: the tree under `crates/` is byte-identical to the one T-green ran (`git diff af5f052..HEAD` touches only `docs/handoffs`).
+
+## Evidence appendix
+No new entries. `docs/handoffs/126/evidence.md` is unchanged.
+
+## Tests that look wrong (for T)
+**S-1 is test-only, so it is routed back to T. F changed no production code for it.**
+- The seam S asks T to test already exists and needs no production change:
+  - `async fn shared_runner(socket: &str, image: &str, paths: &SharedPaths) -> Result<SharedRunner, Refusal>` at `crates/gridops-host-agent/src/docker.rs:1063`;
+  - `struct SharedPaths { work_root, work, runners_root, runner_root, cache_root }` (all `PathBuf`) at docker.rs:1025. It can be built field by field with temp roots, so `SharedPaths::of` (the real `/var/lib/gridops-agent` paths) is not needed;
+  - `SharedRunner { image_id, args, folders }` at docker.rs:1050.
+- All three are private to `docker.rs`. `mod externals_tests;` (docker.rs:1469) is a child module, so a test in `externals_tests.rs` can reach them through `use super::*` or `super::` paths. No visibility change is needed.
+- S's two required cases (cache present; moved tag with `docker.set("id", ...)`) can both be written against this signature.
+- As S directed, `image = runner.image_id` at docker.rs:203 stays verified by reading. I added no production seam for it.
+
+## Known issues
+- S's advisories stand as written in handoff-S.md: NV-1 to NV-5 need a live `container:` job, there is an upgrade window, and some stand-in tests skip on root. None needs a production change in this cycle.
+
+## Files changed
+None this round.
+
+---
+
 # Handoff-F: Phase 6 (round 2, rework after diff gate r1) - Container jobs on the linux pool: runner externals and tool cache at host-valid paths
 
 **Date:** 2026-11-22

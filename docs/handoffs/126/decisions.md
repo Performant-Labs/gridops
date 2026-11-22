@@ -238,3 +238,9 @@
 - **Assumed:** with no survey.md, the brief's named objects and `NativeRuntime`'s staged fill are the Reuse map.
 - **Hedged:** runtime behaviour (NV-1 to NV-5) is outside this gate and was not checked.
 - **Evidence:** read the full `docker.rs` and `work_folder.rs` diffs against the merge-base, and grepped for other tree-removal helpers (none in the host agent).
+
+## F, Phase 6 (round 3, spec-audit rework S-1)
+- **Decided:** no production change. S-1 is test-only (S: "no `src/` change required"; "do not add a production seam in this cycle"). Flagged in handoff-F so the finding returns to T.
+- **Assumed:** T can reach the private `shared_runner`, `SharedPaths` and `SharedRunner` from the existing child module `externals_tests` (docker.rs:1469) without any visibility change.
+- **Hedged:** none.
+- **Evidence:** read docker.rs:1025-1075 (seam signature and fields, all `PathBuf` roots, so temp roots can be injected). `git diff af5f052..HEAD` touches only `docs/handoffs`, so T-green's Tier 1 results still hold.
