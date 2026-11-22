@@ -57,3 +57,28 @@
   - every caller of `choose_platform` and `platform_jobs`.
 
   `git diff master -- crates src` is empty. No live worktree overlaps: `cool-davinci` is clean, and `gridops-134` is stale (its work landed as 80e6f1b).
+
+## Phase 4 Tests RED (T) - 2026-11-21T18:40:00-08:00
+- **Decided:**
+  - Five tests at two tiers (`docs/handoffs/181/handoff-T-red.md`).
+  - Core, in `crates/gridops-core/tests/gitlab_pool_fleet.rs` (public API, migrated SQLite):
+    - `a_pending_gitlab_job_puts_a_fleet_platform_behind_until_a_spare_runner_covers_it`;
+    - `a_pool_with_github_and_gitlab_jobs_counts_both_and_lists_only_github_jobs`.
+  - Reconciler, in `gitlab_lifecycle_tests.rs` (a full `run_pass`):
+    - `a_pending_job_places_one_fleet_runner_for_a_pool_at_min_zero`;
+    - `pending_jobs_scale_a_fleet_gitlab_pool_up_to_max_count`;
+    - `jobs_that_are_not_pending_place_no_fleet_runner_for_a_pool_at_min_zero`, a guard that is green before the fix.
+  - The `Fleet` fixture was extended, not duplicated. `new` now delegates to `with_pool`, and the new constructor is `autoscaling(max_count)`. `gitlab_poll_tests::row` became `pub(super)` (test module only) so its `pending`-row SQL is reused. No `pub` item was added.
+  - The core min-0 test tags its job `arm64` on an x64 platform, so it also pins the brief's rule that a GitLab job "is not filtered by `platform_supports_labels`".
+  - The guard test forces `desired_count=2` so that `provision` actually runs, which makes it a real guard on the `NoDemand` path and on "only `pending` jobs are demand".
+- **Assumed:**
+  - The reconciler's placed-runner count is the number of `workload_intents` rows for the pool. The brief allows this ("one `workload_intents` row or the equivalent").
+  - Prod's symptom, "desired raised but nothing placed", is reproduced by the `desired_count == 1` precondition passing while placement fails.
+- **Hedged:**
+  - The guard test is green before the fix, by design; it is required by the brief. Its validity was shown by a temporary `min_count=1` probe (it fails 1 vs 0), which was reverted.
+  - The local clippy (1.99.1) reports 5 lint errors in code this change doesn't touch. CI pins 1.98.1, so this is advisory for F's pre-PR clippy step.
+- **Evidence:**
+  - `cargo test -p gridops-core --test gitlab_pool_fleet`: 3 pass, 2 fail on the `behind` assertion, with the ownership preconditions passing.
+  - `cargo test -p gridops-reconciler`: 123 pass, 2 fail (`placed` is 0, expected 1; totals `[0,0,0]`, expected a final 2), with the `desired_count == 1` precondition passing.
+  - A `min_count=1` fixture probe made test 3 pass in full, and was reverted.
+  - `cargo fmt --check` and the clippy run on the core test target are clean.
