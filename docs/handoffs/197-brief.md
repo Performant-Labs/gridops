@@ -23,6 +23,9 @@ Eleven-plus wave-1 issues will be done in parallel by weaker agents, each in its
 
 ## Guard check test PRs
 
+The guard maps a PR to a wave-1 issue from its body, as #197 §6 says: a `Closes #N` (also `Fixes`/`Resolves`, case-insensitive) naming a wave-1 issue in the owners file. A PR naming none of them is out of the guard's scope and passes. A PR naming two or more wave-1 issues fails. The guard's own tests cover all three cases.
+
+
 The "Done when" asks for two throwaway PRs proving `Fleet health guard` fails (one editing a file outside an issue's list, one editing a contract test). Open them against `Performant-Labs/gridops` only (always pass `--repo Performant-Labs/gridops`, never upstream `iamngoni/gridops`), from branches off this story's branch, then close them and delete their branches. Cut them from the story branch's head after the last change to `scripts/fleet-health-guard.mjs`, `docs/design/fleet-health-owners.json`, any contract test file or the `Fleet health guard` job in `.github/workflows/ci.yml`; if any of those changes afterwards (including by a rebase or update of the story branch), open the two test PRs again from the new head and record both runs' head SHAs in the PR description.
 
 ## Acceptance criteria, copied from the issues (fetched 2026-11-22)
@@ -154,7 +157,7 @@ The Phase 3 review of the first plan (`docs/handoffs/197/handoff-A.md`) returned
 ### D-3. #197 wires every hook a wave-1 issue would otherwise need in a shared file
 
 - (a) An `AppState` field in `crates/gridops-api/src/state.rs` for the health source and #194's cache, following the `gitlab` / `with_gitlab` precedent. `FakeFleetHealthSource` gets the seams #194's tests need (a call count, fail-next, held calls, a settable clock), like `FakeGitLab`.
-- (b) A fleet-wide queue breakdown #201 can call from `collect_live(db, now)`. `queue_breakdown` in `resources/overview_queue.rs` is `pub(super)` and scoped to one user. #197 exposes a fleet-wide variant (or a signature #201 fills in) from a file #201 owns, or makes the existing one reusable without changing its current behavior. Either way, #201 must not need to edit `overview_queue.rs`. *(Superseded: the options in this bullet are narrowed by "(b), closed" below. Implement that version; don't add a stub signature.)*
+- (b) A fleet-wide queue breakdown #201 can call from `collect_live`: see "(b), closed" below for the one shape to implement.
 - (c) The Overview tile. #197 calls `useFleetHealth("24h")` in `src/routes/_app/index.tsx`, adds the optional second parameter to `metricTiles`, and widens the `MetricTile.to` union. #203's change to `metric-tiles.ts` is then add-only, and the guard enforces it. Until #203 lands, the tile renders nothing.
 - (d) A 422 error variant in `ApiError` (and the fleet `ErrorCode` if the category routes use the fleet envelope; see W-5 below), for #199's invalid-regex response.
 - (e) Contract-test `mod` declarations sit in #197-owned parent files, as `gitlab/mod.rs:22-26` does, so a wave-1 agent can't unhook its own tests.
