@@ -1,4 +1,87 @@
-# Handoff-T-red: Phase 4 - Container jobs on the linux pool: runner externals and tool cache at host-valid paths (#126)
+# Handoff-T-red: Phase 4 (round 2, rework after diff gate r1) - Container jobs on the linux pool: runner externals and tool cache at host-valid paths (#126)
+
+**Date:** 2026-11-22
+**Branch:** claude/fix-126-externals (head 7f963e4, A's round-3 PASS)
+**Brief / wireframe reviewed:** docs/handoffs/126-brief.md (unchanged since e10e8be), docs/handoffs/126-diff-result-r1.md, docs/handoffs/126/handoff-A.md (round 3, "Notes for O"), docs/handoffs/126/decisions.md. Wireframe: N/A (no UI).
+
+Round 1 of this handoff (the full contract and the original RED) is kept below, after the divider.
+
+## A precondition
+Confirmed: A returned PASS (round 3, 7f963e4), with 0 blocks and 2 warns.
+- A's "Notes for O" route two diff-gate findings to T this cycle:
+  - **B-1:** add the failed-rename fill test.
+  - **W-3:** pin the expected pair in the Prepare wiring test.
+- A's warns 1 and 2 are F's work for this pass:
+  - warn 1: `spawn_blocking` for `remove_tree`, and `tokio::fs::rename`;
+  - warn 2: finish the `shared_folder` rename.
+- Neither warn needs a test change.
+
+## Why this is not a classic RED
+- F's implementation is already on the branch (a27bd95), so the behaviour these tests pin already exists. Both tests pass against the current code.
+- The tests close coverage holes the diff gate found. They do not specify new behaviour.
+- RED validity is therefore shown by mutation instead. Each test fails for the right reason when the behaviour it pins is removed from `docker.rs` (4 mutations, all reverted; see below).
+- For F's pass this round, these tests are the guard. The failed-rename test exercises exactly the line A warn 1 changes (`std::fs::rename` to `tokio::fs::rename`, and `remove_tree` of the staging folder under `spawn_blocking`).
+
+## Tests authored
+Both are in `crates/gridops-host-agent/src/docker/externals_tests.rs`. It is the only file changed; no production file was touched.
+
+1. **`a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging`** (new). Pins brief item 5 / decision 5: "a failed rename → `Runtime, true`, and no staging directory is taken for a cache" (diff gate B-1).
+   - **Setup:** a regular file is pre-created at `<cache_root>/<hex>`. `is_real_dir` is false for a file, so the fill runs, copies, and then cannot rename the staged folder onto the file (`ENOTDIR`).
+   - **Assertions:**
+     - the answer is `(Runtime, true)`;
+     - the reason names the image tag and the cache path;
+     - exactly one `docker cp` ran, which proves the failure is the rename and not an earlier step;
+     - `<hex>.partial` is gone (only `<hex>` remains in the cache root);
+     - the file at `<hex>` is unchanged (still a regular file with its content);
+     - Start's `externals_cache` check still refuses;
+     - no fill container is left behind.
+   - **Tier:** a unit test against the stand-in `docker` (the module's existing rerun pattern). This is the cheapest tier that reaches the rename: it needs the fill's real filesystem steps but no Docker daemon.
+   - **Why a separate test:** it is not a sixth case in `a_docker_error_during_the_fill_is_retryable_and_leaves_no_cache`. That loop asserts `!cache_root.join(HEX).exists()`, which cannot hold when a file must stand at that path. This test also asserts things specific to a rename failure: staging removed after a complete copy, the occupant untouched, and the cp count.
+2. **`a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache`** (changed). Pins decision 2's wiring and decision 5's mapping (diff gate W-3).
+   - **Before:** it accepted either `(Configuration, false)` or `(Runtime, true)`, so a wrong pair for the failure that actually occurred passed.
+   - **Now:** a new helper, `cache_root_creation_answer()`, finds the nearest existing ancestor of `EXTERNALS_CACHE_ROOT` and tries to create a probe folder there. That gives the pair decision 5 assigns on this machine:
+     - `PermissionDenied` → `(Configuration, false)`;
+     - any other error → `(Runtime, true)`;
+     - success → remove the probe and skip with a reason, because the Prepare would write outside the test. The old test had no guard against this.
+   - The test then asserts that the Prepare answers exactly that pair.
+   - **Tier:** unchanged. It must go through `DockerRuntime::call` to cover the wiring.
+
+## RED confirmation
+- **Command:** `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test -p gridops-host-agent --lib <test>`.
+- **Mutations:** each was applied to `crates/gridops-host-agent/src/docker.rs` and reverted with a backup copy. `git status` afterwards shows only the test file modified.
+- **Results against unmutated code:**
+  - both tests pass;
+  - the externals module has 19 tests and all pass;
+  - every `gridops-host-agent` test binary passes: lib 28, dispatch 8, docker_gitlab 10, docker_runtime 1+1+2, version 1.
+
+| # | Mutation (behaviour removed) | Test | Result and the failing line |
+|---|---|---|---|
+| M1 | The rename error maps to `Refusal::configuration` | failed-rename | FAILED: `Error: Configuration, retryable false: Could not move the externals of the image harbor.example/performantlabs/pl-runner:1.70.4 into …/state/externals/2f529cfa…9491: Not a directory (os error 20)` |
+| M2 | Staging is removed only after `placed?`, so a failed rename leaves it | failed-rename | FAILED: `Error: staging left behind: ["2f529cfa…9491", "2f529cfa…9491.partial"]` |
+| M3 | Whatever stands at the cache path is removed before the rename | failed-rename | FAILED: `Error: Ok(…/state/externals/2f529cfa…9491)` (the file was replaced by a cache) |
+| M4 | `PermissionDenied` while creating the cache root maps to `Runtime` | Prepare wiring | FAILED: `Error: a Prepare that could not fill the externals cache answered Failed { code: Runtime, retryable: true, diagnostic: None }, expected Configuration, retryable false` |
+
+- **What M4 also shows:**
+  - The Prepare test really runs on this machine; it does not skip. It runs as a non-root user, `/var/lib` is `root:wheel 755`, and there is no `/var/lib/gridops-agent`.
+  - The old either-pair assertion would have passed M4. That is the W-3 gap, now closed.
+- **Hygiene:**
+  - `cargo fmt --all -- --check` is clean (after `rustfmt` on the test file).
+  - `cargo +1.98.1 clippy -p gridops-host-agent --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` is clean.
+
+## Not covered (unchanged from round 1, plus the diff gate's NV items)
+The following are not exercised by any test:
+- the sweep under the lock (A round-2 warn 8);
+- Start's success path, which writes `/var/lib/gridops-agent`;
+- a real daemon's `docker cp -L`, `--mount …,readonly`, and the host's resolution of the runner root's `externals` link (NV-1, NV-2, NV-5).
+
+The diff gate's W-2 (no sweep of `.partial` on the warm-cache path) is a production choice within the brief's decision 8. It has no test this round. If F changes it, the existing sweep test's shape covers a warm-cache variant only after a T pass.
+
+## Ready for F
+RED is valid as a rework RED: both tests pin behaviour the diff gate found untested, and each fails for the right reason when that behaviour is removed (M1-M4). F may proceed with A's round-3 warns 1 and 2. These tests and the rest of the suite must stay green through that refactor.
+
+---
+
+# Round 1 - Handoff-T-red: Phase 4 - Container jobs on the linux pool: runner externals and tool cache at host-valid paths (#126)
 
 **Date:** 2026-11-22
 **Branch:** claude/fix-126-externals (head 25e34e8, the Phase 3 PASS commit)

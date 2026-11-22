@@ -181,3 +181,26 @@
   - Searches: a repo-wide grep for `{{.Config.Image}}` readers; the crate module-layout precedent (`webhooks.rs` with `webhooks/gitlab_tests.rs`).
   - Workflow: the release's `coding-pipeline.workflow.mjs` Phase 4/5/7 routing and `coding-pipeline-logic.mjs` (`F_RESULT_SCHEMA`, `nextPhase`, `archCarryNote`).
   - Coexistence: the origin/master diff 9e357e0..fbacbc2 (only `CHANGELOG.md` is shared) and `git worktree list` (#124 shares none of these files).
+
+## Phase 4 RED (T, round 2: rework after diff gate r1) - 2026-11-22T12:46:23-08:00
+- **Decided:**
+  - **B-1:** added `a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging`.
+    - A regular file pre-created at `<cache_root>/<hex>` makes the rename of the staged folder fail with `ENOTDIR`. It needs no production seam.
+    - The test asserts `(Runtime, true)`, a reason naming the tag and the path, one `cp`, no `.partial`, the file untouched, Start's check still refusing, and no container left.
+    - It is a separate test rather than a sixth loop case, because the loop asserts that `<hex>` does not exist.
+  - **W-3:** `a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache` now asserts one pair.
+    - The new helper `cache_root_creation_answer()` works the pair out from a probe in the nearest existing ancestor of `EXTERNALS_CACHE_ROOT`: `PermissionDenied` gives `Configuration, false`, any other error gives `Runtime, true`.
+    - If this user can create the probe, the test skips with a reason, which also stops the Prepare from writing a real cache.
+  - Kept round 1 of `handoff-T-red.md` below the new round. No production file was touched.
+- **Assumed:**
+  - The driver's "author the RED" task applies to the test-only findings A's round-3 "Notes for O" route to T. F's next pass is A's round-3 warns 1 and 2.
+- **Hedged:**
+  - Both tests pass against the current code, because the behaviour already exists. RED validity rests on 4 reverted mutations of `docker.rs` (M1-M4 in the handoff), each caught with the expected failing line.
+  - The `Runtime, true` branch of the probe helper (a non-permission error, such as a read-only root) is not reachable on this Mac and was not run.
+- **Evidence:**
+  - Commands, all green:
+    - `cargo test -p gridops-host-agent`: every binary passes (lib 28, of which externals_tests 19);
+    - `cargo fmt --all -- --check`;
+    - `cargo +1.98.1 clippy -p gridops-host-agent --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl`.
+  - Mutations M1-M4 each failed the targeted test. `git status` after the revert shows only the test file changed.
+  - M4 also proves the Prepare test runs here rather than skipping: non-root user, `/var/lib` is `root:wheel 755`, and there is no `/var/lib/gridops-agent`.

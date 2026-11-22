@@ -786,6 +786,69 @@ async fn a_docker_error_during_the_fill_is_retryable_and_leaves_no_cache() -> Re
     Ok(())
 }
 
+/// Item 5 (diff gate r1, B-1): a failed rename of the complete staging copy into place is
+/// `Runtime, true`, naming the cache path; the staging folder is removed, nothing becomes a cache
+/// (Start's check still refuses), and whatever stood at the cache path is left as it was. The
+/// rename fails here because a regular file already holds the cache's name, so the fill runs
+/// (it is no folder) but the staged folder cannot replace it.
+#[tokio::test]
+async fn a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging() -> Result<()>
+{
+    let Some(directory) =
+        stand_in("a_failed_rename_into_the_cache_is_retryable_and_leaves_no_cache_or_staging")?
+    else {
+        return Ok(());
+    };
+    let docker = StandIn::new(&directory, "/actions-runner", Docker::V29)?;
+    docker.externals("/actions-runner")?;
+    let cache_root = directory.join("state/externals");
+    fs::create_dir_all(&cache_root)?;
+    let target = cache_root.join(HEX);
+    fs::write(&target, "not a cache")?;
+
+    let filled = DockerRuntime::new(None, None)
+        .fill_externals_cache(&cache_root, TAG)
+        .await;
+    let Err(refusal) = &filled else {
+        bail!("{}", outcome(&filled));
+    };
+    ensure!(
+        refusal.code == FailureCode::Runtime && refusal.retryable,
+        "{}",
+        describe(refusal)
+    );
+    let path = target.display().to_string();
+    ensure!(
+        refusal.reason.contains(&path) && refusal.reason.contains(TAG),
+        "the reason must name the image and the cache path {path}: {}",
+        refusal.reason
+    );
+    ensure!(
+        docker.calls_of("cp")?.len() == 1,
+        "the fill did not reach the rename (no copy was made): {:?}",
+        docker.calls()?
+    );
+    ensure!(
+        entries(&cache_root)? == vec![HEX.to_owned()],
+        "staging left behind: {:?}",
+        entries(&cache_root)?
+    );
+    ensure!(
+        fs::symlink_metadata(&target)?.is_file() && fs::read_to_string(&target)? == "not a cache",
+        "what stood at the cache path was replaced or changed"
+    );
+    ensure!(
+        externals_cache(&cache_root, &format!("sha256:{HEX}")).is_err(),
+        "a failed fill was taken for a cache"
+    );
+    ensure!(
+        docker.containers()?.is_empty(),
+        "containers left behind: {:?}",
+        docker.containers()?
+    );
+    Ok(())
+}
+
 /// Decision 8, A warn 8: after a new fill, caches whose image Docker says is gone, and staging
 /// left by a crashed fill, are removed; caches of images still present stay. A cache whose image
 /// Docker could not be asked about is kept.
@@ -840,7 +903,9 @@ async fn a_fill_sweeps_caches_whose_image_is_gone_and_leftover_staging() -> Resu
 
 /// Decision 2 wiring: a GitHub Prepare that shares the socket fills the cache under the agent's
 /// `StateDirectory`; where it cannot (here, a machine without one), the Prepare fails instead of
-/// reporting an environment its container jobs could not use.
+/// reporting an environment its container jobs could not use. The answer is the one decision 5
+/// gives the error this machine returns for creating the cache root (diff gate r1, W-3): a folder
+/// the agent may not create is `Configuration, false`, any other IO error `Runtime, true`.
 #[tokio::test]
 async fn a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache() -> Result<()> {
     let Some(directory) =
@@ -849,6 +914,9 @@ async fn a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache
         return Ok(());
     };
     if not_an_agent_host_or_skip()? {
+        let Some((code, retryable)) = cache_root_creation_answer()? else {
+            return Ok(());
+        };
         let docker = StandIn::new(&directory, "/actions-runner", Docker::V29)?;
         docker.externals("/actions-runner")?;
         let prepared = prepare_environment(github()?, RunnerMode::Ephemeral, true)?;
@@ -865,16 +933,12 @@ async fn a_github_prepare_sharing_the_socket_fails_when_it_cannot_fill_the_cache
             matches!(
                 response,
                 HelperResponse::Failed {
-                    code: FailureCode::Configuration,
-                    retryable: false,
+                    code: answered,
+                    retryable: answered_retryable,
                     ..
-                } | HelperResponse::Failed {
-                    code: FailureCode::Runtime,
-                    retryable: true,
-                    ..
-                }
+                } if answered == code && answered_retryable == retryable
             ),
-            "a Prepare that could not fill the externals cache answered {response:?}"
+            "a Prepare that could not fill the externals cache answered {response:?}, expected {code:?}, retryable {retryable}"
         );
     }
     Ok(())
@@ -1203,6 +1267,34 @@ fn not_an_agent_host_or_skip() -> Result<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+/// The failure decision 5 gives creating `EXTERNALS_CACHE_ROOT` on this machine, found by
+/// creating a probe folder in its nearest existing ancestor: `PermissionDenied` is
+/// `Configuration, false`, any other error `Runtime, true`. `None` (skip, saying why) when this
+/// user could create it, as the Prepare would then write outside the test.
+fn cache_root_creation_answer() -> Result<Option<(FailureCode, bool)>> {
+    let mut ancestor = Path::new(gridops_core::fleet::EXTERNALS_CACHE_ROOT);
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .context("the cache root has no existing ancestor")?;
+    }
+    let probe = ancestor.join(format!("gridops-probe-{}", uuid::Uuid::new_v4()));
+    match fs::create_dir(&probe) {
+        Ok(()) => {
+            fs::remove_dir(&probe)?;
+            eprintln!(
+                "skipped: this user may create folders in {}, so the Prepare could fill a real cache",
+                ancestor.display()
+            );
+            Ok(None)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Ok(Some((FailureCode::Configuration, false)))
+        }
+        Err(_) => Ok(Some((FailureCode::Runtime, true))),
+    }
 }
 
 /// Make everything under `directory` writable again, so it can be removed.
