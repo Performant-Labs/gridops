@@ -1,0 +1,164 @@
+# Decision journal: #152 prune fleet_inventory_snapshots
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T10:29:31-08:00
+- **Decided:** BLOCK, with 1 block and 4 warn findings (`docs/handoffs/152/handoff-A.md`).
+  - **Block 1 [correctness]: the specified batched DELETE does not bound its scan.**
+    - **The defect:** the inner `SELECT … WHERE snap.received_at < ? AND NOT EXISTS (…) ORDER BY snap.rowid LIMIT ?` plans as `SCAN snap`. Every batch that finds fewer than 500 rows walks the whole retained table while it holds the write lock. That is the last batch of each drain pass and the only batch of every steady-state pass.
+    - **The cost on prod:** about 190 MB at the 7-day default, every 30 s pass, and it grows with the setting.
+    - **Precedent:** this is the defect class `migrations/0034_retention_indexes.sql` was written to fix.
+    - **Why the brief misses it:** its `EXPLAIN QUERY PLAN` criterion (outer rowid lookup, sessions index) accepts this plan.
+    - **The fix:**
+      - migration 0049 adds `fleet_inventory_snapshots_received_idx ON fleet_inventory_snapshots(received_at)`;
+      - the subquery orders by `snap.received_at`;
+      - a core test in `query_plan_tests.rs` style pins `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)` and allows no `SCAN ` step.
+  - **The warns:**
+    - (2) a new `pub mod snapshot_retention` in `fleet::registry` with a free fn over `&SqlitePool` returning `sqlx::Error`, not inside the private, transactional `inventory.rs`;
+    - (3) `tokio::time::sleep` of a named const of 25 ms or more between batches, not `yield_now()`, because the API's writers are in another process and SQLite's busy handler polls with 1 to 100 ms sleeps;
+    - (4) add the field to `save_settings`'s `settings.updated` audit JSON, like `macosVmSlots`;
+    - (5) the timing estimate also measures a steady-state call and the one-time index build, and the PR body states the deploy-time index build.
+- **Assumed:**
+  - Prod's 7-day steady state is about 49k rows of about 3.9 KB, derived from the brief's 711 MB / 181,546 rows and 7,000 rows a day.
+  - The reconcile interval is the 30 s default on Mars.
+  - The crate's bundled SQLite (libsqlite3-sys) plans these statements the same way as the sqlite3 3.54 CLI I used.
+- **Hedged:**
+  - The steady-state lock time (about 70 to 290 ms warm) is an extrapolation from a 10k-row local seed, not a prod measurement.
+  - I chose block over warn because:
+    - the brief's own headline requirement is that "every delete holds the write lock only briefly";
+    - the brief explicitly steers F away from the index;
+    - T would otherwise pin a plan test that accepts the scan.
+  - The alternative of bounding by rowid without an index (a `rowid <` the first recent row) would also avoid the scan. I did not recommend it, because the index follows the documented 0034 precedent and needs no time-order invariant.
+- **Evidence:**
+  - **Files read:**
+    - the brief;
+    - `migrations/0026_fleet_inventory.sql` (the session and snapshot schema, and the triggers), `0034_retention_indexes.sql`, `0036`, `0045` and the latest, `0048`;
+    - `registry/{mod.rs, inventory.rs (submit_inventory, load_current_session), logs.rs, unconfirmed.rs, query_plan_tests.rs, invariants_tests.rs}` and `queries.rs` :1110-1160, :1345-1365, :1900-1915;
+    - reconciler `main.rs` (`reconcile`, `cleanup_retention`, `enforce_log_storage_budget`, `setting_i64`);
+    - api `resources.rs` (`SystemSettings`, `get_settings`, `save_settings`);
+    - `db.rs` (WAL, `busy_timeout` 5 s, `SLOW_STATEMENT` 100 ms);
+    - `fleet/targets.rs` signatures and `fleet/mod.rs`.
+  - **Commands run:**
+    - I applied all 48 migrations to a scratch DB. `EXPLAIN QUERY PLAN` of the brief's statement gave `SCAN snap`. With a `received_at` index plus `ORDER BY snap.rowid` it was still `SCAN snap`. With the index plus `ORDER BY snap.received_at` it gave `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)`.
+    - On a 10k-row, roughly 4 KB-per-row seed (41.5 MB) with 3 eligible rows, `.stats` showed:
+      - the brief's statement: 10,044 page misses and 9,999 fullscan steps;
+      - indexed and ordered by `received_at`: 21 page misses and 0 fullscan steps;
+      - the drain case (9,000 eligible): 536 pages under either ordering.
+  - **Scratch:** `/private/tmp/claude-501/-Users-andreangelantoni-Projects-gridops/a9a4a0b8-80da-4ffe-92a0-a8c8dabe7437/scratchpad/a152/`
+
+## Phase 3 Architecture (A, up-front plan re-review) - 2026-11-22T10:36:33-08:00
+- **Decided:** PASS, with 0 block and 1 warn findings (`docs/handoffs/152/handoff-A.md`, which replaces the BLOCK version at 9a543bf).
+  - **Block 1 (unbounded scan) is resolved.** The amended brief:
+    - adds migration 0049 with `fleet_inventory_snapshots_received_idx ON fleet_inventory_snapshots(received_at)`;
+    - orders the batch subquery by `snap.received_at`;
+    - replaces the EXPLAIN criterion with plan test 5, which runs on a shared const and rejects any `SCAN ` step.
+  - **Warns 2 to 5 are resolved:**
+    - the prune is a new `pub mod snapshot_retention` with a free fn returning `sqlx::Error` and `pub const`s;
+    - a named-const `tokio::time::sleep` runs between batches, not `yield_now`;
+    - `inventorySnapshotRetentionDays` is in the `settings.updated` audit JSON;
+    - the timing estimate adds a steady-state measurement and the index build time, and the PR body gives the deploy-time build.
+  - **New warn 1:** test 5 says "a `SEARCH` of `fleet_observation_sessions`". The planner reports the step by its alias, `SEARCH s USING INDEX …`, so the assertion should match `s` and should not pin a sessions index name. The no-`SCAN` assertion is the real guard.
+- **Assumed:**
+  - SQLite 3.51.3, bundled by libsqlite3-sys 0.37.0, plans this statement the same way as the 3.54.0 CLI. Test 5 checks this on the real library.
+  - No other in-flight run will add a migration 0049. The #124 and #130 briefs say no migration, and no branch has 0049 or later.
+- **Hedged:** The steady-state page count (21 pages) comes from the earlier 10k-row seed with the same SQL. I did not re-seed, to save disk.
+- **Evidence:**
+  - **Planner run:** I applied all 48 migrations plus the proposed index to a fresh scratch database (`…/scratchpad/a152r/v.db`). `EXPLAIN QUERY PLAN` of the brief's exact statement gave:
+    - `SEARCH fleet_inventory_snapshots USING INTEGER PRIMARY KEY (rowid=?)`;
+    - `LIST SUBQUERY 2`;
+    - `SEARCH snap USING INDEX fleet_inventory_snapshots_received_idx (received_at<?)`;
+    - `CORRELATED SCALAR SUBQUERY 1`;
+    - `SEARCH s USING INDEX sqlite_autoindex_fleet_observation_sessions_2 (host_id=? AND session_id=?)`.
+  - **Placement precedent:** the reconciler calls `fleet::retry::retry_failed_start`, whose `LAST_FAILURE` const is plan-tested in `registry/query_plan_tests.rs`.
+  - **Error-type precedent:** `fleet::ensure_control_plane` and `autoscaling::waiting_job_pools` return `sqlx::Error`.
+  - **Schema tests:** the upgrade tests in `tests/fleet_schema.rs` compare only the objects that existed before migrating, so the new index does not affect them.
+  - **Tokio:** the workspace pulls it in with `full` features.
+  - **Branches:** a scan of every local and remote branch found no `migrations/0049_` or later.
+
+## Phase 4 Tester (T, RED) - 2026-11-22T11:03:39-08:00
+- **Decided:** RED is valid; F may implement (`docs/handoffs/152/handoff-T-red.md`).
+  - **Core** (`registry/snapshot_retention_tests.rs`, new; `query_plan_tests.rs`, one test added):
+    - the retention rule (brief test 1);
+    - the batch bounds and oldest-first order (test 2);
+    - the decided consts (500, 40, at least 25 ms);
+    - the plan of `PRUNE_BATCH` (test 5, with A's warn 1 applied: the sessions step is matched by its alias `s` and no sessions index is named).
+  - **Reconciler** (`snapshot_retention_tests.rs`, new): through `cleanup_retention`, the setting with default 7, clamped to 1 and to 3650, and the open session's current row always kept (test 4). Plus a guard: a failing prune doesn't stop the rest of the cleanup.
+  - **API** (`fleet_http/snapshot_retention_setting.rs`, new):
+    - default 7;
+    - a value is stored as a JSON number and audited;
+    - an omitted field is left alone;
+    - 0, -1 and 3651 answer 400;
+    - 1 and 3650 are accepted (test 3).
+  - **The contract names F must provide:** `snapshot_retention::{PRUNE_BATCH, BATCH_SIZE, MAX_BATCHES, BATCH_PAUSE, prune_inventory_snapshots}`, and the index `fleet_inventory_snapshots_received_idx`.
+- **Assumed:**
+  - A compile RED for the new core module is accepted, as in #140, #146, #148 and #179. A throwaway stub of today's behaviour supplied the runtime RED behind it.
+  - `PRUNE_BATCH` binds `(cutoff, batch_size)` in that order, following the brief's statement.
+- **Hedged:**
+  - **Lock release between batches is not unit-tested.** That covers the autocommit per batch and the sleep. A concurrent-writer test would depend on timing, so it is left to code review in Phase 6 and to F's timing measurements.
+  - The `info` log of rows deleted per pass is not asserted.
+  - The guard test passes before the feature by design. It is a guard, not a RED.
+- **Evidence:**
+  - **Compile RED:** `unresolved import crate::fleet::registry::snapshot_retention`, in 2 places.
+  - **Runtime RED with the stub:**
+    - the plan contains `SCAN snap`;
+    - the batch test fails `left: 0 right: 4`;
+    - the rule test fails with all 9 rows kept.
+  - **Reconciler RED:** `left: [1, 2, 100] right: [2, 100]`.
+  - **API RED:** `left: Null right: Number(7)`.
+  - **Throwaway correct implementations pass every test.** Mutations M1 to M12 each fail at least one test. Two examples: dropping `ended_at IS NULL` fails the rule test, and `?` instead of a warn fails the guard.
+  - **The full `gridops-core` suite passes** with the throwaway implementation and 0049, including `fleet_schema` (17 tests).
+  - **CI's clippy (1.98.1, `-D warnings`) is clean.**
+  - **All throwaway code is reverted.** Only test files are staged.
+  - **A seed correction:** a first reconciler seed failed with a setup error, because the credential verifier format trigger rejected it. I fixed it before declaring RED.
+
+## Phase 6 Feature Implementor (F) - 2026-11-22T11:24:05-08:00
+- **Decided:** implemented against T's RED; every authored test is GREEN (`docs/handoffs/152/handoff-F.md`).
+  - **Core:** new `fleet::registry::snapshot_retention`.
+    - `PRUNE_BATCH` is the brief's statement, ordered by `received_at`.
+    - `BATCH_SIZE` 500, `MAX_BATCHES` 40, `BATCH_PAUSE` 25 ms.
+    - The setting consts `RETENTION_DAYS_KEY`, `DEFAULT_RETENTION_DAYS` 7 and `RETENTION_DAYS` 1..=3650 are shared by the API and the reconciler, following the `tart_host::VM_SLOTS_KEY` precedent.
+    - `cutoff_millis` clamps the days.
+    - `prune_inventory_snapshots` runs one autocommit statement per batch, sleeps between batches, and stops on a partial batch or at `max_batches`. A `batch_size` below 1 deletes nothing, because a negative SQLite `LIMIT` is no limit.
+  - **Migration 0049:** exactly the brief's index.
+  - **Reconciler:** `cleanup_retention` runs the prune last. It logs a non-zero count at info and an error at warn, and never fails the pass.
+  - **API:** an optional `inventorySnapshotRetentionDays`. It defaults to 7, is range-checked by the existing 400, stored only when given, and audited.
+  - **Docs:** a "Inventory snapshot retention" section in `docs/fleet-api.md` (no doc listed the other retention settings), and CHANGELOG Upgrading and Changed entries.
+- **Assumed:**
+  - The local sqlite3 3.54.0 CLI timings carry over to the bundled 3.51.3. Plan test 5 confirms the plan on 3.51.3.
+  - Prod's ~170k eligible rows drain at 20,000 a pass, because `cleanup_retention` runs every reconcile pass (main.rs:640 and :697).
+- **Hedged:**
+  - The timings use a warm OS page cache. Mars's cold-cache per-batch hold will be higher; I estimate tens of ms at most, against a 5 s `busy_timeout`.
+  - The index-build estimate for prod (1 to 3 s) is extrapolated from 0.10 s on an 85 MB seed.
+  - `release_preflight::..._without_a_macos_arm64_machine` fails on this Mac whether or not my changes are present. I left it alone: it is outside scope and depends on the environment.
+- **Evidence:**
+  - **Verified readers:** `grep fleet_inventory_snapshots crates src` finds the same readers as the brief.
+  - **Resend path:** `load_current_session` requires `ended_at IS NULL` (inventory.rs:409), so the current snapshot of an ended session is prunable.
+  - **Timing** (scratchpad `f152/`, 20,000 × 3.9 KB rows, 85 MB):
+    - drain: 40 batches, 19,992 deleted, the 8 current kept, per batch median 2.3 / p90 4.4 / max 14.0 ms, 123 ms total;
+    - steady state: 1.7 ms, 62 page misses, 0 fullscan steps;
+    - index build: 0.10 s.
+  - **Tests:**
+    - core: 315 lib tests plus all integration binaries pass;
+    - reconciler: 127 pass;
+    - API: lib 130, control_plane_contracts 39, fleet_http 150/151 (the macOS-environment failure only);
+    - clippy 1.98.1 with `-D warnings` and `cargo fmt --check` are clean.
+
+## T (Phase 7, GREEN + Tier 2)
+- **Decided:** treat `release_preflight::the_release_preflight_fails_early_without_a_macos_arm64_machine` as a pre-existing, macOS-host-dependent failure, not blocking: its test and fixture are outside the diff and it asserts on the host OS.
+- **Assumed:** none beyond F's stash experiment for that test's pre-existence; I confirmed from the output that the failure is the preflight seeing this Mac as the macOS machine.
+- **Hedged:** timings are F's (sqlite3 CLI 3.54.0, warm cache), not re-measured.
+- **Evidence:** full core+reconciler suite exit 0; API suite 150/151; clippy and fmt clean; mutation `ended_at IS NULL` -> `1=1` fails the retention-rule test; evidence.md entries spot-checked against source.
+
+## A (Phase 7, anti-duplication gate) - PASS
+- F extended `cleanup_retention`, `setting_i64`, `SystemSettings`/`settings`/`save_settings` and the migration sequence. The only new object, `registry::snapshot_retention`, is justified in the brief. No parallel path.
+- Two warns (shared consts vs. per-crate literals; wrapper fn name equals the core fn name). Neither blocks.
+
+## F (Phase 6, S REWORK round)
+- **Decided:** make no production change. Both S findings are test-quality gaps in `snapshot_retention_tests.rs`: the pause test only checks constants, and the `batch_size < 1` guard has no test. F never edits tests, so I recorded both for T in handoff-F "Tests that look wrong" and reported `done: false`, which sends the round to T.
+- **Assumed:** S's mutant results (P removes the pause, G removes the guard, and all 4 core tests still pass either way) are accurate. I did not re-run them, because doing so means touching production code only to revert it.
+- **Hedged:** none.
+- **Evidence:** the guard is at `snapshot_retention.rs:78-80` and the inter-batch sleep is at `snapshot_retention.rs:84-86`. I read both at this round's HEAD, and both are unchanged.
+
+## T (Phase 6, test-only rework of S findings 1 and 2)
+- **Decided:** replace the constants-only pause test with `a_pass_pauses_between_its_batches`, which measures wall time across 3 full batches and asserts at least `2 * BATCH_PAUSE` with no upper bound. Add `a_batch_size_below_one_deletes_nothing`, which runs `batch_size` 0 and -1 and checks 0 returned and all rows kept. Drop the 500/40 literal equalities, which add no signal.
+- **Assumed:** none.
+- **Hedged:** the tests do not check that no pause follows the last batch, because that needs a wall-time upper bound, which can flake. The tokio paused clock was rejected: auto-advance would also fire the sqlx pool timers.
+- **Evidence:** mutant P (sleep removed) fails the pause test with 1.14 ms < 50 ms. Mutant G (guard removed) fails the guard test at -1 with 3 rows deleted. Both mutants were reverted and `snapshot_retention.rs` has no diff. The suite gives 4 passed, and fmt and clippy are clean.
