@@ -1,31 +1,24 @@
 ## Implementation Review (Round 1)
 
 ### BLOCK findings
-
-**[B-1] docs/handoffs/222 (Feature Handoff, "Tier 1 self-check") — missing mutation check the brief requires — the brief's Tests section says "Show a mutation check for the plan test and the error-isolation test in the handoff," but the handoff's mutation-check entry only says "T's handoff-T-red already ran M1-M11 against an equivalent throwaway, and running them again is T's Phase 6." No mutation check for `every_retention_batch_finds_its_rows_through_its_cutoff_index` or `a_failing_table_prune_does_not_stop_the_other_tables_or_the_pass` is shown, and the handoff's "Deviations from spec: None" contradicts the brief's explicit deliverable — this blocks because it is an unmet acceptance criterion demonstrable from the prompt itself — remediation: run and record the two mutation checks (e.g. remove migration 0050 for the plan test; remove the `Err` arm / re-add `?` for the error-isolation test) and their red results in the handoff.
+None.
 
 ### Needs-verification findings
+**[NV-1]** crates/gridops-reconciler/src/snapshot_retention_tests.rs (MACHINES / `capacity_parents`) — The claim that `host_samples` rows with `host_id = 'snapshot-retention-host'` insert successfully in the reconciler test harness: `capacity_parents` (shown in the diff) inserts only `installations` and `runner_pools`, no `fleet_hosts` parent, unlike the core-side `Db::new` which does insert a `fleet_hosts` row. If `host_samples.host_id` has an enforced FK, these inserts fail; if the pre-existing `Harness::new` (not shown) already creates a matching host, or FKs are off, it's fine — the green test runs suggest it works, but the harness source isn't in this prompt. Settled by: the `Harness::new` body in `snapshot_retention_tests.rs` and the `host_samples` table definition in `migrations/` (FK clause), plus the PRAGMA foreign_keys setting in `db.rs`.
 
-**[NV-1] crates/gridops-core/tests/retention.rs — the plan test asserts the `EXPLAIN QUERY PLAN` detail string ends with exactly `INDEX {index} ({column}<?)` (e.g. `INDEX host_samples_received_idx (received_at<?)`) — settle with the actual SQLite EQP output on the project's SQLite version (e.g. run `EXPLAIN QUERY PLAN` on a migrated database and paste the `detail` strings); the handoff reports the tests green, but the exact detail wording is a runtime claim this prompt cannot check.
+**[NV-2]** migrations/0051_host_samples_received_idx.sql — The claim (handoff, M1 mutation) that the plan test fails when 0051 is removed is based on a run I cannot reproduce here; also the claim that the SQLite planner produces `SEARCH <t> USING … INDEX <idx> (<col><?)` for all eight statements (including the three autoindex cases) is a runtime claim shown only as reported output. Settled by: re-running `-p gridops-core --test retention` with 0051 removed, and `EXPLAIN QUERY PLAN` output for all eight `prune_batch` statements on a migrated database.
 
-**[NV-2] crates/gridops-core/tests/retention.rs (Expected inserts) — the test inserts assume the exact column sets/NOT-NULL constraints of `host_samples` (`host_id,host_epoch,observed_at,received_at,coverage`), `fleet_hosts`, `runner_pools`, and `installations` are as written — settle with the `CREATE TABLE` statements for those tables in migrations (e.g. `migrations/0027_fleet_queries.sql`, `0001_initial.sql`); a NOT NULL column omitted from the insert would make every test in the file fail rather than pass.
-
-**[NV-3] crates/gridops-reconciler/src/snapshot_retention_tests.rs `setting()` — the comment claims storing `value.to_string()` matches "how the settings API does (a JSON number)" — settle with the settings write path in gridops-api (the `settings.value` column type and serialization); a mismatch would mean the test's stored setting is not what production writes, weakening `each_retained_table_keeps_its_own_window`'s settings half.
-
-**[NV-4] crates/gridops-reconciler/src/main.rs:700 / 643 — the claim that these are the only `cleanup_retention(app).await?` call sites — settle with a repository-wide search for `cleanup_retention(`; the evidence appendix cites both, but excerpts are bounded.
+**[NV-3]** crates/gridops-core/src/retention.rs — The claim that each batch statement is a single autocommit statement (no implicit transaction spanning batches under the sqlx SQLite pool) is a runtime-library behavior claim not evidenced in this prompt. Settled by: sqlx SQLite executor source / documentation showing `sqlx::query(...).execute(pool)` on a pool without an explicit transaction runs in autocommit mode.
 
 ### WARN findings
+**[W-1]** crates/gridops-reconciler/src/main.rs:739 — `DELETE FROM fleet_agent_logs WHERE received_at < ?` remains one unbounded `?`-propagated delete, and its only index leads with `host_id` (0034:7), so on a large `fleet_agent_logs` it can reproduce this exact incident. The handoff declares it out of scope with a follow-up issue, and the brief scopes `cleanup_retention` only — but the same class of defect is being left in the same pass. Recommendation: confirm the follow-up issue exists before merge and covers the `oauth_states` / `github_app_manifest_states` deletes at :743–749 too, which are also unbounded.
 
-**[W-1] migrations/0050_host_samples_received_idx.sql — migration-number collision with open PR #221's `0050_fleet_health.sql` is acknowledged but deferred to "land time"; PR #221's three new `cleanup_retention` deletes also must become `RetentionTable` variants after this lands — recommendation: coordinate the renumbering and the enum extension in this PR's description as a landing precondition, since whichever merges second silently breaks the other's migration ordering.
-
-**[W-2] crates/gridops-core/src/retention.rs `prune_batch()` — the five `const` SQL strings embed newlines/indentation inside the string literals; harmless for SQLite but makes the strings differ from the single-line form a reviewer might grep for — recommendation: none required, but note the strings are multi-line when writing the mutation checks.
+**[W-2]** crates/gridops-core/tests/retention.rs (`a_prune_stops_at_the_first_short_batch`) — the test's rationale comment says a non-stopping call "would sleep forever", and it relies on `tokio::time::timeout(10s)` rather than `#[tokio::test(start_paused = true)]`; with `u32::MAX` batches a genuine regression makes the test take up to 10 s (and with real sleeps, far longer than the timeout budget only because the timeout fires first — fine, but flaky-slow under `RUST_TEST_THREADS=2` load on a busy CI host). Recommendation: use paused time or a smaller `max_batches` sentinel.
 
 ### NIT findings
+**[NIT-1]** crates/gridops-core/tests/retention.rs (`a_tables_prune_takes_only_its_rows_older_than_the_cutoff_oldest_first`) — the nested per-`other`-table assertion loop re-checks already-verified invariants O(n²) times; the `pruned`/`untouched` cross-check adds little beyond the per-table assertions.
 
-**[NIT-1] crates/gridops-core/tests/retention.rs `a_prune_stops_at_the_first_short_batch` — asserts `db.remaining(...) == [0_i64; 0]`; `[].to_vec()`-style comparison or `is_empty()` would read clearer, and the `u32::MAX` max_batches relies on the short-batch stop rather than the timeout to terminate.
-
-**[NIT-2] crates/gridops-reconciler/src/main.rs `prune_retained_table` — `Ok(0) => {}` silently skips logging; intentional per brief (log only non-zero), but a comment saying so would prevent a future "fix."
+**[NIT-2]** migrations/0051_host_samples_received_idx.sql — brief says "header comment in the style of 0034 and 0049"; 0034's header is 4 lines ending with the failure mode, this is 5 lines — substantively equivalent, no action needed.
 
 ### Verdict
-
-BLOCK — 1 blocking finding; must resolve before testing starts.
+PASS — no BLOCK findings; testing may proceed.

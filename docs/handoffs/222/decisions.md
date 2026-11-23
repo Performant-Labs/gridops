@@ -196,3 +196,9 @@
 - **Assumed:** none.
 - **Hedged:** M5 was not re-run this cycle; the production line it guards did not change and F's run recorded it failing.
 - **Evidence:** ran M1 (0051 moved away) and a new M-fleet (`fleet_host_hourly` `ORDER BY rowid`); both turned the plan test red, then reverted with a clean `git status`.
+
+## A Phase 7 anti-duplication gate (eight-table cycle) - 2026-11-22
+- **Decided:** PASS (`docs/handoffs/222/handoff-A-dup.md`). One batch loop (`retention::delete_in_batches`) shared by `RetentionTable::prune` and `prune_inventory_snapshots`; all eight retention deletes go through the enum; no literal retention DELETE left in `cleanup_retention`.
+- **Assumed:** none.
+- **Hedged:** `fleet_agent_logs` and `log_streams` deletes remain out of scope per the brief; warn only, follow-up issue still owed by O.
+- **Evidence:** diff of `crates/` vs origin/master read in full; grep of non-test `DELETE FROM` in crates.
