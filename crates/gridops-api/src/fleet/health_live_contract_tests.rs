@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result};
 use gridops_core::{
     fleet::failure::PlacementFailureReason,
     fleet_health::{
-        Concern, ConcernSubject, JobCategory, Severity,
+        Concern, ConcernSubject, JobCategory, Severity, speed_check,
         testdata::{self, JobSeed, PlacementEnd, SampleSeed, SeededFleet},
     },
 };
@@ -424,4 +424,90 @@ async fn the_running_counts_by_category_add_up_to_the_runners_running_now() -> R
     assert_eq!(fleet_sum, per_host);
     assert_eq!(fleet.running_total, per_host);
     seeded.close().await
+}
+
+/// #197 section 7: the contract tests for #201 run on realistic volume, so CI
+/// enforces the #179 lock rules on the real reads and not just in
+/// instructions.
+///
+/// The synthetic week is 50,400 finished jobs and a sample every 30 s per
+/// machine. On top of it, 7 jobs are running on two machines and 40 are
+/// queued; the live read must count exactly those, by category, and finish
+/// with no statement over 100 ms, with all the finished jobs behind it.
+#[tokio::test]
+#[ignore = "contract: #201"]
+async fn the_live_read_over_a_week_of_jobs_counts_the_running_and_queued_with_no_slow_statement()
+-> Result<()> {
+    let directory =
+        std::env::temp_dir().join(format!("gridops-live-week-{}", uuid::Uuid::new_v4()));
+    let db = gridops_core::connect_database_path(&directory.join("db.sqlite")).await?;
+    let week = testdata::build_week(&db, NOW).await?;
+    assert!(week.jobs >= 50_000, "{} jobs", week.jobs);
+    let io = week.fleet.host("io")?.id.clone();
+    let jupiter = week.fleet.host("Jupiter")?.id.clone();
+
+    let mut jobs = Vec::new();
+    let mut next_id = 1_000_000;
+    let mut running = |name: &str, host: &str, category: Option<JobCategory>| {
+        next_id += 1;
+        let mut job = JobSeed::running(
+            next_id,
+            name,
+            Some(host),
+            NOW - 3 * MINUTE,
+            NOW - 2 * MINUTE,
+        );
+        job.category = category;
+        job
+    };
+    for _ in 0..3 {
+        jobs.push(running("unit tests", &io, Some(JobCategory::Test)));
+    }
+    for _ in 0..2 {
+        jobs.push(running("docker image", &io, Some(JobCategory::Build)));
+    }
+    jobs.push(running("lint", &jupiter, Some(JobCategory::Check)));
+    jobs.push(running("misc", &jupiter, None));
+    // 40 waiting for a runner for under 3 minutes: 20 test, 10 build, 10 uncategorized.
+    for index in 0..40_i64 {
+        let mut job = JobSeed::queued(
+            2_000_000 + index,
+            "queued job",
+            NOW - MINUTE - index * 1_000,
+        );
+        job.category = match index % 4 {
+            0 | 1 => Some(JobCategory::Test),
+            2 => Some(JobCategory::Build),
+            _ => None,
+        };
+        jobs.push(job);
+    }
+    testdata::insert_jobs(&db, &week.fleet, &jobs).await?;
+
+    let (fleet, hosts, _) = speed_check::check(&db, collect_live(&db, NOW)).await?;
+
+    assert_eq!(
+        fleet.running_total, 7,
+        "the seeded running jobs, no finished one"
+    );
+    assert_eq!(
+        fleet.running_by_category.values().sum::<u32>(),
+        fleet.running_total,
+        "the categories add up to the total"
+    );
+    assert_eq!(fleet.queued_total, 40);
+    assert_eq!(
+        fleet.queued_by_category.values().sum::<u32>(),
+        fleet.queued_total,
+        "NULL is counted as other, so the categories add up to the total"
+    );
+    let io_running: u32 = hosts
+        .iter()
+        .filter(|stats| stats.host_id == io)
+        .flat_map(|stats| stats.running_by_category.values())
+        .sum();
+    assert_eq!(io_running, 5, "io's five running jobs");
+    db.close().await;
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
 }

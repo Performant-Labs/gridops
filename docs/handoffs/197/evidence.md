@@ -108,3 +108,11 @@ Source facts in unchanged code that the diff and T's tests rely on.
   > 	"aria-current": "page"
   > };
 
+
+### Round 3 (T, nav render test)
+
+- **Fact:** the docked sidebar is the only `<aside>` the shell renders, and the shell reads the signed-in viewer from the root route's loader, so `tests/app-shell-nav.test.ts` selects `aside a[...]` and gives the root route `loader: () => null`.
+  **Source:** `src/components/app-shell.tsx:137` and `:44`
+  **Verbatim excerpt:**
+  > 	<aside className="flex h-full w-[244px] shrink-0 flex-col gap-3 px-2 py-2">
+  > 	const viewer = getRouteApi("__root__").useLoaderData();

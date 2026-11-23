@@ -289,3 +289,17 @@
   - `tsc`, lint and vitest (642 passed, 18 skipped) are clean, and the guard passes 13 of 13.
   - Handoff: `docs/handoffs/197/handoff-F.md`, round 3 at the top.
 
+
+## Phase 7 Tester (T, round 3, S rework) - 2026-11-22T18:15:00-08:00
+- **Decided:**
+  - Authored the three tests S's REWORK and F's handoff left to T: a jsdom render of the real `AppShell` (`tests/app-shell-nav.test.ts`), and the #193 and #201 realistic-volume contract tests (marked, over `build_week`, under `speed_check::check`).
+  - Each Rust test has a positive assertion, so it fails against its stub once unmarked.
+  - #193's index thresholds are loose (Jupiter above 1.2, the rest below 1.1) so both reasonable median definitions pass.
+- **Assumed:**
+  - The 14 `gridops-manager` `SUN_LEN` failures are environmental: the branch does not touch that crate.
+- **Hedged:**
+  - The speed-check set is now five `build_week` callers, about 45 s of the 60 s budget. A smaller week is the lever if CI is tight.
+- **Evidence:**
+  - Nav test fails 1 of 5 (`/fleet/health`) with F's fix reverted; both Rust tests fail against the stubs on the stub's assertion.
+  - `vitest` 647 passed, 18 skipped; `tsc`, lint, build, guard 13 of 13, fmt and CI's clippy (1.98.1) clean; cargo 1138 passed, 14 manager `SUN_LEN`.
+  - Handoff: `docs/handoffs/197/handoff-T-green.md`, round 3 at the top.

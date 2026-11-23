@@ -18,7 +18,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use super::{
-    HealthWindow, SpeedResult, speed,
+    HealthWindow, SpeedResult, speed, speed_check,
     testdata::{self, JobSeed, SeededFleet},
 };
 
@@ -329,4 +329,64 @@ async fn only_successful_runs_inside_the_window_count_and_shards_compare_togethe
         "three keys at 3 CPUs, one of them from six shard runs"
     );
     harness.close().await
+}
+
+/// #197 section 7: the contract tests for #193 run on realistic volume, so CI
+/// enforces the #179 lock rules on the real read and not just in instructions.
+///
+/// The synthetic week is 50,400 successful jobs over the four budgeted
+/// machines, every machine at both runner sizes (2 and 3 CPUs) on all of the
+/// week's keys, with durations within 25% of typical. Jupiter is then made
+/// 1.5 times slower on every job. The index read for the whole week must
+/// finish with no statement over 100 ms, and must tell Jupiter apart.
+#[tokio::test]
+#[ignore = "contract: #193"]
+async fn a_week_of_50000_jobs_finds_the_slow_machine_with_no_statement_over_100_ms() -> Result<()> {
+    let directory =
+        std::env::temp_dir().join(format!("gridops-speed-week-{}", uuid::Uuid::new_v4()));
+    let db = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+    let week = testdata::build_week(&db, NOW).await?;
+    assert!(week.jobs >= 50_000, "{} jobs", week.jobs);
+    let jupiter = week.fleet.host("Jupiter")?.id.clone();
+    // Jupiter's jobs all start 1.5 times as long before they complete.
+    let slowed = sqlx::query(
+        "UPDATE workflow_jobs SET started_at = completed_at - (completed_at - started_at) * 3 / 2
+         WHERE runner_name IN (
+           SELECT r.name FROM runners r
+           JOIN workload_placements p ON p.runner_id = r.id
+           WHERE p.host_id = ?)",
+    )
+    .bind(&jupiter)
+    .execute(&db)
+    .await?;
+    assert!(
+        slowed.rows_affected() > 10_000,
+        "the week gives Jupiter a quarter of its jobs, not {}",
+        slowed.rows_affected()
+    );
+
+    let results =
+        speed_check::check(&db, speed::speed_indexes(&db, HealthWindow::Week, NOW)).await?;
+
+    for size in [2_000, 3_000] {
+        let slow = result(&results, &week.fleet, "Jupiter", size)?
+            .index
+            .ok_or_else(|| anyhow::anyhow!("Jupiter at {size} has no index"))?;
+        assert!(
+            slow > 1.2,
+            "Jupiter at {size} runs 1.5x slower than the rest, its index is {slow}"
+        );
+        for host in ["io", "europa", "callisto"] {
+            let typical = result(&results, &week.fleet, host, size)?
+                .index
+                .ok_or_else(|| anyhow::anyhow!("{host} at {size} has no index"))?;
+            assert!(
+                typical < 1.1 && typical < slow,
+                "{host} at {size} is not slow: {typical} against Jupiter's {slow}"
+            );
+        }
+    }
+    db.close().await;
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
 }

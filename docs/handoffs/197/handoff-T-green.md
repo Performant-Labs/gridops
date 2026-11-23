@@ -1,3 +1,80 @@
+# Handoff-T-green: Phase 7 - Fleet health shared contract (#197), round 3 (S rework)
+
+**Date:** 2026-11-22
+**Branch:** claude/fleet-197-contract (head 3367dd0; test edits uncommitted, for the driver to commit)
+**Issue:** #197
+**Handoff-F reviewed:** `docs/handoffs/197/handoff-F.md` (round 3 at the top)
+**Handoff-S reviewed:** `docs/handoffs/197/handoff-S.md` (findings 1 to 3)
+
+Rounds 1 and 2 are kept unchanged below, under "Rounds 1 and 2". F reported nothing wrong in the tests ("Tests that look wrong: None"). F listed two tests as missing, and the pipeline went from S straight to F without a T-red round, so I authored both here. Both are tests only; I changed no production code.
+
+## Tests authored this round
+
+| Test | Pins | Tier | Why this tier |
+|---|---|---|---|
+| `tests/app-shell-nav.test.ts` (new, 5 cases, live) | S finding 1: on `/fleet/health`, `/fleet`, `/fleet/machines/abc`, `/queued-jobs` and `/` exactly one sidebar link has `aria-current="page"` and exactly one has `data-status="active"`, and it is the right one. Machines is current on `/fleet/machines/abc`, Health only on `/fleet/health`. | integration (jsdom, real `AppShell` under a memory-history router) | `navigation.test.ts` covers the pure `isActivePath`, but the defect was in the router's own attributes on the rendered link, which only a render reaches. There is no Playwright suite. |
+| `speed_contract_tests.rs::a_week_of_50000_jobs_finds_the_slow_machine_with_no_statement_over_100_ms` (#193, `#[ignore = "contract: #193"]`) | Spec section 7: #193's index read runs on `testdata::build_week` (50,400 jobs) under `speed_check::check`. Jupiter's jobs are made 1.5 times slower, so the positive assertions are that Jupiter's index is above 1.2 and the other three machines' are below 1.1 and below Jupiter's, at both runner sizes (2 and 3 CPUs). | integration (SQLite) | The statement-time rule needs a real database at volume. |
+| `health_live_contract_tests.rs::the_live_read_over_a_week_of_jobs_counts_the_running_and_queued_with_no_slow_statement` (#201, `#[ignore = "contract: #201"]`) | Spec section 7: #201's `collect_live` runs on `build_week` plus 7 running jobs (on io and Jupiter) and 40 queued ones, under `speed_check::check`. `running_total` is 7, `queued_total` is 40, each category map sums to its total (NULL counted as other), and io's running count is 5. | integration (SQLite) | Same. |
+
+Design notes:
+- **The 100 ms rule has a positive assertion in each Rust test**, so it fails against the stub once unmarked (an empty stub passes a "no slow statement" check).
+- **#193's thresholds are loose on purpose.** The fleet median includes Jupiter's own runs, so the real index is about 1.4 (about 0.92 for the others); a median over "the rest of the fleet" would give 1.5 and 1.0. Both definitions satisfy "above 1.2, below 1.1".
+- **The UPDATE that slows Jupiter is guarded** by `rows_affected() > 10_000`, so a silent no-op cannot make the test vacuous.
+- **Time:** each test builds a week once, about 8 s, so the speed-check set is now five `build_week` callers: about 45 s of the 60 s budget, run in parallel binaries in CI. If #193 or #201 find it tight, a smaller week is the lever.
+
+## GREEN confirmation
+
+Run with `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2`.
+
+| Command | Result |
+|---|---|
+| `npx vitest run` | 57 files passed, 4 skipped; **647 passed, 18 skipped** (F's 642 plus my 5) |
+| `npx tsc --noEmit` | exit 0 |
+| `npm run lint` | clean (`--max-warnings=0`) |
+| `npm run build` | `built in 992ms`, typecheck clean |
+| `npm run validate:openapi` | valid, 71 warnings (unchanged) |
+| `node --test scripts/fleet-health-guard.test.mjs` | 13 of 13 |
+| `cargo fmt --all -- --check` | clean |
+| `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (CI's command) | clean |
+| `cargo test --workspace --locked --no-fail-fast` | **1138 passed, 14 failed, 51 ignored** (49 before; the two new contract tests are the difference) |
+
+The 14 failures are all `gridops-manager` tests with `path must be shorter than SUN_LEN` (the macOS unix-socket path limit for this long worktree path). `git diff` of that crate against the merge-base is empty, so this branch did not touch it. This is the same environmental red as rounds 1 and 2, and CI is unaffected.
+
+**Spot-check that the new tests pin behavior.**
+- **Nav test, F's fix reverted** (`app-shell.tsx` restored from `HEAD~1`, then put back; the diff of `src` is clean afterwards): 1 of 5 fails, `/fleet/health`, with `what a screen reader announces: expected [ '/fleet', '/fleet/health' ] to deeply equal [ '/fleet/health' ]`. The other four pass, as they should: the prefix problem only affects a path that sits under another item's.
+- **#193 test, run with `-- --ignored` against the stub:** fails at `Error: no speed result for Jupiter at 2000`, after the week, the UPDATE guard (over 10,000 rows) and the `speed_check` wrapper all ran. Right reason: the stub returns no results.
+- **#201 test, run with `-- --ignored` against the stub:** fails with `assertion left == right failed: the seeded running jobs, no finished one, left: 0, right: 7`. Right reason: the stub reports an empty fleet.
+- The 47 earlier contract tests are unchanged since round 2's marker-removal proof (61 of 61 non-environmental failures against the stubs).
+
+## Tier 1 results
+Everything in the table above. F's reported results reproduce: 642 vitest tests (mine: 647 with the new 5), `tsc`, lint, guard 13 of 13, build. No discrepancy.
+
+## Tier 2 results
+- **Test coverage per criterion:** PASS. S finding 1 now has a render-level test, and finding 2's two missing realistic-volume tests exist. Every "Done when" item from rounds 1 and 2 is still backed.
+- **Test quality (`test-quality.md` section 7):** PASS. Each new test names one behavior, fails in isolation for the right reason (above), sits at the cheapest tier that reaches the behavior, and asserts behavior (what the screen reader sees; the index and counts), not implementation. The suite is proportionate: 5 nav cases are one parametrized behavior, and the two Rust tests are the two spec section 7 required, with no duplicate of #190/#191/#200's.
+- **Type safety:** PASS. `tsc` is clean; no `any` in the new test (`router as never` is the repo's existing pattern in `tart-host-card.test.ts`).
+- **Error handling / data integrity / API contract / security / migration:** unchanged by this round (F changed one `Link` prop and deleted a dead constant). Covered in rounds 1 and 2.
+- **Playwright:** the project has no Playwright suite. U did not run in this pipeline, and S walked the page headless.
+- **Evidence appendix:** one entry appended to `evidence.md` (round 3, T): the `<aside>` the nav test selects on and the root-loader read, both in unchanged code, copied verbatim.
+
+## Acceptance criteria status
+- S finding 1 (one current page in the sidebar): PASS, `tests/app-shell-nav.test.ts` (fails without F's change).
+- S finding 2 (#193 and #201 realistic-volume contract tests): PASS as authored, marked, and failing against the stubs for the right reason.
+- S finding 3 (unused `escape`): PASS, the guard script's 13 tests pass.
+- All earlier criteria: unchanged and green.
+
+## Blocking issues
+None.
+
+## Advisory notes
+- **Environmental:** the 14 manager `SUN_LEN` failures (above).
+- **Still O's, not verifiable here:** the Mars-copy timing, the two live guard test PRs (cut after this round), the required check, the #190/#194/#201 comments, the #204 reminder.
+- **The U stage did not run.** S's headless walk is the only real-browser look; the nav defect it found is now covered by a test.
+
+---
+
+# Rounds 1 and 2 (kept unchanged)
+
 # Handoff-T-green: Phase 7 - Fleet health shared contract (#197)
 
 **Date:** 2026-11-22
