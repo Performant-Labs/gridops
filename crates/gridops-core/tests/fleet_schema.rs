@@ -135,8 +135,10 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
             continue;
         }
         assert_eq!(
-            new_schema.get(&name),
-            Some(&definition),
+            new_schema
+                .get(&name)
+                .map(|new| without_0050_columns(&name, new)),
+            Some(definition),
             "changed legacy schema: {name}"
         );
     }
@@ -173,16 +175,55 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
 
 /// The definitions 0047 may change, each asserted by shape instead: the
 /// `runners` rebuild and its indexes, `runner_pools` (one added column), and
-/// whatever else the caller names. 0050 (#197) appends `category` to
-/// `workflow_jobs` and five columns to `gitlab_jobs`, asserted by
-/// `assert_added_columns` and `tests/fleet_health_schema.rs`.
+/// whatever else the caller names. 0050 (#197) only appends columns to
+/// `workflow_jobs` and `gitlab_jobs`, so those stay byte-for-byte checked:
+/// see [`without_0050_columns`].
 fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
     name == "runners"
         || name == "runner_pools"
-        || name == "workflow_jobs"
-        || name == "gitlab_jobs"
         || RUNNERS_INDEXES.iter().any(|(index, _, _)| *index == name)
         || also.contains(&name)
+}
+
+/// The category column 0050 adds to both job tables, as SQLite stores it.
+const CATEGORY_0050: &str = "category TEXT\n  CHECK (category IS NULL OR category IN ('test','build','check','deploy','other'))";
+
+/// The column clauses `ALTER TABLE ... ADD COLUMN` in 0050 (#197) appends to a
+/// table's stored definition, in order.
+const ADDED_BY_0050: [(&str, &[&str]); 2] = [
+    ("workflow_jobs", &[CATEGORY_0050]),
+    (
+        "gitlab_jobs",
+        &[
+            CATEGORY_0050,
+            "job_name TEXT",
+            "project_path TEXT",
+            "started_at INTEGER",
+            "completed_at INTEGER",
+        ],
+    ),
+];
+
+/// `definition` (an object's SQL after the upgrade) with 0050's added column
+/// clauses taken out, each of which must be there exactly once. What is left
+/// must equal the definition before the upgrade byte for byte, so a later
+/// migration that drops or loosens a `CHECK` or a foreign key on either job
+/// table still fails the upgrade tests.
+fn without_0050_columns(name: &str, definition: &str) -> String {
+    let Some((_, clauses)) = ADDED_BY_0050.iter().find(|(table, _)| *table == name) else {
+        return definition.to_owned();
+    };
+    let mut stripped = definition.to_owned();
+    for clause in *clauses {
+        let added = format!(", {clause}");
+        assert_eq!(
+            stripped.matches(&added).count(),
+            1,
+            "{name}: 0050's `{clause}` is not in its definition exactly once: {definition}"
+        );
+        stripped = stripped.replacen(&added, "", 1);
+    }
+    stripped
 }
 
 /// Every index on `runners` after 0047: name, unique, columns. The first eight
@@ -878,8 +919,10 @@ async fn gitlab_upgrade_from_0046_keeps_the_fleet_graph_and_every_reference() ->
             continue;
         }
         assert_eq!(
-            new_schema.get(name),
-            Some(definition),
+            new_schema
+                .get(name)
+                .map(|new| without_0050_columns(name, new)),
+            Some(definition.clone()),
             "changed schema: {name}"
         );
     }
@@ -1422,16 +1465,14 @@ async fn the_0048_rebuild_keeps_every_target_and_reference() -> Result<()> {
     .await?;
     let new_schema = schema(&db.pool).await?;
     for (name, definition) in &old_schema {
-        if name == "fleet_ci_targets"
-            || name == "fleet_ci_targets_immutable_identity"
-            || name == "workflow_jobs"
-            || name == "gitlab_jobs"
-        {
+        if name == "fleet_ci_targets" || name == "fleet_ci_targets_immutable_identity" {
             continue;
         }
         assert_eq!(
-            new_schema.get(name),
-            Some(definition),
+            new_schema
+                .get(name)
+                .map(|new| without_0050_columns(name, new)),
+            Some(definition.clone()),
             "changed schema: {name}"
         );
     }
