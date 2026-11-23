@@ -74,6 +74,35 @@ const fn expected(table: RetentionTable) -> Expected {
             insert_columns: "started_at,duration_ms",
             insert_values: "?,1",
         },
+        // The three fleet health tables (0050, #197) are `STRICT`, and their
+        // primary key leads with the cutoff column, so their batches search
+        // the primary key's automatic index. Each hour must be a whole hour
+        // (`CHECK (hour % 3600000 = 0)`); every stamp these tests use is.
+        RetentionTable::FleetHealthHourly => Expected {
+            table: "fleet_health_hourly",
+            index: "sqlite_autoindex_fleet_health_hourly_1",
+            column: "hour",
+            insert_columns: "hour,host_id,pool_id,category,job_count,completed_count,\
+                             infra_failure_count,duration_ms_sum,cpu_seconds_sum,\
+                             queue_wait_histogram,duration_histogram,computed_at",
+            insert_values: "?,'unmanaged','unmanaged','other',1,1,0,10,0.5,\
+                            '[0,0,0,0,0,0,0,0,0]','[0,0,0,0,0,0,0,0,0]',1",
+        },
+        RetentionTable::FleetHostHourly => Expected {
+            table: "fleet_host_hourly",
+            index: "sqlite_autoindex_fleet_host_hourly_1",
+            column: "hour",
+            insert_columns: "hour,host_id,online_minutes,start_attempts,start_failures_json,\
+                             uncertain_placements,computed_at",
+            insert_values: "?,'retention-host',0,0,'{}',0,1",
+        },
+        RetentionTable::FleetHealthSnapshots => Expected {
+            table: "fleet_health_snapshots",
+            index: "sqlite_autoindex_fleet_health_snapshots_1",
+            column: "recorded_at",
+            insert_columns: "recorded_at,\"window\",fleet_score,host_scores_json",
+            insert_values: "?,'24h',NULL,'{}'",
+        },
     }
 }
 
@@ -148,8 +177,8 @@ impl Db {
 }
 
 /// The retention deletes that are not batched: each still finds its rows
-/// through an index. (The five batched ones are pinned by the next test,
-/// against the statements the prune runs.)
+/// through an index. (The batched ones, every `RetentionTable`, are pinned by
+/// the next test, against the statements the prune runs.)
 #[tokio::test]
 async fn retention_deletes_find_their_rows_through_an_index() -> Result<()> {
     let db = Db::new().await?;
@@ -180,7 +209,9 @@ async fn retention_deletes_find_their_rows_through_an_index() -> Result<()> {
 
 /// #222's regression test. Each batch's inner select must search its table
 /// through the cutoff-column index (`USING INDEX` or `USING COVERING INDEX`),
-/// and no step may scan a table. Without migration 0051, `host_samples` plans
+/// and no step may scan a table. This covers all eight retained tables,
+/// including the three fleet health ones (#197), whose unbatched deletes used
+/// to be checked in `fleet_health_schema.rs`. Without migration 0051, `host_samples` plans
 /// as `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`
 /// plus a temp B-tree: a read of every row inside the write lock.
 #[tokio::test]
@@ -192,6 +223,9 @@ async fn every_retention_batch_finds_its_rows_through_its_cutoff_index() -> Resu
         [
             "audit_events",
             "capacity_samples",
+            "fleet_health_hourly",
+            "fleet_health_snapshots",
+            "fleet_host_hourly",
             "host_samples",
             "reconciler_passes",
             "webhook_deliveries",

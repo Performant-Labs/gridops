@@ -157,3 +157,24 @@
     - `0050_fleet_health.sql:60-114` and `0051`;
     - `tests/retention.rs:1-300`, `tests/fleet_health_schema.rs:360-405` and the reconciler's `snapshot_retention_tests.rs:150-430`;
     - `fleet_health_wiring_tests.rs:1-88` and `docs/design/fleet-health.md:378-382`.
+
+## Phase 4 Tester (T, RED, fresh run after the amendment) - 2026-11-22T21:23:38-08:00
+- **Decided:** RED is valid, so F may start (`docs/handoffs/222/handoff-T-red.md`). No new test functions: the existing suites now cover all eight tables.
+  - **Core, `tests/retention.rs`:** three `expected()` arms that satisfy #221's `STRICT` DDL, with index `sqlite_autoindex_<t>_1`; the eight-name `ALL` assertion; the stale "five" comments fixed (A warn 3).
+  - **Core, `tests/fleet_health_schema.rs`:** the three hand-written `DELETE` plan rows are folded into the `RetentionTable::ALL` plan test. The test is renamed `window_reads_go_through_an_index`, and the module doc is updated (A warn 2).
+  - **Reconciler, `snapshot_retention_tests.rs`:** `TABLES: [Table; 5]` is replaced by an exhaustive `const fn table(RetentionTable)` mapped over `ALL`. Stamps step by `Table::step` (one hour for the two hourly tables), from a whole hour. The isolation and cap tests now cover all eight tables. The window test keeps an explicit list of the five original tables, so the fleet health window has one home, the wiring test (A warn 1).
+- **Assumed:** none beyond the first cycle's (the bundled SQLite plans as observed through sqlx).
+- **Hedged:**
+  - While the RED stands, the reconciler's whole bin test target fails to compile, not only these tests. That's the cost of A's preferred exhaustive `match`, and it ends with F's first edit.
+  - M3 (an unbounded fleet health const) passes the plan test. Only the per-table and cap tests catch it.
+  - The `info` log, the absence of a spanning transaction, and the short-batch stop are still checked by review in Phase 6.
+- **Evidence:**
+  - **Compile RED** in both binaries: `E0599 no variant … FleetHealthHourly / FleetHostHourly / FleetHealthSnapshots`, and nothing else.
+  - **Runtime RED on stub A** (variants and arm added, #221's three `.await?` deletes kept):
+    - isolation: `cleanup returned Err(… fleet_health_hourly deletes refused by the test)`;
+    - cap: `fleet_health_hourly … left: [] right: [1760850000000]`.
+  - **The full throwaway passes** the whole `cargo test -p gridops-core -p gridops-reconciler` (core lib 323, every integration binary, reconciler 136). Clippy 1.98.1 `-D warnings --all-targets` and fmt are clean.
+  - **Mutations M1-M7 and M2b** each fail their test:
+    - M1 (delete 0051): `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`;
+    - M5 (`?` on the prune): `cleanup returned Err(… webhook_deliveries deletes refused …)`.
+  - The throwaway was reverted. Only the three test files are staged.
