@@ -6,7 +6,7 @@ import { Callout, EmptyState, LoadingRows, PageBody, PageHeader } from "~/compon
 import { Button } from "~/components/ui/button";
 import { fleetErrorMessage } from "~/features/fleet/fleet-ui";
 import { useRefreshInterval } from "~/lib/use-refresh-interval";
-import { cn } from "~/lib/utils";
+import { cn, formatDateTime } from "~/lib/utils";
 import { HEALTH_REFRESH_MS, isHealthForbidden, useFleetHealth } from "./api";
 import { AreasOfConcern } from "./areas-of-concern";
 import { CategoryLegend } from "./category-legend";
@@ -14,21 +14,42 @@ import { FleetScoreCard } from "./fleet-score-card";
 import { LiveStrip } from "./live-strip";
 import { MachineDetail } from "./machine-detail";
 import { MachineScoreTable } from "./machine-score-table";
-import { HEALTH_WINDOWS, type FleetHealthViewProps, type HealthWindow } from "./types";
+import { HEALTH_WINDOWS, healthWindowSchema, type FleetHealthViewProps, type HealthWindow } from "./types";
 
 /** Where the page remembers the chosen window. */
 export const HEALTH_WINDOW_STORAGE_KEY = "gridops.fleetHealth.window";
 
-/**
- * The window the page opens on: the one last chosen, `24h` by default and when storage fails.
- * #197 always opens on `24h`; #195 reads `HEALTH_WINDOW_STORAGE_KEY`.
- */
-export function loadHealthWindow(): HealthWindow {
-  return "24h";
+/** `window.localStorage` itself throws in some privacy modes; treat that as no storage. */
+function browserStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
-/** Remembers the chosen window (#195 writes `HEALTH_WINDOW_STORAGE_KEY`). */
-export function saveHealthWindow(_window: HealthWindow): void {}
+/**
+ * The window the page opens on: the one last chosen in `localStorage`, `24h` by default, when the
+ * stored value is not a window any more, and when storage fails.
+ */
+export function loadHealthWindow(): HealthWindow {
+  try {
+    const stored = browserStorage()?.getItem(HEALTH_WINDOW_STORAGE_KEY) ?? null;
+    const parsed = healthWindowSchema.safeParse(stored);
+    return parsed.success ? parsed.data : "24h";
+  } catch {
+    return "24h";
+  }
+}
+
+/** Remembers the chosen window; a failure leaves the default for the next load. */
+export function saveHealthWindow(window: HealthWindow): void {
+  try {
+    browserStorage()?.setItem(HEALTH_WINDOW_STORAGE_KEY, window);
+  } catch {
+    // Storage may be unavailable (privacy modes, quota): the page still works this view.
+  }
+}
 
 const WINDOW_LABELS: Record<HealthWindow, string> = { "1h": "1 hour", "24h": "24 hours", "7d": "7 days" };
 
@@ -97,21 +118,23 @@ function Slot({ name, children }: { name: HealthSlot; children: ReactNode }) {
 }
 
 function HealthSections({ data, window }: FleetHealthViewProps) {
+  const generatedAt = new Date(data.generatedAt).toISOString();
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4 p-3 sm:p-4" data-testid="fleet-health-sections">
       {data.stale ? (
         <Callout title="Showing the last good reading" tone="warning">
-          GridOps couldn’t read the fleet just now, so this is the last response it had.
+          GridOps couldn’t read the fleet just now, so this is the last response it had, from{" "}
+          <time dateTime={generatedAt}>{formatDateTime(generatedAt)}</time>.
         </Callout>
       ) : null}
-      <Slot name="live-strip"><LiveStrip data={data} window={window} /></Slot>
       <div className="grid gap-4 lg:grid-cols-2">
         <Slot name="areas-of-concern"><AreasOfConcern data={data} window={window} /></Slot>
         <Slot name="fleet-score"><FleetScoreCard data={data} window={window} /></Slot>
       </div>
-      <Slot name="category-legend"><CategoryLegend data={data} window={window} /></Slot>
+      <Slot name="live-strip"><LiveStrip data={data} window={window} /></Slot>
       <Slot name="machine-table"><MachineScoreTable data={data} window={window} /></Slot>
       <Slot name="machine-detail"><MachineDetail data={data} window={window} /></Slot>
+      <Slot name="category-legend"><CategoryLegend data={data} window={window} /></Slot>
     </div>
   );
 }
