@@ -178,3 +178,37 @@
 - **Assumed:** the 14 `gridops-manager` SUN_LEN failures are environmental (macOS socket path length in a long worktree path) because the crate is untouched on this branch.
 - **Hedged:** two contract tests pass against the stubs (`no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs`, `a_machine_with_no_cpu_budget_never_raises_host_offline`) and I kept them as guards for the real code.
 - **Evidence:** the CI clippy command is clean; the workspace run was 1137 passed with only the manager failures; vitest 638 passed, 18 skipped; guard 13 of 13; the marked contract tests all fail against the stubs when run (core 16/17, api 18/19, reconciler 11/11, frontend 18/18). Handoff: `docs/handoffs/197/handoff-T-green.md`.
+
+## Phase 3 Architecture (A, up-front plan review, round 4) - 2026-11-22T17:14:19-08:00
+- **Decided:** PASS, with 0 block findings and 1 new warn (`docs/handoffs/197/handoff-A.md`, rewritten). The round 1 to 3 warns are carried word for word under their numbers, because the brief cites them by number.
+  - **Why this pass ran:** the diff gate's round 1 BLOCKed (`docs/handoffs/197-diff-result-r1.md`) and F had reported `archChanged`, so the run was routed back here. The brief is unchanged since round 3 (1867382).
+  - **Checked against the code at af735a4:**
+    - in place: W-15, W-16, W-18/W-26, W-22, W-23, W-25 and W-27;
+    - W-17/W-24 is half done: the shared helpers and the per-category counts are there, but the `ApiResult` return and the unrecorded `fleet → resources` edge are still open, and stay Phase 7 checks.
+  - **Warn 28 (new): the page-render test has nothing to assert on that survives wave 1.**
+    - A #197 test expecting "Coming in #N" breaks when #195, #202 or #203 fill their sections, and the guard refuses a wave-1 edit to a #197 file. That is why T left the test out and the diff gate blocked (B-2).
+    - Fix, inside #197's diff: stable `data-health-section` slots in `HealthSections`, listed in the design doc as part of the composition; a #197 page test on the slots and the 403/failure states; no placeholder text asserted through the page.
+- **Assumed:**
+  - This is a fresh pass with no earlier BLOCK to mark: my last verdict (round 3) was PASS, and the task text names no findings.
+  - F's `archChanged` covers what its handoff lists under "Architecture notes for A". Its structured result isn't kept on disk.
+- **Hedged:**
+  - **Warn 28 is a warn, not a block, on the same rule as warn 22.**
+    - Under the ownership model, one design fits: hooks in the #197-owned composition.
+    - It needs no choice written into the brief.
+    - A BLOCK on an unchanged brief would stop the run for a human amendment that adds nothing this handoff doesn't already say.
+    - I check it at Phase 7.
+  - **The diff gate's B-1 (the marker-removal proof) is test verification, so I take no position on it.** I only noted, for O, that T-green kept two contract tests that pass against the stubs.
+- **Evidence:**
+  - **Read:**
+    - the brief, both brief-gate results, `197-diff-result-r1.md`, `handoff-F.md`, this file, and round 3's `handoff-A.md`;
+    - the routing and the Phase 4/7 driver code in the release's `coding-pipeline.workflow.mjs`;
+    - core `fleet_health/{classifier_cache.rs,category.rs (exports),fake.rs (seams)}`, `gitlab/jobs.rs` (diff) and `fleet/registry/{mod.rs,queries.rs}` (diff);
+    - api `webhooks.rs` (diff), `fleet/health.rs`, `state.rs` (diff), and `resources.rs` and `resources/overview_queue.rs` (diff);
+    - reconciler `main.rs` (diff);
+    - `src/lib/{api.ts,navigation.ts}` (diff), and `src/features/fleet-health/{api.ts,page.tsx,placeholder-card.tsx,machine-score-table.tsx,live-strip.tsx}`;
+    - `docs/design/fleet-health-owners.json`, and `docs/design/fleet-health.md` (the live half, the page, the rules version).
+  - **Checked:**
+    - `grep`: no caller of `process_workflow_job` holds a transaction;
+    - `grep`: no frontend contract test pins a section root;
+    - `grep`: 0050's `CREATE INDEX` lines;
+    - `grep`: the design doc has no `fleet → resources` edge note.
