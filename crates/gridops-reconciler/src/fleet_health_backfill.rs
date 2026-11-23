@@ -15,7 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::{Connection as _, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 
 use gridops_core::fleet_health::{
-    HOUR_MILLIS, JobCategory, category::Classifier, classifier_cache::shared,
+    HOUR_MILLIS, JobCategory,
+    category::Classifier,
+    classifier_cache::{RulesVersion, shared},
 };
 
 /// Rows per batch: one short transaction each.
@@ -42,12 +44,12 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> anyhow::Result<()> {
 /// rules version moved, listing the hours whose rollups the moves make
 /// stale, and records the version it applied.
 async fn reclassify_on_rules_change(conn: &mut SqliteConnection, now: i64) -> anyhow::Result<()> {
-    let version = rules_version(conn).await?;
+    let key = RulesVersion::of(conn).await?.key();
     let stored: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key=?")
         .bind(RULES_VERSION_KEY)
         .fetch_optional(&mut *conn)
         .await?;
-    if stored.as_deref() == Some(version.as_str()) {
+    if stored.as_deref() == Some(key.as_str()) {
         return Ok(());
     }
     let classifier = shared().refresh(conn, now).await?;
@@ -58,25 +60,11 @@ async fn reclassify_on_rules_change(conn: &mut SqliteConnection, now: i64) -> an
          ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
     )
     .bind(RULES_VERSION_KEY)
-    .bind(&version)
+    .bind(&key)
     .bind(now)
     .execute(&mut *conn)
     .await?;
     Ok(())
-}
-
-/// The rules' version, as the settings key stores it: `COUNT(*)` and
-/// `MAX(updated_at)` of `job_category_rules`, the pair the classifier cache
-/// compares.
-async fn rules_version(conn: &mut SqliteConnection) -> anyhow::Result<String> {
-    let (count, max_updated_at): (i64, Option<i64>) =
-        sqlx::query_as("SELECT COUNT(*),MAX(updated_at) FROM job_category_rules")
-            .fetch_one(&mut *conn)
-            .await?;
-    Ok(match max_updated_at {
-        Some(updated_at) => format!("{count}:{updated_at}"),
-        None => count.to_string(),
-    })
 }
 
 /// One workflow job the backfill looks at: what a rule matches, and what a

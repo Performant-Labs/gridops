@@ -21,7 +21,7 @@
 //! webhook classifies outside a transaction. So the rebuild must stay cheap
 //! even for a large rule list (#199 allows many rules): the writers' path
 //! rebuilds through [`compile_chunked`], which compiles position-ordered
-//! chunks of rules on every core at once, keeping the caller's write
+//! chunks of rules on at most one thread per core, keeping the caller's write
 //! transaction under the speed check's 50 ms
 //! (`classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly`,
 //! a #190 contract test). [`ClassifierCache::current`] serves the one
@@ -51,20 +51,28 @@ use super::{
 /// rules again.
 const CHECK_INTERVAL_MS: i64 = 60_000;
 
-/// Rules per chunk of a parallel rebuild: enough chunks to keep every core
-/// busy, few enough that thread start-up stays noise.
+/// Rules per chunk of a parallel rebuild, before the core count caps how
+/// many chunks there are: enough chunks to keep every core busy, few enough
+/// that thread start-up stays noise.
 const CHUNK_RULES: usize = 16;
 
 /// What the rules were when the cache compiled them: `COUNT(*)` and
 /// `MAX(updated_at)` of `job_category_rules`. Either one moving is a change.
+/// The backfill stores the same pair as its `fleet_health.rules_version`
+/// setting, through [`RulesVersion::key`], so the reclassify trigger and the
+/// cache's rebuild see one version.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-struct RulesVersion {
+pub struct RulesVersion {
     count: i64,
     max_updated_at: Option<i64>,
 }
 
 impl RulesVersion {
-    async fn of(conn: &mut SqliteConnection) -> anyhow::Result<Self> {
+    /// The stored rules' version on this connection.
+    ///
+    /// # Errors
+    /// The read fails.
+    pub async fn of(conn: &mut SqliteConnection) -> anyhow::Result<Self> {
         let (count, max_updated_at): (i64, Option<i64>) =
             sqlx::query_as("SELECT COUNT(*),MAX(updated_at) FROM job_category_rules")
                 .fetch_one(&mut *conn)
@@ -73,6 +81,16 @@ impl RulesVersion {
             count,
             max_updated_at,
         })
+    }
+
+    /// The settings key form of this version: two different rule sets give
+    /// two different keys.
+    #[must_use]
+    pub fn key(self) -> String {
+        match self.max_updated_at {
+            Some(updated_at) => format!("{}:{updated_at}", self.count),
+            None => self.count.to_string(),
+        }
     }
 }
 
@@ -216,7 +234,7 @@ pub fn shared() -> &'static ClassifierCache {
 }
 
 /// The writers' classifier: the rules in position order, compiled chunk by
-/// chunk on every core at once.
+/// chunk on at most one thread per core.
 ///
 /// `Classifier::classify` answers [`JobCategory::Other`] both when no rule
 /// matched and when the first rule that matched is an `other` rule, so a
@@ -260,9 +278,10 @@ struct Chunked {
     last_check: i64,
 }
 
-/// Compiles `rules` as position-ordered chunks, one thread per chunk. A
-/// chunk whose thread panics is left empty, like a rule whose pattern does
-/// not compile: the rest still classify.
+/// Compiles `rules` as position-ordered chunks on at most one thread per
+/// core (however many rules there are). A chunk whose thread panics is left
+/// empty, like a rule whose pattern does not compile: the rest still
+/// classify.
 fn compile_chunked(rules: &[CategoryRule]) -> ChunkedClassifier {
     let mut ordered: Vec<CategoryRule> = rules.to_vec();
     ordered.sort_by_key(|rule| rule.position);
@@ -271,12 +290,14 @@ fn compile_chunked(rules: &[CategoryRule]) -> ChunkedClassifier {
             rule.category = JobCategory::FixAgent;
         }
     }
-    let chunks: Vec<Vec<CategoryRule>> =
-        ordered.chunks(CHUNK_RULES).map(ToOwned::to_owned).collect();
+    let cores = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let chunk_count = ordered.len().div_ceil(CHUNK_RULES).min(cores).max(1);
+    let chunk_len = ordered.len().div_ceil(chunk_count);
+    let chunks: Vec<&[CategoryRule]> = ordered.chunks(chunk_len).collect();
     if chunks.len() <= 1 {
         return ChunkedClassifier {
             chunks: vec![Arc::new(category::compile(
-                &chunks.first().cloned().unwrap_or_default(),
+                chunks.first().copied().unwrap_or_default(),
             ))],
         };
     }
@@ -432,4 +453,94 @@ pub async fn category_for_insert(
         repository.as_deref(),
         job.labels,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CHUNK_RULES, ChunkedClassifier, JobCategory,
+        category::{self, RuleField},
+        compile_chunked,
+    };
+
+    fn rule(
+        position: i64,
+        category: JobCategory,
+        field: RuleField,
+        pattern: &str,
+    ) -> category::CategoryRule {
+        category::CategoryRule {
+            position,
+            category,
+            field,
+            pattern: pattern.to_owned(),
+        }
+    }
+
+    /// The chunked rebuild answers what `Classifier::classify` on the whole
+    /// rule list answers: the `other`-as-`fix-agent` sentinel must not show,
+    /// whatever chunk a rule lands in. The list spans several chunks and
+    /// holds every rule field, an `other` rule ahead of a matching rule,
+    /// invalid patterns, and an `other` rule last.
+    #[test]
+    fn chunked_classify_answers_what_the_whole_classifier_answers() {
+        let mut rules = vec![
+            rule(0, JobCategory::Other, RuleField::JobName, "sentinel"),
+            // A pattern that does not compile: skipped by both paths.
+            rule(1, JobCategory::Test, RuleField::JobName, "([unclosed"),
+            rule(2, JobCategory::Build, RuleField::WorkflowName, "^ci$"),
+            rule(3, JobCategory::Check, RuleField::Repository, "acme/"),
+            rule(4, JobCategory::Deploy, RuleField::JobName, "deploy"),
+            rule(5, JobCategory::Test, RuleField::Labels, "docker"),
+        ];
+        let filler = i64::try_from(4 * CHUNK_RULES).unwrap_or_default();
+        for index in 0..filler {
+            rules.push(rule(
+                6 + index,
+                if index % 2 == 0 {
+                    JobCategory::Build
+                } else {
+                    JobCategory::Other
+                },
+                RuleField::JobName,
+                &format!("^filler-{index}$"),
+            ));
+        }
+        rules.push(rule(
+            6 + filler,
+            JobCategory::Other,
+            RuleField::JobName,
+            "sentinel|deploy",
+        ));
+
+        let whole = category::compile(&rules);
+        let chunked: ChunkedClassifier = compile_chunked(&rules);
+        assert!(
+            chunked.chunks.len() > 1,
+            "the list must span several chunks to pin the borders"
+        );
+        let labels = [vec!["docker".to_owned(), "self-hosted".to_owned()], vec![]];
+        for job_name in [
+            "sentinel",
+            "deploy",
+            "sentinel deploy",
+            "filler-3",
+            "filler-4",
+            "unit tests",
+            "",
+        ] {
+            for workflow_name in [None, Some("CI"), Some("Nightly")] {
+                for repository in [None, Some("acme/app"), Some("team/other")] {
+                    for labels in &labels {
+                        assert_eq!(
+                            chunked.classify(job_name, workflow_name, repository, labels),
+                            whole.classify(job_name, workflow_name, repository, labels),
+                            "{job_name}/{workflow_name:?}/{repository:?}/{} labels",
+                            labels.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
