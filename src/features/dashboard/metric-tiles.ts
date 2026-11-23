@@ -1,4 +1,5 @@
 import type { HealthTone } from "~/components/status-icon";
+import { bandTone, scoreBand } from "~/components/charts/chart-theme";
 import type { FleetHealth } from "~/features/fleet-health/types";
 import { successRateTile } from "./success-rate";
 import type { DashboardOverview } from "./types";
@@ -51,12 +52,16 @@ export function metricTiles(metrics: Metrics, _health?: FleetHealth): MetricTile
     .map((part) => `${part.count} ${part.label}`)
     .join(" · ");
   const queueHint = queueParts(metrics).map((part) => `${part.count} ${part.label}`).join(" · ");
+  // The guard lets this shared file take added lines only, so #197's `_health` parameter keeps
+  // its name here as the Fleet health tile (#203) starts using it.
+  const fleet = _health ? fleetHealthTile(_health) : null;
   return [
     { label: "Runners", value: metrics.runners, hint: runnerHint || "No runners yet", to: "/runners", tone: onlineRunners > 0 ? "success" : "neutral" },
     { label: "Busy", value: `${metrics.busy} of ${onlineRunners}`, hint: onlineRunners > 0 ? `${Math.round((metrics.busy / onlineRunners) * 100)}% of online runners` : "No runner is online", to: "/runners", tone: metrics.busy > 0 ? "progress" : "neutral" },
     { label: "Idle", value: metrics.idle, hint: metrics.idle > 0 ? "Online and free for the queue" : "Nothing free right now", to: "/runners", tone: metrics.idle > 0 ? "success" : "neutral" },
     { label: "Queued jobs", value: metrics.queuedJobs, hint: metrics.queuedJobs > 0 ? queueHint : "Queue is clear", to: "/queued-jobs", tone: queuedTone(metrics) },
     { label: "Success rate", ...successRateTile(metrics), to: "/workflow-runs", tone: successTone(metrics.successRate) },
+    ...(fleet ? [fleet] : []),
   ];
 }
 
@@ -69,4 +74,21 @@ export function queuedTone(metrics: Pick<Metrics, "queuedWaiting" | "queuedManua
 export function successTone(rate: number | null): HealthTone {
   if (rate === null) return "neutral";
   return rate >= 90 ? "success" : rate >= 70 ? "warning" : "danger";
+}
+
+/**
+ * The Fleet health tile (#203): the window's score in its band's tone, and as the hint the
+ * critical concerns — the parts that need action now, whatever the score. The Overview passes the
+ * 24-hour health from `useFleetHealth("24h")`; without it (a member, or a failed load) the tile
+ * is absent and the strip is as it was.
+ */
+export function fleetHealthTile(health: FleetHealth): MetricTile {
+  const critical = health.concerns.filter((concern) => concern.severity === "critical").length;
+  return {
+    label: "Fleet health",
+    value: health.fleet.score ?? "—",
+    hint: critical === 0 ? "No critical concerns" : `${critical} critical concern${critical === 1 ? "" : "s"}`,
+    to: "/fleet/health",
+    tone: bandTone(scoreBand(health.fleet.score)),
+  };
 }
