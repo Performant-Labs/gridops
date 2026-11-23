@@ -190,3 +190,9 @@
   - `cargo fmt --all -- --check` exit 0; `cargo test -p gridops-core -p gridops-reconciler` exit 0 (24 binaries ok, core lib 323, reconciler 136); clippy 1.98.1 `--all-targets -D warnings` exit 0.
   - Mutations: M1 gives `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`; M5 gives `cleanup returned Err(… webhook_deliveries deletes refused by the test`. Both restored, and both tests green again.
   - `evidence.md`: call-site lines updated after the merge (`main.rs:678-681`, `:737`), and the three fleet-health primary keys and the 90-day constant appended.
+
+## T Phase 7 (GREEN, eight-table cycle)
+- **Decided:** PASS. Suite green (core retention 7, fleet_schema 17, reconciler 136), fmt and clippy clean; rewrote handoff-T-green.md because the earlier file described the first (five-table, 0050) cycle.
+- **Assumed:** none.
+- **Hedged:** M5 was not re-run this cycle; the production line it guards did not change and F's run recorded it failing.
+- **Evidence:** ran M1 (0051 moved away) and a new M-fleet (`fleet_host_hourly` `ORDER BY rowid`); both turned the plan test red, then reverted with a clean `git status`.
