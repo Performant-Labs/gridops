@@ -1,5 +1,5 @@
 //! One compiled job classifier per process, and the seam every job writer
-//! binds `category` through (#190 fills both in).
+//! binds `category` through (#190).
 //!
 //! The writers (the GitHub webhook, the GitHub poll and the GitLab job
 //! writer) call [`category_for_insert`] only when they insert a job row, and
@@ -7,48 +7,102 @@
 //! never touches `category`, so a stored category is never changed by a later
 //! write (W-15). #190's backfill classifies what is still NULL.
 //!
-//! #197 delivers the seam: [`category_for_insert`] returns `None` (the job
-//! stays unclassified) and [`ClassifierCache::current`] compiles the rules on
-//! every call. #190 makes the cache rebuild only when the rules change
-//! (`MAX(updated_at)` or `COUNT(*)`), checked at most once a minute.
+//! [`category_for_insert`] classifies through the process-wide cache
+//! ([`ClassifierCache::shared`]), which compiles the rules on its first call
+//! and rebuilds only when they change (`MAX(updated_at)` or `COUNT(*)` of
+//! `job_category_rules`), checked at most once a minute — and again whenever
+//! `now` is earlier than the last check, so a caller whose clock moved back
+//! still sees the rules it wrote.
 //!
 //! [`category_for_insert`] may run while its caller holds the write lock: the
 //! GitLab writer classifies inside the webhook's `BEGIN IMMEDIATE` and the
 //! GitLab poll's one transaction per page of jobs, and the GitHub poll
 //! (`upsert_workflow_job`) inside its page's transaction. Only the GitHub
-//! webhook classifies outside a transaction. So it must stay cheap, including
-//! the first call after a rule change, when the cache recompiles: the
-//! caller's write transaction stays under the speed check's 50 ms
+//! webhook classifies outside a transaction. So the rebuild must stay cheap
+//! even for a large rule list (#199 allows many rules): the writers' path
+//! rebuilds through [`compile_chunked`], which compiles position-ordered
+//! chunks of rules on every core at once, keeping the caller's write
+//! transaction under the speed check's 50 ms
 //! (`classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly`,
-//! a #190 contract test).
+//! a #190 contract test). [`ClassifierCache::current`] serves the one
+//! `Arc<Classifier>` the rest of the process wants (the backfill), rebuilt
+//! the same way and on the same clock.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
 };
 
+use anyhow::Context as _;
 use sqlx::SqliteConnection;
+use tokio::sync::Mutex;
 
 use crate::fleet::ExternalId;
 
 use super::{
     JobCategory,
-    category::{self, Classifier},
+    category::{self, CategoryRule, Classifier},
 };
+
+/// How long the cache serves one compiled classifier without looking at the
+/// rules again.
+const CHECK_INTERVAL_MS: i64 = 60_000;
+
+/// Rules per chunk of a parallel rebuild: enough chunks to keep every core
+/// busy, few enough that thread start-up stays noise.
+const CHUNK_RULES: usize = 16;
+
+/// What the rules were when the cache compiled them: `COUNT(*)` and
+/// `MAX(updated_at)` of `job_category_rules`. Either one moving is a change.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+struct RulesVersion {
+    count: i64,
+    max_updated_at: Option<i64>,
+}
+
+impl RulesVersion {
+    async fn of(conn: &mut SqliteConnection) -> anyhow::Result<Self> {
+        let (count, max_updated_at): (i64, Option<i64>) =
+            sqlx::query_as("SELECT COUNT(*),MAX(updated_at) FROM job_category_rules")
+                .fetch_one(&mut *conn)
+                .await?;
+        Ok(Self {
+            count,
+            max_updated_at,
+        })
+    }
+}
+
+/// The compiled classifier, and when the cache last looked at the rules.
+#[derive(Debug)]
+struct Cached {
+    classifier: Arc<Classifier>,
+    version: RulesVersion,
+    last_check: i64,
+}
 
 /// A process's compiled classifier.
 #[derive(Debug, Default)]
 pub struct ClassifierCache {
+    /// The writers' classifier, rebuilt in parallel chunks.
+    chunked: Mutex<Option<Chunked>>,
+    /// The one `Arc<Classifier>` for callers that want it whole.
+    cached: Mutex<Option<Cached>>,
     compilations: AtomicUsize,
 }
 
 impl ClassifierCache {
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// The classifier for the stored rules as of `now`.
+    /// The classifier for the stored rules as of `now`. The rules are looked
+    /// at at most once a minute, and again whenever `now` is earlier than
+    /// the last look; the classifier is recompiled only when its version
+    /// moved.
     ///
     /// # Errors
     /// Reading the rules fails.
@@ -57,10 +111,93 @@ impl ClassifierCache {
         conn: &mut SqliteConnection,
         now: i64,
     ) -> anyhow::Result<Arc<Classifier>> {
-        let _ = now;
-        let rules = category::load_rules(conn).await?;
+        let mut cached = self.cached.lock().await;
+        let due = cached.as_ref().is_none_or(|cached| {
+            now < cached.last_check || now - cached.last_check >= CHECK_INTERVAL_MS
+        });
+        if !due && let Some(cached) = cached.as_ref() {
+            return Ok(Arc::clone(&cached.classifier));
+        }
+        self.reload(&mut cached, conn, now).await
+    }
+
+    /// The classifier for the stored rules whatever the clock says: the
+    /// backfill calls this once it has seen the rules version move, so it
+    /// reclassifies with the rules that changed and not the cached minute.
+    ///
+    /// # Errors
+    /// Reading the rules fails.
+    pub async fn refresh(
+        &self,
+        conn: &mut SqliteConnection,
+        now: i64,
+    ) -> anyhow::Result<Arc<Classifier>> {
+        let mut cached = self.cached.lock().await;
+        self.reload(&mut cached, conn, now).await
+    }
+
+    /// Reads the rules' version and compiles the rules again when it moved.
+    /// The cache lock is held, so one recompile serves every caller waiting
+    /// on it.
+    async fn reload(
+        &self,
+        cached: &mut Option<Cached>,
+        conn: &mut SqliteConnection,
+        now: i64,
+    ) -> anyhow::Result<Arc<Classifier>> {
+        let version = RulesVersion::of(&mut *conn).await?;
+        if let Some(cached) = cached.as_mut()
+            && cached.version == version
+        {
+            cached.last_check = now;
+            return Ok(Arc::clone(&cached.classifier));
+        }
+        let rules = category::load_rules(&mut *conn).await?;
         self.compilations.fetch_add(1, Ordering::Relaxed);
-        Ok(Arc::new(category::compile(&rules)))
+        let classifier = Arc::new(category::compile(&rules));
+        *cached = Some(Cached {
+            classifier: Arc::clone(&classifier),
+            version,
+            last_check: now,
+        });
+        Ok(classifier)
+    }
+
+    /// The writers' classifier for the stored rules as of `now`, on the same
+    /// clock as [`Self::current`] but rebuilt as parallel chunks, so the
+    /// first call after a rule change does not hold its caller's write
+    /// transaction for a serial compile of every pattern.
+    ///
+    /// # Errors
+    /// Reading the rules fails.
+    async fn chunks_for(
+        &self,
+        conn: &mut SqliteConnection,
+        now: i64,
+    ) -> anyhow::Result<ChunkedClassifier> {
+        let mut chunked = self.chunked.lock().await;
+        let due = chunked.as_ref().is_none_or(|chunked| {
+            now < chunked.last_check || now - chunked.last_check >= CHECK_INTERVAL_MS
+        });
+        if !due && let Some(chunked) = chunked.as_ref() {
+            return Ok(chunked.classifier.clone());
+        }
+        let version = RulesVersion::of(&mut *conn).await?;
+        if let Some(chunked) = chunked.as_mut()
+            && chunked.version == version
+        {
+            chunked.last_check = now;
+            return Ok(chunked.classifier.clone());
+        }
+        let rules = category::load_rules(&mut *conn).await?;
+        self.compilations.fetch_add(1, Ordering::Relaxed);
+        let classifier = compile_chunked(&rules);
+        *chunked = Some(Chunked {
+            classifier: classifier.clone(),
+            version,
+            last_check: now,
+        });
+        Ok(classifier)
     }
 
     /// How many times this cache has compiled the rules.
@@ -68,6 +205,99 @@ impl ClassifierCache {
     pub fn compilations(&self) -> usize {
         self.compilations.load(Ordering::Relaxed)
     }
+}
+
+/// The process's cache: the one classifier every job writer and the backfill
+/// share.
+#[must_use]
+pub fn shared() -> &'static ClassifierCache {
+    static SHARED: OnceLock<ClassifierCache> = OnceLock::new();
+    SHARED.get_or_init(ClassifierCache::new)
+}
+
+/// The writers' classifier: the rules in position order, compiled chunk by
+/// chunk on every core at once.
+///
+/// `Classifier::classify` answers [`JobCategory::Other`] both when no rule
+/// matched and when the first rule that matched is an `other` rule, so a
+/// chunk cannot tell the two apart on its own. [`compile_chunked`] therefore
+/// compiles every `other` rule as [`JobCategory::FixAgent`], a category no
+/// rule may store: a chunk that answers `fix-agent` matched an `other` rule,
+/// and a chunk that answers `other` matched nothing, so the next chunk is
+/// asked. The answer is the one `Classifier::classify` on the whole rule
+/// list would have given.
+#[derive(Debug, Clone, Default)]
+struct ChunkedClassifier {
+    chunks: Vec<Arc<Classifier>>,
+}
+
+impl ChunkedClassifier {
+    fn classify(
+        &self,
+        job_name: &str,
+        workflow_name: Option<&str>,
+        repository: Option<&str>,
+        labels: &[String],
+    ) -> JobCategory {
+        for chunk in &self.chunks {
+            match chunk.classify(job_name, workflow_name, repository, labels) {
+                // No rule in this chunk matched; the next chunk is asked.
+                JobCategory::Other => {}
+                JobCategory::FixAgent => return JobCategory::Other,
+                category => return category,
+            }
+        }
+        JobCategory::Other
+    }
+}
+
+/// The writers' cached classifier, and when the cache last looked at the
+/// rules.
+#[derive(Debug)]
+struct Chunked {
+    classifier: ChunkedClassifier,
+    version: RulesVersion,
+    last_check: i64,
+}
+
+/// Compiles `rules` as position-ordered chunks, one thread per chunk. A
+/// chunk whose thread panics is left empty, like a rule whose pattern does
+/// not compile: the rest still classify.
+fn compile_chunked(rules: &[CategoryRule]) -> ChunkedClassifier {
+    let mut ordered: Vec<CategoryRule> = rules.to_vec();
+    ordered.sort_by_key(|rule| rule.position);
+    for rule in &mut ordered {
+        if rule.category == JobCategory::Other {
+            rule.category = JobCategory::FixAgent;
+        }
+    }
+    let chunks: Vec<Vec<CategoryRule>> =
+        ordered.chunks(CHUNK_RULES).map(ToOwned::to_owned).collect();
+    if chunks.len() <= 1 {
+        return ChunkedClassifier {
+            chunks: vec![Arc::new(category::compile(
+                &chunks.first().cloned().unwrap_or_default(),
+            ))],
+        };
+    }
+    let compiled = thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| scope.spawn(move || Arc::new(category::compile(chunk))))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                if let Ok(chunk) = handle.join() {
+                    chunk
+                } else {
+                    tracing::warn!("job category rules: a compile chunk panicked and was skipped");
+                    Arc::new(Classifier::default())
+                }
+            })
+            .collect()
+    });
+    ChunkedClassifier { chunks: compiled }
 }
 
 /// Where a job being inserted came from, for the fields its own row lacks.
@@ -95,18 +325,111 @@ pub struct NewJob<'a> {
     pub origin: JobOrigin<'a>,
 }
 
+/// The workflow name and repository of a GitHub job's run.
+async fn github_run(
+    conn: &mut SqliteConnection,
+    run_id: i64,
+) -> anyhow::Result<(String, Option<String>)> {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT runs.workflow_name,repositories.full_name
+           FROM workflow_runs runs
+           LEFT JOIN repositories ON repositories.id=runs.repository_id
+          WHERE runs.id=?",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .context("no workflow run for the job")
+}
+
+/// A GitLab project's path: the connection's scope when the connection is
+/// scoped to that project, else the path another of the project's
+/// `gitlab_jobs` rows already stored.
+async fn gitlab_project_path(
+    conn: &mut SqliteConnection,
+    connection_id: &str,
+    project_id: ExternalId,
+) -> anyhow::Result<Option<String>> {
+    let project = i64::try_from(project_id.get())?;
+    if let Some(scope) = sqlx::query_scalar::<_, String>(
+        "SELECT scope_path FROM gitlab_connections
+          WHERE id=? AND scope_kind='project' AND scope_id=?",
+    )
+    .bind(connection_id)
+    .bind(project)
+    .fetch_optional(&mut *conn)
+    .await?
+    {
+        return Ok(Some(scope));
+    }
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT project_path FROM gitlab_jobs
+              WHERE connection_id=? AND project_id=? AND project_path IS NOT NULL
+              ORDER BY job_id LIMIT 1",
+    )
+    .bind(connection_id)
+    .bind(project)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten())
+}
+
 /// The category to bind when inserting `job`, or `None` to leave it for the
 /// backfill. Never fails a write: an error reading the rules or the run is
 /// logged and gives `None`.
-#[allow(
-    clippy::unused_async,
-    reason = "#190 reads the rules and the run here; the writers already await it"
-)]
 pub async fn category_for_insert(
     conn: &mut SqliteConnection,
     job: &NewJob<'_>,
     now: i64,
 ) -> Option<JobCategory> {
-    let _ = (conn, job, now);
-    None
+    let classifier = match shared().chunks_for(conn, now).await {
+        Ok(classifier) => classifier,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "job category rules unreadable; the job is left for the backfill"
+            );
+            return None;
+        }
+    };
+    let (workflow_name, repository) = match job.origin {
+        JobOrigin::GitHubRun(run_id) => match github_run(conn, run_id).await {
+            Ok((workflow_name, repository)) => (Some(workflow_name), repository),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    run_id,
+                    "workflow run unreadable; the job is left for the backfill"
+                );
+                return None;
+            }
+        },
+        JobOrigin::GitLabProject {
+            connection_id,
+            project_id,
+            path,
+        } => {
+            let repository = match path {
+                Some(path) => Some(path.to_owned()),
+                None => match gitlab_project_path(conn, connection_id, project_id).await {
+                    Ok(path) => path,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            connection_id,
+                            "gitlab project unreadable; the job is left for the backfill"
+                        );
+                        return None;
+                    }
+                },
+            };
+            (None, repository)
+        }
+    };
+    Some(classifier.classify(
+        job.job_name.unwrap_or(""),
+        workflow_name.as_deref(),
+        repository.as_deref(),
+        job.labels,
+    ))
 }
