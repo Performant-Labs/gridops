@@ -95,3 +95,46 @@ None. The suite is GREEN apart from the 14 environmental `gridops-manager` SUN_L
 2. The two vacuously-green contract tests above stay as wave-1 guards.
 3. Still O's (needs push or production access): the guard's live sample PRs, and the speed measurement on a copy of the Mars database.
 4. The speed-check set measured about 8.8 s per `build_week` binary; three `build_week` callers plus the 10k backfill should stay under the 60 s CI budget.
+
+---
+
+# Round 2 (after F's round 2, head cceb4c6)
+
+**Date:** 2026-11-22
+**Handoff-F reviewed:** `docs/handoffs/197/handoff-F.md` (round 2)
+**Handoff-T-red:** `docs/handoffs/197/handoff-T-red.md` (round 2)
+
+F's round 2 changed only `src/features/fleet-health/page.tsx` (six `data-health-section` slots) and `docs/design/fleet-health.md`. No Rust file changed, so the round-1 Rust results above stand. F listed no "Tests that look wrong", and I changed no test or production file this round.
+
+## GREEN confirmation
+- `npx vitest run tests/fleet-health-page.test.ts` (the round-2 page test): 4 passed. At T-red it was 3 failed and 1 passed.
+- `npx vitest run`: 56 files passed, 4 skipped; **642 passed, 18 skipped** (the 18 are the marked contract tests). Matches F.
+- **Spot-check, behavior removed:** I renamed `data-health-section` to `data-removed-section` in `page.tsx`. The page test went back to 3 failed, 1 passed (the same three as the RED), so it pins the slots and not the implementation. I restored the file, and `git status` is clean.
+
+## Tier 1
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | PASS |
+| `npm run lint` (`--max-warnings=0`) | PASS |
+| `npx vite build` | PASS (`built in 925ms`) |
+| `node --test scripts/fleet-health-guard.test.mjs` | PASS, 13 of 13 |
+| Rust (fmt, clippy, workspace tests) | Not re-run: no Rust file changed since the round-1 PASS. The 14 `gridops-manager` SUN_LEN failures stay environmental |
+| F's numbers cross-checked | Same as F (642/18, 13/13) |
+
+## Tier 2
+- **Coverage / diff-gate B-2:** PASS. `/fleet/health` renders the fixture into six slots, the window picker, the 403 and the failure/Retry states, in `tests/fleet-health-page.test.ts`.
+- **Test quality:** PASS. Four tests, each one behavior, at the cheapest tier (jsdom with a stubbed `fetch`); the 403 test is a deliberate regression guard and is not redundant with the failure test.
+- **Type safety:** PASS. `HealthSlot` is a closed union, `tsc` clean, no `any`.
+- **Layout risk:** the `min-w-0` block wrapper is layout-neutral today. It is not pinned by a test, so U should look at the row when walking the page.
+- **Evidence appendix:** nothing new. The round relies on no unchanged source behavior.
+
+## Acceptance criteria status
+All round-1 criteria stand. B-2 is backed by the four page tests. B-1 was met by T-red's marker-removal run.
+
+## Blocking issues
+None.
+
+## Advisory notes
+- Still O's, as before: the guard's two sample PRs (W-1), the Mars-copy timing (W-2), and the #204 reminder to move `FakeFleetHealthSource` behind `test-support` (W-5).
+- The page test passes against placeholders only by design: it asserts slots, not text (warn 28).
+- U must walk `/fleet/health` live: no Playwright suite exists, so this surface is a coverage hole for headless checks.
