@@ -22,11 +22,14 @@ custom_model_max_tokens = 131072
 max_model_tokens = 131072  # a context clamp, not an output cap (#920)
 
 [pr_reviewer]
+# require_score_review and require_ticket_analysis_review are forced to true by the
+# workflow (PR_REVIEWER__* env); they are set to the same values here so this file
+# matches what runs in CI (gridops#208).
 require_score_review = true
 require_tests_review = true
 require_security_review = true
 require_focused_review = false
-require_ticket_analysis_review = false
+require_ticket_analysis_review = true
 num_code_suggestions = 4
 inline_code_comments = true
 automatic_review = true
@@ -115,6 +118,8 @@ publish_output = true
 publish_output_progress = false
 
 [github_action_config]
+# The workflow sets all three from its own env (pr_actions and auto_review fixed,
+# auto_improve from .agents/pr-review.yml); these mirror it, editing them here changes nothing.
 auto_review = true
 auto_improve = false
 pr_actions = ["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]
