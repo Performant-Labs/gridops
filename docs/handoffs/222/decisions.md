@@ -85,3 +85,13 @@
   - clippy 1.98.1 `-D warnings` on core, reconciler and api: clean;
   - fmt: clean.
   - Source facts are in `docs/handoffs/222/evidence.md`.
+
+## Phase 7 Tester (T, GREEN) - 2026-11-22
+- **Decided:** GREEN confirmed with no test changes; verdict PASS. Left the suite as authored since F flagged no wrong tests.
+- **Assumed:** None.
+- **Hedged:** The `info` log and the absence of a spanning transaction are verified by review only, as in #152.
+- **Evidence:**
+  - `cargo test -p gridops-core -p gridops-reconciler`: 574 passed, 0 failed.
+  - fmt and clippy 1.98.1 `-D warnings` (core, reconciler, api): clean.
+  - Mutations on F's real code: deleting 0050 fails the plan test (`SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`); `ORDER BY rowid` fails the plan and per-table tests; `?` on the prune error fails the isolation test (`cleanup returned Err(... webhook_deliveries deletes refused ...)`). All reverted, tree clean.
+  - Every excerpt in `evidence.md` checked against source: verbatim.
