@@ -89,8 +89,9 @@ never changes a stored category (W-15). They are `process_workflow_job` (GitHub 
 `crates/gridops-core/src/gitlab/jobs.rs`). Each calls
 `classifier_cache::category_for_insert(&mut conn, &NewJob, now)` on its own connection (never a
 pool inside a write transaction). A GitHub job reads its workflow name and repository from
-`workflow_runs` by `run_id` (`JobOrigin::GitHubRun`); a GitLab job carries its project path
-(`JobOrigin::GitLabProject`). `None` leaves the job unclassified; the backfill classifies what is
+`workflow_runs` by `run_id` (`JobOrigin::GitHubRun`); a GitLab job carries its connection,
+project id and, when the writer has it, its project path (`JobOrigin::GitLabProject`; the poll has
+no path, so #190 finds it from the ids, for example from another of the project's rows). `None` leaves the job unclassified; the backfill classifies what is
 still NULL.
 
 **The cache (#190).** One compiled classifier per process, rebuilt only when the rules change

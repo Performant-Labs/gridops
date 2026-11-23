@@ -19,6 +19,8 @@ use std::sync::{
 
 use sqlx::SqliteConnection;
 
+use crate::fleet::ExternalId;
+
 use super::{
     JobCategory,
     category::{self, Classifier},
@@ -64,8 +66,15 @@ pub enum JobOrigin<'a> {
     /// A GitHub job of this run: the workflow name and repository come from
     /// `workflow_runs`.
     GitHubRun(i64),
-    /// A GitLab job of this project path (`None` when unknown).
-    GitLabProject(Option<&'a str>),
+    /// A GitLab job of this connection's project. `path` is the project's
+    /// path when the writer has it (a webhook) and `None` when it does not
+    /// (the poll), in which case the ids let #190 find it, for example from
+    /// another of the project's `gitlab_jobs` rows.
+    GitLabProject {
+        connection_id: &'a str,
+        project_id: ExternalId,
+        path: Option<&'a str>,
+    },
 }
 
 /// A job a writer is about to insert.

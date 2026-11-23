@@ -269,7 +269,11 @@ pub async fn record_gitlab_job(
                     &NewJob {
                         job_name: obs.job_name,
                         labels: obs.tag_list.unwrap_or_default(),
-                        origin: JobOrigin::GitLabProject(obs.project_path),
+                        origin: JobOrigin::GitLabProject {
+                            connection_id: obs.connection_id,
+                            project_id: obs.project_id,
+                            path: obs.project_path,
+                        },
                     },
                     now_ms,
                 )
