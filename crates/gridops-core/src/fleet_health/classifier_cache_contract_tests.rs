@@ -222,6 +222,13 @@ async fn classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly() 
     let names: Vec<String> = (1..=50).map(|id| format!("fleet-197-only-{id}")).collect();
     speed_check::check(&db, async {
         let mut transaction = db.begin_with("BEGIN IMMEDIATE").await?;
+        // The speed check times a write transaction from its first row change,
+        // and the first job is classified (the recompile) before its UPSERT.
+        // Change a row first, so the timer covers that classification too, as
+        // the real lock does from `BEGIN IMMEDIATE`.
+        sqlx::query("UPDATE gitlab_connections SET updated_at=updated_at+1 WHERE id='gl'")
+            .execute(&mut *transaction)
+            .await?;
         for job_id in 1..=50_u64 {
             record_gitlab_job(
                 &mut transaction,
