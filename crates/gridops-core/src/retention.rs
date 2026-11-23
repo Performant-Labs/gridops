@@ -42,16 +42,25 @@ pub enum RetentionTable {
     HostSamples,
     /// `reconciler_passes`, by `started_at`.
     ReconcilerPasses,
+    /// `fleet_health_hourly`, by `hour` (its primary key leads with it).
+    FleetHealthHourly,
+    /// `fleet_host_hourly`, by `hour` (its primary key leads with it).
+    FleetHostHourly,
+    /// `fleet_health_snapshots`, by `recorded_at` (its primary key leads with it).
+    FleetHealthSnapshots,
 }
 
 impl RetentionTable {
     /// Every retained table, each once.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::WebhookDeliveries,
         Self::AuditEvents,
         Self::CapacitySamples,
         Self::HostSamples,
         Self::ReconcilerPasses,
+        Self::FleetHealthHourly,
+        Self::FleetHostHourly,
+        Self::FleetHealthSnapshots,
     ];
 
     /// The table's name, for log fields.
@@ -63,6 +72,9 @@ impl RetentionTable {
             Self::CapacitySamples => "capacity_samples",
             Self::HostSamples => "host_samples",
             Self::ReconcilerPasses => "reconciler_passes",
+            Self::FleetHealthHourly => "fleet_health_hourly",
+            Self::FleetHostHourly => "fleet_host_hourly",
+            Self::FleetHealthSnapshots => "fleet_health_snapshots",
         }
     }
 
@@ -92,6 +104,18 @@ impl RetentionTable {
             Self::ReconcilerPasses => {
                 "DELETE FROM reconciler_passes WHERE rowid IN (SELECT rowid FROM reconciler_passes
                   WHERE started_at < ? ORDER BY started_at LIMIT ?)"
+            }
+            Self::FleetHealthHourly => {
+                "DELETE FROM fleet_health_hourly WHERE rowid IN (SELECT rowid FROM fleet_health_hourly
+                  WHERE hour < ? ORDER BY hour LIMIT ?)"
+            }
+            Self::FleetHostHourly => {
+                "DELETE FROM fleet_host_hourly WHERE rowid IN (SELECT rowid FROM fleet_host_hourly
+                  WHERE hour < ? ORDER BY hour LIMIT ?)"
+            }
+            Self::FleetHealthSnapshots => {
+                "DELETE FROM fleet_health_snapshots WHERE rowid IN (SELECT rowid FROM fleet_health_snapshots
+                  WHERE recorded_at < ? ORDER BY recorded_at LIMIT ?)"
             }
         }
     }

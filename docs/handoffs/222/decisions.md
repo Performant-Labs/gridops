@@ -178,3 +178,15 @@
     - M1 (delete 0051): `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`;
     - M5 (`?` on the prune): `cleanup returned Err(… webhook_deliveries deletes refused …)`.
   - The throwaway was reverted. Only the three test files are staged.
+
+## Phase 5 Feature Implementor (F, fresh run after the amendment) - 2026-11-22T21:36:00-08:00
+- **Decided:** implementation done, with T's RED now GREEN (`docs/handoffs/222/handoff-F.md`).
+  - `RetentionTable` gets `FleetHealthHourly`, `FleetHostHourly` and `FleetHealthSnapshots`, each with its own `const` batch statement ordered by its cutoff column (`hour`, `hour`, `recorded_at`); `ALL` is `[Self; 8]`.
+  - `cleanup_retention` computes `fleet_health_cutoff` with the other cutoffs and gives the three variants one arm; #221's three unbatched `.await?` deletes are removed. No separate fleet-health delete path.
+  - The brief's two mutation checks (the first diff gate's B-1) are recorded in the handoff: removing 0051 fails the plan test, and restoring `?` on a prune fails the isolation test.
+- **Assumed:** none beyond the cycle's (the bundled SQLite plans as the tests observe through sqlx).
+- **Hedged:** `archChanged` is reported `true`, because a public enum in core gains variants, even though A approved exactly this extension; a false positive costs one A pass.
+- **Evidence:**
+  - `cargo fmt --all -- --check` exit 0; `cargo test -p gridops-core -p gridops-reconciler` exit 0 (24 binaries ok, core lib 323, reconciler 136); clippy 1.98.1 `--all-targets -D warnings` exit 0.
+  - Mutations: M1 gives `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`; M5 gives `cleanup returned Err(… webhook_deliveries deletes refused by the test`. Both restored, and both tests green again.
+  - `evidence.md`: call-site lines updated after the merge (`main.rs:678-681`, `:737`), and the three fleet-health primary keys and the 90-day constant appended.

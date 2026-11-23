@@ -3364,6 +3364,7 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
     let audit_cutoff =
         now - setting_i64(&app.database, "auditRetentionDays", 365).await * 86_400_000;
     let capacity_cutoff = now - 31 * 86_400_000;
+    let fleet_health_cutoff = now - FLEET_HEALTH_RETENTION_DAYS * 86_400_000;
     let expired_logs =
         sqlx::query("SELECT path FROM log_streams WHERE expires_at IS NOT NULL AND expires_at < ?")
             .bind(now)
@@ -3406,24 +3407,14 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
             RetentionTable::CapacitySamples
             | RetentionTable::HostSamples
             | RetentionTable::ReconcilerPasses => capacity_cutoff,
+            // Fleet health keeps 90 days (#197): the hourly rollups and the
+            // score snapshots, each deleted through its time index.
+            RetentionTable::FleetHealthHourly
+            | RetentionTable::FleetHostHourly
+            | RetentionTable::FleetHealthSnapshots => fleet_health_cutoff,
         };
         prune_retained_table(app, table, cutoff).await;
     }
-    // Fleet health keeps 90 days (#197): the hourly rollups and the score
-    // snapshots, each read and deleted through its time index.
-    let fleet_health_cutoff = now - FLEET_HEALTH_RETENTION_DAYS * 86_400_000;
-    sqlx::query("DELETE FROM fleet_health_hourly WHERE hour < ?")
-        .bind(fleet_health_cutoff)
-        .execute(&app.database)
-        .await?;
-    sqlx::query("DELETE FROM fleet_host_hourly WHERE hour < ?")
-        .bind(fleet_health_cutoff)
-        .execute(&app.database)
-        .await?;
-    sqlx::query("DELETE FROM fleet_health_snapshots WHERE recorded_at < ?")
-        .bind(fleet_health_cutoff)
-        .execute(&app.database)
-        .await?;
     prune_inventory_snapshots(app, now).await;
     Ok(())
 }
