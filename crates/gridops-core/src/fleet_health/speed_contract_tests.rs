@@ -124,7 +124,6 @@ async fn typical_fleet(harness: &mut Harness, factor: f64) -> Result<()> {
 }
 
 #[test]
-#[ignore = "contract: #193"]
 fn each_shard_suffix_form_normalizes_to_one_key() {
     let plain = speed::job_key("acme/app", "CI", "unit");
     for sharded in [
@@ -149,7 +148,6 @@ fn each_shard_suffix_form_normalizes_to_one_key() {
 }
 
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn a_machine_running_every_key_at_one_and_a_half_times_gets_1_5() -> Result<()> {
     let mut harness = Harness::new().await?;
     typical_fleet(&mut harness, 1.5).await?;
@@ -180,7 +178,6 @@ async fn a_machine_running_every_key_at_one_and_a_half_times_gets_1_5() -> Resul
 }
 
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn keys_under_the_five_run_minimum_are_ignored() -> Result<()> {
     let mut harness = Harness::new().await?;
     typical_fleet(&mut harness, 1.5).await?;
@@ -209,7 +206,6 @@ async fn keys_under_the_five_run_minimum_are_ignored() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn fewer_than_three_qualifying_keys_is_not_enough_data() -> Result<()> {
     let mut harness = Harness::new().await?;
     typical_fleet(&mut harness, 1.0).await?;
@@ -232,7 +228,6 @@ async fn fewer_than_three_qualifying_keys_is_not_enough_data() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn the_same_machine_at_two_runner_sizes_gets_two_indexes() -> Result<()> {
     let mut harness = Harness::new().await?;
     typical_fleet(&mut harness, 1.5).await?;
@@ -264,7 +259,6 @@ async fn the_same_machine_at_two_runner_sizes_gets_two_indexes() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn only_successful_runs_inside_the_window_count_and_shards_compare_together() -> Result<()> {
     let mut harness = Harness::new().await?;
     typical_fleet(&mut harness, 1.0).await?;
@@ -340,7 +334,6 @@ async fn only_successful_runs_inside_the_window_count_and_shards_compare_togethe
 /// 1.5 times slower on every job. The index read for the whole week must
 /// finish with no statement over 100 ms, and must tell Jupiter apart.
 #[tokio::test]
-#[ignore = "contract: #193"]
 async fn a_week_of_50000_jobs_finds_the_slow_machine_with_no_statement_over_100_ms() -> Result<()> {
     let directory =
         std::env::temp_dir().join(format!("gridops-speed-week-{}", uuid::Uuid::new_v4()));
