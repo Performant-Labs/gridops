@@ -303,3 +303,6 @@
   - Nav test fails 1 of 5 (`/fleet/health`) with F's fix reverted; both Rust tests fail against the stubs on the stub's assertion.
   - `vitest` 647 passed, 18 skipped; `tsc`, lint, build, guard 13 of 13, fmt and CI's clippy (1.98.1) clean; cargo 1138 passed, 14 manager `SUN_LEN`.
   - Handoff: `docs/handoffs/197/handoff-T-green.md`, round 3 at the top.
+
+## A-dup (round 3, S-rework delta caa663b..f8b8b37) — PASS
+Delta extends `NavLinkItem`, the existing contract-test files and the guard script in place. No parallel path. Two warns carried (shared `matchMedia` shim, chart-theme threshold copy).

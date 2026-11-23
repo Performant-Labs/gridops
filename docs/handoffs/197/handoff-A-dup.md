@@ -1,31 +1,27 @@
-# Handoff-A-dup: Phase 7 - Fleet health shared contract (#197)  (anti-duplication gate)
+# Handoff-A-dup: Phase 7 - Fleet health shared contract (#197)  (anti-duplication gate, round 3 re-check)
 
 **Date:** 2026-11-22
 **Branch:** claude/fleet-197-contract
-**Diff base:** fbacbc2 (merge-base with master)   **Diff head:** caa663b
-**Reuse map:** none (no `survey.md`); analogues are those named in `handoff-A.md` (#137 GitLab contract, `/fleet/workload`, #152 retention) and the brief's Reuse section
+**Diff base:** fbacbc2 (merge-base with master); this pass re-checks caa663b..f8b8b37 (the S-rework round)
+**Reuse map:** none (no `survey.md`); analogues are those named in `handoff-A.md` and the brief's Reuse section
 **Verdict:** PASS
 
 ## Summary
-F extended the analogous objects and built no parallel path. The new modules (`fleet_health`, the api health and job-category handlers, the reconciler passes, the charts, the guard) are the ones the brief creates. Everything that overlaps existing code reuses it. Round 2's only production change is the slot wrappers in `HealthSections` in `page.tsx`, which extends that component in place.
+The S-rework round extends existing objects and builds no parallel path. The previous PASS (caa663b) still stands for everything outside this delta. The delta is one prop on the existing `NavLinkItem`, one dead helper deleted from the guard, and three new tests placed in the files that already hold the contract tests or the nav tests.
 
-## Reuse checked in the diff
-- `fleet_queue_breakdown` (`overview_queue.rs`): `pools_with_platforms`, `waiting_job` and `split_waiting_jobs` were taken out of `queue_breakdown`, which now calls them. No second queue split.
-- `host_live_reads` (`registry/queries.rs`): built from `counts`, `root_budget`, `allocation_read`, `latest_measurement`, `placement_failures` and `start_gate_read`. No parallel host projection.
-- GitLab writer (`gitlab/jobs.rs`): D18's single UPSERT is extended in place (name, path, started/completed, category on insert).
-- `FleetHealthState` uses `RegistryClock` and `system_clock()`. `AppState` gets one field plus two builder methods in the existing style.
-- `ApiError` gets one variant (`Invalid`, 422); `require_admin` is made `pub(super)` and reused. The `TOKEN_SCOPED_ROUTES` row follows `/fleet/workload`.
-- Frontend: `useFleetHealth` follows `FleetWorkloadSection`'s fetch pattern (component state, no query client); a private `request` follows the fleet `admin-api.ts` shape (A warn 27); `~/lib/api.ts` `ApiError` is extended, not replaced; the nav list gets one item and `isActivePath` is fixed.
-- The db.rs speed-check hook instruments the existing pool builder under the `test-support` gate, on top of the #179 slow-statement log.
+## Reuse checked in the delta
+- `src/components/app-shell.tsx`: `activeOptions={{ exact: !active }}` is added to the existing `Link` in `NavLinkItem`. It is driven by the app's existing `isActivePath` result, so the router follows the app's one decision and there is no second active-state rule.
+- `speed_contract_tests.rs` and `health_live_contract_tests.rs`: the #193 and #201 realistic-volume tests sit in the existing contract files. They use `testdata::build_week`, `testdata::insert_jobs`, `JobSeed`, `speed_check::check`, `speed::speed_indexes` and `collect_live`, all of which already exist. No new fixture builder or timing harness.
+- `scripts/fleet-health-guard.mjs`: deletes an unused helper; nothing added.
+- `tests/app-shell-nav.test.ts`: a new file, flat in `tests/` like its neighbours. It repeats the jsdom/`createRoot`/`matchMedia` setup that `tests/tart-host-card.test.ts` and `tests/connections-routes.test.ts` each carry. The project has no shared render helper, so the per-file setup is the local pattern, not drift.
 
 ## Findings
 | # | Severity | File:line | Finding | Suggested fix |
 |---|---|---|---|---|
-| 1 | warn | `src/components/charts/chart-theme.ts:11-12` | `GOOD_SCORE = 90` and `FAIR_SCORE = 70` restate the thresholds of `successTone` (`src/features/dashboard/metric-tiles.ts:69-71`) as a second copy; the doc comment says they are equal, but nothing ties them. A later change to either drifts silently. | In a wave-1 or follow-up change, have `successTone` use `scoreBand`/`bandTone`, or add a test that pins the two together. Not a parallel path: a shared constant pair, so no block. |
-| 2 | warn | `crates/gridops-api/src/resources/overview_queue.rs:~372` and `resources.rs:90-98` | `fleet_queue_breakdown` still returns the legacy `ApiResult` (A warn 24, noted open in round 4), and `fleet_queued_jobs!` repeats the body of `visible_queued_jobs!` minus the user join instead of composing it. The design doc (`fleet-health.md:281`) names the `crate::resources` call but does not call it out as a new `fleet → resources` edge. Neither is a duplicate query path (the pool and job-owner logic is shared). | #201 maps the error where it calls it; if the two clauses are ever edited, edit both. Consider adding one sentence to the design doc naming the edge. |
-| 3 | warn | `src/features/dashboard/metric-tiles.ts:42-47` | `metricTiles` takes `_health` and does nothing with it until #203. It is a deliberate hook (the brief's wiring-here rule), so not drift. | None; #203 fills it. |
+| 1 | warn | `tests/app-shell-nav.test.ts:36-47` | The `matchMedia` stub is the third copy of the same jsdom shim (also in `connections-routes.test.ts` and `tart-host-card.test.ts`). | If a fourth copy appears, extract a shared test helper. Not worth doing in this PR. |
+| 2 | warn | `src/components/chart-theme.ts` (carried from the earlier pass, `chart-theme.ts:11-12`) | `GOOD_SCORE`/`FAIR_SCORE` still restate `successTone`'s thresholds. | Unchanged; a follow-up or wave-1 change should tie them together. |
 
-No duplication; extension is clean. No unplanned drive-by edits of shared code were found: the shared-file edits (`resources.rs`, `overview_queue.rs`, `registry/queries.rs`, `jobs.rs`, `api.ts`, `navigation.ts`) are each named in the brief.
+No duplication; extension is clean. No unplanned drive-by edits of shared code: `app-shell.tsx` was confirmed unowned by wave-1 in S's round, and the guard script and tests are #197's own.
 
 ## Notes for F
 None (PASS).
