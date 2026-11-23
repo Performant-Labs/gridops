@@ -147,7 +147,6 @@ fn cpu_series(sorted_index: i64) -> u32 {
 }
 
 #[tokio::test]
-#[ignore = "contract: #200"]
 async fn an_hour_of_samples_starts_and_failures_gives_one_row_per_machine() -> Result<()> {
     let harness = Harness::new().await?;
     let io = harness.id("io")?;
@@ -271,7 +270,6 @@ async fn an_hour_of_samples_starts_and_failures_gives_one_row_per_machine() -> R
 }
 
 #[tokio::test]
-#[ignore = "contract: #200"]
 async fn rolling_a_machine_hour_up_again_gives_the_same_row() -> Result<()> {
     let harness = Harness::new().await?;
     harness
@@ -317,7 +315,6 @@ async fn rolling_a_machine_hour_up_again_gives_the_same_row() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #200"]
 async fn a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list() -> Result<()> {
     let harness = Harness::new().await?;
     harness.samples("io", H, 120, |_, _| {}).await?;
@@ -333,7 +330,6 @@ async fn a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "contract: #200"]
 async fn seven_days_of_samples_for_5_machines_roll_up_with_no_long_write_transaction() -> Result<()>
 {
     let directory =
