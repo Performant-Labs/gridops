@@ -95,3 +95,34 @@
   - fmt and clippy 1.98.1 `-D warnings` (core, reconciler, api): clean.
   - Mutations on F's real code: deleting 0050 fails the plan test (`SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`); `ORDER BY rowid` fails the plan and per-table tests; `?` on the prune error fails the isolation test (`cleanup returned Err(... webhook_deliveries deletes refused ...)`). All reverted, tree clean.
   - Every excerpt in `evidence.md` checked against source: verbatim.
+
+## Phase 3 Architecture (A, up-front plan review, re-entry after diff-gate r1 with archChanged) - 2026-11-22T20:48:52-08:00
+- **Decided:** BLOCK, with 3 block and 3 warn findings (`docs/handoffs/222/handoff-A.md`).
+  - **Why:** the brief (blob 0a006ec, unchanged) went stale. PR #221 merged to master as 36dbc1a at 8:26 PM PST (04:26 UTC), 19 minutes after the first pass.
+  - **Block 1 [correctness]:** `0050_host_samples_received_idx.sql` collides with master's `0050_fleet_health.sql`. The brief must name 0051.
+  - **Block 2 [completeness]:** master's `cleanup_retention` now has eight retention deletes. The brief must cover `fleet_health_hourly`, `fleet_host_hourly` and `fleet_health_snapshots` as `RetentionTable` variants. Otherwise their `?` can still abort the snapshot prune and the pass, which breaks Scope 3.
+  - **Block 3 [completeness]:** the first pass deferred both cases to a "land step" that this non-Scion project doesn't have. The driver never merges the base, a CONFLICTING PR stops `mirror-merge-conflict`, and T (next) writes no production code. So O must merge `origin/master`, with a union of the one hunk and a `git mv` to 0051, before a fresh run.
+  - **Warns:**
+    - #221's literal plan rows in `tests/fleet_health_schema.rs:390-395` move into the `RetentionTable::ALL` plan test;
+    - the reconciler test's `TABLES: [Table; 5]` isn't keyed to the enum, and the hourly tables need hour-aligned stamps;
+    - the `fleet_agent_logs` follow-up issue is still unopened.
+  - **F's code against the approved design (archChanged re-check):** consistent, with no drift. The first pass's placement and sharing decisions stand.
+- **Assumed:**
+  - The union merge followed by the rename is green. Every existing #222 test covers only the five tables, and #221's deletes and tests are untouched. I didn't build it.
+  - The first pass's assumption that "#222 lands before #221" was wrong, and that is recorded here.
+- **Hedged:**
+  - I assigned the integration merge to O, not to F in this run. The route after an A PASS is T-red first, and T can't resolve a production hunk, so the run can't sequence the merge itself.
+  - Warn 5's harness shape is T's call.
+- **Evidence:**
+  - **git:**
+    - `git fetch` and `git log 9e6eaf3..origin/master` show 36dbc1a (#221). `gh pr view 221` shows MERGED at 2026-11-23T04:26:20Z.
+    - `git merge-tree --write-tree HEAD origin/master` gives a CONFLICT in `main.rs`, in `cleanup_retention`, and a tree with both 0050 files.
+    - `git ls-tree` over every local and remote branch, plus `gh pr list`, show 0051 is free.
+  - **Code read:**
+    - sqlx-core 0.9.0 `migrate/migrator.rs:255-285`: the applied map is built once, with no duplicate check.
+    - The release's `coding-pipeline.workflow.mjs:3492` (the `mirror-merge-conflict` stop), `workflow-coding-pipeline.md` §"The land" (Scion-only) and `tester.md:8,23`.
+  - **Query plans:** applied master's migrations plus the index as 0051 to a scratch DB, then ran `EXPLAIN QUERY PLAN` (sqlite3 3.54.0) on all eight batch statements. Each plans as `SEARCH <t> USING COVERING INDEX …`. The three fleet-health tables use `sqlite_autoindex_<t>_1 (<col><?)`. Without 0051, host_samples plans as `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx` plus a temp B-tree.
+  - **Files read:**
+    - branch: `retention.rs`, `snapshot_retention.rs`, `0050_host_samples_received_idx.sql`, the `main.rs` and `lib.rs` diffs, `tests/retention.rs` and the reconciler's `snapshot_retention_tests.rs`;
+    - master: `cleanup_retention`, `0050_fleet_health.sql`, `fleet_health_wiring_tests.rs`, `tests/fleet_health_schema.rs:375-410` and `tests/fleet_schema.rs:120-180`;
+    - `docs/handoffs/222-diff-result-r1.md`.
