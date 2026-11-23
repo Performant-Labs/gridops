@@ -126,3 +126,34 @@
     - branch: `retention.rs`, `snapshot_retention.rs`, `0050_host_samples_received_idx.sql`, the `main.rs` and `lib.rs` diffs, `tests/retention.rs` and the reconciler's `snapshot_retention_tests.rs`;
     - master: `cleanup_retention`, `0050_fleet_health.sql`, `fleet_health_wiring_tests.rs`, `tests/fleet_health_schema.rs:375-410` and `tests/fleet_schema.rs:120-180`;
     - `docs/handoffs/222-diff-result-r1.md`.
+
+## Phase 3 Architecture (A, up-front plan review, fresh run after the amendment) - 2026-11-22T21:06:30-08:00
+- **Decided:** PASS, with 0 block and 4 warn findings (`docs/handoffs/222/handoff-A.md`). The previous pass's three blocks are resolved:
+  - (1) the brief (blob a0817fe, 20df2d2) names `0051`, and the branch carries `migrations/0051_host_samples_received_idx.sql`;
+  - (2) the brief covers all eight retention deletes, with `FleetHealthHourly`, `FleetHostHourly` and `FleetHealthSnapshots` as `RetentionTable` variants, one cutoff arm on `FLEET_HEALTH_RETENTION_DAYS` (which stays in the reconciler), and #221's three `.await?` deletes removed;
+  - (3) merge 6173973 brings in origin/master 36dbc1a as a union in `cleanup_retention`.
+  - The first pass's placement and sharing decisions stand. Folding the fleet-health deletes into the enum is the planned extension. At Phase 7, any separate fleet-health delete path counts as a parallel path.
+  - **Warns:**
+    - (1) the reconciler's `TABLES: [Table; 5]` isn't keyed to the enum, and its millisecond `?-i` stamps break the hourly tables' `CHECK (hour % 3600000 = 0)`;
+    - (2) after the fold, `fleet_health_schema.rs`'s test name (:374), module doc (:11) and row comment (:391) go stale;
+    - (3) the core `expected()` arms need #221's STRICT insert shapes, and the counts at `tests/retention.rs:151,188-200` and `retention.rs:49` need updating;
+    - (4) the `fleet_agent_logs` follow-up issue is still unopened, and the earlier `?`s in `cleanup_retention` (:3384-3399) still skip every prune on failure.
+- **Assumed:** the bundled SQLite (3.51.3) plans these statements as the 3.54.0 CLI does. #152's review and this run's earlier T and F runs, all through sqlx, matched the CLI for this shape.
+- **Hedged:** I compile-checked the integration merge but didn't test it; T-red runs the suite next. Warns 1-3 are T's and F's to apply inside the planned change.
+- **Evidence:**
+  - **git:**
+    - `git fetch` shows origin/master still at 36dbc1a, and `merge-base --is-ancestor origin/master HEAD` is true.
+    - `git diff origin/master HEAD -- crates/gridops-reconciler/src/main.rs` shows the union.
+    - `git ls-tree` over every ref finds 0051 only on this branch. The only open PR, #121, touches no migrations.
+    - `gh issue list --state all --search fleet_agent_logs` is empty.
+  - **Build:** `CARGO_BUILD_JOBS=2 cargo check -p gridops-core -p gridops-reconciler --tests` finished in 28.7 s, with the shared target from the parent `.cargo/config.toml` and `CARGO_TARGET_DIR` unset.
+  - **Query plans:** with the branch's migrations 0001-0051 in a scratch DB, `EXPLAIN QUERY PLAN` on all eight batch statements gives `SEARCH <t> USING COVERING INDEX <idx> (<col><?)`. For the three fleet-health tables, `<idx>` is `sqlite_autoindex_<t>_1`. There is no `SCAN`, and no migration declares `WITHOUT ROWID`. Without 0051, `host_samples` gives `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx` plus a temp B-tree.
+  - **Files read:**
+    - the amended brief and its diff;
+    - `222-brief-result-r1.md` and `222-diff-result-r1.md`;
+    - both earlier `handoff-A.md` versions (aab847f and 1ac794e);
+    - `retention.rs` and `snapshot_retention.rs`;
+    - `cleanup_retention` and `prune_retained_table` in the reconciler's `main.rs`;
+    - `0050_fleet_health.sql:60-114` and `0051`;
+    - `tests/retention.rs:1-300`, `tests/fleet_health_schema.rs:360-405` and the reconciler's `snapshot_retention_tests.rs:150-430`;
+    - `fleet_health_wiring_tests.rs:1-88` and `docs/design/fleet-health.md:378-382`.
