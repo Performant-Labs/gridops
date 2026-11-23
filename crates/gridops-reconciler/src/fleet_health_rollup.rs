@@ -204,7 +204,10 @@ async fn hour_facts(db: &SqlitePool, hour: i64) -> Result<Vec<JobFact>> {
 
 /// Folds one job into the hour's rows: its machine from the placement (none
 /// is `unmanaged`, with no CPU-seconds), its category (NULL as `other`), its
-/// clamped duration and its two histogram buckets.
+/// clamped duration and its two histogram buckets. A negative wait (clock
+/// skew: `created_at` is when `GridOps` first saw the job) is no wait, the
+/// bucket `histogram_bucket` gives a negative value; the duration is clamped
+/// because its sum is stored non-negative.
 fn add(rows: &mut BTreeMap<RowKey, HourTotals>, fact: &JobFact) {
     let category = JobCategory::from_column(fact.category.as_deref());
     let (host, pool, cpu_millis) = match (fact.host_id.as_ref(), fact.pool_id.as_ref()) {
@@ -226,7 +229,12 @@ fn add(rows: &mut BTreeMap<RowKey, HourTotals>, fact: &JobFact) {
 /// Writes the hour's rows, replacing what is there and taking the hour off
 /// `fleet_health_recompute`: one short transaction per [`WRITE_BATCH`] rows,
 /// the first emptying the hour, the last also emptying its recompute entry
-/// (an hour with no jobs still gets both).
+/// (an hour with no jobs still gets both). An hour is one (host, pool,
+/// category) group per job that ran, so it is far below the batch size and
+/// one transaction writes it whole; the split only serves #179's rule that
+/// no transaction writes more than 500 rows, should a fleet ever grow that
+/// wide, and a failure between batches leaves the hour listed for a recompute
+/// that rewrites it from scratch.
 ///
 /// # Errors
 /// A write failed.
