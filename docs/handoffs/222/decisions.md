@@ -69,3 +69,19 @@
   - A throwaway correct implementation passes all 12, plus the full core (318 lib and every integration binary) and reconciler (133) suites, with clippy 1.98.1 `-D warnings` and fmt clean.
   - Mutations M1-M11 each fail their test. M1 (delete 0050) shows `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`, and M8 (`?` on the prune error) shows the isolation test failing.
   - The throwaway was reverted, and only the two test files are staged.
+
+## Phase 5 Feature Implementor (F) - 2026-11-22T20:34:22-08:00
+- **Decided:**
+  - Implemented A's design as written: `gridops_core::retention` holds `RetentionTable` (ALL, as_str, prune_batch with one const per table), `prune` and the shared `pub(crate) delete_in_batches` loop.
+  - The constants moved there from `snapshot_retention`, which re-exports them; `prune_inventory_snapshots` delegates to the shared loop with its signature unchanged.
+  - Migration 0050 adds `host_samples_received_idx`.
+  - `cleanup_retention` loops over `RetentionTable::ALL` with an exhaustive cutoff `match`. A non-zero count logs at info, and an error logs at warn and the loop continues.
+- **Assumed:** #222 lands before PR #221, so it keeps 0050 (A finding 5).
+- **Hedged:** The prunes still run after `enforce_log_storage_budget(app).await?`, so a failure there still skips them. That is out of scope (A finding 7).
+- **Evidence:**
+  - core `--test retention`: 7 passed;
+  - reconciler `snapshot_retention_tests`: 5 passed;
+  - full `-p gridops-core -p gridops-reconciler`: all ok (core lib 318, reconciler 133);
+  - clippy 1.98.1 `-D warnings` on core, reconciler and api: clean;
+  - fmt: clean.
+  - Source facts are in `docs/handoffs/222/evidence.md`.

@@ -15,7 +15,7 @@
 //! the lock. One call deletes at most `batch_size * max_batches` rows; the rest
 //! goes on the next call.
 
-use std::{ops::RangeInclusive, time::Duration};
+use std::ops::RangeInclusive;
 
 use sqlx::SqlitePool;
 
@@ -26,15 +26,9 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 7;
 /// The days the setting accepts; a stored value outside them is clamped.
 pub const RETENTION_DAYS: RangeInclusive<i64> = 1..=3_650;
 
-/// Rows one batch deletes at most: about 2 MB of row data, a few
-/// milliseconds of write lock.
-pub const BATCH_SIZE: i64 = 500;
-/// Batches one call runs at most (20,000 rows), bounding each reconcile pass.
-pub const MAX_BATCHES: u32 = 40;
-/// The pause between batches, at least one batch's measured lock hold.
-/// `SQLite`'s busy handler polls with sleeps of 1 to 100 ms, so a waiter in
-/// another process needs the lock to stay free for a while, not just a yield.
-pub const BATCH_PAUSE: Duration = Duration::from_millis(25);
+/// The batch bounds every retention prune shares (#222): see
+/// [`crate::retention`].
+pub use crate::retention::{BATCH_PAUSE, BATCH_SIZE, MAX_BATCHES};
 
 /// One batch, binding `(cutoff_millis, batch_size)`: the oldest rows received
 /// before the cutoff that are not an open session's current snapshot.
@@ -76,25 +70,6 @@ pub async fn prune_inventory_snapshots(
     batch_size: i64,
     max_batches: u32,
 ) -> Result<u64, sqlx::Error> {
-    // A negative LIMIT is no limit in SQLite: never let one through.
-    let Ok(full @ 1..) = u64::try_from(batch_size) else {
-        return Ok(0);
-    };
-    let mut deleted = 0;
-    for batch in 0..max_batches {
-        if batch > 0 {
-            tokio::time::sleep(BATCH_PAUSE).await;
-        }
-        let rows = sqlx::query(PRUNE_BATCH)
-            .bind(cutoff_millis)
-            .bind(batch_size)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        deleted += rows;
-        if rows < full {
-            break;
-        }
-    }
-    Ok(deleted)
+    crate::retention::delete_in_batches(pool, PRUNE_BATCH, cutoff_millis, batch_size, max_batches)
+        .await
 }

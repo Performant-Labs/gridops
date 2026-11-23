@@ -34,6 +34,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
 use gridops_core::gitlab::{GitLabApi, GitLabCredentials};
+use gridops_core::retention::{self, RetentionTable};
 use gridops_core::{
     BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowJob,
     GitHubWorkflowRun, JitRequest, ProviderCapacity, RepositoryCapacity, RunnerTarget, Vault,
@@ -3331,29 +3332,42 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
     .execute(&app.database)
     .await?;
     enforce_log_storage_budget(app).await?;
-    sqlx::query("DELETE FROM webhook_deliveries WHERE received_at < ?")
-        .bind(webhook_cutoff)
-        .execute(&app.database)
-        .await?;
-    sqlx::query("DELETE FROM audit_events WHERE created_at < ?")
-        .bind(audit_cutoff)
-        .execute(&app.database)
-        .await?;
-    sqlx::query("DELETE FROM capacity_samples WHERE recorded_at < ?")
-        .bind(capacity_cutoff)
-        .execute(&app.database)
-        .await?;
-    // Machine samples back the overview's workload chart, which shows up to 30 days.
-    sqlx::query("DELETE FROM host_samples WHERE received_at < ?")
-        .bind(capacity_cutoff)
-        .execute(&app.database)
-        .await?;
-    sqlx::query("DELETE FROM reconciler_passes WHERE started_at < ?")
-        .bind(capacity_cutoff)
-        .execute(&app.database)
-        .await?;
+    for table in RetentionTable::ALL {
+        let cutoff = match table {
+            RetentionTable::WebhookDeliveries => webhook_cutoff,
+            RetentionTable::AuditEvents => audit_cutoff,
+            // 31 days. Machine samples back the overview's workload chart,
+            // which shows up to 30 days.
+            RetentionTable::CapacitySamples
+            | RetentionTable::HostSamples
+            | RetentionTable::ReconcilerPasses => capacity_cutoff,
+        };
+        prune_retained_table(app, table, cutoff).await;
+    }
     prune_inventory_snapshots(app, now).await;
     Ok(())
+}
+
+/// Deletes the rows of one retained table older than `cutoff` in bounded
+/// batches (#222), so the pass never holds the write lock for long. A failure
+/// is logged and does not fail the pass or stop the other tables' prunes:
+/// what is left goes on the next pass, as does anything past the per-pass cap.
+async fn prune_retained_table(app: &Reconciler, table: RetentionTable, cutoff: i64) {
+    match retention::prune(
+        &app.database,
+        table,
+        cutoff,
+        retention::BATCH_SIZE,
+        retention::MAX_BATCHES,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(deleted) => tracing::info!(table = table.as_str(), deleted, "pruned old rows"),
+        Err(error) => {
+            tracing::warn!(table = table.as_str(), error = ?error, "could not prune old rows");
+        }
+    }
 }
 
 /// Deletes old fleet inventory snapshots in bounded batches (#152), keeping
@@ -3361,18 +3375,18 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
 /// one. A failure is logged and does not fail the pass: what is left goes on
 /// the next pass, as does anything past the per-pass cap.
 async fn prune_inventory_snapshots(app: &Reconciler, now: i64) {
-    use gridops_core::fleet::registry::snapshot_retention as retention;
+    use gridops_core::fleet::registry::snapshot_retention as snapshots;
     let days = setting_i64(
         &app.database,
-        retention::RETENTION_DAYS_KEY,
-        retention::DEFAULT_RETENTION_DAYS,
+        snapshots::RETENTION_DAYS_KEY,
+        snapshots::DEFAULT_RETENTION_DAYS,
     )
     .await;
-    match retention::prune_inventory_snapshots(
+    match snapshots::prune_inventory_snapshots(
         &app.database,
-        retention::cutoff_millis(now, days),
-        retention::BATCH_SIZE,
-        retention::MAX_BATCHES,
+        snapshots::cutoff_millis(now, days),
+        snapshots::BATCH_SIZE,
+        snapshots::MAX_BATCHES,
     )
     .await
     {
