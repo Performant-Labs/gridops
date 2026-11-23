@@ -102,10 +102,34 @@ jobs:
       - name: Test the guard
         run: node --test scripts/fleet-health-guard.test.mjs
 
+      # The rules come from the base branch, not the pull request: a pull request must not be able
+      # to loosen its own guard by editing the script or the owners file. Both are read from the
+      # base commit into a scratch directory and run from there (the script finds the owners file
+      # relative to itself). The one exception is the pull request that adds the guard (#197),
+      # whose base has none yet; every wave-1 pull request is cut after it lands.
+      - name: Read the guard's rules from the base branch
+        id: base-guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          dir="$RUNNER_TEMP/fleet-health-guard"
+          mkdir -p "$dir/scripts" "$dir/docs/design"
+          if git cat-file -e "$BASE_SHA:scripts/fleet-health-guard.mjs" 2>/dev/null \
+            && git cat-file -e "$BASE_SHA:docs/design/fleet-health-owners.json" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/fleet-health-guard.mjs" > "$dir/scripts/fleet-health-guard.mjs"
+            git show "$BASE_SHA:docs/design/fleet-health-owners.json" > "$dir/docs/design/fleet-health-owners.json"
+            echo "script=$dir/scripts/fleet-health-guard.mjs" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The base branch has no fleet health guard yet; using this pull request's copy (only the pull request that adds it)."
+            echo "script=scripts/fleet-health-guard.mjs" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check the pull request's files
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/fleet-health-guard.mjs
+          GUARD_SCRIPT: ${{ steps.base-guard.outputs.script }}
+        run: node "$GUARD_SCRIPT"
 
   rust:
     name: Rust format, lint, and tests
