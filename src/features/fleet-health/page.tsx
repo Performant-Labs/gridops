@@ -1,5 +1,5 @@
 import { HeartPulse, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { LiveRefreshNotice } from "~/components/live-refresh-notice";
 import { Callout, EmptyState, LoadingRows, PageBody, PageHeader } from "~/components/page";
@@ -85,6 +85,17 @@ export function FleetHealthPage() {
   );
 }
 
+/**
+ * The page's composition: each section sits in its own slot, marked `data-health-section`, so the
+ * page test can check the composition without reading a section's content. Wave 1 fills a slot's
+ * content and may move the slot, but keeps its name (`docs/design/fleet-health.md`, "The page").
+ */
+type HealthSlot = "live-strip" | "areas-of-concern" | "fleet-score" | "category-legend" | "machine-table" | "machine-detail";
+
+function Slot({ name, children }: { name: HealthSlot; children: ReactNode }) {
+  return <div className="min-w-0" data-health-section={name}>{children}</div>;
+}
+
 function HealthSections({ data, window }: FleetHealthViewProps) {
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4 p-3 sm:p-4" data-testid="fleet-health-sections">
@@ -93,14 +104,14 @@ function HealthSections({ data, window }: FleetHealthViewProps) {
           GridOps couldn’t read the fleet just now, so this is the last response it had.
         </Callout>
       ) : null}
-      <LiveStrip data={data} window={window} />
+      <Slot name="live-strip"><LiveStrip data={data} window={window} /></Slot>
       <div className="grid gap-4 lg:grid-cols-2">
-        <AreasOfConcern data={data} window={window} />
-        <FleetScoreCard data={data} window={window} />
+        <Slot name="areas-of-concern"><AreasOfConcern data={data} window={window} /></Slot>
+        <Slot name="fleet-score"><FleetScoreCard data={data} window={window} /></Slot>
       </div>
-      <CategoryLegend data={data} window={window} />
-      <MachineScoreTable data={data} window={window} />
-      <MachineDetail data={data} window={window} />
+      <Slot name="category-legend"><CategoryLegend data={data} window={window} /></Slot>
+      <Slot name="machine-table"><MachineScoreTable data={data} window={window} /></Slot>
+      <Slot name="machine-detail"><MachineDetail data={data} window={window} /></Slot>
     </div>
   );
 }

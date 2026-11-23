@@ -351,6 +351,12 @@ A stale response shows a warning above the sections.
 The sections, each taking `{ data, window }` and using only the router's `Link`: the live strip
 and category legend (#203), Areas of concern and the fleet score card (#195), the machine table
 and detail (#202). Until its issue lands, each renders a placeholder card ("Coming in #N").
+Each section sits in its own slot, an element carrying `data-health-section`: `live-strip`,
+`areas-of-concern`, `fleet-score`, `category-legend`, `machine-table` and `machine-detail`, six
+in all (the stale warning is not a slot). The slots are part of the composition: wave 1 fills a
+slot's content and may move the slot, but keeps the attribute. No slot renders while loading, on
+a 403 or on a failure. #197's page test (`tests/fleet-health-page.test.ts`) asserts the
+composition slots, not the placeholder text.
 
 - **Areas of concern:** the first five concerns in the API's order, then all on "Show all N";
   "No areas of concern" when empty; rows keyed by `key` (`data-concern-key`), so a refresh keeps
@@ -384,7 +390,9 @@ transaction is timed from its first row change to its commit or rollback, and wh
 armed a connection's worker thread routes its `tracing` events to the check's own dispatcher
 (set as that thread's default from a hook), which records sqlx's slow-statement warning. Limits:
 a `BEGIN IMMEDIATE` held before any write, or a write to a `WITHOUT ROWID` table, is not timed;
-a statement is seen only once SQLite has run 1,000 instructions of it.
+a statement is seen only once SQLite has run 1,000 instructions of it. Catching those is a
+non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock that `BEGIN IMMEDIATE`
+holds before its first write, or a slow write to a `WITHOUT ROWID` table.
 
 `fleet_health::testdata` seeds realistic data in batches: `seed_fleet` (the five fixture
 machines with their budgets, one installation, repository `acme/app` and a pool labelled

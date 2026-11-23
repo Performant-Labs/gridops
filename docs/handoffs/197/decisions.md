@@ -245,3 +245,21 @@
     - the guard passes 13 of 13.
   - **A correct implementation can pass the new tests:** a throwaway one on the scratch branch passed the page tests and the repaired #195 test.
   - **Handoff:** `docs/handoffs/197/handoff-T-red.md` (round 2 at the top).
+
+## Phase 6 Feature Implementor (F, round 2) - 2026-11-22T17:40:00-08:00
+- **Decided:**
+  - The six `data-health-section` slots go on wrapper `div`s in `page.tsx`, not on the sections' roots. The section files belong to wave 1, and a wrapper survives a rewrite.
+  - Each wrapper gets `min-w-0`, because two of the slots are now grid items.
+  - The slot names are typed by a private `HealthSlot` union, not exported, so the test and the design doc pin the names on their own.
+  - W-3 is a non-goal sentence after the existing "Limits:" sentence in the design doc.
+- **Assumed:**
+  - T sets the slot names, per T-red round 2. The design doc now records them as part of the composition.
+- **Hedged:**
+  - W-1, W-2 and W-5 are left to O, and the NITs to the wave-1 issues that touch those lines.
+  - No Rust changed this round, so cargo was not re-run.
+- **Evidence:**
+  - The page test passes 4 of 4 (it was 3 failing before).
+  - `npx vitest run`: 642 passed, 18 skipped.
+  - `npm run lint`, `tsc --noEmit` and `npm run build` are clean.
+  - The guard passes 13 of 13.
+  - Handoff: `docs/handoffs/197/handoff-F.md`, round 2 at the top.

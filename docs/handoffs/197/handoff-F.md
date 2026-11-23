@@ -1,3 +1,64 @@
+# Handoff-F: Phase 6 - Fleet health shared contract (#197), round 2
+
+**Date:** 2026-11-22
+**Branch:** claude/fleet-197-contract (head c3f2ebc; production edits uncommitted, for the driver to commit)
+**Issue:** #197
+
+Round 1 is kept unchanged below, under "Round 1". This round implements what T's round-2 RED (`handoff-T-red.md`, "The contract F implements against (this round)") asks for, in answer to diff gate round 1 (`docs/handoffs/197-diff-result-r1.md`).
+
+## What was done
+- `src/features/fleet-health/page.tsx`: `HealthSections` puts each section in its own `Slot`, a `<div data-health-section="<slot>">`. There are six slots: `live-strip`, `areas-of-concern`, `fleet-score`, `category-legend`, `machine-table` and `machine-detail`. The stale warning stays outside the slots. `HealthSlot` is a union of the six names, so a typo fails `tsc`.
+- `docs/design/fleet-health.md`, "The page": lists the six slots as part of the composition. Wave 1 fills a slot's content and may move the slot, but keeps the attribute. No slot renders while loading, on a 403 or on a failure. Adds warn 28's sentence: #197's page test asserts the composition slots, not the placeholder text.
+- `docs/design/fleet-health.md`, "Testing" (diff gate W-3): the existing "Limits:" sentence now says that catching these cases is a non-goal. A wave-1 rollup can't rely on the check to flag a lock that `BEGIN IMMEDIATE` holds before its first write, or a slow write to a `WITHOUT ROWID` table.
+
+## Design decisions
+- **A wrapper element, not an attribute on each section's root.** The sections are wave-1 files (#195, #202, #203). If the attribute sat on their roots, every wave-1 rewrite would have to remember to keep it. In `page.tsx` the wrapper survives a section rewrite, and moving a slot means moving one `<Slot>` line. This is the shape T's contract names ("wraps each section in its own element").
+- **`min-w-0` on the wrapper.** Two slots are now grid items (in the `lg:grid-cols-2` row). Without `min-w-0`, a wide table or chart that wave 1 adds would widen the grid track instead of shrinking or scrolling. Today the wrapper is otherwise layout-neutral: it is a block `div`, and the section inside fills it as before.
+- **No exported slot constant.** The test pins the names on purpose, and the design doc lists them. A shared export would let a rename pass both sides silently.
+
+## Reuse / extend-vs-new
+Extends the existing `HealthSections` in `page.tsx`. Nothing new outside it, and `Slot` is private to the file.
+
+## Architecture notes for A
+None. No layer, dependency, schema or public-interface change. A DOM attribute is added for tests, and the design doc gains two paragraphs.
+
+## Deviations from spec / wireframe
+None. No wireframe.
+
+## Tier 1 self-check (incl. tests now GREEN)
+- `npx vitest run tests/fleet-health-page.test.ts`: **4 passed (4)**. Before this change it was 3 failed and 1 passed (T's RED).
+- `npx vitest run`: Test Files 56 passed, 4 skipped (60). **Tests 642 passed, 18 skipped (660).** The 18 skipped are the marked contract tests.
+- `npm run lint` (eslint, `--max-warnings=0`): clean.
+- `npx tsc --noEmit`: clean.
+- `npm run build`: `✓ built in 939ms`, and the typecheck is clean.
+- `node --test scripts/fleet-health-guard.test.mjs`: 13 of 13 pass.
+- No Rust file changed this round, so cargo was not re-run. T-red round 2 ran fmt and CI's clippy on this head, and both were clean.
+
+## Evidence appendix
+None: this round relies on no behaviour outside the diff. The 403 and failure states that the page test checks are in `page.tsx`, the file shown in the diff.
+
+## Tests that look wrong (for T)
+None.
+
+## Known issues
+- Diff gate **B-1** is met by T's marker-removal run (`handoff-T-red.md`, round 2, item 3). There is no production change for it.
+- The following are not F's and are carried for O. None of them blocks this round's tests.
+  - **W-1:** the guard's two sample PRs. They must be cut from a head after T's round-2 contract-test edit.
+  - **W-2:** the Mars-copy timing.
+  - **W-5:** the #204 reminder to move `FakeFleetHealthSource` behind `test-support`.
+- **W-4** is T's doc comment in `health_wiring_tests.rs`.
+- The NITs are left as they are:
+  - NIT-1: the escaped pipes are correct Markdown;
+  - NIT-2 and NIT-3 belong to #201 and #195/#203, which are the issues that touch those lines.
+
+## Files changed
+- `src/features/fleet-health/page.tsx`
+- `docs/design/fleet-health.md`
+
+---
+
+# Round 1
+
 # Handoff-F: Phase 5 - Fleet health, the groundwork (#197)
 
 **Date:** 2026-11-22
