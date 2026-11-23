@@ -12,7 +12,7 @@ No UI change, no API change, no new setting.
 
 ## Scope (decided)
 
-1. **Index.** Add migration `migrations/0050_host_samples_received_idx.sql`. Give it a header comment in the style of `0034_retention_indexes.sql` and `0049`. It contains exactly `CREATE INDEX host_samples_received_idx ON host_samples(received_at);`, with no `IF NOT EXISTS`.
+1. **Index.** Add migration `migrations/0051_host_samples_received_idx.sql` (0050 is master's `0050_fleet_health.sql`, from #221; the branch already carries the renamed file after the integration merge). Give it a header comment in the style of `0034_retention_indexes.sql` and `0049`. It contains exactly `CREATE INDEX host_samples_received_idx ON host_samples(received_at);`, with no `IF NOT EXISTS`.
    - Timing: on a copy of prod, creating 0049's index on a 207k-row table took 6.6 s. This one is 628k narrower rows, so expect seconds. That's acceptable at deploy, because migrations run before the services start.
 2. **Batch every retention delete in `cleanup_retention`**, not just `host_samples`. That covers:
    - `webhook_deliveries` (`received_at`)
@@ -20,8 +20,13 @@ No UI change, no API change, no new setting.
    - `capacity_samples` (`recorded_at`)
    - `host_samples` (`received_at`)
    - `reconciler_passes` (`started_at`)
+   - `fleet_health_hourly` (`hour`), added by #221
+   - `fleet_host_hourly` (`hour`), added by #221
+   - `fleet_health_snapshots` (`recorded_at`), added by #221
 
-   The other four already have an index on their cutoff column (0034 and 0001), but each is still one unbounded statement. The first pass after any long gap, or a retention-setting change, would delete everything old in one write lock. Fix the class, not the instance.
+   For the three fleet-health tables: add `RetentionTable` variants `FleetHealthHourly`, `FleetHostHourly` and `FleetHealthSnapshots`, each with its own `const` statement in the same `rowid IN (… ORDER BY <col> LIMIT ?)` shape, an `as_str` arm and a plan-test arm. Their primary key leads with the cutoff column, so the expected plan is `SEARCH <t> USING COVERING INDEX sqlite_autoindex_<t>_1 (<col><?)`. In the reconciler, the cutoff `match` gets one arm for all three using `now - FLEET_HEALTH_RETENTION_DAYS * 86_400_000`; that constant stays in the reconciler. Then remove #221's three unbatched `sqlx::query(...).await?` deletes from `cleanup_retention`.
+
+   The other seven already have an index on their cutoff column (0034 and 0001), but each is still one unbounded statement. The first pass after any long gap, or a retention-setting change, would delete everything old in one write lock. Fix the class, not the instance.
    - Reuse the shape and constants of `fleet::registry::snapshot_retention` (`crates/gridops-core/src/fleet/registry/snapshot_retention.rs`): 500-row batches, a 25 ms `tokio::time::sleep` between batches, a cap of 40 batches per pass, one autocommit statement per batch, and no transaction spanning batches.
    - Each batch has the form `DELETE FROM <t> WHERE rowid IN (SELECT rowid FROM <t> WHERE <col> < ? ORDER BY <col> LIMIT ?)`. Keep `ORDER BY <col>`: #152 found the planner keeps a full scan with `ORDER BY rowid`.
    - Put a small generic helper in gridops-core, next to `snapshot_retention` or in a sibling `retention` module; the architecture reviewer decides where. It should take the table and column from a **closed set of `const` statements**, not interpolated strings. Don't build SQL from runtime input. A `const` statement per table, chosen by an enum, is fine.
@@ -32,10 +37,11 @@ No UI change, no API change, no new setting.
 
 ## Tests (gridops-core `*_tests.rs`; reconciler wiring only if needed)
 
-- For **each** of the five statements, a query-plan test: `EXPLAIN QUERY PLAN` on a migrated database must show the inner select using the cutoff-column index (`SEARCH ... USING INDEX ...<col>...`), with no `SCAN <table>`. It must fail if migration 0050 is removed: the `host_samples` case is the regression test for this incident.
+- For **each** of the eight statements, a query-plan test: `EXPLAIN QUERY PLAN` on a migrated database must show the inner select using the cutoff-column index (`SEARCH ... USING INDEX ...<col>...`), with no `SCAN <table>`. It must fail if migration 0051 is removed: the `host_samples` case is the regression test for this incident.
+- Fold the three hand-written fleet-health delete plan checks in `crates/gridops-core/tests/fleet_health_schema.rs` (the `DELETE FROM fleet_health_hourly/fleet_host_hourly/fleet_health_snapshots` rows of the `for sql in [...]` list, about lines 390-395) into the `RetentionTable::ALL` plan test, so the batched statements are what's checked. Keep that file's other rows.
 - Batching: with more than one batch's worth of old rows, a pass deletes at most `BATCH_SIZE * MAX_BATCHES`. Rows newer than the cutoff are never deleted. The pass stops early when a batch comes back short. It pauses between batches; follow #152's `a_pass_pauses_between_its_batches` pattern.
 - Error isolation: when one table's prune fails (for example, the table was dropped in the test database), the other tables are still pruned.
-- Each test must fail when the code it guards is broken. Show a mutation check for the plan test and the error-isolation test in the handoff.
+- Each test must fail when the code it guards is broken. Show a mutation check for the plan test and the error-isolation test in the handoff: the plan test goes red when 0051 is removed, and the error-isolation test goes red when a `?` is restored on a prune.
 
 ## Constraints
 
