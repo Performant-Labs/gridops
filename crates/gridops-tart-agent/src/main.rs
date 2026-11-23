@@ -2899,12 +2899,35 @@ mod tests {
     // A shell script stands in for `tart`, so the handler's real clone, run,
     // wait and cleanup steps run on any Unix machine. It logs each call and
     // answers `tart run` with the Virtualization framework's limit error while
-    // the `busy` counter is above zero, or always given `always-busy`.
+    // `always-busy` exists, or while the `busy` counter is above zero.
+    //
+    // `always-busy` is the slot a test holds and frees while the agent retries
+    // `tart run` (#124): the fake only tests for it and the test alone creates
+    // or removes it, so freeing the slot cannot be lost to a retry. The `busy`
+    // counter is rewritten by every retry, so it is only for a test that sets
+    // it before provisioning and never touches it again.
+    //
+    // Commands run at once (`tart run` stays up while the agent polls with
+    // `tart exec`), and a long line (a PATH, a runner script) is written in
+    // more than one piece, so a shared log file mixes them (#124). Each
+    // command writes each log entry, its call to `calls/` and its PATH to
+    // `paths/`, to a file of its own and renames it into place whole: a reader
+    // never sees a mixed or a half-written entry.
 
     const FAKE_TART: &str = r#"#!/bin/sh
-dir=$(dirname "$0")
-printf '%s\n' "$*" >> "$dir/calls"
-printf '%s\t%s\n' "$1" "$PATH" >> "$dir/paths"
+dir=${0%/*}
+# log <log> <format> <arguments>: one whole entry in "$dir/<log>/", written
+# under a name starting with `.` and renamed into the log in one step. Names
+# start with this command's PID, which no other live command has, so no other
+# command writes them; a reused PID skips the names an earlier command left.
+log() {
+  to="$dir/$1"; shift; n=0
+  while [ -e "$to/$$-$n" ]; do n=$((n + 1)); done
+  printf "$@" > "$to/.$$-$n"
+  mv "$to/.$$-$n" "$to/$$-$n"
+}
+log calls '%s\n' "$*"
+log paths '%s\t%s' "$1" "$PATH"
 case "$1" in
   run)
     if [ -f "$dir/always-busy" ]; then
@@ -2952,6 +2975,9 @@ case "$1" in
   *) exit 0 ;;
 esac
 "#;
+
+    /// The logs `FAKE_TART` keeps, each a directory of whole entries.
+    const LOGS: [&str; 2] = ["calls", "paths"];
 
     /// Stands in for `ps`: prints `ps-output`, or fails given `ps-broken`.
     const FAKE_PS: &str = r#"#!/bin/sh
@@ -3001,6 +3027,9 @@ exit 0
             for path in ["records", "logs"] {
                 fs::create_dir_all(home.join(path)).await?;
             }
+            for log in LOGS {
+                fs::create_dir(dir.join(log)).await?;
+            }
             let binary = dir.join("tart");
             fs::write(&binary, FAKE_TART).await?;
             fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).await?;
@@ -3020,8 +3049,12 @@ exit 0
                 }
             }
             // The warm-up run is not a command the agent issued; forget it.
-            let _ = fs::remove_file(dir.join("calls")).await;
-            let _ = fs::remove_file(dir.join("paths")).await;
+            for log in LOGS {
+                let mut entries = fs::read_dir(dir.join(log)).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    fs::remove_file(entry.path()).await?;
+                }
+            }
             let ps = dir.join("ps");
             install_script(&ps, FAKE_PS).await?;
             let state = AgentState {
@@ -3057,12 +3090,68 @@ exit 0
             Ok(fs::write(self.dir.join(name), contents).await?)
         }
 
+        /// Removes a flag `flag` set. Removing a file is atomic, so a fake
+        /// command that tests for the flag sees it either there or gone.
+        async fn clear(&self, name: &str) -> Result<()> {
+            Ok(fs::remove_file(self.dir.join(name)).await?)
+        }
+
+        /// Holds the Mac's VM slots until `free_slot`: meanwhile `tart run`
+        /// answers with the Virtualization framework's limit error, however
+        /// often the agent retries it.
+        ///
+        /// The fake only tests for `always-busy`, so no retry can undo
+        /// `free_slot` (#124).
+        async fn hold_slot(&self) -> Result<()> {
+            self.flag("always-busy", "").await
+        }
+
+        /// Frees the slots `hold_slot` held, while the agent may be retrying
+        /// `tart run`.
+        async fn free_slot(&self) -> Result<()> {
+            self.clear("always-busy").await
+        }
+
+        /// The entries of one of the fake's `LOGS`, in the order they were
+        /// written. Each command renames its entry into the log once it is
+        /// written whole; one still being written has a name starting with
+        /// `.` and is not an entry yet.
+        async fn logged(&self, log: &str) -> Result<Vec<String>> {
+            let mut logged = Vec::new();
+            let mut entries = fs::read_dir(self.dir.join(log)).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let written = entry.metadata().await?.modified()?;
+                logged.push((written, fs::read_to_string(entry.path()).await?));
+            }
+            logged.sort();
+            Ok(logged.into_iter().map(|(_, entry)| entry).collect())
+        }
+
         async fn calls(&self) -> Vec<String> {
-            fs::read_to_string(self.dir.join("calls"))
+            self.logged("calls")
                 .await
                 .unwrap_or_default()
-                .lines()
-                .map(ToOwned::to_owned)
+                .iter()
+                .flat_map(|call| call.lines().map(ToOwned::to_owned))
+                .collect()
+        }
+
+        /// Each command the fake ran, with the PATH it ran with, in the
+        /// order they were logged.
+        async fn logged_paths(&self) -> Result<Vec<(String, String)>> {
+            self.logged("paths")
+                .await?
+                .into_iter()
+                .map(|line| {
+                    let (command, path) = line.split_once('\t').with_context(|| {
+                        let start = line.chars().take(80).collect::<String>();
+                        format!("no PATH logged ({} bytes): {start:?}", line.len())
+                    })?;
+                    Ok((command.to_owned(), path.to_owned()))
+                })
                 .collect()
         }
 
@@ -3118,19 +3207,15 @@ exit 0
             .await
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         cleanup_vm(&tart.state, CLONE).await;
-        // The runner's own stop runs in the background once its exec ends.
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while tart.calls_to("stop").await < 2 {
-            anyhow::ensure!(std::time::Instant::now() < deadline, "no runner stop");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // The runner's own stop runs in the background once its exec ends;
+        // a stop has logged its PATH by the time it is done.
+        wait_for_stops(&tart, 2).await?;
 
-        let paths = fs::read_to_string(tart.dir.join("paths")).await?;
+        let paths = tart.logged_paths().await?;
         let mut commands = std::collections::BTreeSet::new();
         let inherited = env::var_os("PATH").unwrap_or_default();
-        for line in paths.lines() {
-            let (command, path) = line.split_once('\t').context("no PATH logged")?;
-            commands.insert(command.to_owned());
+        for (command, path) in &paths {
+            commands.insert(command.clone());
             let entries = env::split_paths(path).collect::<Vec<_>>();
             assert_eq!(
                 entries.first().map(PathBuf::as_path),
@@ -3151,7 +3236,51 @@ exit 0
             "stop",
             "delete",
         ] {
-            assert!(commands.contains(command), "{command} never ran: {paths}");
+            assert!(commands.contains(command), "{command} never ran: {paths:?}");
+        }
+        Ok(())
+    }
+
+    /// The agent runs Tart commands at once (`tart run` stays up while it
+    /// polls with `tart exec`), and the test above reads every PATH the fake
+    /// logged. Two commands logging at the same moment must not mix their
+    /// entries (#124): a PATH the shell writes in more than one piece did,
+    /// in 7 of 300 runs of the test above on a loaded machine.
+    #[tokio::test]
+    async fn tart_commands_run_at_once_each_log_their_whole_path() -> Result<()> {
+        const AT_ONCE: usize = 8;
+        const ROUNDS: usize = 25;
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        // A long PATH, so a log line the shell writes in pieces has many.
+        let mut entries = (0..600)
+            .map(|index| PathBuf::from(format!("/gridops-test/{index:04}/{}", "x".repeat(40))))
+            .collect::<Vec<_>>();
+        entries.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let path = env::join_paths(entries)?
+            .into_string()
+            .map_err(|path| anyhow::anyhow!("PATH is not UTF-8: {path:?}"))?;
+        for _ in 0..ROUNDS {
+            let runs = (0..AT_ONCE).map(|_| {
+                Command::new(tart.dir.join("tart"))
+                    .arg("list")
+                    .env("PATH", &path)
+                    .stdout(Stdio::null())
+                    .status()
+            });
+            for status in futures_util::future::join_all(runs).await {
+                anyhow::ensure!(status?.success(), "tart list failed");
+            }
+        }
+        let logged = tart.logged_paths().await?;
+        assert_eq!(logged.len(), AT_ONCE * ROUNDS, "one entry per command");
+        for (command, logged_path) in &logged {
+            assert_eq!(command, "list");
+            assert!(
+                logged_path == &path,
+                "a mixed entry of {} bytes, not {}",
+                logged_path.len(),
+                path.len()
+            );
         }
         Ok(())
     }
@@ -3249,7 +3378,7 @@ exit 0
     #[tokio::test]
     async fn a_runner_waiting_for_a_slot_is_listed_as_waiting() -> Result<()> {
         let tart = FakeTart::new(Duration::from_secs(30)).await?;
-        tart.flag("busy", "1000").await?;
+        tart.hold_slot().await?;
         let provisioning = tokio::spawn({
             let state = tart.state.clone();
             async move {
@@ -3287,11 +3416,68 @@ exit 0
             "{runner}"
         );
         // Free the slot: the runner starts and is no longer listed as waiting.
-        tart.flag("busy", "0").await?;
+        tart.free_slot().await?;
         let Ok(Ok(())) = provisioning.await else {
             anyhow::bail!("the runner did not start once the slot was free")
         };
         assert!(tart.state.slot_waiters.is_empty());
+        Ok(())
+    }
+
+    /// The test above frees the slot while the agent retries `tart run`
+    /// every 20 to 50 ms (#124). If a retry wrote the state the slot is held
+    /// by, a retry that read it just before the test freed the slot would
+    /// write it back, and the slot would stay held past the agent's wait.
+    /// So `tart run` must only read that state; the test alone changes it.
+    #[tokio::test]
+    async fn tart_run_never_writes_the_state_a_held_slot_is_kept_in() -> Result<()> {
+        // Every top-level file a test may set, as opposed to the scripts and
+        // the `calls` and `paths` log directories the fake writes to on every
+        // command (directories are skipped below).
+        async fn test_state(tart: &FakeTart) -> Result<std::collections::BTreeMap<String, String>> {
+            let mut state = std::collections::BTreeMap::new();
+            let mut entries = fs::read_dir(&tart.dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type().await?.is_file()
+                    && !["tart", "ps", "calls", "paths"].contains(&name.as_str())
+                {
+                    state.insert(name, fs::read_to_string(entry.path()).await?);
+                }
+            }
+            Ok(state)
+        }
+        async fn run(tart: &FakeTart) -> Result<std::process::Output> {
+            Ok(Command::new(tart.dir.join("tart"))
+                .args(["run", CLONE])
+                .output()
+                .await?)
+        }
+
+        let tart = FakeTart::new(Duration::from_secs(30)).await?;
+        // Once the slot is free, `run` fails on this instead of starting a VM.
+        tart.flag("broken", "").await?;
+        tart.hold_slot().await?;
+        let held = test_state(&tart).await?;
+        for _ in 0..2 {
+            let output = run(&tart).await?;
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("exceeds the system limit"),
+                "the slot is held: {output:?}"
+            );
+        }
+        assert_eq!(
+            test_state(&tart).await?,
+            held,
+            "a retried `tart run` changed the state the test holds the slot with"
+        );
+
+        tart.free_slot().await?;
+        let output = run(&tart).await?;
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("disk image is corrupted"),
+            "the slot is free: {output:?}"
+        );
         Ok(())
     }
 
@@ -3643,7 +3829,7 @@ admin     tart run
         // makes that write fail, even for root.
         let blocker = record_path(&tart.state, &id).with_extension("json.tmp");
         fs::create_dir(&blocker).await?;
-        fs::remove_file(tart.dir.join("exec-hold")).await?;
+        tart.clear("exec-hold").await?;
 
         wait_for_stops(&tart, 1).await?;
         let on_disk: TartRecord =

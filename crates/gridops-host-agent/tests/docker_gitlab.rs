@@ -513,6 +513,32 @@ async fn a_verified_gitlab_runner_starts_with_its_token_only_on_stdin() -> Resul
             .any(|arg| arg.contains(gridops_core::fleet::SHARED_WORK_ROOT)),
         "a GitLab runner got the GitHub shared work folder: {args:?}"
     );
+    // #126 decision 10: nor the GitHub runner root, the externals cache or their variables.
+    for github_only in [
+        gridops_core::fleet::SHARED_RUNNERS_ROOT,
+        gridops_core::fleet::EXTERNALS_CACHE_ROOT,
+    ] {
+        ensure!(
+            !args.iter().any(|arg| arg.contains(github_only)),
+            "a GitLab runner got the GitHub runner's {github_only}: {args:?}"
+        );
+    }
+    for variable in [
+        "RUNNER_TOOL_CACHE=",
+        "GRIDOPS_RUNNER_ROOT=",
+        "GRIDOPS_RUNNER_EXTERNALS=",
+    ] {
+        ensure!(
+            !args
+                .windows(2)
+                .any(|pair| pair[0] == "-e" && pair[1].starts_with(variable)),
+            "a GitLab runner got the GitHub runner's {variable}: {args:?}"
+        );
+    }
+    ensure!(
+        !args.iter().any(|arg| arg.starts_with("--mount")),
+        "a GitLab runner got a --mount: {args:?}"
+    );
     ensure!(args.iter().any(|arg| arg == "--init"), "{args:?}");
     // The image is the pool's; the agent holds no image of its own (B-1).
     let image = args

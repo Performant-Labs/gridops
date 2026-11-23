@@ -1,0 +1,32 @@
+## Brief Review (Round 1)
+
+### BLOCK findings
+None.
+
+### Resolved findings
+**[R-1]** "Requirement 3 ('fail loudly') has no test requirement." — Item 5 now mandates: "Every failure path of requirement 3 / decision 5 has a test asserting the exact `(FailureCode, retryable)` pair," enumerating each path (missing WorkingDir → `Configuration, false`; no `externals` → `Configuration, false`; StateDirectory permission failure → `Configuration, false`; Docker/IO error during fill → `Runtime, true` with no staging dir taken; Start cache-missing in both JIT and persistent modes → `Runtime, true` with no `docker create` issued), plus the logged-reason assertion.
+**[R-2]** (Round-2 W-1, environment-id path safety) — The brief now specifies `<environment id>` is a `PreparedEnvironmentId` (`fleet_uuid!` newtype, non-nil UUID, hyphenated `Display` at ids.rs:73-77, shown and confirmed: `self.0.fmt(formatter)`), built only from the typed id, with a test pinning the runner root is a direct child of the runners root.
+**[R-3]** (Round-2 W-2, stale-cache sweep untested) — Item 5 now mandates the stale-cache test on a temp cache root with a stand-in `docker` recognising "no such object" via the existing `missing()` check, including the non-missing-inspect-error case where the cache is kept.
+**[R-4]** (Round-2 W-3, id/tag reuse invariant) — The brief now states every Start resolves the image's `{{.Id}}` itself and never reuses an id or tag resolution from Prepare or an earlier Start; a re-pull either finds that id's cache or fails with `Runtime, true`.
+**[R-5]** (Round-1 W-1..W-4, NIT-1/NIT-2, and Round-2 NIT-1) — The amended brief pins the copy-cost deliverable (byte and file counts, measured or estimated, saying which), resolves the daemon-test conflict (decision 10 governs; stand-in `docker` CLI is not a daemon and is explicitly allowed), specifies the cache-name sanitization function with unit tests and a doc comment, covers symlinked `externals` (followed or rejected with `Configuration, false`, pinned by a test), applies the Start cache check to both JIT and persistent paths, pins the cache root is never under `SHARED_WORK_ROOT`, and spells out the root-skip probe mechanism for the permission test (`create_dir` probe, docker.rs:977-980).
+
+### Needs-verification findings
+**[NV-1]** Runner 2.338.2 maps host paths to job-container paths checking Work (`/__w`) before Tools/Externals, first match wins (decision 1's premise). — The path-mount resolution loop of `ContainerInfo.cs` from actions/runner 2.338.2, shown verbatim; the brief explicitly does not quote third-party source.
+**[NV-2]** Tool-cache resolution order is `RUNNER_TOOL_CACHE`, then `AGENT_TOOLSDIRECTORY`, then `<work>/_tool` (brief facts, decision 9). — `HostContext.cs:409-415` of actions/runner 2.338.2, shown verbatim.
+**[NV-3]** The image's `.env`, loaded by the runner listener over its environment, cannot (or can) override `RUNNER_TOOL_CACHE` (decision 9's "check and handle"). — `Program.cs:172-194` plus the `.env` precedence semantics vs. process environment.
+**[NV-4]** The runner derives `<root>/externals` from the parent of the running `bin/`, not an env var — the premise of the whole symlink design. — The install-root/externals resolution code in actions/runner 2.338.2.
+**[NV-5]** The host kernel follows a symlinked bind-mount source at mount time; and `--mount type=bind,source=…` errors on a missing source while `-v` auto-creates it (decision 6). — Docker/mount documentation or a kernel-level excerpt; a reproduced transcript.
+**[NV-6]** The observed error (`exec: "/__e/node24/bin/node": stat …`) is caused by the daemon auto-creating empty host directories for missing `-v` sources, and Docker leaves `/actions-runner/externals` and `/opt/hostedtoolcache` behind on the host. — Docker daemon behavior docs for missing bind-mount sources, or a reproduced transcript showing the empty root-owned dirs on the host.
+**[NV-7]** The brief's citation of `provisioning.rs:311-334` (`runner_root=${GRIDOPS_RUNNER_ROOT:-$PWD}`, `_diag/pages` glob, `launch` in a background subshell) — cited verbatim in the brief's citation section but not among the excerpts attached to this prompt (only `:43-91` of provisioning.rs is shown). — `crates/gridops-core/src/provisioning.rs:280-370`, shown verbatim.
+**[NV-8]** The cited precedents at `docker_runtime.rs:160-211` (notably `!recorded.contains("/home/runner/run.sh")`) and `docker.rs:845-852` / `:970-995` (`missing()`, the 0555-root test) — cited but not excerpted in this prompt (the file was omitted in the prior round's cap and is not attached now). — Those file:line ranges, shown verbatim.
+
+### WARN findings
+**[W-1]** Item 5's stale-cache test sentence lists three starting artifacts ("a live cache, a stale cache and a leftover staging directory") but then asserts on four ("the live cache and the newly filled cache remain") — the "newly filled" cache is the fill the test performs, but the wording reads as if it were a pre-existing fourth. — Reword to "after a fill, the stale cache and the staging leftover are gone; the pre-existing live cache and the cache just filled remain."
+**[W-2]** Item 5 leans on "handoff-A finding 10" for the stand-in-`docker` allowance without quoting it; the internal reference is fine at plan time but the diff gate will only see this brief. — One sentence in item 5 stating the allowance directly (it mostly does: "the stand-in `docker` CLI pattern of `tests/docker_runtime.rs` is not a daemon and may be used") is sufficient; just drop the opaque finding reference.
+
+### NIT findings
+**[NIT-1]** Requirement 1 says the per-environment runner root holds "everything of the image's runner directory except `externals`," but decision 4 adds "Copy `bin`, do not link it" — implying `bin` is copied rather than everything-except-externals; harmless, but the two phrasings should agree on what exactly is copied (presumably everything except `externals`, with `bin` called out because the tempdir copy temptation is to link it).
+**[NIT-2]** The brief's "Facts established" say `/actions-runner` is 683 MB "almost all of it `externals`" but never gives the non-externals remainder; the copy-cost deliverable will supply it, so this is only a rounding-out note.
+
+### Verdict
+PASS — no BLOCK findings; implementation may proceed.

@@ -1,0 +1,73 @@
+# PR-Agent review caller for GridOps.
+#
+# The review LOGIC lives in the VENDORED copy next to this file,
+# ./.github/workflows/pr-review-reusable.yml, not in playbook's reusable: GridOps is
+# public and cannot call a workflow in the private playbook repo. That copy carries
+# LOCAL PATCHES listed in its header; when re-syncing it from playbook, keep them or
+# confirm playbook now has the same fixes. This caller only owns the event triggers,
+# the concurrency group and the job `if` that guards it. All behaviour is driven by
+# .agents/pr-review.yml. Do not inline the reusable's logic here.
+#
+# NOTE: `concurrency` sits on the JOB, behind an `if`, and `cancel-in-progress` is
+# event-scoped, both on purpose — see the job below and the pr-reviewer README
+# §"Issue comment trigger fires on all slash commands". A comment never cancels
+# a running review. GitHub keeps only the newest PENDING run per group, so a `/review`
+# posted while a push review is queued replaces it; that is harmless, as the job notes.
+
+name: PR-Agent Spec Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  pr-review:
+    # Runner: the reusable's job runs on vars.CI_RUNNER_LIGHT when the repo sets it, else
+    # vars.CI_RUNNER (the org's self-hosted-linux pool); see the reusable's `runs-on`.
+    # Extends the reusable's own job `if` (pr-review-reusable.yml, job `pr-agent`); keep the shared part
+    # identical. It is repeated here so that the job-level `concurrency` below is taken only by a
+    # run that will actually review: bot events and comments that are not PR-Agent commands are
+    # skipped before they can join the group.
+    # GridOps is public, so two guards beyond the playbook's caller: a pull request from a
+    # fork is never reviewed (it gets no secrets, and the review runs on the self-hosted
+    # fleet), and only the owner, members and collaborators can start a review by comment.
+    # Only `/review` starts a run. `/describe`, `/improve` and `/ask` post no Reviewer Guide, so
+    # the reusable's status step would find no score and turn `pr-agent/review` red on a commit
+    # that already passed (found by PR-Agent on #208); that status is a required check.
+    if: |
+      github.event.sender.type != 'Bot' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        startsWith(github.event.comment.body, '/review')))
+    # On the job, not the workflow. Workflow-level `concurrency` is taken when the run is
+    # CREATED, before any job `if`: every PR comment (an ordinary reply, a bot notice) then joined the group and, as the newest pending run, replaced a queued `/review`
+    # or push review, and was itself skipped, so that review never ran. On the job, only a run
+    # that passes the `if` above takes a slot.
+    # Event-scoped cancellation: a push (`synchronize`) cancels a superseded in-flight review,
+    # because the new commit makes it stale; a command comment never cancels a running review.
+    # The group holds ONE pending run; a `/review` that displaces a queued push review is
+    # harmless: it reviews the current head and posts that commit's status.
+    concurrency:
+      group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
+    uses: ./.github/workflows/pr-review-reusable.yml
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+    secrets:
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # DEFAULT reviewer: PR-Agent through the Claude Code CLI (pr-agent-cli-handlers).
+      # While this secret is absent the job uses the API-key secrets above instead.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

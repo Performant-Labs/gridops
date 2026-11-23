@@ -19,7 +19,10 @@ pub mod work_folder;
 pub mod workload;
 
 pub use failure::{PlacementFailure, PlacementFailureReason};
-pub use work_folder::{DEFAULT_WORK_FOLDER, SHARED_WORK_ROOT, job_work_folder, shared_work_folder};
+pub use work_folder::{
+    DEFAULT_WORK_FOLDER, EXTERNALS_CACHE_ROOT, SHARED_RUNNERS_ROOT, SHARED_WORK_ROOT,
+    job_work_folder, shared_runner_root, shared_work_folder,
+};
 
 pub use service::{
     FleetError, FleetService, OperationStatus, Submission, SubmissionState, SubmitIntent,

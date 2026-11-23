@@ -8,9 +8,34 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
-## Unreleased
+## 0.2.0 - 2026-11-22
+
+The version was set to 0.2.0 on 2026-11-04 (#120), but that tag was never
+published; this release is the first `v0.2.0`, and it carries everything below.
 
 ### Upgrading
+
+- Three database migrations run when the services start on the new version:
+  `0043` (an attempt number on workflow jobs, so a re-run's earlier attempts
+  can be told apart), `0044` (clears the default image stored on a provider a
+  pool does not use) and `0045` (an index on jobs without a conclusion). No
+  existing table is dropped. (#109, #110, #112)
+- Upgrade the API, runner manager and reconciler together. Tart starts now run
+  in the reconciler, and the manager reports the slot queue the new Tart host
+  card shows. (#106, #113, #115)
+- **Reinstall the Tart agent on the Mac** with `scripts/install-tart-agent.sh`.
+  `GRIDOPS_TART_MAX_RUNNERS` now defaults to 2 and
+  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` to 60 (was 180). Re-running the installer
+  now keeps the settings of an installed agent unless you pass a variable.
+  (#106, #114)
+- **The control plane images are built on a Linux runner** (`self-hosted-linux`),
+  which needs `linux/arm64` emulation (QEMU) registered once on the Docker host;
+  the job checks it first. They are still built only when the repository
+  variable `RELEASE_IMAGES` is `true`. (#105)
+- **The API no longer starts Tart runners itself.** `POST
+  /api/v1/runner-pools` and the pool scale and reconcile calls leave the
+  missing Tart runners to the reconciler and say how many in
+  `handedToReconciler`. Docker pools start as before. (#119)
 
 - Migration `0047` adds GitLab connections, GitLab jobs and the GitLab
   columns on runners and fleet CI targets. It rebuilds the `fleet_ci_targets`
@@ -26,6 +51,11 @@ Known problems in the current release are in the README's
 - Migration `0048` adds `retired_at` to fleet CI targets. It rebuilds the
   `fleet_ci_targets` table, copying every row; existing targets stay
   unretired. (#183)
+- Machines whose Docker runner profiles share the Docker socket need the new
+  host agent build so that GitHub `container:` jobs work there. The agent now
+  keeps a runner externals cache for each image under
+  `/var/lib/gridops-agent/externals` and a runner folder for each runner under
+  `/var/lib/gridops-agent/runners`. (#126)
 - Migration `0049` adds an index on fleet inventory snapshots' `received_at`.
   The index is built once, when the services start on the new version, while
   the database is locked for writes. Expect a second or two for a 700 MB
@@ -63,6 +93,14 @@ Known problems in the current release are in the README's
   [GitLab runners](docs/gitlab-runners.md). (#150, #153, #157, #158, #160,
   #161, #162, #163, #164, #166, #172)
 
+- **A Tart host card on the Overview**: the Mac's macOS VM slots, who holds
+  each one, the slot queue, and the warning when the agent's cap is below the
+  slot setting. (#113)
+- **The Tart installer test runs in CI** on the macOS runner, when the
+  installer, its plist template or the Tart agent change. (#105)
+- The manager's health reports `agentMaxRunners` and a `warning` for the Tart
+  agent's cap. (#106)
+
 ### Changed
 
 - **Old fleet inventory snapshots are deleted.** Snapshots grew without
@@ -78,8 +116,30 @@ Known problems in the current release are in the README's
   422. An invalid update sent to a pool that does not exist, or that the caller
   cannot see, is now a 404 instead of a 400. (#172)
 
+- **The Create pool form asks for the Tart base VM** with a hint on how to
+  prepare one. (#99)
+- **Each provider has its own start lock**, and Docker starts cover the image
+  pull, so a slow start on one provider no longer holds up another. (#107)
+- **Tart starts run beside the reconciler pass**, and a macOS VM slot that
+  frees goes to the head of the line at once. (#115)
+- A pool stores no image for a provider it does not use, nor a base VM for a
+  native Tart pool, and editing a pool applies the same image agreement check
+  as creating one. (#110, #116)
+
 ### Fixed
 
+- **GitHub `container:` jobs run on Docker runners that share the Docker
+  socket.** Every such job failed at its first JavaScript action with
+  `exec: "/__e/node24/bin/node": ... no such file or directory`. The runner's
+  `externals` and tool cache existed only inside the runner container, so the
+  host's daemon mounted empty folders into the job container. The host agent
+  now copies each image's `externals` once, when it prepares the runner. It
+  runs the runner from a folder that exists at the same path on the host, and
+  keeps the tool cache in the runner's work folder. A prepare that cannot copy
+  the `externals` fails, and so does a start whose image has no copy, each
+  with the reason in the agent's log. See
+  [Docker actions and container jobs](docs/fleet-agent.md#docker-actions-and-container-jobs).
+  (#126)
 - **A fleet runner that cannot be registered no longer holds its machine's
   capacity forever.** A prepared placement whose runner could not be
   registered with GitHub or GitLab and started (for example, GitHub kept
@@ -140,56 +200,6 @@ Known problems in the current release are in the README's
   inventory refresh gets a 5xx, a 429 or no answer now resends it, unchanged,
   until its observation lease runs out, instead of starting a new session on
   the first failure. (#179)
-
-## 0.2.0 - 2026-11-04
-
-### Upgrading
-
-- Three database migrations run when the services start on the new version:
-  `0043` (an attempt number on workflow jobs, so a re-run's earlier attempts
-  can be told apart), `0044` (clears the default image stored on a provider a
-  pool does not use) and `0045` (an index on jobs without a conclusion). No
-  existing table is dropped. (#109, #110, #112)
-- Upgrade the API, runner manager and reconciler together. Tart starts now run
-  in the reconciler, and the manager reports the slot queue the new Tart host
-  card shows. (#106, #113, #115)
-- **Reinstall the Tart agent on the Mac** with `scripts/install-tart-agent.sh`.
-  `GRIDOPS_TART_MAX_RUNNERS` now defaults to 2 and
-  `GRIDOPS_TART_VM_SLOT_WAIT_SECONDS` to 60 (was 180). Re-running the installer
-  now keeps the settings of an installed agent unless you pass a variable.
-  (#106, #114)
-- **The control plane images are built on a Linux runner** (`self-hosted-linux`),
-  which needs `linux/arm64` emulation (QEMU) registered once on the Docker host;
-  the job checks it first. They are still built only when the repository
-  variable `RELEASE_IMAGES` is `true`. (#105)
-- **The API no longer starts Tart runners itself.** `POST
-  /api/v1/runner-pools` and the pool scale and reconcile calls leave the
-  missing Tart runners to the reconciler and say how many in
-  `handedToReconciler`. Docker pools start as before. (#119)
-
-### Added
-
-- **A Tart host card on the Overview**: the Mac's macOS VM slots, who holds
-  each one, the slot queue, and the warning when the agent's cap is below the
-  slot setting. (#113)
-- **The Tart installer test runs in CI** on the macOS runner, when the
-  installer, its plist template or the Tart agent change. (#105)
-- The manager's health reports `agentMaxRunners` and a `warning` for the Tart
-  agent's cap. (#106)
-
-### Changed
-
-- **The Create pool form asks for the Tart base VM** with a hint on how to
-  prepare one. (#99)
-- **Each provider has its own start lock**, and Docker starts cover the image
-  pull, so a slow start on one provider no longer holds up another. (#107)
-- **Tart starts run beside the reconciler pass**, and a macOS VM slot that
-  frees goes to the head of the line at once. (#115)
-- A pool stores no image for a provider it does not use, nor a base VM for a
-  native Tart pool, and editing a pool applies the same image agreement check
-  as creating one. (#110, #116)
-
-### Fixed
 
 - **A re-run no longer leaves the earlier attempt's jobs queued or in
   progress**, and the "waiting for over five minutes" alert is confirmed with
