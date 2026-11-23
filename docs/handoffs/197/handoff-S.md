@@ -1,3 +1,134 @@
+# Handoff-S: Phase 10 - Fleet health shared contract (#197), round 2 (re-audit after the S rework)
+
+**Date:** 2026-11-22
+**Branch:** claude/fleet-197-contract (head e634843; the working tree was clean when the audit started)
+**Issue:** #197 (wave 0 of epic #198)
+**Handoff-T reviewed:** `docs/handoffs/197/handoff-T-green.md` (round 3 at the top; rounds 1 and 2 below it) and `handoff-T-red.md`
+**Handoff-A reviewed:** `docs/handoffs/197/handoff-A.md` (plan review, PASS), `handoff-A-dup.md` (round 3 re-check, PASS) and the diff gate's `docs/handoffs/197-diff-result-r3.md` (PASS, no BLOCK findings)
+**Handoff-F reviewed:** `docs/handoffs/197/handoff-F.md` (round 3 at the top; rounds 1 and 2 below it)
+**Spec read:** issue #197 in full, #193's and #201's issue text (their "Work" and "Done when" lists, which the two new tests are measured against), `docs/handoffs/197-brief.md`, `docs/design/fleet-health.md` (Testing section)
+**Operator-facing report:** [`phase-10-fleet-health-report.html`](phase-10-fleet-health-report.html) (wipe-slider before/after comparators at 360, 768, 1280, plus light theme and the 403 state)
+
+This round re-audits the delta from round 1 (head 8401a86, verdict REWORK) to e634843. Everything outside that delta was audited in round 1 and is unchanged; round 1 is kept verbatim below ("Round 1"), and its spec-compliance table still stands except where this round says otherwise. The delta (`git diff 8401a86..HEAD`) is 11 files: `src/components/app-shell.tsx` (+4), `scripts/fleet-health-guard.mjs` (-2), `tests/app-shell-nav.test.ts` (new), `speed_contract_tests.rs` (+1 test), `health_live_contract_tests.rs` (+1 test), and handoff and evidence files. No other source file changed.
+
+## A precondition
+Confirmed: A returned **PASS** on the plan, and A-dup returned **PASS** on the rework delta (caa663b..f8b8b37). The diff gate's round 3 returned PASS with no BLOCK findings.
+
+## T precondition
+Confirmed: T-green (round 3) reports **zero blocking issues**. Its only red is the 14 `gridops-manager` `SUN_LEN` failures (macOS socket-path length for this worktree's path). I confirmed the crate is untouched: `git diff $(git merge-base master HEAD) -- crates/gridops-manager` is empty. I excluded it from my own workspace run.
+
+## Visual-diff-tool precondition (visual / web projects only)
+Met, with one honest limit on what the comparison means.
+- **Tools:** ImageMagick `compare` and `magick` are on PATH. Playwright is installed in the session scratchpad (outside the repo), driving the existing headless Chromium. The `mcp__Claude_in_Chrome__*` tools are not in my tool list, and the user's standing rule is headless only, so no visible browser was opened.
+- **Reference:** `/fleet/health` is a new route and has no design mock, preview HTML or wireframe (the brief says "Wireframe: N/A"). So a "does it match the design" pixel delta cannot be computed, and I am not claiming one. The role doc allows a prior baseline as the reference, and round 1 left captures of this very page, so this round's pixel diff is **round 1 (before the rework, head 45dfed6) versus this round (after, head e634843)**, captured the same way. It proves the rework changed nothing visible; it does not prove the page matches a design (that belongs to #195, #202 and #203, whose "Done when" lists carry the 360/1280 light/dark screenshot items).
+- **Setup:** Vite dev server on 127.0.0.1:5199 (stopped afterwards), `/api/**` intercepted: the session as an admin, `GET /api/v1/fleet/health` answered with `src/features/fleet-health/fixture.json`, anything else 404.
+
+## Visual diff results (visual / web projects only)
+
+Reference = round 1's committed captures in `screenshots/`; live = this round's, in `screenshots/cycle-2/`.
+
+| Viewport | Pixels different (any channel) | Whole-page delta % | `compare -metric AE` (IM7 prints a float) | Diff PNG | Composite |
+|---|---|---|---|---|---|
+| 360x800 dark | 352 | 0.1222% | 52.3 | screenshots/cycle-2/t3-fleet-health-360-dark-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-360-dark-composite-20261122.png |
+| 768x1024 dark | 352 | 0.0448% | 52.3 | screenshots/cycle-2/t3-fleet-health-768-dark-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-768-dark-composite-20261122.png |
+| 1280x800 dark | 352 | 0.0344% | 52.3 | screenshots/cycle-2/t3-fleet-health-1280-dark-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-1280-dark-composite-20261122.png |
+| 360x800 light | 363 | 0.1260% | 58.1 | screenshots/cycle-2/t3-fleet-health-360-light-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-360-light-composite-20261122.png |
+| 1280x800 light | 363 | 0.0354% | 58.1 | screenshots/cycle-2/t3-fleet-health-1280-light-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-1280-light-composite-20261122.png |
+| 1280x800, 403 state | 352 | 0.0344% | 52.3 | screenshots/cycle-2/t3-fleet-health-1280-403-diff-20261122.png | screenshots/cycle-2/t3-fleet-health-1280-403-composite-20261122.png |
+
+(Round 1 has no 768 light capture, so there is no 768 light pair.) All six are far under the 2% MATCH threshold, and the delta is concentrated, as the threshold rule asks me to check: the bounding box of every differing pixel is the same **73x10 px box at the top centre** (`+225+4` at 360, `+429+4` at 768, `+685+4` at 1280; I measured the dark pairs at all three sizes, the 1280 light and 403 pairs, and the 360 light pair, so the box is the same everywhere I looked). That box is the build stamp.
+
+### Per-section delta description
+| Section | Viewport(s) | What differs | Documented by F | Status |
+|---|---|---|---|---|
+| Top bar build stamp | all | text changed from "build 465 . 45dfed6" to "build 469 . e634843" (the build number and commit id, which change on every commit) | n/a (not page design) | DELTA, expected, not a regression |
+| Sidebar and highlighted item | all | none (only Health is highlighted, as in round 1) | n/a | MATCH |
+| Page header and 1h/24h/7d picker, Refresh | all | none | n/a | MATCH |
+| The six "Coming in #N" cards | all | none (same positions, text, wrapping) | n/a | MATCH |
+
+### Functional walk (the part a pixel diff cannot see: what a screen reader is told)
+Same headless Chromium, reading every `a[aria-current]` and `a[data-status="active"]` on the page:
+
+| Route | Viewport | Links marked current by the sidebar | Console / page errors | Horizontal scroll | Slots | Cards |
+|---|---|---|---|---|---|---|
+| `/fleet/health` | 360, 768, 1280, light and dark | **exactly one: `/fleet/health`** (both `aria-current="page"` and `data-status="active"`) | none | none | 6 of 6 | #203, #195, #195, #203, #202, #202 |
+| `/fleet/health`, health answers 403 | 1280 | exactly one: `/fleet/health`; "Administrators only" shown, 0 slots | only the browser's own 403 resource line | none | 0 | none |
+| `/fleet` | 1280 | exactly one: `/fleet` (Machines) | only my mock's 404 resource lines | none | | |
+| `/fleet/machines/abc` | 1280 | the sidebar's `/fleet` (Machines) only (see the breadcrumb advisory) | none | none | | |
+
+In round 1 `/fleet/health` marked both `/fleet` and `/fleet/health`. On `/queued-jobs` and `/` my mock's 404s put the route in its error boundary (no sidebar), so those two are covered only by T's jsdom test, which renders them with the shell.
+
+## Closure of round 1's findings
+
+| Round 1 finding | Fix | Verified by me |
+|---|---|---|
+| **1. Machines also `aria-current="page"` on `/fleet/health`** (production, accessibility) | `src/components/app-shell.tsx` `NavLinkItem`: `activeOptions={{ exact: !active }}`, with a three-line comment. A link the app calls inactive is router-active only on an exact match, so the router stops marking Machines under `/fleet/health`; a link the app calls active keeps the router's prefix match, so Machines stays current on `/fleet/machines/<id>`. | **Closed.** (a) Real browser: exactly one current sidebar link on `/fleet/health` at all three viewports, both themes and the 403 state (table above). (b) New `tests/app-shell-nav.test.ts` (5 cases) passes. (c) **Control:** I copied the repo (without `node_modules`, `.git`, `crates`) to the scratchpad, put the pre-fix `app-shell.tsx` from 8401a86 back, and ran the new test there: 1 failed (`/fleet/health`: `what a screen reader announces: expected [ '/fleet', '/fleet/health' ] to deeply equal [ '/fleet/health' ]`) and 4 passed, so the test fails for the right reason without the fix. (d) F's evidence citations for the router behaviour check out against `node_modules/@tanstack/react-router/dist/esm/link.js` (1.170.18): the prefix-versus-`exact` test at lines 213-221, `STATIC_ACTIVE_PROPS` spread after the caller's props at 369 and 379-382. (e) `isActivePath` is pure prefix logic with no aliases (`src/lib/navigation.ts:63-74`), so the app and the router agree for every item. |
+| **2. #193 and #201 have no realistic-volume contract test** (spec section 7) | `speed_contract_tests.rs`: `a_week_of_50000_jobs_finds_the_slow_machine_with_no_statement_over_100_ms` (`#[ignore = "contract: #193"]`). `health_live_contract_tests.rs`: `the_live_read_over_a_week_of_jobs_counts_the_running_and_queued_with_no_slow_statement` (`#[ignore = "contract: #201"]`). Each builds `testdata::build_week` and runs the real read inside `speed_check::check`. | **Closed.** Details in "Test quality" below. |
+| **3. Unused `const escape` in the guard script** | Deleted (`scripts/fleet-health-guard.mjs`, -2 lines). | **Closed.** `grep` finds no `escape` left; `node --test scripts/fleet-health-guard.test.mjs`: 13 of 13 pass. |
+
+## Spec compliance
+Round 1's table stands. The rows whose answer changed:
+
+| Spec item | Checked | Compliant |
+|---|---|---|
+| #197 section 7: "The contract tests for #190, #191, #200, #193 and #201 use both" the synthetic week and the speed-check helper | #193's and #201's contract tests now call `testdata::build_week` and `speed_check::check` (grep of the two files; I ran both, below). #190, #191 and #200 were already compliant. | **YES** (was NO) |
+| Section 5: every wave-1 contract test "fails against the stubs once its marker is removed" | Marker counts (anchored grep of the attribute and `it.skip` lines): **49 Rust** (`#190` 6, `#191` 4, `#192` 9, `#193` 7, `#194` 5, `#199` 5, `#200` 4, `#201` 9), which is round 1's 47 plus the two new tests, and **18 Vitest**, unchanged. I ran both new tests with `-- --ignored` against the stubs: #193 fails with `Error: no speed result for Jupiter at 2000` (7.97 s, after the week, the Jupiter `UPDATE` guard and the `speed_check` wrapper all ran); #201 fails with `assertion left == right failed: the seeded running jobs, no finished one, left: 0, right: 7` (7.69 s). Both are the stub's empty answer, the right reason. | YES |
+| Done when: full workspace checks | I re-ran, at head e634843: `cargo fmt --all -- --check` (clean); `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (CI's command, clean); `cargo test --workspace --exclude gridops-manager --locked --no-fail-fast` (**41 targets, 1041 passed, 0 failed, 51 ignored**, exit 0); `npx tsc --noEmit` (exit 0); `npm run lint` (`--max-warnings=0`, clean); `npx vitest run` (**57 files passed, 4 skipped; 647 passed, 18 skipped**), which matches T-green's numbers exactly. `CARGO_BUILD_JOBS=2`, `RUST_TEST_THREADS=2`. | YES |
+| Not verifiable here (needs a push or Mars access) | The Mars-copy migration timing, and the two live guard test PRs: unchanged, see "Merge conditions that are O's". | NOT VERIFIED, O |
+
+## Test quality audit (`testing/test-quality.md` section 7) of the three new tests
+
+| Test | One behaviour | Fails in isolation for the right reason | Cheapest tier | Behaviour, not implementation | Verdict |
+|---|---|---|---|---|---|
+| `tests/app-shell-nav.test.ts` (`it.each`, 5 cases) | Which sidebar links the page marks as current. The five cases are one parametrized behaviour. | Yes: against the pre-fix `app-shell.tsx` it fails on `/fleet/health` only, with the two-link assertion; the other four pass, as they should (the prefix problem only affects a path under another item's). | jsdom render of the real shell under a memory-history router. The defect was in the router's own attributes on the rendered link, which the pure `isActivePath` test cannot see, and there is no Playwright suite. | Asserts what a screen reader reads (`aria-current`, `data-status`) on `aside a`, not the prop passed. A precondition line asserts both `/fleet` and `/fleet/health` links exist, so the test cannot pass vacuously. | PASS |
+| `speed_contract_tests.rs` `a_week_of_50000_jobs_finds_the_slow_machine_with_no_statement_over_100_ms` (#193) | The index read on a 50,400-job week finds the slow machine, with no statement over 100 ms. | Yes (run above). The `UPDATE` that slows Jupiter is guarded by `rows_affected() > 10_000`, so a silent no-op cannot make it vacuous, and a positive assertion on the result means an empty stub cannot pass. | SQLite integration (the statement-time rule needs a real database at volume). | Asserts the index's meaning (Jupiter above 1.2 and above every other machine; the others below 1.1) at both runner sizes, not the SQL. | PASS |
+| `health_live_contract_tests.rs` `the_live_read_over_a_week_of_jobs_counts_the_running_and_queued_with_no_slow_statement` (#201) | `collect_live` on the same week plus 7 running and 40 queued jobs counts them, with no slow statement. | Yes (run above): the stub reports 0 running against the seeded 7. | SQLite integration. | Asserts `running_total` 7, `queued_total` 40, each category map sums to its total (NULL counted as other), and io's five running jobs. | PASS |
+
+**Do the new expectations hold for a correct implementation?** The two Rust tests cannot run against real code until wave 1, so I checked them against the issues' own definitions instead of trusting them, since a wrong contract test costs a wave-1 agent a cycle (the agents are told to stop if a contract test looks wrong).
+- **#193:** I re-implemented the generator (`testdata::build_week`: `typical * (75 + (index*37) % 51) / 100`, host `index / 8 % 4`, size 3000 at `index % 5 == 0`) and the issue's index definition (normalize shard suffixes, median per (machine, size, key) over the fleet median of the key, run-count-weighted geometric mean, at least 5 runs each side) in a scratch script, and slowed one machine 1.5x as the test does. Result, for each of the four choices of "Jupiter": the slowed machine's index is **1.38** at both 2,000 and 3,000, the other three are **0.92**. The test's thresholds (above 1.2; below 1.1; below Jupiter's) hold with margin, and they would also hold if an implementation took the "rest of the fleet" median (1.5 and 1.0). The `workflow_jobs` time columns are `integer` (`migrations/0001_initial.sql`), so the `UPDATE`'s integer arithmetic is sound.
+- **#201:** every queued job counts toward `queued_total` in the existing contract test in that file too (`queued_total == 2`, including a job no pool can run), the seeded ids cannot collide with the week's (week ids 1 to 50,400; running 1,000,001+; queued 2,000,000+), and all queued ages are under 3 minutes so no concern threshold interferes with the counts.
+- **Suite proportionality:** two Rust tests for the two missing section 7 callers, one nav test file for one defect. No test duplicates #190, #191 or #200's volume tests. No tautological, duplicate-signal, mock-shaped or coverage-padding test found, so there is no "delete or merge" finding.
+- **CI time:** each new test builds one week, about 8 s here (7.97 s and 7.69 s measured). The speed-check set is now five `build_week` callers, about 45 s if run back to back, and they sit in separate test binaries, so the design doc's "under 60 s in CI" still holds. If it gets tight, a smaller week for these two is the lever (T said so).
+
+## Quality audit
+| Area | Result | Notes |
+|------|--------|-------|
+| API consistency | PASS | Unchanged from round 1. |
+| Error handling | PASS | Unchanged. |
+| UI/UX match to spec | PASS | Every slot renders; loading, 403 ("Administrators only") and failure-with-Retry states are tested and were walked again. The rework is pixel-neutral apart from the build stamp (above). |
+| Accessibility | **PASS** (was FAIL) | Finding 1 closed: one current page in the sidebar. See the breadcrumb advisory for a pre-existing, out-of-scope neighbour. |
+| Architecture gate | PASS | A plan PASS, A-dup PASS (round 3), diff gate round 3 PASS. Nothing here conflicts with A. `app-shell.tsx` is owned by no wave-1 issue (`docs/design/fleet-health-owners.json` does not list it), so the change does not collide with wave 1. |
+| Code organization | PASS | The dead `escape` constant is gone. No TODOs, debug output or commented-out code in the delta. The new comment in `NavLinkItem` states why, not what. |
+| Security | PASS | Unchanged; the delta touches no auth, input handling or secrets. |
+| Performance | PASS (unverified on Mars) | Unchanged. The Mars-copy timing is O's. |
+| Visual regression | PASS | Before/after pixel diff: 0.03% to 0.13%, all of it the build stamp (above). No Playwright VR suite exists in the project. |
+| Naming consistency | PASS | Test names say the behaviour; the two contract tests follow the file's existing style and marker form (`#[tokio::test]` then `#[ignore = "contract: #N"]`). |
+| Test quality (`testing/test-quality.md` section 7) | **PASS** (was FAIL, missing coverage) | Audited above. |
+
+## Scope check
+Delivered exactly the rework's scope: two production edits (one prop, one deleted constant), three tests (one nav render test file and the two section 7 volume tests), and the handoff and evidence files. No stub was filled beyond what #197 implements, and no wave-1 file was touched. Round 1's under-delivery (finding 2) is closed. The two O-only acceptance items remain open, as they were in round 1 (below).
+
+## Verdict
+
+PASS — all of round 1's findings are closed and independently verified, the three new tests are sound and fail against the stubs for the right reason, the spec's section 7 is now met, and the rest of the audited behaviour is unchanged and green. Ready for O to commit.
+
+### Merge conditions that are O's, not a rework (unchanged from round 1; none is a pipeline failure)
+These are #197 "Done when" items that need a push or production access. They are **not verified here** and the PR must not merge without them:
+- **Mars timing:** apply migrations 0001 to 0050 to a read-only `VACUUM INTO` copy of the Mars database (2.9 GB), record the wall time and the Mac's `uptime` load next to the Done-when item in the PR description, and delete both copies even on failure (brief, "The Mars database timing check"). The step to watch: `ALTER TABLE ... ADD COLUMN ... CHECK` and the two partial `category IS NULL` indexes each read every `workflow_jobs` and `gitlab_jobs` row.
+- **Two guard test PRs** against `Performant-Labs/gridops` only, **cut from head e634843 or later** (this round changed the guard script, and round 1 changed the contract test files), one editing a file outside an issue's list and one editing a contract test; both must fail `Fleet health guard`, then be closed and their branches deleted; record both head SHAs.
+- After merge: add `Fleet health guard` to `master`'s required checks; post the correcting comments on #190 (insert sites, D-1), #194 (admin-only, D-4) and #201 (the host read and queue variant); remind #204 to move `FakeFleetHealthSource` behind `test-support`.
+
+## Advisory notes
+- **A pre-existing, out-of-scope neighbour of finding 1.** On `/fleet/machines/<id>` the breadcrumb "Machines" link in the page header (inside `<main>`, not the sidebar) also carries the router's `aria-current="page"`, because TanStack's default for a parent-path link is a prefix match. It comes from `PageHeader`'s `breadcrumbs` prop (`src/routes/_app/fleet.machines.$hostId.tsx:64` and `:95`, rendered by `src/components/page.tsx`); neither file is touched by this branch (`git diff` against the merge-base is empty for both). It is the router default, so I am not holding #197 for it. Whoever next edits `PageHeader` could make its breadcrumb links exact-active.
+- **Temp directories on failure.** The two new Rust tests remove their temp directory only on the success path (`std::fs::remove_dir_all` at the end), so a failing run leaves a `gridops-speed-week-*` or `gridops-live-week-*` directory in the OS temp dir. Harmless, and it only happens when the test fails; the wave-1 agent can add a guard if it bothers them (they may not edit the test, so this is #197-owned; leaving it).
+- **`matchMedia` shim.** `tests/app-shell-nav.test.ts` is the third copy of the same jsdom shim (also in `connections-routes.test.ts` and `tart-host-card.test.ts`). A-dup already flagged it; a shared helper is worth it if a fourth appears.
+- Carried from round 1, unchanged: the guard reads its own rules from the PR's branch (hardening: check out the base ref for the script and the owners file); #190's issue text is stale (the correcting comment must be posted before wave 1 starts); the window picker's buttons are 24 px tall at 360 px (the app's existing density; #195 owns the frame); `CHANGELOG` says new jobs "get a `category` column" while the value stays NULL until #190; a member's Overview load makes one `GET /api/v1/fleet/health` that returns 403 (the workload chart's pattern, D-4).
+- **Evidence from this audit, not committed except the screenshots:** the walk, comparison and control-run scripts are in the session scratchpad. Committed: `docs/handoffs/197/phase-10-fleet-health-report.html` and `docs/handoffs/197/screenshots/cycle-2/` (live, diff and composite PNGs per viewport, and the section crops).
+
+---
+
+# Round 1 (kept unchanged; its verdict was REWORK, answered by F, T and A in the rework round and re-audited above)
+
 # Handoff-S: Phase 10 - Fleet health shared contract (#197)
 
 **Date:** 2026-11-22
