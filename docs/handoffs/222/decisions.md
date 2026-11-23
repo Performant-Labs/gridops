@@ -40,3 +40,32 @@
     - #221's 0050 tables plan as a `SEARCH` through their primary-key autoindexes.
     - `git ls-tree` over all branches found `0050_fleet_health.sql` on `claude/fleet-197-contract`.
     - `gh pr view 221` showed it OPEN and MERGEABLE. The master branch protection has `strict: true`.
+
+## Phase 4 Tester (T, RED) - 2026-11-22T20:25:11-08:00
+- **Decided:** RED is valid, so F may start (`docs/handoffs/222/handoff-T-red.md`).
+  - **Core, in `crates/gridops-core/tests/retention.rs` (extended, A finding 3).** There are 6 new tests, and one existing test is trimmed to the deletes that stay unbatched:
+    - a plan test over `RetentionTable::ALL` with an exhaustive expectation `match` (A finding 4's `SEARCH <t> USING …INDEX <idx> (<col><?)` and no `SCAN`);
+    - a per-table prune test: strict cutoff, oldest first, bounded by `batch_size * max_batches`, own table only;
+    - early stop (`max_batches = u32::MAX` under a 10 s timeout);
+    - the pause (#152's lower-bound pattern);
+    - batch size below 1;
+    - a const pin, which also asserts that `snapshot_retention` shares the constants.
+  - **Reconciler, in `snapshot_retention_tests.rs` (extended, A's layering).** There are 3 new tests:
+    - per-table error isolation through a refusing trigger, on each of the 5 tables in turn, and `cleanup_retention` must return `Ok`;
+    - a per-pass cap of 20,001 rows per table, so exactly the youngest survives;
+    - a guard on each table's retention window, with defaults plus the two settings.
+  - I kept the cap test, about 5 s, because without it the unbounded deletes could stay wrapped in warn-and-continue with every other test green.
+  - I kept the const pin, although #152's rework dropped its literal equalities. Here the pause test and the cap test both read the constants, so only the pin stops a `BATCH_PAUSE = 0` or a huge `MAX_BATCHES` from passing them trivially.
+- **Assumed:**
+  - `RetentionTable` derives `Clone, Copy, Debug`; the tests need it, and the handoff states it for F.
+  - The bundled SQLite plans as observed: these runs used it through sqlx, not the CLI.
+- **Hedged:**
+  - Not tested: the info log, the absence of a transaction across batches, and stopping on a short batch as against an empty one. These are reviewed in Phase 6, as #152 did.
+  - Mutation M3 (`<=`) passes the plan test, because SQLite prints `<?` for `<=`. Only the per-table behaviour test catches it.
+- **Evidence:**
+  - Compile RED: `E0432 unresolved import gridops_core::retention` (plus its `Duration` knock-on).
+  - Runtime RED against a stub of today's behaviour: 4 core tests fail on assertions, and the plan test shows `["SCAN host_samples"]`.
+  - Reconciler RED with no stubs: isolation `cleanup returned Err(… webhook_deliveries deletes refused …)`, and cap `left: [] right: [youngest]`.
+  - A throwaway correct implementation passes all 12, plus the full core (318 lib and every integration binary) and reconciler (133) suites, with clippy 1.98.1 `-D warnings` and fmt clean.
+  - Mutations M1-M11 each fail their test. M1 (delete 0050) shows `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`, and M8 (`?` on the prune error) shows the isolation test failing.
+  - The throwaway was reverted, and only the two test files are staged.
