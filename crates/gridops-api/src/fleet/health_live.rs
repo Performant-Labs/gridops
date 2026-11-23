@@ -228,42 +228,53 @@ pub(crate) async fn collect_live(
     }
 
     // The oldest job waiting for capacity, with its name and repository for
-    // the concern's sentence (a lookup by id; the breakdown only counts).
-    let oldest_queued = match (
-        queue.queue.oldest_waiting_job,
-        queue.queue.oldest_waiting_millis,
-    ) {
-        (Some(job_id), Some(wait_ms)) => {
-            let job = sqlx::query(
-                "SELECT wj.name AS name,wj.created_at AS queued_at,repo.full_name AS repository
-                   FROM workflow_jobs wj
-                   JOIN workflow_runs wr ON wr.id=wj.run_id
-                   JOIN repositories repo ON repo.id=wr.repository_id
-                  WHERE wj.id=?",
-            )
-            .bind(job_id)
-            .fetch_optional(db)
-            .await?;
-            job.map(|row| OldestQueued {
-                job_id,
-                job_name: row.get("name"),
-                repository: row.get("repository"),
-                queued_at: row.get("queued_at"),
-                wait_ms,
-            })
+    // the concern's sentence (a lookup by id; the breakdown only counts). The
+    // breakdown's job clause already requires the run and repository rows, so
+    // the lookup only misses if the job left the queue between the two reads;
+    // the concern below still fires then, unnamed.
+    let mut oldest_queued = None;
+    let mut oldest_unnamed = None;
+    if let Some((job_id, wait_ms)) = queue
+        .queue
+        .oldest_waiting_job
+        .zip(queue.queue.oldest_waiting_millis)
+    {
+        let job = sqlx::query(
+            "SELECT wj.name AS name,wj.created_at AS queued_at,repo.full_name AS repository
+               FROM workflow_jobs wj
+               JOIN workflow_runs wr ON wr.id=wj.run_id
+               JOIN repositories repo ON repo.id=wr.repository_id
+              WHERE wj.id=?",
+        )
+        .bind(job_id)
+        .fetch_optional(db)
+        .await?;
+        match job {
+            Some(row) => {
+                oldest_queued = Some(OldestQueued {
+                    job_id,
+                    job_name: row.get("name"),
+                    repository: row.get("repository"),
+                    queued_at: row.get("queued_at"),
+                    wait_ms,
+                });
+            }
+            None => oldest_unnamed = Some((job_id, wait_ms)),
         }
-        _ => None,
-    };
+    }
 
     // `unmatched-jobs`: queued jobs no pool can run, as the Overview splits
     // them.
     if queue.queue.unmatched > 0 {
         let unmatched = queue.queue.unmatched;
-        let job = if unmatched == 1 { "job" } else { "jobs" };
-        let asks = if unmatched == 1 { "asks" } else { "ask" };
+        let one = unmatched == 1;
+        let job = if one { "job" } else { "jobs" };
+        let asks = if one { "asks" } else { "ask" };
+        let matches_ = if one { "matches" } else { "match" };
         let detail = if queue.queue.unavailable == 0 {
             format!(
-                "{unmatched} queued {job} {asks} for labels no runner pool offers; they will wait until one does."
+                "{unmatched} queued {job} {asks} for labels no runner pool offers; {} will wait until one does.",
+                if one { "it" } else { "they" }
             )
         } else if queue
             .queue
@@ -274,17 +285,19 @@ pub(crate) async fn collect_live(
             == 0
         {
             format!(
-                "{unmatched} queued {job} {asks} for a pool that is paused, tripped or on another platform; nothing will start for them."
+                "{unmatched} queued {job} {asks} for a pool that is paused, tripped or on another platform; nothing will start for {}.",
+                if one { "it" } else { "them" }
             )
         } else {
             format!(
-                "{unmatched} queued {job} match no pool that can run them; they will wait until one does."
+                "{unmatched} queued {job} {matches_} no pool that can run {}; they will wait until one does.",
+                if one { "it" } else { "them" }
             )
         };
         concerns.push(Concern {
             key: "unmatched-jobs".to_owned(),
             severity: Severity::Critical,
-            title: format!("{unmatched} queued {job} match no pool"),
+            title: format!("{unmatched} queued {job} {matches_} no pool"),
             detail,
             subject: ConcernSubject::Fleet,
             link: Some("/queued-jobs".to_owned()),
@@ -293,27 +306,36 @@ pub(crate) async fn collect_live(
     }
 
     // `oldest-queued`: the oldest waiting job's wait, over five minutes.
-    if let Some(oldest) = &oldest_queued {
-        if oldest.wait_ms > QUEUED_WARN_MILLIS {
-            let severity = if oldest.wait_ms > QUEUED_CRITICAL_MILLIS {
-                Severity::Critical
-            } else {
-                Severity::Warning
-            };
-            let wait = span_text(oldest.wait_ms);
-            concerns.push(Concern {
-                key: "oldest-queued".to_owned(),
-                severity,
-                title: format!("A job has waited {wait}"),
-                detail: format!(
-                    "{} in {} has waited {wait} to start.",
-                    oldest.job_name, oldest.repository
-                ),
-                subject: ConcernSubject::Fleet,
-                link: Some("/queued-jobs".to_owned()),
-                since: Some(oldest.queued_at),
-            });
-        }
+    let oldest_wait = oldest_queued
+        .as_ref()
+        .map(|job| job.wait_ms)
+        .or(oldest_unnamed.map(|(_, wait_ms)| wait_ms));
+    if let Some(wait_ms) = oldest_wait.filter(|wait| *wait > QUEUED_WARN_MILLIS) {
+        let severity = if wait_ms > QUEUED_CRITICAL_MILLIS {
+            Severity::Critical
+        } else {
+            Severity::Warning
+        };
+        let wait = span_text(wait_ms);
+        let detail = match &oldest_queued {
+            Some(job) => format!(
+                "{} in {} has waited {wait} to start.",
+                job.job_name, job.repository
+            ),
+            None => format!(
+                "Job {} has waited {wait} to start.",
+                oldest_unnamed.map_or(-1, |(job_id, _)| job_id)
+            ),
+        };
+        concerns.push(Concern {
+            key: "oldest-queued".to_owned(),
+            severity,
+            title: format!("A job has waited {wait}"),
+            detail,
+            subject: ConcernSubject::Fleet,
+            link: Some("/queued-jobs".to_owned()),
+            since: oldest_queued.as_ref().map(|job| job.queued_at),
+        });
     }
 
     let names: HashMap<String, String> =
