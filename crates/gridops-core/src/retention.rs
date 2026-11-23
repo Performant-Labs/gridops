@@ -38,7 +38,7 @@ pub enum RetentionTable {
     AuditEvents,
     /// `capacity_samples`, by `recorded_at`.
     CapacitySamples,
-    /// `host_samples`, by `received_at` (index added by migration 0050).
+    /// `host_samples`, by `received_at` (index added by migration 0051).
     HostSamples,
     /// `reconciler_passes`, by `started_at`.
     ReconcilerPasses,

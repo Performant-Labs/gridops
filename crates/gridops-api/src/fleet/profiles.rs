@@ -346,7 +346,9 @@ pub(super) async fn workload(
         .map_err(|error| fleet_error(context, &error))
 }
 
-async fn require_admin(
+/// Refuses anyone but a system administrator (403), as every fleet-wide read
+/// here does; the fleet health endpoint uses it too (#197, D-4).
+pub(super) async fn require_admin(
     state: &AppState,
     context: &RequestContext,
     principal: &Principal,

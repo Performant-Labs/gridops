@@ -372,6 +372,8 @@ struct JobResponse {
     status: JobStatus,
     #[serde(default)]
     tag_list: Vec<String>,
+    #[serde(default)]
+    name: Option<String>,
     pipeline: IdOnly,
 }
 
@@ -383,6 +385,7 @@ impl JobResponse {
             pipeline_id: self.pipeline.id,
             status: self.status,
             tag_list: self.tag_list,
+            name: self.name,
         }
     }
 }

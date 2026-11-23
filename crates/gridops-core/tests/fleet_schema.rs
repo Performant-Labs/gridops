@@ -135,8 +135,10 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
             continue;
         }
         assert_eq!(
-            new_schema.get(&name),
-            Some(&definition),
+            new_schema
+                .get(&name)
+                .map(|new| without_0050_columns(&name, new)),
+            Some(definition),
             "changed legacy schema: {name}"
         );
     }
@@ -173,12 +175,55 @@ async fn additive_upgrade_preserves_every_legacy_row_index_and_trigger() -> Resu
 
 /// The definitions 0047 may change, each asserted by shape instead: the
 /// `runners` rebuild and its indexes, `runner_pools` (one added column), and
-/// whatever else the caller names.
+/// whatever else the caller names. 0050 (#197) only appends columns to
+/// `workflow_jobs` and `gitlab_jobs`, so those stay byte-for-byte checked:
+/// see [`without_0050_columns`].
 fn exempt_from_definition_check(name: &str, also: &[&str]) -> bool {
     name == "runners"
         || name == "runner_pools"
         || RUNNERS_INDEXES.iter().any(|(index, _, _)| *index == name)
         || also.contains(&name)
+}
+
+/// The category column 0050 adds to both job tables, as SQLite stores it.
+const CATEGORY_0050: &str = "category TEXT\n  CHECK (category IS NULL OR category IN ('test','build','check','deploy','other'))";
+
+/// The column clauses `ALTER TABLE ... ADD COLUMN` in 0050 (#197) appends to a
+/// table's stored definition, in order.
+const ADDED_BY_0050: [(&str, &[&str]); 2] = [
+    ("workflow_jobs", &[CATEGORY_0050]),
+    (
+        "gitlab_jobs",
+        &[
+            CATEGORY_0050,
+            "job_name TEXT",
+            "project_path TEXT",
+            "started_at INTEGER",
+            "completed_at INTEGER",
+        ],
+    ),
+];
+
+/// `definition` (an object's SQL after the upgrade) with 0050's added column
+/// clauses taken out, each of which must be there exactly once. What is left
+/// must equal the definition before the upgrade byte for byte, so a later
+/// migration that drops or loosens a `CHECK` or a foreign key on either job
+/// table still fails the upgrade tests.
+fn without_0050_columns(name: &str, definition: &str) -> String {
+    let Some((_, clauses)) = ADDED_BY_0050.iter().find(|(table, _)| *table == name) else {
+        return definition.to_owned();
+    };
+    let mut stripped = definition.to_owned();
+    for clause in *clauses {
+        let added = format!(", {clause}");
+        assert_eq!(
+            stripped.matches(&added).count(),
+            1,
+            "{name}: 0050's `{clause}` is not in its definition exactly once: {definition}"
+        );
+        stripped = stripped.replacen(&added, "", 1);
+    }
+    stripped
 }
 
 /// Every index on `runners` after 0047: name, unique, columns. The first eight
@@ -250,6 +295,8 @@ const LEGACY_ADDED_COLUMNS: AddedColumns = &[
         ],
     ),
     ("runner_pools", &[("run_untagged", "INTEGER", Some(0))]),
+    // #197, 0050: NULL until #190's backfill classifies the job.
+    ("workflow_jobs", &[("category", "TEXT", None)]),
 ];
 
 const FLEET_ADDED_COLUMNS: AddedColumns = &[
@@ -270,6 +317,8 @@ const FLEET_ADDED_COLUMNS: AddedColumns = &[
             ("retired_at", "INTEGER", None),
         ],
     ),
+    // #197, 0050: NULL until #190's backfill classifies the job.
+    ("workflow_jobs", &[("category", "TEXT", None)]),
 ];
 
 /// (name, upper-cased declared type, notnull, default, pk) per column, in order.
@@ -870,8 +919,10 @@ async fn gitlab_upgrade_from_0046_keeps_the_fleet_graph_and_every_reference() ->
             continue;
         }
         assert_eq!(
-            new_schema.get(name),
-            Some(definition),
+            new_schema
+                .get(name)
+                .map(|new| without_0050_columns(name, new)),
+            Some(definition.clone()),
             "changed schema: {name}"
         );
     }
@@ -1113,8 +1164,16 @@ async fn gitlab_tables_enforce_the_pinned_constraints() -> Result<()> {
                 (false, "created_at,id".to_owned())
             ),
             (
+                "gitlab_jobs_completed_idx".to_owned(),
+                (false, "completed_at".to_owned())
+            ),
+            (
                 "gitlab_jobs_connection_job_unique".to_owned(),
                 (true, "connection_id,job_id".to_owned())
+            ),
+            (
+                "gitlab_jobs_unclassified_idx".to_owned(),
+                (false, "id".to_owned())
             ),
         ])
     );
@@ -1387,7 +1446,21 @@ async fn the_0048_rebuild_keeps_every_target_and_reference() -> Result<()> {
     assert_added_columns(
         &db.pool,
         &old_columns,
-        &[("fleet_ci_targets", &[("retired_at", "INTEGER", None)])],
+        &[
+            ("fleet_ci_targets", &[("retired_at", "INTEGER", None)]),
+            // #197, 0050.
+            ("workflow_jobs", &[("category", "TEXT", None)]),
+            (
+                "gitlab_jobs",
+                &[
+                    ("category", "TEXT", None),
+                    ("job_name", "TEXT", None),
+                    ("project_path", "TEXT", None),
+                    ("started_at", "INTEGER", None),
+                    ("completed_at", "INTEGER", None),
+                ],
+            ),
+        ],
     )
     .await?;
     let new_schema = schema(&db.pool).await?;
@@ -1396,8 +1469,10 @@ async fn the_0048_rebuild_keeps_every_target_and_reference() -> Result<()> {
             continue;
         }
         assert_eq!(
-            new_schema.get(name),
-            Some(definition),
+            new_schema
+                .get(name)
+                .map(|new| without_0050_columns(name, new)),
+            Some(definition.clone()),
             "changed schema: {name}"
         );
     }

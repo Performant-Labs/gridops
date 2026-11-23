@@ -38,10 +38,13 @@ pub async fn connect_database_path(path: &Path) -> Result<SqlitePool> {
         // every other writer wait, so name anything over 100 ms. The event is
         // on the `sqlx::query` target, which each process's log filter admits.
         .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect_with(options)
-        .await?;
+    let pool_options = SqlitePoolOptions::new().max_connections(8);
+    // Test builds time every statement and write transaction for
+    // `fleet_health::speed_check` (#197).
+    #[cfg(any(test, feature = "test-support"))]
+    let pool_options =
+        crate::fleet_health::speed_check::instrument(pool_options, options.get_filename());
+    let pool = pool_options.connect_with(options).await?;
     adopt_legacy_drizzle_schema(&pool).await?;
     MIGRATOR
         .run(&pool)
@@ -341,7 +344,7 @@ mod tests {
         .fetch_one(&pool)
         .await?
         .get::<i64, _>("count");
-        assert_eq!(tables, 74);
+        assert_eq!(tables, 79);
         assert!(table_exists(&pool, "workflow_job_sync").await?);
         assert!(table_exists(&pool, "runner_pool_waits").await?);
         assert!(table_exists(&pool, "runner_pool_exclusive_labels").await?);

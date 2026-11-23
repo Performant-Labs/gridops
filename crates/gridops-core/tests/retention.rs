@@ -61,7 +61,7 @@ const fn expected(table: RetentionTable) -> Expected {
         },
         RetentionTable::HostSamples => Expected {
             table: "host_samples",
-            // Added by migration 0050: without it the batch scans the table.
+            // Added by migration 0051: without it the batch scans the table.
             index: "host_samples_received_idx",
             column: "received_at",
             insert_columns: "host_id,host_epoch,observed_at,received_at,coverage",
@@ -180,7 +180,7 @@ async fn retention_deletes_find_their_rows_through_an_index() -> Result<()> {
 
 /// #222's regression test. Each batch's inner select must search its table
 /// through the cutoff-column index (`USING INDEX` or `USING COVERING INDEX`),
-/// and no step may scan a table. Without migration 0050, `host_samples` plans
+/// and no step may scan a table. Without migration 0051, `host_samples` plans
 /// as `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx`
 /// plus a temp B-tree: a read of every row inside the write lock.
 #[tokio::test]

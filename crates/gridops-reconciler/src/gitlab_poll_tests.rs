@@ -174,6 +174,7 @@ fn job(project_id: u64, job_id: u64, status: JobStatus, tags: &[&str]) -> Result
         pipeline_id: id(1)?,
         status,
         tag_list: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        name: None,
     })
 }
 
