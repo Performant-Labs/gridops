@@ -453,13 +453,12 @@ async fn the_upgrade_keeps_existing_jobs_and_leaves_them_unclassified() -> Resul
             .fetch_one(&db.pool)
             .await?;
     assert_eq!(unclassified, 2, "existing jobs wait for #190's backfill");
-    let gitlab_new: (Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>) =
-        sqlx::query_as(
-            "SELECT category,job_name,project_path,started_at,completed_at FROM gitlab_jobs WHERE id='g1'",
-        )
-        .fetch_one(&db.pool)
-        .await?;
-    assert_eq!(gitlab_new, (None, None, None, None, None));
+    let gitlab_new: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT value FROM gitlab_jobs, json_each(json_array(category,job_name,project_path,started_at,completed_at)) WHERE gitlab_jobs.id='g1'",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    assert_eq!(gitlab_new, vec![None; 5]);
 
     // The gitlab_jobs additions, appended, nullable, in this order.
     let gitlab_columns = columns(&db.pool, "gitlab_jobs").await?;

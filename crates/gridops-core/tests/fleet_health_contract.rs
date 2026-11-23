@@ -33,7 +33,7 @@ fn concern(key: &str, severity: Severity, since: Option<i64>) -> Concern {
         title: format!("{key} title"),
         detail: format!("{key} detail."),
         subject: ConcernSubject::Fleet,
-        link: "/fleet/health".to_owned(),
+        link: Some("/fleet/health".to_owned()),
         since,
     }
 }

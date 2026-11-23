@@ -356,6 +356,7 @@ impl Harness {
                 pipeline_id: ext(PIPELINE)?,
                 status: JobStatus::Pending,
                 tag_list: tags(tag_list),
+                name: None,
             },
         );
         Ok(())
@@ -1310,7 +1311,22 @@ async fn a_first_seen_running_event_marks_the_runner_busy_and_a_later_pending_is
 
     h.deliver(SECRET_A, &job_event(100, "pending", Some(T + 1_000)))
         .await?;
-    assert_eq!(h.job_a(100).await?, row);
+    // The stale `pending` changes no state. It does carry `build_name`, which
+    // fleet health (#197, W-16) fills once into a row first written without
+    // one, so only `updated_at` and `job_name` may differ.
+    let after = h.job_a(100).await?;
+    assert_eq!(
+        JobRow {
+            updated_at: row.updated_at,
+            ..after
+        },
+        row
+    );
+    let job_name: Option<String> =
+        sqlx::query_scalar("SELECT job_name FROM gitlab_jobs WHERE job_id=100")
+            .fetch_one(&h.database)
+            .await?;
+    assert_eq!(job_name.as_deref(), Some("rspec"));
     assert_eq!(h.job_lookups(), Vec::<Url>::new());
     Ok(())
 }

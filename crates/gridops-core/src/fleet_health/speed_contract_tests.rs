@@ -78,7 +78,7 @@ impl Harness {
     }
 
     async fn indexes(&self) -> Result<Vec<SpeedResult>> {
-        Ok(speed::speed_indexes(&self.db, HealthWindow::Day, NOW).await?)
+        speed::speed_indexes(&self.db, HealthWindow::Day, NOW).await
     }
 
     async fn close(self) -> Result<()> {
@@ -299,9 +299,10 @@ async fn only_successful_runs_inside_the_window_count_and_shards_compare_togethe
         .take(6)
         .enumerate()
     {
-        let completed = NOW - 3 * HOUR - offset as i64 * 1_000;
+        let offset = i64::try_from(offset)?;
+        let completed = NOW - 3 * HOUR - offset * 1_000;
         let mut shard = JobSeed::completed(
-            20_000 + offset as i64,
+            20_000 + offset,
             name,
             Some(&harness.fleet.host("callisto")?.id),
             completed - 400_000,

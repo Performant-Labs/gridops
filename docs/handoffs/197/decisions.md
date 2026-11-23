@@ -171,3 +171,10 @@
     - Vitest: 638 passed. `eslint` and `tsc` are clean.
     - The guard: 13 of 13. The OpenAPI document is valid.
   - Source facts: `docs/handoffs/197/evidence.md` (9 entries).
+
+## T (Phase 7, GREEN + Tier 2)
+
+- **Decided:** I repaired every item under F's "Tests that look wrong" myself, test-only. The marked contract tests are left marked. The webhook test (item 6) now asserts the W-16 name fill rather than whole-row equality, because W-16 says a later event fills a missing name.
+- **Assumed:** the 14 `gridops-manager` SUN_LEN failures are environmental (macOS socket path length in a long worktree path) because the crate is untouched on this branch.
+- **Hedged:** two contract tests pass against the stubs (`no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs`, `a_machine_with_no_cpu_budget_never_raises_host_offline`) and I kept them as guards for the real code.
+- **Evidence:** the CI clippy command is clean; the workspace run was 1137 passed with only the manager failures; vitest 638 passed, 18 skipped; guard 13 of 13; the marked contract tests all fail against the stubs when run (core 16/17, api 18/19, reconciler 11/11, frontend 18/18). Handoff: `docs/handoffs/197/handoff-T-green.md`.

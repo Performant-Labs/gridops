@@ -123,7 +123,7 @@ impl Harness {
 }
 
 /// A finished job: created at `H + created`, waiting `wait`, running
-/// `duration` (all ms), on `host` (None: a runner GridOps doesn't manage).
+/// `duration` (all ms), on `host` (`None`: a runner `GridOps` doesn't manage).
 fn job(
     id: i64,
     name: &str,

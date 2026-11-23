@@ -41,6 +41,10 @@ pub(super) const HEALTH: &str = "/api/v1/fleet/health";
 pub(super) struct TestClock(AtomicI64);
 
 impl TestClock {
+    #[allow(
+        dead_code,
+        reason = "the #194 contract tests move the clock once unmarked"
+    )]
     pub(super) fn set(&self, now: i64) {
         self.0.store(now, Ordering::SeqCst);
     }

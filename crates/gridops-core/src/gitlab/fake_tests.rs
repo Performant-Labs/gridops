@@ -45,6 +45,7 @@ fn job(job_id: u64, project_id: u64, status: JobStatus) -> Result<Job> {
         pipeline_id: id(500)?,
         status,
         tag_list: vec!["docker".to_owned()],
+        name: None,
     })
 }
 

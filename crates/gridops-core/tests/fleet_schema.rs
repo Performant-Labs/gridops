@@ -1121,8 +1121,16 @@ async fn gitlab_tables_enforce_the_pinned_constraints() -> Result<()> {
                 (false, "created_at,id".to_owned())
             ),
             (
+                "gitlab_jobs_completed_idx".to_owned(),
+                (false, "completed_at".to_owned())
+            ),
+            (
                 "gitlab_jobs_connection_job_unique".to_owned(),
                 (true, "connection_id,job_id".to_owned())
+            ),
+            (
+                "gitlab_jobs_unclassified_idx".to_owned(),
+                (false, "id".to_owned())
             ),
         ])
     );

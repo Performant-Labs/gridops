@@ -121,7 +121,7 @@ async fn fast_work_passes_and_its_value_and_errors_come_through() -> Result<()> 
 #[tokio::test]
 async fn the_synthetic_week_has_the_fixture_machines_at_realistic_volume() -> Result<()> {
     let (directory, pool) = database().await?;
-    let end = 1_800_000_000_000_i64 - 1_800_000_000_000_i64 % 3_600_000;
+    let end = 1_800_000_000_000_i64; // a whole hour: 500,000 hours since the epoch
     let started = Instant::now();
     let week = speed_check::check(&pool, testdata::build_week(&pool, end)).await?;
     let elapsed = started.elapsed();

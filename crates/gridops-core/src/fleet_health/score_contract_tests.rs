@@ -336,7 +336,10 @@ fn a_component_without_enough_data_spreads_its_weight_and_the_weights_still_sum_
     let combined = score::combine(&missing);
     let sum: f64 = combined.components.iter().map(|c| c.weight).sum();
     assert!((sum - 100.0).abs() < 1e-6, "weights sum to {sum}");
-    assert_eq!(combined.components[3].weight, 0.0);
+    assert!(
+        combined.components[3].weight.abs() < 1e-9,
+        "a missing component takes no weight"
+    );
     for (index, original) in [(0, 40.0), (1, 20.0), (2, 15.0), (4, 10.0)] {
         let spread = combined.components[index].weight;
         assert!(
@@ -588,7 +591,8 @@ impl Inputs {
     /// A value in `[low, high)`, or `None` one time in ten.
     fn value(&mut self, low: f64, high: f64) -> Option<f64> {
         let raw = self.next();
-        (raw % 10 != 0).then(|| low + (raw >> 11) as f64 / (1_u64 << 53) as f64 * (high - low))
+        (!raw.is_multiple_of(10))
+            .then(|| low + (raw >> 11) as f64 / (1_u64 << 53) as f64 * (high - low))
     }
 }
 

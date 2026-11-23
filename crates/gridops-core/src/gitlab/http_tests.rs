@@ -329,6 +329,7 @@ fn expected_job(job_id: u64, status: JobStatus) -> Result<Job> {
         pipeline_id: id(555)?,
         status,
         tag_list: vec!["docker".to_owned(), "linux".to_owned()],
+        name: Some("build".to_owned()),
     })
 }
 

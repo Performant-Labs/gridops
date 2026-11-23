@@ -2776,7 +2776,7 @@ async fn host_live_reads_match_what_list_hosts_gives_an_admin() -> Result<()> {
         "10000000-0000-4000-8000-0000000000bb",
     ] {
         sqlx::query("INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes) VALUES (?,?,NULL,'root',1000,1024,1000)")
-            .bind(format!("{}-root", &id[..30]))
+            .bind(id.replacen("10000000", "11000000", 1))
             .bind(id)
             .execute(&fixture.pool)
             .await?;
