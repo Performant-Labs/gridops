@@ -29,9 +29,10 @@
 //! the same way and on the same clock.
 
 use std::{
+    collections::HashMap,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicI64, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -106,7 +107,7 @@ struct Cached {
 #[derive(Debug, Default)]
 pub struct ClassifierCache {
     /// The writers' classifier, rebuilt in parallel chunks.
-    chunked: Mutex<Option<Chunked>>,
+    chunked: Mutex<Option<Arc<Chunked>>>,
     /// The one `Arc<Classifier>` for callers that want it whole.
     cached: Mutex<Option<Cached>>,
     compilations: AtomicUsize,
@@ -192,30 +193,32 @@ impl ClassifierCache {
         &self,
         conn: &mut SqliteConnection,
         now: i64,
-    ) -> anyhow::Result<ChunkedClassifier> {
+    ) -> anyhow::Result<Arc<Chunked>> {
         let mut chunked = self.chunked.lock().await;
         let due = chunked.as_ref().is_none_or(|chunked| {
-            now < chunked.last_check || now - chunked.last_check >= CHECK_INTERVAL_MS
+            let last_check = chunked.last_check.load(Ordering::Relaxed);
+            now < last_check || now - last_check >= CHECK_INTERVAL_MS
         });
         if !due && let Some(chunked) = chunked.as_ref() {
-            return Ok(chunked.classifier.clone());
+            return Ok(Arc::clone(chunked));
         }
         let version = RulesVersion::of(&mut *conn).await?;
-        if let Some(chunked) = chunked.as_mut()
+        if let Some(chunked) = chunked.as_ref()
             && chunked.version == version
         {
-            chunked.last_check = now;
-            return Ok(chunked.classifier.clone());
+            chunked.last_check.store(now, Ordering::Relaxed);
+            return Ok(Arc::clone(chunked));
         }
         let rules = category::load_rules(&mut *conn).await?;
         self.compilations.fetch_add(1, Ordering::Relaxed);
-        let classifier = compile_chunked(&rules);
-        *chunked = Some(Chunked {
-            classifier: classifier.clone(),
+        let built = Arc::new(Chunked {
+            classifier: compile_chunked(&rules),
+            projects: Mutex::new(HashMap::new()),
             version,
-            last_check: now,
+            last_check: AtomicI64::new(now),
         });
-        Ok(classifier)
+        *chunked = Some(Arc::clone(&built));
+        Ok(built)
     }
 
     /// How many times this cache has compiled the rules.
@@ -270,12 +273,16 @@ impl ChunkedClassifier {
 }
 
 /// The writers' cached classifier, and when the cache last looked at the
-/// rules.
+/// rules. `projects` remembers the GitLab project paths the poll had to
+/// look up, one per project instead of one per job; a rebuild clears it.
+/// `last_check` is atomic so a check can move it through the shared
+/// `Arc<Chunked>` the writers hold.
 #[derive(Debug)]
 struct Chunked {
     classifier: ChunkedClassifier,
+    projects: Mutex<HashMap<(String, i64), Option<String>>>,
     version: RulesVersion,
-    last_check: i64,
+    last_check: AtomicI64,
 }
 
 /// Compiles `rules` as position-ordered chunks on at most one thread per
@@ -373,6 +380,30 @@ async fn github_run(
     .context("no workflow run for the job")
 }
 
+/// A GitLab project's path, memoized on the cache entry: the poll
+/// classifies a whole page of one project's jobs, often inside one write
+/// transaction, and the lookup is per job.
+async fn project_path(
+    conn: &mut SqliteConnection,
+    cache: &Chunked,
+    connection_id: &str,
+    project_id: ExternalId,
+) -> anyhow::Result<Option<String>> {
+    let key = (
+        connection_id.to_owned(),
+        i64::try_from(project_id.get()).unwrap_or_default(),
+    );
+    {
+        let projects = cache.projects.lock().await;
+        if let Some(path) = projects.get(&key) {
+            return Ok(path.clone());
+        }
+    }
+    let found = gitlab_project_path(conn, connection_id, project_id).await?;
+    cache.projects.lock().await.insert(key, found.clone());
+    Ok(found)
+}
+
 /// A GitLab project's path: the connection's scope when the connection is
 /// scoped to that project, else the path another of the project's
 /// `gitlab_jobs` rows already stored.
@@ -413,8 +444,8 @@ pub async fn category_for_insert(
     job: &NewJob<'_>,
     now: i64,
 ) -> Option<JobCategory> {
-    let classifier = match shared().chunks_for(conn, now).await {
-        Ok(classifier) => classifier,
+    let cache = match shared().chunks_for(conn, now).await {
+        Ok(cache) => cache,
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -442,7 +473,7 @@ pub async fn category_for_insert(
         } => {
             let repository = match path {
                 Some(path) => Some(path.to_owned()),
-                None => match gitlab_project_path(conn, connection_id, project_id).await {
+                None => match project_path(conn, &cache, connection_id, project_id).await {
                     Ok(path) => path,
                     Err(error) => {
                         tracing::warn!(
@@ -457,7 +488,7 @@ pub async fn category_for_insert(
             (None, repository)
         }
     };
-    Some(classifier.classify(
+    Some(cache.classifier.classify(
         job.job_name.unwrap_or(""),
         workflow_name.as_deref(),
         repository.as_deref(),
