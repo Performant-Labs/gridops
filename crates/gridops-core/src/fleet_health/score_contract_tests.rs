@@ -602,6 +602,9 @@ fn no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs() {
     let t = targets();
     let mut inputs = Inputs(197);
     let in_range = |c: &ScoreComponent| c.score.is_none_or(|score| score <= 100);
+    // The inputs run past both ends of every table, so a clamp must be hit at
+    // both ends: without this, a component that never scores passes vacuously.
+    let (mut at_0, mut at_100, mut combined_scores) = (0_usize, 0_usize, 0_usize);
     for case in 0..1_000 {
         let components = vec![
             score::fleet_queue_wait(inputs.value(-MINUTE, 120.0 * MINUTE), &t),
@@ -631,7 +634,10 @@ fn no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs() {
         ];
         for set in [&components, &machine] {
             assert!(set.iter().all(in_range), "case {case}: {set:?}");
+            at_0 += set.iter().filter(|c| c.score == Some(0)).count();
+            at_100 += set.iter().filter(|c| c.score == Some(100)).count();
             let combined = score::combine(set);
+            combined_scores += usize::from(combined.score.is_some());
             assert!(
                 combined.score.is_none_or(|score| score <= 100),
                 "case {case}: {combined:?}"
@@ -642,6 +648,15 @@ fn no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs() {
             }
         }
     }
+    assert!(
+        at_0 > 0,
+        "no component clamped to 0 on inputs past the 0 end"
+    );
+    assert!(
+        at_100 > 0,
+        "no component clamped to 100 on inputs past the 100 end"
+    );
+    assert!(combined_scores > 0, "no set combined into a score");
 }
 
 /// #192's rule: the scoring engine is pure. A guard, green by design.

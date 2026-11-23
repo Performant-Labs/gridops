@@ -15,7 +15,7 @@
  *   `24h` when storage fails).
  */
 import { createElement } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AreasOfConcern } from "~/features/fleet-health/areas-of-concern";
 import { scoreBand } from "~/features/fleet-health/chart-theme";
@@ -24,6 +24,7 @@ import { loadHealthWindow, saveHealthWindow } from "~/features/fleet-health/page
 import type { FleetHealth } from "~/features/fleet-health/types";
 
 import { all, button, click, fixture, one, render, mountEachTest } from "./fleet-health-dom";
+import { installMemoryStorage, type MemoryStorage } from "./fixtures/memory-storage";
 
 vi.mock("@tanstack/react-router", async () => {
   const { createElement: element } = await import("react");
@@ -99,17 +100,24 @@ describe("Fleet score card", () => {
 });
 
 describe("the remembered window", () => {
-  afterEach(() => window.localStorage.clear());
+  // Recent Node hides jsdom's localStorage (tests/fixtures/memory-storage.ts): a fresh one per test.
+  let storage: MemoryStorage;
+  beforeEach(() => {
+    storage = installMemoryStorage();
+  });
 
   it.skip("[contract: #195] remembers the chosen window, 24h by default and when storage fails", () => {
     expect(loadHealthWindow()).toBe("24h");
     saveHealthWindow("7d");
+    expect(storage.getItem("gridops.fleetHealth.window")).toBe("7d");
     expect(loadHealthWindow()).toBe("7d");
     saveHealthWindow("1h");
     expect(loadHealthWindow()).toBe("1h");
-    window.localStorage.setItem("gridops.fleetHealth.window", "30d");
+    storage.setItem("gridops.fleetHealth.window", "30d");
     expect(loadHealthWindow()).toBe("24h");
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+    // A valid stored window, then storage fails: the fallback, not the value, gives 24h.
+    storage.setItem("gridops.fleetHealth.window", "7d");
+    vi.spyOn(storage, "getItem").mockImplementation(() => {
       throw new Error("storage is off");
     });
     expect(loadHealthWindow()).toBe("24h");

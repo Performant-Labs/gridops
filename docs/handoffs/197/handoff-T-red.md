@@ -1,3 +1,109 @@
+# Handoff-T-red: Phase 4 - Fleet health shared contract (#197), round 2
+
+**Date:** 2026-11-22
+**Branch:** claude/fleet-197-contract (head 77f62ae; test edits uncommitted and staged by path)
+**Brief / wireframe reviewed:** `docs/handoffs/197-brief.md` (unchanged since 1867382), `docs/handoffs/197-diff-result-r1.md` (diff gate round 1: B-1, B-2, W-1 to W-5), `docs/handoffs/197/handoff-A.md` (round 4, warn 28), `handoff-F.md`, `handoff-T-green.md`. No wireframe.
+
+Round 1 (the whole suite, RED at 829367f) is kept unchanged below, under "Round 1". This round adds only what the diff gate's round 1 asked of the tests.
+
+## A precondition
+
+A returned **PASS** on the plan (Phase 3, round 4, `handoff-A.md`), with 0 block findings and the new warn 28 (the page test asserts composition slots, not placeholder text). I follow warn 28's shape for B-2.
+
+## Tests authored or changed this round
+
+| Test | Change | Pins | Tier | Why this tier |
+|---|---|---|---|---|
+| `tests/fleet-health-page.test.ts` (new, #197-owned, live) | 4 tests | B-2 / warn 28: `/fleet/health` renders the fixture through `FleetHealthPage` | integration (jsdom, `fetch` stubbed) | The page's job is wiring the hook to the sections. A component render with a stubbed `fetch` is the cheapest tier that reaches it. There is no Playwright suite. |
+| · `renders the fixture into one slot per section, each with content` | new | GETs `window=24h`. Exactly one `[data-health-section]` per slot (`areas-of-concern`, `category-legend`, `fleet-score`, `live-strip`, `machine-detail`, `machine-table`), and each slot holds content. Order is not pinned (#195 owns the layout), and neither is placeholder text. | | |
+| · `asks for the window chosen in the picker` | new | Clicking `7d` requests `window=7d` and moves `aria-pressed`. The slots are still all there. | | |
+| · `tells a member the page is for administrators, with no sections` | new | A 403 shows "Administrators only" (the design doc's wording) and no slots | | |
+| · `shows a failure with Retry, and renders the sections once a retry succeeds` | new | A 500 shows no slots and not "Administrators only". Retry fetches again, and the slots appear. | | |
+| `score_contract_tests.rs::no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs` (#192, still marked) | strengthened | Over the 1,000 inputs, at least one component clamps to 0, at least one to 100, and at least one set combines into a score | unit | Same property test. It now has a control: the inputs run past both ends of every table, so a correct engine must hit both clamps. |
+| `health_live_contract_tests.rs::a_machine_with_no_cpu_budget_never_raises_host_offline` (#201, still marked) | strengthened | In the same `collect_live` call, io (budgeted, silent 60 min) is `host-offline` while the budget-0 laptop (silent 60 min) is not | integration (SQLite) | Same test with a control, so an empty concern list fails it |
+| `tests/fleet-health-195-frame.contract.test.ts` "the remembered window" (#195, still marked) | repaired | Uses `installMemoryStorage()` (`tests/fixtures/memory-storage.ts`). Checks that the documented key `gridops.fleetHealth.window` is written. The storage-failure leg now stores a *valid* `7d` before `getItem` throws. | unit (jsdom) | Same test. See "Why the #195 test was repaired". |
+| `health_wiring_tests.rs` | doc comment only (W-4) | Says `?window=` is ignored until #194, so a bad window gets 200 today, and that the published 400 is #194's contract test. A test pinning today's 200 would break when #194 lands, and #194 can't edit this #197 file, so it is a comment, not a test. | | |
+
+**Why the two contract tests were strengthened (B-1).** T-green reported them passing against the stubs. The brief's Done-when says every contract test "fails against the stubs once its marker is removed". Both were negative or property checks that an empty stub satisfies. Each now has a positive control that the real behaviour must meet, and both fail against the stubs (below).
+
+**Why the #195 test was repaired.** Removing the markers showed that its `afterEach(() => window.localStorage.clear())` throws `TypeError: Cannot read properties of undefined (reading 'clear')` on this machine's Node (v26.13.0). `tests/fixtures/memory-storage.ts` says why: "Recent Node releases ship their own `localStorage` global, which hides jsdom's and is undefined unless Node is started with a storage file". CI runs Node 22, so it would pass there and fail on newer Node for a reason that has nothing to do with #195. The old storage-failure leg had a second flaw: it spied on `Storage.prototype.getItem` after storing an invalid `30d`, which can't tell the fallback apart from the invalid-value check.
+
+## RED confirmation
+
+**1. The new page test, markers in place** (`npx vitest run tests/fleet-health-page.test.ts`): 3 failed, 1 passed.
+
+    × renders the fixture into one slot per section, each with content
+    × asks for the window chosen in the picker
+    × shows a failure with Retry, and renders the sections once a retry succeeds
+    AssertionError: expected [] to deeply equal [ 'areas-of-concern', …(5) ]
+     ❯ tests/fleet-health-page.test.ts:65:33 / :82:33 / :113:33   (the slot assertion in each)
+
+- **Right reason:** in each test, every assertion before the slot check passed:
+  - the `24h` request;
+  - `aria-pressed` on `7d` and `24h`;
+  - Retry refetching.
+
+  A throwaway probe showed that `[data-testid="fleet-health-sections"]` renders its section children from the fixture. So the only thing missing is the `data-health-section` attribute: the feature this round asks of F.
+- **The 403 test passes now, by design.** The members-only state was already built in round 1. The test is a regression guard the diff gate asked for, not RED. It is discriminating: the failure test asserts the 500 path does *not* say "Administrators only", so a page that showed that text for every error would fail one of the two.
+- **Satisfiable:** on the scratch branch (below), adding the six `data-health-section` wrappers in `HealthSections` made all 4 page tests pass. That throwaway implementation was then reverted, and it never touched this worktree.
+
+**2. Full frontend suite, markers in place** (`npx vitest run`): 3 failed (the three above), 639 passed, 18 skipped. `eslint` on the changed tests and `tsc --noEmit` are clean.
+
+**3. B-1, the marker-removal proof on a scratch branch.**
+- **Setup:**
+  - worktree `gridops-197-markers` on branch `scratch/197-markers-removed`, from 77f62ae plus this round's test edits;
+  - every `#[ignore = "contract: #N"]` line deleted, and every `it.skip("[contract: #N] ` turned into `it("`;
+  - the only `contract: #` text left is the 10 module doc comments.
+- **Rust:** `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 cargo test --workspace --locked --no-fail-fast` gave 1138 passed, 61 failed, 2 ignored (pre-existing, non-contract). The 61:
+  - `gridops-core` lib, 17: every #190 (2), #192 (9) and #193 (6) contract test.
+  - `gridops-api` bin, 19: every #190 (1), #194 (5), #199 (5) and #201 (8) contract test.
+  - `gridops-reconciler` bin, 11: every #190 (3), #191 (4) and #200 (4) contract test.
+  - `gridops-manager` bin, 14: `path must be shorter than SUN_LEN`. This is the macOS socket-path limit for a long worktree path, in a crate this branch doesn't touch (same as T-green).
+  - **47 of 47 Rust contract tests fail, and no unrelated test fails.** Each failure is an assertion on stub output, for example:
+    - `window=30d: {"concerns":…` (a 200 where 400 is due);
+    - `{"error":"Job category rules arrive with #199."}`;
+    - `io, budgeted and silent 60 min, is offline: []`;
+    - `no component clamped to 0 on inputs past the 0 end`;
+    - `recompiled at +1 ms`;
+    - `unit (1/4)`.
+
+    None is an import, compile or setup error.
+- **Frontend:** `npx vitest run` with the markers removed: all 18 contract tests fail (#195 6, #199 4, #202 4, #203 4), plus the 3 page tests. The repaired #195 storage test now fails at `expected null to be '7d'` (the stub writes nothing), not at a `localStorage` TypeError. With a throwaway correct `load`/`saveHealthWindow` it passes.
+- **Correction to round 1 and T-green counts:** a plain `grep -c` for the marker strings gives 57 Rust and 22 frontend, but that includes one doc-comment mention per file. The real counts are 47 Rust and 18 frontend.
+- **Cleanup:** the scratch worktree and branch were removed afterwards (`git worktree list` shows none).
+
+**4. Other checks on this worktree:**
+- `cargo fmt --all --check` is clean.
+- `cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings -A clippy::unused_async_trait_impl` (CI's command) finished with no warnings.
+- `node --test scripts/fleet-health-guard.test.mjs`: 13 of 13.
+
+## The contract F implements against (this round)
+
+1. **`HealthSections` (`src/features/fleet-health/page.tsx`)** wraps each section in its own element carrying `data-health-section="<slot>"`, one per slot. The slot names are exactly `live-strip`, `areas-of-concern`, `fleet-score`, `category-legend`, `machine-table` and `machine-detail`. Each wrapper holds the section's content (today the placeholder card). Do not add a seventh slot; the stale warning is not a slot. No slot renders while loading, on a 403 or on a failure.
+2. **`docs/design/fleet-health.md`, "The page":**
+   - list the six slots as part of the composition: wave 1 fills a slot's content and may move the slot, but keeps the attribute;
+   - add warn 28's sentence: #197's page test asserts the composition slots, not the placeholder text.
+3. **Nothing else in production changes** for this round's other test edits. The #192, #201 and #195 tests are contract tests, still marked, and failing against the stubs is the intended state.
+
+## Not for T (carried for F or O)
+
+- **W-1 and W-2** (the guard's live sample PRs, and the timing on the Mars database copy) still need a push or production ssh. They are O's before merge.
+- **W-3** (state the speed-check limits as a non-goal for rollup authors) is a design-doc wording change, so it is F's. The "Limits:" sentence is already there.
+- **W-5** (`FakeFleetHealthSource` behind `test-support` when #204 lands) is an issue comment for O.
+- **This round changes `tests/fleet-health-195-frame.contract.test.ts`, a contract test file.** Per the brief, the guard's two sample PRs must be cut from a head after this change.
+
+## Ready for F
+
+RED is valid:
+- The 3 slot tests fail on the missing `data-health-section` slots and nothing else. The 403 regression guard passes by design.
+- With the markers removed, every contract test fails against the stubs: 47 Rust and 18 frontend.
+
+F may implement item 1 (the slots) and item 2 (the design doc) above.
+
+---
+
+# Round 1
+
 # Handoff-T-red: Phase 4 - Fleet health shared contract (#197)
 
 **Date:** 2026-11-22

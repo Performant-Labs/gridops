@@ -11,6 +11,11 @@
 //! - `ApiError`'s 422 carries per-rule `details` for #199, and no existing
 //!   error body changes (D-3(d), refined).
 //!
+//! Not live yet: `?window=` is not read until #194, so today any value, a
+//! bad one included, gets 200 and the 24 h fixture. The 400 for a bad window
+//! that `OpenAPI` already publishes is #194's contract test
+//! (`health_contract_tests.rs`), not behaviour this file pins.
+//!
 //! Mounted from `fleet/mod.rs`.
 
 use anyhow::{Context as _, Result};

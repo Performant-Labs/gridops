@@ -212,3 +212,36 @@
     - `grep`: no frontend contract test pins a section root;
     - `grep`: 0050's `CREATE INDEX` lines;
     - `grep`: the design doc has no `fleet → resources` edge note.
+
+## Phase 4 Tester (T, author/RED, round 2) - 2026-11-22T17:32:03-08:00
+- **Decided:**
+  - **B-2 is met with warn 28's shape.** `tests/fleet-health-page.test.ts` (#197-owned, live) renders `FleetHealthPage` with `fetch` stubbed. It checks:
+    - six `data-health-section` slots, as a set (order is #195's), each with content;
+    - the `24h` request, and the picker's `7d` request with `aria-pressed`;
+    - "Administrators only" on a 403;
+    - a failure with Retry that recovers.
+
+    No placeholder text is asserted.
+  - **B-1:** the two contract tests that passed against the stubs now carry positive controls:
+    - #192's property test must hit both clamps and combine at least once;
+    - #201's no-budget test must see a budgeted machine, silent just as long, go offline in the same call.
+  - **The #195 remembered-window contract test is repaired, test-only:**
+    - it now uses `installMemoryStorage()` (Node 26 hides jsdom's `localStorage`);
+    - it checks that the documented key is written;
+    - its storage-failure leg stores a valid value first.
+  - **W-4 is a doc comment in `health_wiring_tests.rs`, not a test.** Pinning today's 200 would break when #194 lands.
+- **Assumed:**
+  - The slot names (`live-strip`, `areas-of-concern`, `fleet-score`, `category-legend`, `machine-table`, `machine-detail`) are mine to set. A's warn 28 names the mechanism, not the values. F records them in the design doc.
+  - The `gridops-manager` SUN_LEN failures are environmental, as in T-green.
+- **Hedged:**
+  - The 403 page test passes before F's change, because that state was already built in round 1. It is a regression guard, not RED. The failure test, which says no "Administrators only" on a 500, keeps it discriminating.
+  - The Mars timing (W-2) is left to O. So are the guard's sample PRs (W-1), which must now be cut after this round's contract-test edit.
+- **Evidence:**
+  - **Marker-removal proof:** run on the scratch branch `scratch/197-markers-removed`, which was removed afterwards. The workspace gave 1138 passed and 61 failed. The 61 are 47 of 47 Rust contract tests (core 17, api 19, reconciler 11) and 14 manager SUN_LEN failures. Vitest: all 18 contract tests and the 3 page slot tests fail.
+  - **Round 1 and T-green counts:** "57/22" from `grep -c` counted doc comments. The real counts are 47 and 18.
+  - **With markers in place:**
+    - vitest has 3 failures (the slot tests), 639 passed and 18 skipped;
+    - `tsc`, `eslint`, `cargo fmt` and CI's clippy are clean;
+    - the guard passes 13 of 13.
+  - **A correct implementation can pass the new tests:** a throwaway one on the scratch branch passed the page tests and the repaired #195 test.
+  - **Handoff:** `docs/handoffs/197/handoff-T-red.md` (round 2 at the top).

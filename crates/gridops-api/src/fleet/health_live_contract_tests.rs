@@ -161,10 +161,22 @@ async fn a_machine_with_no_cpu_budget_never_raises_host_offline() -> Result<()> 
     seeded
         .sample("MacBookPro", NOW - 60 * MINUTE, 50 * GIB)
         .await?;
+    // The control: io (budgeted) silent just as long is offline in the same
+    // call, so an empty concern list can't pass this test.
+    let io = seeded.id("io")?;
+    sqlx::query("DELETE FROM host_samples WHERE host_id = ?")
+        .bind(&io)
+        .execute(&seeded.db)
+        .await?;
+    seeded.sample("io", NOW - 60 * MINUTE, 50 * GIB).await?;
     let concerns = seeded.concerns().await?;
     assert!(
         find(&concerns, &format!("host-offline:{laptop_id}")).is_none(),
         "{concerns:?}"
+    );
+    assert!(
+        find(&concerns, &format!("host-offline:{io}")).is_some(),
+        "io, budgeted and silent 60 min, is offline: {concerns:?}"
     );
     seeded.close().await
 }
