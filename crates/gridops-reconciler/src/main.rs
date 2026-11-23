@@ -2173,18 +2173,28 @@ async fn upsert_workflow_job(
     now: i64,
 ) -> Result<()> {
     // The category is bound for a new row only: the `ON CONFLICT` update
-    // below never touches it (#197, W-15). The classifier reads the run's
-    // workflow name and repository on this same connection.
-    let category = category_for_insert(
-        &mut *connection,
-        &NewJob {
-            job_name: Some(&job.name),
-            labels: &job.labels,
-            origin: JobOrigin::GitHubRun(job.run_id),
-        },
-        now,
-    )
-    .await;
+    // below never touches it (#197, W-15), so a job row that already exists
+    // is not classified again. The classifier reads the run's workflow name
+    // and repository on this same connection.
+    let exists = sqlx::query("SELECT 1 FROM workflow_jobs WHERE id=?")
+        .bind(job.id)
+        .fetch_optional(&mut *connection)
+        .await?
+        .is_some();
+    let category = if exists {
+        None
+    } else {
+        category_for_insert(
+            &mut *connection,
+            &NewJob {
+                job_name: Some(&job.name),
+                labels: &job.labels,
+                origin: JobOrigin::GitHubRun(job.run_id),
+            },
+            now,
+        )
+        .await
+    };
     sqlx::query(
         r#"INSERT INTO workflow_jobs (
           id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,

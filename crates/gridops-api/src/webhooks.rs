@@ -643,8 +643,15 @@ async fn process_workflow_job(
     }
     let status = string(job, "status").or(action).unwrap_or("queued");
     // The category is bound for a new row only: the `ON CONFLICT` update
-    // below never touches it (#197, W-15).
+    // below never touches it (#197, W-15). So a job row that already exists
+    // is not classified again: every later event for the job skips the rules.
     let category = {
+        let mut connection = database.acquire().await?;
+        let exists = sqlx::query("SELECT 1 FROM workflow_jobs WHERE id=?")
+            .bind(id)
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
         let labels = job
             .get("labels")
             .and_then(Value::as_array)
@@ -655,17 +662,20 @@ async fn process_workflow_job(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut connection = database.acquire().await?;
-        category_for_insert(
-            &mut connection,
-            &NewJob {
-                job_name: string(job, "name"),
-                labels: &labels,
-                origin: JobOrigin::GitHubRun(run_id),
-            },
-            now,
-        )
-        .await
+        if exists {
+            None
+        } else {
+            category_for_insert(
+                &mut connection,
+                &NewJob {
+                    job_name: string(job, "name"),
+                    labels: &labels,
+                    origin: JobOrigin::GitHubRun(run_id),
+                },
+                now,
+            )
+            .await
+        }
     };
     sqlx::query(
         r#"INSERT INTO workflow_jobs (

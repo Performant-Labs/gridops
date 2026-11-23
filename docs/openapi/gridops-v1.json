@@ -2694,7 +2694,7 @@
                       "key": "category-other",
                       "severity": "info",
                       "title": "Many jobs have no category",
-                      "detail": "24% of the window's jobs are `other`: a job category rule may be missing.",
+                      "detail": "25% of the window's jobs are `other`: a job category rule may be missing.",
                       "subject": {
                         "kind": "fleet"
                       },

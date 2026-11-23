@@ -795,7 +795,7 @@ fn windowed_concerns() -> Vec<Concern> {
             key: "category-other".to_owned(),
             severity: Severity::Info,
             title: "Many jobs have no category".to_owned(),
-            detail: "24% of the window's jobs are `other`: a job category rule may be missing."
+            detail: "25% of the window's jobs are `other`: a job category rule may be missing."
                 .to_owned(),
             subject: ConcernSubject::Fleet,
             link: Some("/settings/general".to_owned()),
