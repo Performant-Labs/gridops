@@ -35,7 +35,7 @@ type Preview = {
   other: Array<{ name: string; jobs: number }>;
 };
 
-const selectClassName = cn(inputClassName, "w-auto appearance-none pr-6");
+const selectClassName = cn(inputClassName, "w-auto pr-7");
 
 export function JobCategoriesSection() {
   const [rules, setRules] = useState<Rule[]>([]);
@@ -82,11 +82,18 @@ export function JobCategoriesSection() {
     return () => clearTimeout(timer);
   }, [loaded, rules]);
 
+  // Any change to the rules makes the last save's per-row messages stale
+  // (a move even shifts the position they name), so they come off with it.
+  const changeRules = (change: (current: Rule[]) => Rule[]) => {
+    setRowErrors({});
+    setRules(change);
+  };
+
   const edit = (index: number, patch: Partial<Rule>) =>
-    setRules((current) => current.map((rule, at) => (at === index ? { ...rule, ...patch } : rule)));
+    changeRules((current) => current.map((rule, at) => (at === index ? { ...rule, ...patch } : rule)));
 
   const move = (index: number, offset: -1 | 1) =>
-    setRules((current) => {
+    changeRules((current) => {
       const target = index + offset;
       const rule = current[index];
       const swap = current[target];
@@ -97,9 +104,9 @@ export function JobCategoriesSection() {
       return next;
     });
 
-  const remove = (index: number) => setRules((current) => current.filter((_, at) => at !== index));
+  const remove = (index: number) => changeRules((current) => current.filter((_, at) => at !== index));
 
-  const add = () => setRules((current) => [...current, { category: "test", field: "job_name", pattern: "" }]);
+  const add = () => changeRules((current) => [...current, { category: "test", field: "job_name", pattern: "" }]);
 
   async function save() {
     setSaving(true);
