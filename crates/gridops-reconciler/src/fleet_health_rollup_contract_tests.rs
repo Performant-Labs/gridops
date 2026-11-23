@@ -356,7 +356,6 @@ async fn seed(harness: &Harness) -> Result<Vec<Row>> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #191"]
 async fn an_hour_of_seeded_jobs_gives_the_expected_rows() -> Result<()> {
     let harness = Harness::new().await?;
     let expected = seed(&harness).await?;
@@ -375,7 +374,6 @@ async fn an_hour_of_seeded_jobs_gives_the_expected_rows() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #191"]
 async fn rolling_an_hour_up_again_gives_identical_rows() -> Result<()> {
     let harness = Harness::new().await?;
     let expected = seed(&harness).await?;
@@ -403,7 +401,6 @@ async fn rolling_an_hour_up_again_gives_identical_rows() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #191"]
 async fn a_pass_rolls_up_a_listed_hour_and_catches_up_the_last_7_days() -> Result<()> {
     let harness = Harness::new().await?;
     let expected = seed(&harness).await?;
@@ -458,7 +455,6 @@ async fn a_pass_rolls_up_a_listed_hour_and_catches_up_the_last_7_days() -> Resul
 }
 
 #[tokio::test]
-#[ignore = "contract: #191"]
 async fn seven_days_of_50000_jobs_roll_up_with_no_long_write_transaction() -> Result<()> {
     let directory =
         std::env::temp_dir().join(format!("gridops-job-rollup-week-{}", uuid::Uuid::new_v4()));
