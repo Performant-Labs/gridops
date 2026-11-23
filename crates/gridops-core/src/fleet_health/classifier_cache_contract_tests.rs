@@ -188,23 +188,38 @@ async fn classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly() 
     sqlx::query("INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at) VALUES ('gl','gl','https://gitlab.example.test','project',7,'team/app','gl.token','gl.webhook',1,1)")
         .execute(&db)
         .await?;
-    let now = crate::now_millis();
-    // 200 more rules after the defaults, saved just now: the next
-    // classification recompiles, inside the write transaction below.
+    // Past the minute of any earlier test's check through the process-wide
+    // cache, so the cache must look at the rules again, inside the write
+    // transaction below.
+    let now = crate::now_millis() + 2 * MINUTE;
+    // 200 more rules after the defaults, saved at `now`: 199 that match
+    // nothing and one that is the only match for this test's job names. A
+    // cache that did not recompile classifies those jobs `other`, and the
+    // test fails.
     let base: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(position),-1)+1 FROM job_category_rules")
             .fetch_one(&db)
             .await?;
     for index in 0..200_i64 {
-        sqlx::query("INSERT INTO job_category_rules (position,category,field,pattern,created_at,updated_at) VALUES (?,'check','job_name',?,?,?)")
+        let (category, pattern) = if index == 199 {
+            ("deploy", "^fleet-197-only-[0-9]+$".to_owned())
+        } else {
+            (
+                "check",
+                format!("^never-matches-{index}-(alpha|beta|gamma)[0-9]+$"),
+            )
+        };
+        sqlx::query("INSERT INTO job_category_rules (position,category,field,pattern,created_at,updated_at) VALUES (?,?,'job_name',?,?,?)")
             .bind(base + index)
-            .bind(format!("^never-matches-{index}-(alpha|beta|gamma)[0-9]+$"))
+            .bind(category)
+            .bind(pattern)
             .bind(now)
             .bind(now)
             .execute(&db)
             .await?;
     }
     let docker = vec!["docker".to_owned()];
+    let names: Vec<String> = (1..=50).map(|id| format!("fleet-197-only-{id}")).collect();
     speed_check::check(&db, async {
         let mut transaction = db.begin_with("BEGIN IMMEDIATE").await?;
         for job_id in 1..=50_u64 {
@@ -220,7 +235,7 @@ async fn classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly() 
                     retries_count: None,
                     tag_list: Some(&docker),
                     gitlab_runner_id: None,
-                    job_name: Some("rspec 1/3"),
+                    job_name: Some(&names[usize::try_from(job_id - 1)?]),
                     project_path: None,
                 },
                 now,
@@ -231,14 +246,14 @@ async fn classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly() 
         Ok(())
     })
     .await?;
-    let tests: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM gitlab_jobs WHERE connection_id='gl' AND category='test'",
+    let deploys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM gitlab_jobs WHERE connection_id='gl' AND category='deploy'",
     )
     .fetch_one(&db)
     .await?;
     assert_eq!(
-        tests, 50,
-        "every job was classified on insert, in the transaction"
+        deploys, 50,
+        "every job was classified on insert, in the transaction, by the rules saved just before"
     );
     close(directory, db).await
 }
