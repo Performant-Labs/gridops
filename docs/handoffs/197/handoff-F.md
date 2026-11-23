@@ -1,4 +1,90 @@
-# Handoff-F: Phase 6 - Fleet health shared contract (#197), round 2
+# Handoff-F: Phase 6 - Fleet health shared contract (#197), round 3 (S rework)
+
+**Date:** 2026-11-22
+**Branch:** claude/fleet-197-contract (head 8401a86; production edits uncommitted, for the driver to commit)
+**Issue:** #197
+
+This round answers the Spec Auditor's REWORK (`docs/handoffs/197/handoff-S.md`, findings 1 to 3). Round 2 and round 1 are kept unchanged below.
+
+## What was done
+- `src/components/app-shell.tsx`, `NavLinkItem` (S finding 1): the sidebar `Link` now passes `activeOptions={{ exact: !active }}`. A link the app calls inactive (`isActivePath` false) is router-active only on an exact path match, so TanStack Router no longer adds `aria-current="page"` and `data-status="active"` to Machines on `/fleet/health`. A link the app calls active keeps the router's default prefix match, so Machines stays current on `/fleet/machines/<id>`. A three-line comment explains why.
+- `scripts/fleet-health-guard.mjs` (S finding 3, the diff gate's NIT-1): deleted the unused `const escape = ...` helper and the blank line after it.
+- Finding 2 needs test changes only. F cannot make them, so it is listed under "Tests missing (for T)" below.
+
+## Design decisions
+- **Make the router follow the app, rather than override its attributes.** The router spreads `STATIC_ACTIVE_PROPS` (`data-status`, `aria-current`) after every caller prop (`link.js:369`), so passing `aria-current={undefined}` or `data-status` cannot win. The alternatives were dropping `Link` for a plain `<a>` with manual navigation (this loses preload and transition handling), or `activeProps`/`inactiveProps`, which don't control those two attributes. `exact: !active` is the smallest change and the one S suggested. It is correct for every item: an app-inactive item is never on its own exact path. `isActivePath(to, to)` is true, because no other item shares a `to` (pinned by `tests/navigation.test.ts`, "gives every item its own destination"). An app-active item satisfies the router's prefix test, because `underPath` and the router's check have the same `to` or `to/` semantics. The one exception is `/`, which the app only calls active on `/`, where the router agrees.
+- **I kept the app's own `aria-current` prop.** It is now redundant with the router's, but it states the intent at the call site and costs nothing.
+
+## Reuse / extend-vs-new
+Extends the existing `NavLinkItem`. Nothing new.
+
+## Architecture notes for A
+None. One prop on an existing `Link` and one dead constant deleted. No layer, dependency, schema or public-interface change. Neither file is owned by a wave-1 issue (S confirmed this for `app-shell.tsx`; the guard script is #197's).
+
+## Deviations from spec / wireframe
+None.
+
+## Tier 1 self-check (incl. tests now GREEN)
+- **Finding 1, rendered behaviour (a scratch render, not a committed test).** I rendered the real `AppShell` (inside `ThemeProvider` and `TooltipProvider`) under a memory-history TanStack router in jsdom, and listed the `nav a[aria-current="page"]` and `nav a[data-status="active"]` hrefs per path. I ran it as a temporary `tests/zz-f-scratch-nav.test.ts` and **deleted it afterwards**; it is not in the diff.
+  - Without the fix (control, `app-shell.tsx` stashed): `/fleet/health` gave `{"marked":["/fleet","/fleet/health"],"status":["/fleet","/fleet/health"]}`, which reproduces S's finding.
+  - With the fix:
+    - `/fleet/health` gives `{"marked":["/fleet/health"],"status":["/fleet/health"]}`.
+    - `/fleet` gives `["/fleet"]`.
+    - `/fleet/machines/abc` gives `["/fleet"]`.
+    - `/` gives `["/"]`.
+    - `/queued-jobs` gives `["/queued-jobs"]`.
+    - Exactly one current link on each.
+- `npx tsc --noEmit`: clean (exit 0).
+- `npm run lint` (eslint, `--max-warnings=0`, globs `src tests *.config.ts eslint.config.js`): clean.
+- `npx vitest run`: Test Files 56 passed, 4 skipped (60). **Tests 642 passed, 18 skipped (660).** The 18 skipped are the marked contract tests, the same count as round 2.
+- `node --test scripts/fleet-health-guard.test.mjs`: **13 of 13 pass** after deleting `escape`.
+- No Rust file changed this round, so cargo was not re-run.
+
+## Evidence appendix
+`docs/handoffs/197/evidence.md`, two new entries at the end (round 3). They cover TanStack Router 1.170.18's `Link`: the prefix-versus-`exact` active test, and `STATIC_ACTIVE_PROPS` spread after the caller's props.
+
+## Tests that look wrong (for T)
+None.
+
+## Tests missing (for T)
+1. **S finding 1, render-level nav test (new).** Add a jsdom test that renders the real `AppShell` under a TanStack router and asserts exactly one `nav a[aria-current="page"]` per path:
+   - `/fleet/health` gives Health (`/fleet/health`).
+   - `/fleet` and `/fleet/machines/<id>` give Machines (`/fleet`).
+   - Also assert `data-status="active"` the same way.
+
+   What worked in my scratch render:
+   - Wrap in `ThemeProvider` plus `TooltipProvider` (from `~/components/ui/tooltip`). Without the second, Radix throws "`Tooltip` must be used within `TooltipProvider`".
+   - Give the root route `loader: () => null`, since `AppShell` reads `getRouteApi("__root__").useLoaderData()`.
+   - Set `notFoundComponent: () => null`.
+   - Stub `window.matchMedia` if absent.
+   - `tests/tart-host-card.test.ts` shows the router-render pattern.
+
+   With `app-shell.tsx` reverted, `/fleet/health` yields two current links, so the test fails against the old code for the right reason.
+2. **S finding 2, #193 and #201 realistic-volume contract tests (spec §7).** One marked test each, in the files that already hold their contract tests (`speed_contract_tests.rs`, `health_live_contract_tests.rs`), run under `speed_check::check` over `testdata::build_week`:
+   - `#[ignore = "contract: #193"]`: `speed::speed_indexes` over the week returns an index for the machine(s) the week makes slower, and no statement takes over 100 ms.
+   - `#[ignore = "contract: #201"]`: `collect_live` over the week returns the seeded running and queued counts (each category sum equals its total), and no statement takes over 100 ms.
+   - Each needs a positive assertion on the result, so it fails against the stub once unmarked.
+   - The speed-check set must stay under 60 s (about 8.8 s per `build_week` today). If that is tight, a smaller week for these two is acceptable if stated.
+
+   No production change is needed for these: the stubs are meant to fail them until #193 and #201 land.
+
+## Known issues
+None for F. O's merge conditions are unchanged from `handoff-S.md`:
+- the Mars-copy timing;
+- the two live guard test PRs, which must be cut **after** this round, because it changes `scripts/fleet-health-guard.mjs`;
+- adding the required check;
+- the #190, #194 and #201 comments;
+- the #204 reminder.
+
+## Files changed
+- `src/components/app-shell.tsx`
+- `scripts/fleet-health-guard.mjs`
+
+---
+
+# Round 2 (kept unchanged)
+
+## Handoff-F: Phase 6 - Fleet health shared contract (#197), round 2
 
 **Date:** 2026-11-22
 **Branch:** claude/fleet-197-contract (head c3f2ebc; production edits uncommitted, for the driver to commit)

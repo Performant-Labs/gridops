@@ -274,3 +274,18 @@
 - **Evidence:**
   - Read the diff for `overview_queue.rs`, `resources.rs`, `error.rs`, `state.rs`, `db.rs`, `registry/queries.rs`, `health.rs`, `health_live.rs`, `api.ts` and both `chart-theme.ts` files.
   - Handoff: `docs/handoffs/197/handoff-A-dup.md`.
+
+## Phase 6 Feature Implementor (F, round 3, S rework) - 2026-11-22T17:55:00-08:00
+- **Decided:**
+  - S finding 1: `NavLinkItem` passes `activeOptions={{ exact: !active }}`, so the router's active state (and its `aria-current`/`data-status`) follows `isActivePath`.
+  - Kept the app's own `aria-current` prop as the stated intent.
+  - S finding 3: deleted the unused `escape` from the guard script.
+- **Assumed:**
+  - No two nav items share a `to` (pinned by `tests/navigation.test.ts`), so an app-inactive item is never on its own exact path.
+- **Hedged:**
+  - S finding 2 and the render-level nav test are T's (F writes no tests). Both are listed under "Tests missing (for T)" in `handoff-F.md`.
+- **Evidence:**
+  - Scratch jsdom render of the real `AppShell` (deleted after): `/fleet/health` had two current links before the fix and one (Health) after. `/fleet` and `/fleet/machines/abc` give Machines.
+  - `tsc`, lint and vitest (642 passed, 18 skipped) are clean, and the guard passes 13 of 13.
+  - Handoff: `docs/handoffs/197/handoff-F.md`, round 3 at the top.
+

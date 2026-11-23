@@ -82,3 +82,29 @@ Source facts in unchanged code that the diff and T's tests rely on.
   >         "retries_count": 0,
   >         "build_id": job_id,
   >         "build_name": "rspec",
+
+### Round 3 (F, S rework finding 1)
+
+- **Fact:** TanStack Router's `Link` calls a link active on a prefix path match unless `activeOptions.exact` is set, in which case only an exact path match counts (so `/fleet` is router-active on `/fleet/health` by default).
+  **Source:** `node_modules/@tanstack/react-router/dist/esm/link.js:213-221` (`@tanstack/react-router` 1.170.18)
+  **Verbatim excerpt:**
+  > const isActive = React$1.useMemo(() => {
+  > 	if (externalLink) return false;
+  > 	if (activeOptions?.exact) {
+  > 		if (!exactPathTest(currentLocation.pathname, next.pathname, router.basepath)) return false;
+  > 	} else {
+  > 		const currentPathSplit = removeTrailingSlash(currentLocation.pathname, router.basepath);
+  > 		const nextPathSplit = removeTrailingSlash(next.pathname, router.basepath);
+  > 		if (!(currentPathSplit.startsWith(nextPathSplit) && (currentPathSplit.length === nextPathSplit.length || currentPathSplit[nextPathSplit.length] === "/"))) return false;
+  > 	}
+
+- **Fact:** when the router calls a link active it spreads `data-status="active"` and `aria-current="page"` after the caller's props, so a caller's own `aria-current` cannot override it; only the router's active test can.
+  **Source:** `node_modules/@tanstack/react-router/dist/esm/link.js:369` and `:379-382`
+  **Verbatim excerpt:**
+  > 	...isActive && STATIC_ACTIVE_PROPS,
+  >
+  > var STATIC_ACTIVE_PROPS = {
+  > 	"data-status": "active",
+  > 	"aria-current": "page"
+  > };
+

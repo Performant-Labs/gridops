@@ -86,8 +86,6 @@ function changeBlocks(patch) {
   return blocks;
 }
 
-const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 /**
  * Whether `patch` only removes issue `issue`'s contract markers: a Rust `#[ignore = "contract: #N"]`
  * line taken out, or a Vitest `it.skip("[contract: #N] name"` turned into `it("name"` with the
