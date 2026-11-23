@@ -263,3 +263,14 @@
   - `npm run lint`, `tsc --noEmit` and `npm run build` are clean.
   - The guard passes 13 of 13.
   - Handoff: `docs/handoffs/197/handoff-F.md`, round 2 at the top.
+
+## Phase 7 Architecture Reviewer (A, anti-duplication gate) - 2026-11-22
+- **Decided:**
+  - PASS. F extended `queue_breakdown`, `list_hosts`' helpers, D18's UPSERT, `RegistryClock`, `ApiError`, the `FleetWorkloadSection` fetch pattern and `HealthSections`. No parallel path.
+- **Assumed:**
+  - No survey Reuse map exists, so I used the analogues named in `handoff-A.md` and the brief.
+- **Hedged:**
+  - Three warns, none blocking: the 90/70 thresholds duplicated from `successTone`, `fleet_queue_breakdown` still returning `ApiResult` with the `fleet → resources` edge unnamed in the design doc, and `metricTiles`' unused `_health` hook.
+- **Evidence:**
+  - Read the diff for `overview_queue.rs`, `resources.rs`, `error.rs`, `state.rs`, `db.rs`, `registry/queries.rs`, `health.rs`, `health_live.rs`, `api.ts` and both `chart-theme.ts` files.
+  - Handoff: `docs/handoffs/197/handoff-A-dup.md`.
