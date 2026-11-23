@@ -1,3 +1,4 @@
+// guard test
 //! Contract tests for #190 (job categories) in `gridops-core`, written by
 //! #197: the classifier cache and GitLab ingestion. #190's GitHub webhook
 //! test is in `gridops-api` and its poll, backfill and reclassify tests are
