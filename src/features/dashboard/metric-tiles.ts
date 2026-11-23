@@ -1,4 +1,5 @@
 import type { HealthTone } from "~/components/status-icon";
+import type { FleetHealth } from "~/features/fleet-health/types";
 import { successRateTile } from "./success-rate";
 import type { DashboardOverview } from "./types";
 
@@ -6,7 +7,7 @@ export type MetricTile = {
   label: string;
   value: string | number;
   hint: string;
-  to: "/runners" | "/queued-jobs" | "/workflow-runs";
+  to: "/runners" | "/queued-jobs" | "/workflow-runs" | "/fleet/health";
   tone: HealthTone;
 };
 
@@ -38,8 +39,12 @@ export function queueParts(metrics: Metrics) {
   ];
 }
 
-/** The tiles of the Overview strip, built so each hint partitions its headline. */
-export function metricTiles(metrics: Metrics): MetricTile[] {
+/**
+ * The tiles of the Overview strip, built so each hint partitions its headline. `health` is the
+ * fleet's 24-hour health when the viewer may read it (administrators); #203 adds the Fleet health
+ * tile from it, and until then the strip is the same with or without it.
+ */
+export function metricTiles(metrics: Metrics, _health?: FleetHealth): MetricTile[] {
   const onlineRunners = metrics.busy + metrics.idle;
   const runnerHint = runnerParts(metrics)
     .filter((part) => part.count > 0)

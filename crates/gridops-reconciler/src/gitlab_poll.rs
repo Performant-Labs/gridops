@@ -314,6 +314,8 @@ async fn check_stale_jobs(
                 retries_count: None,
                 tag_list: None,
                 gitlab_runner_id: None,
+                job_name: None,
+                project_path: None,
             },
         };
         record_check(app, &observation).await?;
@@ -370,7 +372,8 @@ async fn record_check(app: &Reconciler, checked: &JobObservation<'_>) -> Result<
 }
 
 /// What the poll saw of `job` on `connection_id` at `seen_at`: its status,
-/// pipeline and tags; it never knows the runner or the retry count.
+/// pipeline, tags and name; it never knows the runner, the retry count or
+/// the project path (the webhook fills that in, #197).
 fn observation<'a>(connection_id: &'a str, job: &'a Job, seen_at: i64) -> JobObservation<'a> {
     JobObservation {
         connection_id,
@@ -382,6 +385,8 @@ fn observation<'a>(connection_id: &'a str, job: &'a Job, seen_at: i64) -> JobObs
         retries_count: None,
         tag_list: Some(&job.tag_list),
         gitlab_runner_id: None,
+        job_name: job.name.as_deref(),
+        project_path: None,
     }
 }
 

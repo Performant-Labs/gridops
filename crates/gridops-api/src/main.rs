@@ -371,6 +371,14 @@ fn session_routes() -> Router<AppState> {
             put(resources::save_builtin_runner_host),
         )
         .route(
+            "/api/v1/settings/job-categories",
+            get(fleet::job_categories::rules).put(fleet::job_categories::save_rules),
+        )
+        .route(
+            "/api/v1/settings/job-categories/preview",
+            post(fleet::job_categories::preview),
+        )
+        .route(
             "/api/v1/settings/runner-host/budget",
             put(resources::save_builtin_runner_host_budget),
         )

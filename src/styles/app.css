@@ -41,6 +41,13 @@
   --panel-shadow: 0 0 0 1px rgb(0 0 0 / 0.02), 0 1px 3px rgb(0 0 0 / 0.04);
   --popover-shadow: 0 0 0 1px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.06);
   --log-background: #0f1011;
+  /* Job categories on the fleet health page (#197): one hue each, apart from the status colours. */
+  --category-test: #3b8fe8;
+  --category-build: #8e6cd8;
+  --category-check: #2fa39a;
+  --category-deploy: #d9772b;
+  --category-fix-agent: #d8558b;
+  --category-other: #95a2b3;
 }
 
 .dark {
@@ -72,6 +79,12 @@
   --panel-shadow: 0 0 0 1px rgb(255 255 255 / 0.015), 0 2px 8px rgb(0 0 0 / 0.3);
   --popover-shadow: 0 0 0 1px rgb(255 255 255 / 0.06), 0 12px 32px rgb(0 0 0 / 0.5), 0 2px 6px rgb(0 0 0 / 0.3);
   --log-background: #0a0b0c;
+  --category-test: #4ea7fc;
+  --category-build: #a78bfa;
+  --category-check: #3cc4b8;
+  --category-deploy: #f2994a;
+  --category-fix-agent: #f07aa8;
+  --category-other: #8a95a5;
 }
 
 @theme inline {

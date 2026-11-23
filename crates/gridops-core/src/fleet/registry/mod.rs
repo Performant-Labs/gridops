@@ -53,7 +53,7 @@ pub use enrollment::{
     RecoverHost, RecoveryIssue,
 };
 pub use inventory::InventoryError;
-pub use queries::QueryError;
+pub use queries::{HostLiveRead, QueryError, host_live_reads};
 
 use credentials::validate_secret_for_authentication;
 use enrollment::{ROTATION_OVERLAP_MILLIS, ROTATION_TTL_MILLIS, require_user};

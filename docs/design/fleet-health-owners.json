@@ -1,0 +1,91 @@
+{
+  "$comment": "Which files each fleet health issue of epic #198 owns, for the Fleet health guard (scripts/fleet-health-guard.mjs, #197). `owns`: files (globs allowed) the issue may change freely. `addOnly`: shared files where it may only add lines. `contractTests`: #197's contract test files, whatever glob they match; a wave-1 pull request may only remove its own `contract: #N` markers from them. `wave2`: listed for the record, not checked by the guard. Every other file is #197's. See docs/design/fleet-health.md, Ownership.",
+  "contractTests": [
+    "crates/**/*_contract_tests.rs",
+    "tests/fleet-health-*.contract.test.ts",
+    "src/**/*.contract.test.ts",
+    "src/**/*.contract.test.tsx"
+  ],
+  "issues": {
+    "190": {
+      "owns": [
+        "crates/gridops-core/src/fleet_health/classifier_cache.rs",
+        "crates/gridops-reconciler/src/fleet_health_backfill.rs"
+      ],
+      "addOnly": []
+    },
+    "191": {
+      "owns": ["crates/gridops-reconciler/src/fleet_health_rollup.rs"],
+      "addOnly": []
+    },
+    "192": {
+      "owns": [
+        "crates/gridops-core/src/fleet_health/score.rs",
+        "crates/gridops-core/src/fleet_health/concerns.rs"
+      ],
+      "addOnly": []
+    },
+    "193": {
+      "owns": ["crates/gridops-core/src/fleet_health/speed.rs"],
+      "addOnly": []
+    },
+    "194": {
+      "owns": ["crates/gridops-api/src/fleet/health.rs"],
+      "addOnly": []
+    },
+    "195": {
+      "owns": [
+        "src/features/fleet-health/page.tsx",
+        "src/features/fleet-health/areas-of-concern.tsx",
+        "src/features/fleet-health/fleet-score-card.tsx",
+        "src/features/fleet-health/frame-*.tsx",
+        "tests/fleet-health-195-*.test.ts"
+      ],
+      "addOnly": []
+    },
+    "199": {
+      "owns": [
+        "crates/gridops-api/src/fleet/job_categories.rs",
+        "src/features/settings/job-categories-section.tsx",
+        "tests/fleet-health-199-*.test.ts"
+      ],
+      "addOnly": []
+    },
+    "200": {
+      "owns": ["crates/gridops-reconciler/src/fleet_host_rollup.rs"],
+      "addOnly": []
+    },
+    "201": {
+      "owns": ["crates/gridops-api/src/fleet/health_live.rs"],
+      "addOnly": []
+    },
+    "202": {
+      "owns": [
+        "src/features/fleet-health/machine-score-table.tsx",
+        "src/features/fleet-health/machine-detail.tsx",
+        "src/features/fleet-health/machine-*.tsx",
+        "tests/fleet-health-202-*.test.ts"
+      ],
+      "addOnly": ["src/routes/_app/fleet.machines.$hostId.tsx"]
+    },
+    "203": {
+      "owns": [
+        "src/features/fleet-health/live-strip.tsx",
+        "src/features/fleet-health/category-legend.tsx",
+        "src/features/fleet-health/live-*.tsx",
+        "tests/fleet-health-203-*.test.ts"
+      ],
+      "addOnly": ["src/features/dashboard/metric-tiles.ts"]
+    }
+  },
+  "wave2": {
+    "204": {
+      "owns": [
+        "crates/gridops-api/src/fleet/health_source.rs",
+        "crates/gridops-reconciler/src/fleet_health_snapshot.rs",
+        "crates/gridops-api/src/fleet/health.rs"
+      ],
+      "addOnly": []
+    }
+  }
+}

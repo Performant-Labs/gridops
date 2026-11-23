@@ -352,6 +352,8 @@ async fn process_job_hook(
         } else {
             None
         },
+        job_name: string(payload, "build_name"),
+        project_path: nested_string(payload, "project", "path_with_namespace"),
     };
 
     let now = now_millis();

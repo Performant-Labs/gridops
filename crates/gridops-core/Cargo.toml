@@ -15,6 +15,7 @@ hmac.workspace = true
 jsonwebtoken.workspace = true
 log.workspace = true
 rand.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
@@ -28,8 +29,14 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+# Core's own integration tests use `fleet_health::testdata` and
+# `fleet_health::speed_check`, which are behind `test-support`.
+gridops-core = { path = ".", features = ["test-support"] }
+
 [features]
-# Exposes `gitlab::fake::FakeGitLab` to other crates' tests.
+# Exposes `gitlab::fake::FakeGitLab`, `fleet_health::testdata` and
+# `fleet_health::speed_check` to other crates' tests.
 test-support = []
 
 [lints]

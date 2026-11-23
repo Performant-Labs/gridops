@@ -21,6 +21,15 @@
 //!   row is not terminal.
 //! - A terminal row never changes in any column. `updated_at` is `now_ms`
 //!   whenever anything changed; `pool_id` is never written.
+//! - Fleet health (#197, D-1): `job_name` and `project_path` are
+//!   `COALESCE(stored, incoming)`, filled like the runner id (also on a
+//!   rejected status write of a row that is not terminal). `started_at` is
+//!   set once, to the status time of the first applied `running` write;
+//!   `completed_at` once, to the status time of the first applied terminal
+//!   write. `category` is bound on insert only
+//!   ([`category_for_insert`](crate::fleet_health::classifier_cache::category_for_insert))
+//!   and never written by an update (W-15): only #190's backfill or
+//!   reclassify changes it.
 //!
 //! Callers own transactions, `retry_when_busy`, `runner_events` rows, and
 //! when a runner's busy flag changes.
@@ -28,7 +37,13 @@
 use sqlx::SqliteConnection;
 
 use super::JobStatus;
-use crate::fleet::ExternalId;
+use crate::{
+    fleet::ExternalId,
+    fleet_health::{
+        JobCategory,
+        classifier_cache::{JobOrigin, NewJob, category_for_insert},
+    },
+};
 
 /// The tier of a concluded job: success, failed, canceled or skipped.
 const TERMINAL_TIER: u8 = 3;
@@ -52,6 +67,11 @@ pub struct JobObservation<'a> {
     pub tag_list: Option<&'a [String]>,
     /// `Some` only when the writer knows the runner.
     pub gitlab_runner_id: Option<ExternalId>,
+    /// GitLab's job name (`build_name` in a webhook, `name` in the API),
+    /// when the writer has it.
+    pub job_name: Option<&'a str>,
+    /// The project's `path_with_namespace`, when the writer has it.
+    pub project_path: Option<&'a str>,
 }
 
 /// What [`record_gitlab_job`] did.
@@ -60,8 +80,8 @@ pub enum JobWrite {
     Inserted,
     /// The status write applied (and any fills with it).
     StatusApplied,
-    /// The status write was rejected, but an empty runner id or tag list was
-    /// filled.
+    /// The status write was rejected, but an empty runner id, tag list, job
+    /// name or project path was filled.
     FilledOnly,
     /// Nothing was written.
     Ignored,
@@ -145,7 +165,8 @@ macro_rules! status_applies {
 /// project, ?4 job, ?5 pipeline, ?6 status, ?7 tags (JSON), ?8 status time,
 /// ?9 retries (given or 0), ?10 runner, ?11 now, ?12 incoming tier, ?13 tags
 /// given and non-empty, ?14 retries given, ?15 and ?16 the stored status and
-/// status time the caller read (NULL when it read no row).
+/// status time the caller read (NULL when it read no row), ?17 the category
+/// to insert with, ?18 the job name, ?19 the project path.
 ///
 /// The D18 rules are all in the statement, so it is correct on its own. The
 /// last two terms of its `WHERE` also make it change nothing when another
@@ -153,8 +174,10 @@ macro_rules! status_applies {
 /// reported for the write is the one that happened.
 const UPSERT: &str = concat!(
     "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,
-       status_changed_at,retries_count,gitlab_runner_id,pool_id,created_at,updated_at)
-     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,?11,?11)
+       status_changed_at,retries_count,gitlab_runner_id,pool_id,created_at,updated_at,
+       category,job_name,project_path,started_at,completed_at)
+     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,?11,?11,?17,?18,?19,
+       CASE WHEN ?12=2 THEN ?8 END,CASE WHEN ?12=3 THEN ?8 END)
      ON CONFLICT(connection_id,job_id) DO UPDATE SET
        status=CASE WHEN ",
     status_applies!(),
@@ -172,6 +195,14 @@ const UPSERT: &str = concat!(
     status_applies!(),
     ") THEN excluded.tag_list ELSE gitlab_jobs.tag_list END,
        gitlab_runner_id=COALESCE(gitlab_jobs.gitlab_runner_id,excluded.gitlab_runner_id),
+       job_name=COALESCE(gitlab_jobs.job_name,excluded.job_name),
+       project_path=COALESCE(gitlab_jobs.project_path,excluded.project_path),
+       started_at=COALESCE(gitlab_jobs.started_at,CASE WHEN ?12=2 AND ",
+    status_applies!(),
+    " THEN excluded.status_changed_at END),
+       completed_at=COALESCE(gitlab_jobs.completed_at,CASE WHEN ?12=3 AND ",
+    status_applies!(),
+    " THEN excluded.status_changed_at END),
        updated_at=excluded.updated_at
      WHERE ",
     stored_tier!(),
@@ -180,7 +211,9 @@ const UPSERT: &str = concat!(
     status_applies!(),
     "
          OR (gitlab_jobs.gitlab_runner_id IS NULL AND excluded.gitlab_runner_id IS NOT NULL)
-         OR (?13 AND gitlab_jobs.tag_list='[]'))
+         OR (?13 AND gitlab_jobs.tag_list='[]')
+         OR (gitlab_jobs.job_name IS NULL AND excluded.job_name IS NOT NULL)
+         OR (gitlab_jobs.project_path IS NULL AND excluded.project_path IS NOT NULL))
        AND gitlab_jobs.status=?15 AND gitlab_jobs.status_changed_at=?16
      RETURNING status,gitlab_runner_id"
 );
@@ -191,6 +224,8 @@ struct StoredJob {
     status_changed_at: i64,
     tag_list: String,
     gitlab_runner_id: Option<i64>,
+    job_name: Option<String>,
+    project_path: Option<String>,
 }
 
 /// Records `obs` under the D18 rules (see the module docs) with one guarded
@@ -216,8 +251,8 @@ pub async fn record_gitlab_job(
 
     for _ in 0..CONCURRENT_WRITE_ATTEMPTS {
         let stored = sqlx::query_as::<_, StoredJob>(
-            "SELECT status,status_changed_at,tag_list,gitlab_runner_id FROM gitlab_jobs
-             WHERE connection_id=? AND job_id=?",
+            "SELECT status,status_changed_at,tag_list,gitlab_runner_id,job_name,project_path
+               FROM gitlab_jobs WHERE connection_id=? AND job_id=?",
         )
         .bind(obs.connection_id)
         .bind(job_id)
@@ -226,14 +261,29 @@ pub async fn record_gitlab_job(
         let Some(incoming_tier) = status_tier(obs.status.as_str()) else {
             return Ok(ignored(stored, obs));
         };
+        let mut category = None;
         let write = match &stored {
-            None => JobWrite::Inserted,
+            None => {
+                category = category_for_insert(
+                    conn,
+                    &NewJob {
+                        job_name: obs.job_name,
+                        labels: obs.tag_list.unwrap_or_default(),
+                        origin: JobOrigin::GitLabProject(obs.project_path),
+                    },
+                    now_ms,
+                )
+                .await;
+                JobWrite::Inserted
+            }
             Some(row) => {
                 if status_tier(&row.status) == Some(TERMINAL_TIER) {
                     return Ok(ignored(stored, obs));
                 }
                 let fills_runner = row.gitlab_runner_id.is_none() && gitlab_runner_id.is_some();
                 let fills_tags = tags.is_some() && row.tag_list == "[]";
+                let fills_name = row.job_name.is_none() && obs.job_name.is_some();
+                let fills_path = row.project_path.is_none() && obs.project_path.is_some();
                 if status_write_applies(
                     &row.status,
                     row.status_changed_at,
@@ -241,7 +291,7 @@ pub async fn record_gitlab_job(
                     obs.status_changed_at,
                 ) {
                     JobWrite::StatusApplied
-                } else if fills_runner || fills_tags {
+                } else if fills_runner || fills_tags || fills_name || fills_path {
                     JobWrite::FilledOnly
                 } else {
                     return Ok(ignored(stored, obs));
@@ -265,6 +315,9 @@ pub async fn record_gitlab_job(
             .bind(obs.retries_count.is_some())
             .bind(stored.as_ref().map(|row| row.status.as_str()))
             .bind(stored.as_ref().map(|row| row.status_changed_at))
+            .bind(category.map(JobCategory::as_str))
+            .bind(obs.job_name)
+            .bind(obs.project_path)
             .fetch_optional(&mut *conn)
             .await?;
         if let Some((status, gitlab_runner_id)) = written {

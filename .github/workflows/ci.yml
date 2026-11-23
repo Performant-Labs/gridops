@@ -71,6 +71,42 @@ jobs:
       - name: Test the build number script
         run: sh scripts/test-build-info.sh
 
+      - name: Test the fleet health guard
+        run: node --test scripts/fleet-health-guard.test.mjs
+
+  fleet-health-guard:
+    name: Fleet health guard
+    # #197: a pull request that closes a wave-1 fleet health issue (epic #198)
+    # may change only that issue's files, and may only remove its own markers
+    # from the contract tests (docs/design/fleet-health-owners.json). A pull
+    # request that closes none of them passes. It reads the pull request's
+    # changed files from the GitHub API and runs no code from the branch but
+    # the guard itself; the same runner rule as the web job.
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login)) && 'self-hosted-linux' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        timeout-minutes: 5
+
+      - name: Set up Node.js (hosted runner only)
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test the guard
+        run: node --test scripts/fleet-health-guard.test.mjs
+
+      - name: Check the pull request's files
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/fleet-health-guard.mjs
+
   rust:
     name: Rust format, lint, and tests
     # The same runner rule as the web job, but the trusted label is

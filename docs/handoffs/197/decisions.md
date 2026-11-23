@@ -144,3 +144,30 @@
     - vitest and `node --test`: missing modules.
   - Fixed before declaring RED: `AssertSqlSafe` in the seed SQL, and 4 lines corrupted by output redaction.
   - Clean: `eslint` on the new tests, and `cargo fmt`.
+
+## Phase 5 Feature Implementor (F) - 2026-11-22T16:52:00-08:00
+
+- **Decided:**
+  - #197 lands as one pass with no scope split. The brief requires one PR with every shared hook so that wave 1 can run in parallel; A passed that plan, and T's suite covers the whole scope.
+  - The shared hooks are stubs and placeholders:
+    - the job-category handlers check for a system admin, then return 501;
+    - `collect_live`, `DbFleetHealthSource` and the four reconciler passes return empty or `Ok`;
+    - the frontend sections are "Coming in #N" cards.
+  - `useFleetHealth` keeps component state rather than using react-query, because an existing Overview test renders with no `QueryClientProvider`.
+  - The 422 body is a new OpenAPI schema, `ApiInvalidBody`. `ApiErrorBody`'s fields are pinned by a test.
+  - `fleet_queue_breakdown` shares `queue_breakdown`'s helpers (refactored to extend, behaviour unchanged) instead of copying them.
+  - The synthetic week's batches are 75 jobs and 500 samples per transaction, so that the 50 ms write-lock limit holds under a parallel workspace run.
+- **Assumed:**
+  - A GitHub job is classified once, at first insert. `ON CONFLICT` leaves `category` alone, and #199's 7-day reclassification is the path for a rule change.
+  - The health endpoint reads the 24 h window until a wave adds window selection.
+- **Hedged:**
+  - Some test-side fixes are T's (`handoff-F.md`, "Tests that look wrong"): items 1 and 2 stop the core, api and reconciler test targets from compiling. I verified GREEN with local copies of those fixes, now reverted and never staged.
+  - The guard's live sample PRs and the Mars database timing are left to O, because they need a push or PR, and production ssh.
+- **Evidence:**
+  - Tier 1 on 2026-11-22:
+    - `cargo fmt --check` and the 1.98.1 clippy run on production targets are clean.
+    - The full workspace test run is green apart from T's flagged tests and the manager's SUN_LEN environment failures.
+    - The speed check passed twice under load after the batch change (8.7 s and 8.6 s).
+    - Vitest: 638 passed. `eslint` and `tsc` are clean.
+    - The guard: 13 of 13. The OpenAPI document is valid.
+  - Source facts: `docs/handoffs/197/evidence.md` (9 entries).

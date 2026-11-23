@@ -17,7 +17,8 @@
     { "name": "operations", "description": "Durable operation status (token scope `fleet:read` or cookie)" },
     { "name": "agent-protocol", "description": "Host-agent protocol; bearer host credential, not an API token" },
     { "name": "platform-connections", "description": "CI platform connections (session cookie only; a bearer token gets `403 token_not_accepted`)" },
-    { "name": "webhooks", "description": "Deliveries from CI platforms, authenticated by the connection's webhook secret" }
+    { "name": "webhooks", "description": "Deliveries from CI platforms, authenticated by the connection's webhook secret" },
+    { "name": "settings", "description": "System settings (session cookie only, administrators; a bearer token gets `403 token_not_accepted`)" }
   ],
   "security": [{ "cookieAuth": [] }],
   "components": {
@@ -445,6 +446,82 @@
         },
         "required": ["error"]
       },
+      "ApiInvalidBody": {
+        "type": "object",
+        "description": "A 422 of the session routes (`gridops-api`'s `ApiError::Invalid`): the `ApiErrorBody` fields plus `details`, which say where the request is wrong.",
+        "properties": {
+          "error": { "type": "string", "description": "A readable message." },
+          "code": { "type": "string", "description": "A stable machine-readable code." },
+          "details": { "description": "Where the request is wrong; for the job category rules, `[{position, message}]`, one per rule whose pattern does not compile." }
+        },
+        "required": ["error", "code", "details"]
+      },
+      "JobCategory": { "type": "string", "enum": ["test", "build", "check", "deploy", "other"], "description": "A stored job category. `fix-agent` is counted from fix placements and is never a rule's category." },
+      "JobCategoryField": { "type": "string", "enum": ["job_name", "workflow_name", "repository", "labels"], "description": "The field a rule's pattern is matched against; `labels` matches when any one label matches." },
+      "JobCategoryRule": {
+        "type": "object",
+        "properties": {
+          "position": { "type": "integer", "minimum": 0 },
+          "category": { "$ref": "#/components/schemas/JobCategory" },
+          "field": { "$ref": "#/components/schemas/JobCategoryField" },
+          "pattern": { "type": "string", "description": "A case-insensitive regular expression." }
+        },
+        "required": ["position", "category", "field", "pattern"],
+        "additionalProperties": false
+      },
+      "JobCategoryRuleList": {
+        "type": "object",
+        "properties": { "rules": { "type": "array", "items": { "$ref": "#/components/schemas/JobCategoryRule" } } },
+        "required": ["rules"],
+        "additionalProperties": false
+      },
+      "JobCategoryRulesInput": {
+        "type": "object",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "description": "The whole list, in order; the first rule that matches a job decides its category.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": { "$ref": "#/components/schemas/JobCategory" },
+                "field": { "$ref": "#/components/schemas/JobCategoryField" },
+                "pattern": { "type": "string" }
+              },
+              "required": ["category", "field", "pattern"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["rules"],
+        "additionalProperties": false
+      },
+      "JobCategoryPreview": {
+        "type": "object",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": { "position": { "type": "integer", "minimum": 0 }, "matches": { "type": "integer", "minimum": 0 } },
+              "required": ["position", "matches"],
+              "additionalProperties": false
+            }
+          },
+          "other": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": { "name": { "type": "string" }, "jobs": { "type": "integer", "minimum": 1 } },
+              "required": ["name", "jobs"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["rules", "other"],
+        "additionalProperties": false
+      },
       "GitlabConnection": {
         "type": "object",
         "description": "A GitLab connection: one project or group on one GitLab instance. It never carries the access token, the webhook secret or the webhook URL.",
@@ -737,6 +814,1902 @@
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "responses": {
           "200": { "description": "Workload overview", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/fleet/health": {
+      "get": {
+        "tags": ["fleet-read"],
+        "summary": "Fleet health",
+        "description": "The fleet's health over a window: the fleet and per-machine scores with their components, each machine's relative speed per runner size, CPU use by job category, the live queue and running counts, and the areas of concern (windowed and live, merged, worst first). Administrators only (a member gets `403 forbidden`). The response is cached per window for 30 seconds; when the source fails, the last response is served with `stale: true` for up to 10 minutes, then `503 dependency_unavailable`. See docs/design/fleet-health.md.",
+        "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
+        "parameters": [
+          { "name": "window", "in": "query", "required": false, "description": "The window the scores, speed and usage cover. Anything else is a 400.", "schema": { "type": "string", "enum": ["1h", "24h", "7d"], "default": "24h" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The fleet's health",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" },
+                "example": {
+                  "window": "24h",
+                  "generatedAt": 1795215600000,
+                  "stale": false,
+                  "fleet": {
+                    "score": 74,
+                    "components": [
+                      {
+                        "key": "queue-wait",
+                        "label": "Queue wait",
+                        "weight": 40.0,
+                        "score": 61,
+                        "deduction": "Queue p90 was 4 min 30 s against a 1 min target: −16."
+                      },
+                      {
+                        "key": "start-reliability",
+                        "label": "Start reliability",
+                        "weight": 20.0,
+                        "score": 61,
+                        "deduction": "91.6% of runner starts succeeded against a 99% target: −8."
+                      },
+                      {
+                        "key": "infra-failures",
+                        "label": "Infrastructure failures",
+                        "weight": 15.0,
+                        "score": 90,
+                        "deduction": "0.5% of completed jobs failed on the infrastructure against a 0% target: −2."
+                      },
+                      {
+                        "key": "capacity-fit",
+                        "label": "Capacity fit",
+                        "weight": 15.0,
+                        "score": 100,
+                        "deduction": null
+                      },
+                      {
+                        "key": "availability",
+                        "label": "Availability",
+                        "weight": 10.0,
+                        "score": 87,
+                        "deduction": "The fleet's CPU budget was online 97.4% of the window against a 100% target: −1."
+                      }
+                    ],
+                    "trend": [
+                      {
+                        "at": 1795143600000,
+                        "score": 79
+                      },
+                      {
+                        "at": 1795158000000,
+                        "score": 78
+                      },
+                      {
+                        "at": 1795172400000,
+                        "score": 76
+                      },
+                      {
+                        "at": 1795186800000,
+                        "score": 75
+                      },
+                      {
+                        "at": 1795201200000,
+                        "score": 74
+                      },
+                      {
+                        "at": 1795215600000,
+                        "score": 74
+                      }
+                    ],
+                    "categories": [
+                      {
+                        "category": "test",
+                        "jobs": 400,
+                        "cpuHours": 217.5,
+                        "medianDurationMs": 300000,
+                        "p90QueueWaitMs": 393000
+                      },
+                      {
+                        "category": "build",
+                        "jobs": 150,
+                        "cpuHours": 82.6,
+                        "medianDurationMs": 375000,
+                        "p90QueueWaitMs": 221000
+                      },
+                      {
+                        "category": "check",
+                        "jobs": 150,
+                        "cpuHours": 80.4,
+                        "medianDurationMs": 60000,
+                        "p90QueueWaitMs": 224000
+                      },
+                      {
+                        "category": "deploy",
+                        "jobs": 50,
+                        "cpuHours": 17.3,
+                        "medianDurationMs": 210000,
+                        "p90QueueWaitMs": 228000
+                      },
+                      {
+                        "category": "other",
+                        "jobs": 250,
+                        "cpuHours": 132.6,
+                        "medianDurationMs": 20000,
+                        "p90QueueWaitMs": 223000
+                      }
+                    ]
+                  },
+                  "live": {
+                    "queuedTotal": 7,
+                    "queuedByCategory": {
+                      "test": 4,
+                      "build": 1,
+                      "other": 2
+                    },
+                    "queuedByPool": [
+                      {
+                        "poolId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                        "poolName": "linux-docker",
+                        "queued": 4
+                      }
+                    ],
+                    "queuedUnmatched": 3,
+                    "oldestQueued": {
+                      "jobId": 90001,
+                      "jobName": "integration tests (2/4)",
+                      "repository": "acme/app",
+                      "queuedAt": 1795215180000,
+                      "waitMs": 420000
+                    },
+                    "runningTotal": 9,
+                    "runningByCategory": {
+                      "test": 6,
+                      "build": 1,
+                      "check": 1,
+                      "fix-agent": 1
+                    }
+                  },
+                  "hosts": [
+                    {
+                      "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e01",
+                      "name": "io",
+                      "cpuBudgetMillis": 22800,
+                      "memoryBudgetMib": 65536,
+                      "diskTotalBytes": 536870912000,
+                      "score": 99,
+                      "components": [
+                        {
+                          "key": "availability",
+                          "label": "Availability",
+                          "weight": 25.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "start-reliability",
+                          "label": "Start reliability",
+                          "weight": 25.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "relative-speed",
+                          "label": "Relative speed",
+                          "weight": 25.0,
+                          "score": 99,
+                          "deduction": "Speed index 1.01 against a 1.00 target: −0."
+                        },
+                        {
+                          "key": "headroom",
+                          "label": "Headroom",
+                          "weight": 15.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "busy-share",
+                          "label": "Busy share",
+                          "weight": 10.0,
+                          "score": 90,
+                          "deduction": "Busy 45% of its CPU budget against a 50% target while jobs waited: −1."
+                        }
+                      ],
+                      "speed": [
+                        {
+                          "cpuMillis": 1500,
+                          "index": null,
+                          "topKeys": [
+                            {
+                              "key": "acme/app / CI / lint",
+                              "hostMedianMs": 66000,
+                              "fleetMedianMs": 60000,
+                              "hostRuns": 3,
+                              "fleetRuns": 140
+                            }
+                          ]
+                        },
+                        {
+                          "cpuMillis": 2000,
+                          "index": 1.01,
+                          "topKeys": [
+                            {
+                              "key": "acme/app / CI / e2e",
+                              "hostMedianMs": 606000,
+                              "fleetMedianMs": 600000,
+                              "hostRuns": 22,
+                              "fleetRuns": 90
+                            },
+                            {
+                              "key": "acme/app / CI / unit",
+                              "hostMedianMs": 121000,
+                              "fleetMedianMs": 120000,
+                              "hostRuns": 40,
+                              "fleetRuns": 160
+                            },
+                            {
+                              "key": "acme/app / CI / build",
+                              "hostMedianMs": 300000,
+                              "fleetMedianMs": 300000,
+                              "hostRuns": 30,
+                              "fleetRuns": 100
+                            }
+                          ]
+                        }
+                      ],
+                      "categories": [
+                        {
+                          "category": "test",
+                          "jobs": 150,
+                          "cpuHours": 108.6,
+                          "medianDurationMs": 300000,
+                          "p90QueueWaitMs": 800000
+                        },
+                        {
+                          "category": "build",
+                          "jobs": 60,
+                          "cpuHours": 43.5,
+                          "medianDurationMs": 375000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "check",
+                          "jobs": 50,
+                          "cpuHours": 36.2,
+                          "medianDurationMs": 60000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "other",
+                          "jobs": 80,
+                          "cpuHours": 57.9,
+                          "medianDurationMs": 20000,
+                          "p90QueueWaitMs": 240000
+                        }
+                      ],
+                      "usage": [
+                        {
+                          "hour": 1795129200000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795132800000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795136400000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795140000000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795143600000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795147200000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795150800000,
+                          "cpuHours": {
+                            "test": 3.15,
+                            "build": 1.26,
+                            "check": 1.05,
+                            "other": 1.68
+                          }
+                        },
+                        {
+                          "hour": 1795154400000,
+                          "cpuHours": {
+                            "test": 4.72,
+                            "build": 1.89,
+                            "check": 1.57,
+                            "other": 2.52
+                          }
+                        },
+                        {
+                          "hour": 1795158000000,
+                          "cpuHours": {
+                            "test": 6.3,
+                            "build": 2.52,
+                            "check": 2.1,
+                            "other": 3.36
+                          }
+                        },
+                        {
+                          "hour": 1795161600000,
+                          "cpuHours": {
+                            "test": 7.87,
+                            "build": 3.15,
+                            "check": 2.62,
+                            "other": 4.2
+                          }
+                        },
+                        {
+                          "hour": 1795165200000,
+                          "cpuHours": {
+                            "test": 9.44,
+                            "build": 3.78,
+                            "check": 3.15,
+                            "other": 5.03
+                          }
+                        },
+                        {
+                          "hour": 1795168800000,
+                          "cpuHours": {
+                            "test": 9.44,
+                            "build": 3.78,
+                            "check": 3.15,
+                            "other": 5.03
+                          }
+                        },
+                        {
+                          "hour": 1795172400000,
+                          "cpuHours": {
+                            "test": 7.87,
+                            "build": 3.15,
+                            "check": 2.62,
+                            "other": 4.2
+                          }
+                        },
+                        {
+                          "hour": 1795176000000,
+                          "cpuHours": {
+                            "test": 9.44,
+                            "build": 3.78,
+                            "check": 3.15,
+                            "other": 5.03
+                          }
+                        },
+                        {
+                          "hour": 1795179600000,
+                          "cpuHours": {
+                            "test": 9.44,
+                            "build": 3.78,
+                            "check": 3.15,
+                            "other": 5.03
+                          }
+                        },
+                        {
+                          "hour": 1795183200000,
+                          "cpuHours": {
+                            "test": 7.87,
+                            "build": 3.15,
+                            "check": 2.62,
+                            "other": 4.2
+                          }
+                        },
+                        {
+                          "hour": 1795186800000,
+                          "cpuHours": {
+                            "test": 6.3,
+                            "build": 2.52,
+                            "check": 2.1,
+                            "other": 3.36
+                          }
+                        },
+                        {
+                          "hour": 1795190400000,
+                          "cpuHours": {
+                            "test": 4.72,
+                            "build": 1.89,
+                            "check": 1.57,
+                            "other": 2.52
+                          }
+                        },
+                        {
+                          "hour": 1795194000000,
+                          "cpuHours": {
+                            "test": 3.15,
+                            "build": 1.26,
+                            "check": 1.05,
+                            "other": 1.68
+                          }
+                        },
+                        {
+                          "hour": 1795197600000,
+                          "cpuHours": {
+                            "test": 3.15,
+                            "build": 1.26,
+                            "check": 1.05,
+                            "other": 1.68
+                          }
+                        },
+                        {
+                          "hour": 1795201200000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795204800000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795208400000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        },
+                        {
+                          "hour": 1795212000000,
+                          "cpuHours": {
+                            "test": 1.57,
+                            "build": 0.63,
+                            "check": 0.52,
+                            "other": 0.84
+                          }
+                        }
+                      ],
+                      "live": {
+                        "hostId": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e01",
+                        "online": true,
+                        "lastSeenAt": 1795215580000,
+                        "runningByCategory": {
+                          "test": 3,
+                          "build": 1,
+                          "fix-agent": 1
+                        },
+                        "cpuReservedMillis": 9000,
+                        "memoryReservedMib": 18432,
+                        "cpuUsedMillis": 7400,
+                        "memoryUsedMib": 21000,
+                        "diskFreeBytes": 322122547200,
+                        "startFailuresLastHour": 0
+                      }
+                    },
+                    {
+                      "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "name": "Jupiter",
+                      "cpuBudgetMillis": 19200,
+                      "memoryBudgetMib": 49152,
+                      "diskTotalBytes": 1099511627776,
+                      "score": 63,
+                      "components": [
+                        {
+                          "key": "availability",
+                          "label": "Availability",
+                          "weight": 25.0,
+                          "score": 75,
+                          "deduction": "Online 95.0% of the window against a 100% target: −6."
+                        },
+                        {
+                          "key": "start-reliability",
+                          "label": "Start reliability",
+                          "weight": 25.0,
+                          "score": 0,
+                          "deduction": "62.5% of runner starts succeeded against a 99% target: −25."
+                        },
+                        {
+                          "key": "relative-speed",
+                          "label": "Relative speed",
+                          "weight": 25.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "headroom",
+                          "label": "Headroom",
+                          "weight": 15.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "busy-share",
+                          "label": "Busy share",
+                          "weight": 10.0,
+                          "score": 40,
+                          "deduction": "Busy 20% of its CPU budget against a 50% target while jobs waited: −6."
+                        }
+                      ],
+                      "speed": [
+                        {
+                          "cpuMillis": 2000,
+                          "index": 0.97,
+                          "topKeys": [
+                            {
+                              "key": "acme/app / CI / unit",
+                              "hostMedianMs": 120000,
+                              "fleetMedianMs": 120000,
+                              "hostRuns": 25,
+                              "fleetRuns": 175
+                            },
+                            {
+                              "key": "acme/app / CI / e2e",
+                              "hostMedianMs": 588000,
+                              "fleetMedianMs": 600000,
+                              "hostRuns": 18,
+                              "fleetRuns": 94
+                            },
+                            {
+                              "key": "acme/app / CI / build",
+                              "hostMedianMs": 285000,
+                              "fleetMedianMs": 300000,
+                              "hostRuns": 20,
+                              "fleetRuns": 110
+                            }
+                          ]
+                        }
+                      ],
+                      "categories": [
+                        {
+                          "category": "test",
+                          "jobs": 100,
+                          "cpuHours": 35.4,
+                          "medianDurationMs": 300000,
+                          "p90QueueWaitMs": 225000
+                        },
+                        {
+                          "category": "build",
+                          "jobs": 40,
+                          "cpuHours": 14.2,
+                          "medianDurationMs": 375000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "check",
+                          "jobs": 40,
+                          "cpuHours": 14.2,
+                          "medianDurationMs": 60000,
+                          "p90QueueWaitMs": 228000
+                        },
+                        {
+                          "category": "deploy",
+                          "jobs": 20,
+                          "cpuHours": 7.1,
+                          "medianDurationMs": 210000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "other",
+                          "jobs": 60,
+                          "cpuHours": 21.3,
+                          "medianDurationMs": 20000,
+                          "p90QueueWaitMs": 223000
+                        }
+                      ],
+                      "usage": [
+                        {
+                          "hour": 1795129200000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795132800000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795136400000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795140000000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795143600000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795147200000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795150800000,
+                          "cpuHours": {
+                            "test": 1.03,
+                            "build": 0.41,
+                            "check": 0.41,
+                            "deploy": 0.21,
+                            "other": 0.62
+                          }
+                        },
+                        {
+                          "hour": 1795154400000,
+                          "cpuHours": {
+                            "test": 1.54,
+                            "build": 0.62,
+                            "check": 0.62,
+                            "deploy": 0.31,
+                            "other": 0.93
+                          }
+                        },
+                        {
+                          "hour": 1795158000000,
+                          "cpuHours": {
+                            "test": 2.05,
+                            "build": 0.82,
+                            "check": 0.82,
+                            "deploy": 0.41,
+                            "other": 1.23
+                          }
+                        },
+                        {
+                          "hour": 1795161600000,
+                          "cpuHours": {
+                            "test": 2.57,
+                            "build": 1.03,
+                            "check": 1.03,
+                            "deploy": 0.51,
+                            "other": 1.54
+                          }
+                        },
+                        {
+                          "hour": 1795165200000,
+                          "cpuHours": {
+                            "test": 3.08,
+                            "build": 1.23,
+                            "check": 1.23,
+                            "deploy": 0.62,
+                            "other": 1.85
+                          }
+                        },
+                        {
+                          "hour": 1795168800000,
+                          "cpuHours": {
+                            "test": 3.08,
+                            "build": 1.23,
+                            "check": 1.23,
+                            "deploy": 0.62,
+                            "other": 1.85
+                          }
+                        },
+                        {
+                          "hour": 1795172400000,
+                          "cpuHours": {
+                            "test": 2.57,
+                            "build": 1.03,
+                            "check": 1.03,
+                            "deploy": 0.51,
+                            "other": 1.54
+                          }
+                        },
+                        {
+                          "hour": 1795176000000,
+                          "cpuHours": {
+                            "test": 3.08,
+                            "build": 1.23,
+                            "check": 1.23,
+                            "deploy": 0.62,
+                            "other": 1.85
+                          }
+                        },
+                        {
+                          "hour": 1795179600000,
+                          "cpuHours": {
+                            "test": 3.08,
+                            "build": 1.23,
+                            "check": 1.23,
+                            "deploy": 0.62,
+                            "other": 1.85
+                          }
+                        },
+                        {
+                          "hour": 1795183200000,
+                          "cpuHours": {
+                            "test": 2.57,
+                            "build": 1.03,
+                            "check": 1.03,
+                            "deploy": 0.51,
+                            "other": 1.54
+                          }
+                        },
+                        {
+                          "hour": 1795186800000,
+                          "cpuHours": {
+                            "test": 2.05,
+                            "build": 0.82,
+                            "check": 0.82,
+                            "deploy": 0.41,
+                            "other": 1.23
+                          }
+                        },
+                        {
+                          "hour": 1795190400000,
+                          "cpuHours": {
+                            "test": 1.54,
+                            "build": 0.62,
+                            "check": 0.62,
+                            "deploy": 0.31,
+                            "other": 0.93
+                          }
+                        },
+                        {
+                          "hour": 1795194000000,
+                          "cpuHours": {
+                            "test": 1.03,
+                            "build": 0.41,
+                            "check": 0.41,
+                            "deploy": 0.21,
+                            "other": 0.62
+                          }
+                        },
+                        {
+                          "hour": 1795197600000,
+                          "cpuHours": {
+                            "test": 1.03,
+                            "build": 0.41,
+                            "check": 0.41,
+                            "deploy": 0.21,
+                            "other": 0.62
+                          }
+                        },
+                        {
+                          "hour": 1795201200000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795204800000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795208400000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        },
+                        {
+                          "hour": 1795212000000,
+                          "cpuHours": {
+                            "test": 0.51,
+                            "build": 0.21,
+                            "check": 0.21,
+                            "deploy": 0.1,
+                            "other": 0.31
+                          }
+                        }
+                      ],
+                      "live": {
+                        "hostId": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                        "online": true,
+                        "lastSeenAt": 1795215585000,
+                        "runningByCategory": {
+                          "test": 1,
+                          "check": 1
+                        },
+                        "cpuReservedMillis": 4000,
+                        "memoryReservedMib": 8192,
+                        "cpuUsedMillis": 3100,
+                        "memoryUsedMib": 9000,
+                        "diskFreeBytes": 644245094400,
+                        "startFailuresLastHour": 3
+                      }
+                    },
+                    {
+                      "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03",
+                      "name": "callisto",
+                      "cpuBudgetMillis": 8000,
+                      "memoryBudgetMib": 16384,
+                      "diskTotalBytes": 214748364800,
+                      "score": 76,
+                      "components": [
+                        {
+                          "key": "availability",
+                          "label": "Availability",
+                          "weight": 25.0,
+                          "score": 92,
+                          "deduction": "Online 98.3% of the window against a 100% target: −2."
+                        },
+                        {
+                          "key": "start-reliability",
+                          "label": "Start reliability",
+                          "weight": 25.0,
+                          "score": 84,
+                          "deduction": "96.0% of runner starts succeeded against a 99% target: −4."
+                        },
+                        {
+                          "key": "relative-speed",
+                          "label": "Relative speed",
+                          "weight": 25.0,
+                          "score": 58,
+                          "deduction": "Speed index 1.42 against a 1.00 target: −11."
+                        },
+                        {
+                          "key": "headroom",
+                          "label": "Headroom",
+                          "weight": 15.0,
+                          "score": 50,
+                          "deduction": "The least free disk was 15 GiB, between the 20 GiB warning and 10 GiB critical floors: −8."
+                        },
+                        {
+                          "key": "busy-share",
+                          "label": "Busy share",
+                          "weight": 10.0,
+                          "score": 100,
+                          "deduction": null
+                        }
+                      ],
+                      "speed": [
+                        {
+                          "cpuMillis": 2000,
+                          "index": 1.42,
+                          "topKeys": [
+                            {
+                              "key": "acme/app / CI / e2e",
+                              "hostMedianMs": 870000,
+                              "fleetMedianMs": 600000,
+                              "hostRuns": 14,
+                              "fleetRuns": 98
+                            },
+                            {
+                              "key": "acme/app / CI / build",
+                              "hostMedianMs": 405000,
+                              "fleetMedianMs": 300000,
+                              "hostRuns": 9,
+                              "fleetRuns": 121
+                            },
+                            {
+                              "key": "acme/app / CI / unit",
+                              "hostMedianMs": 162000,
+                              "fleetMedianMs": 120000,
+                              "hostRuns": 20,
+                              "fleetRuns": 180
+                            }
+                          ]
+                        }
+                      ],
+                      "categories": [
+                        {
+                          "category": "test",
+                          "jobs": 70,
+                          "cpuHours": 46.1,
+                          "medianDurationMs": 300000,
+                          "p90QueueWaitMs": 232000
+                        },
+                        {
+                          "category": "build",
+                          "jobs": 25,
+                          "cpuHours": 16.5,
+                          "medianDurationMs": 375000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "check",
+                          "jobs": 30,
+                          "cpuHours": 19.7,
+                          "medianDurationMs": 60000,
+                          "p90QueueWaitMs": 255000
+                        },
+                        {
+                          "category": "other",
+                          "jobs": 50,
+                          "cpuHours": 32.9,
+                          "medianDurationMs": 20000,
+                          "p90QueueWaitMs": 192000
+                        }
+                      ],
+                      "usage": [
+                        {
+                          "hour": 1795129200000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795132800000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795136400000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795140000000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795143600000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795147200000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795150800000,
+                          "cpuHours": {
+                            "test": 1.34,
+                            "build": 0.48,
+                            "check": 0.57,
+                            "other": 0.95
+                          }
+                        },
+                        {
+                          "hour": 1795154400000,
+                          "cpuHours": {
+                            "test": 2.0,
+                            "build": 0.72,
+                            "check": 0.86,
+                            "other": 1.43
+                          }
+                        },
+                        {
+                          "hour": 1795158000000,
+                          "cpuHours": {
+                            "test": 2.67,
+                            "build": 0.96,
+                            "check": 1.14,
+                            "other": 1.91
+                          }
+                        },
+                        {
+                          "hour": 1795161600000,
+                          "cpuHours": {
+                            "test": 3.34,
+                            "build": 1.2,
+                            "check": 1.43,
+                            "other": 2.38
+                          }
+                        },
+                        {
+                          "hour": 1795165200000,
+                          "cpuHours": {
+                            "test": 4.01,
+                            "build": 1.43,
+                            "check": 1.71,
+                            "other": 2.86
+                          }
+                        },
+                        {
+                          "hour": 1795168800000,
+                          "cpuHours": {
+                            "test": 4.01,
+                            "build": 1.43,
+                            "check": 1.71,
+                            "other": 2.86
+                          }
+                        },
+                        {
+                          "hour": 1795172400000,
+                          "cpuHours": {
+                            "test": 3.34,
+                            "build": 1.2,
+                            "check": 1.43,
+                            "other": 2.38
+                          }
+                        },
+                        {
+                          "hour": 1795176000000,
+                          "cpuHours": {
+                            "test": 4.01,
+                            "build": 1.43,
+                            "check": 1.71,
+                            "other": 2.86
+                          }
+                        },
+                        {
+                          "hour": 1795179600000,
+                          "cpuHours": {
+                            "test": 4.01,
+                            "build": 1.43,
+                            "check": 1.71,
+                            "other": 2.86
+                          }
+                        },
+                        {
+                          "hour": 1795183200000,
+                          "cpuHours": {
+                            "test": 3.34,
+                            "build": 1.2,
+                            "check": 1.43,
+                            "other": 2.38
+                          }
+                        },
+                        {
+                          "hour": 1795186800000,
+                          "cpuHours": {
+                            "test": 2.67,
+                            "build": 0.96,
+                            "check": 1.14,
+                            "other": 1.91
+                          }
+                        },
+                        {
+                          "hour": 1795190400000,
+                          "cpuHours": {
+                            "test": 2.0,
+                            "build": 0.72,
+                            "check": 0.86,
+                            "other": 1.43
+                          }
+                        },
+                        {
+                          "hour": 1795194000000,
+                          "cpuHours": {
+                            "test": 1.34,
+                            "build": 0.48,
+                            "check": 0.57,
+                            "other": 0.95
+                          }
+                        },
+                        {
+                          "hour": 1795197600000,
+                          "cpuHours": {
+                            "test": 1.34,
+                            "build": 0.48,
+                            "check": 0.57,
+                            "other": 0.95
+                          }
+                        },
+                        {
+                          "hour": 1795201200000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795204800000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795208400000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        },
+                        {
+                          "hour": 1795212000000,
+                          "cpuHours": {
+                            "test": 0.67,
+                            "build": 0.24,
+                            "check": 0.29,
+                            "other": 0.48
+                          }
+                        }
+                      ],
+                      "live": {
+                        "hostId": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03",
+                        "online": true,
+                        "lastSeenAt": 1795215575000,
+                        "runningByCategory": {
+                          "test": 2
+                        },
+                        "cpuReservedMillis": 4000,
+                        "memoryReservedMib": 8192,
+                        "cpuUsedMillis": 3500,
+                        "memoryUsedMib": 12000,
+                        "diskFreeBytes": 17179869184,
+                        "startFailuresLastHour": 0
+                      }
+                    },
+                    {
+                      "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                      "name": "europa",
+                      "cpuBudgetMillis": 12800,
+                      "memoryBudgetMib": 32768,
+                      "diskTotalBytes": 549755813888,
+                      "score": 88,
+                      "components": [
+                        {
+                          "key": "availability",
+                          "label": "Availability",
+                          "weight": 25.0,
+                          "score": 79,
+                          "deduction": "Online 95.8% of the window against a 100% target: −5."
+                        },
+                        {
+                          "key": "start-reliability",
+                          "label": "Start reliability",
+                          "weight": 25.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "relative-speed",
+                          "label": "Relative speed",
+                          "weight": 25.0,
+                          "score": 92,
+                          "deduction": "Speed index 1.08 against a 1.00 target: −2."
+                        },
+                        {
+                          "key": "headroom",
+                          "label": "Headroom",
+                          "weight": 15.0,
+                          "score": 100,
+                          "deduction": null
+                        },
+                        {
+                          "key": "busy-share",
+                          "label": "Busy share",
+                          "weight": 10.0,
+                          "score": 50,
+                          "deduction": "Busy 25% of its CPU budget against a 50% target while jobs waited: −5."
+                        }
+                      ],
+                      "speed": [
+                        {
+                          "cpuMillis": 3000,
+                          "index": 1.08,
+                          "topKeys": [
+                            {
+                              "key": "acme/app / CI / e2e",
+                              "hostMedianMs": 660000,
+                              "fleetMedianMs": 600000,
+                              "hostRuns": 12,
+                              "fleetRuns": 100
+                            },
+                            {
+                              "key": "acme/app / CI / unit",
+                              "hostMedianMs": 126000,
+                              "fleetMedianMs": 120000,
+                              "hostRuns": 16,
+                              "fleetRuns": 184
+                            },
+                            {
+                              "key": "acme/app / CI / lint",
+                              "hostMedianMs": 63000,
+                              "fleetMedianMs": 60000,
+                              "hostRuns": 14,
+                              "fleetRuns": 129
+                            }
+                          ]
+                        }
+                      ],
+                      "categories": [
+                        {
+                          "category": "test",
+                          "jobs": 80,
+                          "cpuHours": 27.3,
+                          "medianDurationMs": 300000,
+                          "p90QueueWaitMs": 220000
+                        },
+                        {
+                          "category": "build",
+                          "jobs": 25,
+                          "cpuHours": 8.5,
+                          "medianDurationMs": 375000,
+                          "p90QueueWaitMs": 270000
+                        },
+                        {
+                          "category": "check",
+                          "jobs": 30,
+                          "cpuHours": 10.2,
+                          "medianDurationMs": 60000,
+                          "p90QueueWaitMs": 210000
+                        },
+                        {
+                          "category": "deploy",
+                          "jobs": 30,
+                          "cpuHours": 10.2,
+                          "medianDurationMs": 210000,
+                          "p90QueueWaitMs": 240000
+                        },
+                        {
+                          "category": "other",
+                          "jobs": 60,
+                          "cpuHours": 20.5,
+                          "medianDurationMs": 20000,
+                          "p90QueueWaitMs": 223000
+                        }
+                      ],
+                      "usage": [
+                        {
+                          "hour": 1795129200000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795132800000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795136400000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795140000000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795143600000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795147200000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795150800000,
+                          "cpuHours": {
+                            "test": 0.79,
+                            "build": 0.25,
+                            "check": 0.3,
+                            "deploy": 0.3,
+                            "other": 0.59
+                          }
+                        },
+                        {
+                          "hour": 1795154400000,
+                          "cpuHours": {
+                            "test": 1.19,
+                            "build": 0.37,
+                            "check": 0.44,
+                            "deploy": 0.44,
+                            "other": 0.89
+                          }
+                        },
+                        {
+                          "hour": 1795158000000,
+                          "cpuHours": {
+                            "test": 1.58,
+                            "build": 0.49,
+                            "check": 0.59,
+                            "deploy": 0.59,
+                            "other": 1.19
+                          }
+                        },
+                        {
+                          "hour": 1795161600000,
+                          "cpuHours": {
+                            "test": 1.98,
+                            "build": 0.62,
+                            "check": 0.74,
+                            "deploy": 0.74,
+                            "other": 1.49
+                          }
+                        },
+                        {
+                          "hour": 1795165200000,
+                          "cpuHours": {
+                            "test": 2.37,
+                            "build": 0.74,
+                            "check": 0.89,
+                            "deploy": 0.89,
+                            "other": 1.78
+                          }
+                        },
+                        {
+                          "hour": 1795168800000,
+                          "cpuHours": {
+                            "test": 2.37,
+                            "build": 0.74,
+                            "check": 0.89,
+                            "deploy": 0.89,
+                            "other": 1.78
+                          }
+                        },
+                        {
+                          "hour": 1795172400000,
+                          "cpuHours": {
+                            "test": 1.98,
+                            "build": 0.62,
+                            "check": 0.74,
+                            "deploy": 0.74,
+                            "other": 1.49
+                          }
+                        },
+                        {
+                          "hour": 1795176000000,
+                          "cpuHours": {
+                            "test": 2.37,
+                            "build": 0.74,
+                            "check": 0.89,
+                            "deploy": 0.89,
+                            "other": 1.78
+                          }
+                        },
+                        {
+                          "hour": 1795179600000,
+                          "cpuHours": {
+                            "test": 2.37,
+                            "build": 0.74,
+                            "check": 0.89,
+                            "deploy": 0.89,
+                            "other": 1.78
+                          }
+                        },
+                        {
+                          "hour": 1795183200000,
+                          "cpuHours": {
+                            "test": 1.98,
+                            "build": 0.62,
+                            "check": 0.74,
+                            "deploy": 0.74,
+                            "other": 1.49
+                          }
+                        },
+                        {
+                          "hour": 1795186800000,
+                          "cpuHours": {
+                            "test": 1.58,
+                            "build": 0.49,
+                            "check": 0.59,
+                            "deploy": 0.59,
+                            "other": 1.19
+                          }
+                        },
+                        {
+                          "hour": 1795190400000,
+                          "cpuHours": {
+                            "test": 1.19,
+                            "build": 0.37,
+                            "check": 0.44,
+                            "deploy": 0.44,
+                            "other": 0.89
+                          }
+                        },
+                        {
+                          "hour": 1795194000000,
+                          "cpuHours": {
+                            "test": 0.79,
+                            "build": 0.25,
+                            "check": 0.3,
+                            "deploy": 0.3,
+                            "other": 0.59
+                          }
+                        },
+                        {
+                          "hour": 1795197600000,
+                          "cpuHours": {
+                            "test": 0.79,
+                            "build": 0.25,
+                            "check": 0.3,
+                            "deploy": 0.3,
+                            "other": 0.59
+                          }
+                        },
+                        {
+                          "hour": 1795201200000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795204800000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795208400000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        },
+                        {
+                          "hour": 1795212000000,
+                          "cpuHours": {
+                            "test": 0.4,
+                            "build": 0.12,
+                            "check": 0.15,
+                            "deploy": 0.15,
+                            "other": 0.3
+                          }
+                        }
+                      ],
+                      "live": {
+                        "hostId": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                        "online": false,
+                        "lastSeenAt": 1795214880000,
+                        "runningByCategory": {},
+                        "cpuReservedMillis": 0,
+                        "memoryReservedMib": 0,
+                        "cpuUsedMillis": 800,
+                        "memoryUsedMib": 4000,
+                        "diskFreeBytes": 322122547200,
+                        "startFailuresLastHour": 0
+                      }
+                    },
+                    {
+                      "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e05",
+                      "name": "MacBookPro",
+                      "cpuBudgetMillis": 0,
+                      "memoryBudgetMib": 16384,
+                      "diskTotalBytes": 1099511627776,
+                      "score": null,
+                      "components": [
+                        {
+                          "key": "availability",
+                          "label": "Availability",
+                          "weight": 25.0,
+                          "score": null,
+                          "deduction": "Not enough data: no samples from this machine in the window."
+                        },
+                        {
+                          "key": "start-reliability",
+                          "label": "Start reliability",
+                          "weight": 25.0,
+                          "score": null,
+                          "deduction": "Not enough data: no runner starts in the window."
+                        },
+                        {
+                          "key": "relative-speed",
+                          "label": "Relative speed",
+                          "weight": 25.0,
+                          "score": null,
+                          "deduction": "Not enough data: fewer than 3 job keys qualify."
+                        },
+                        {
+                          "key": "headroom",
+                          "label": "Headroom",
+                          "weight": 15.0,
+                          "score": null,
+                          "deduction": "Not enough data: no disk or memory samples in the window."
+                        },
+                        {
+                          "key": "busy-share",
+                          "label": "Busy share",
+                          "weight": 10.0,
+                          "score": null,
+                          "deduction": "Not enough data: the machine has no CPU budget."
+                        }
+                      ],
+                      "speed": [],
+                      "categories": [],
+                      "usage": [
+                        {
+                          "hour": 1795129200000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795132800000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795136400000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795140000000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795143600000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795147200000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795150800000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795154400000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795158000000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795161600000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795165200000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795168800000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795172400000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795176000000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795179600000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795183200000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795186800000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795190400000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795194000000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795197600000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795201200000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795204800000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795208400000,
+                          "cpuHours": {}
+                        },
+                        {
+                          "hour": 1795212000000,
+                          "cpuHours": {}
+                        }
+                      ],
+                      "live": {
+                        "hostId": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e05",
+                        "online": false,
+                        "lastSeenAt": null,
+                        "runningByCategory": {},
+                        "cpuReservedMillis": 0,
+                        "memoryReservedMib": 0,
+                        "cpuUsedMillis": null,
+                        "memoryUsedMib": null,
+                        "diskFreeBytes": null,
+                        "startFailuresLastHour": 0
+                      }
+                    }
+                  ],
+                  "concerns": [
+                    {
+                      "key": "host-offline:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                      "severity": "critical",
+                      "title": "europa is offline",
+                      "detail": "europa has sent no sample for 12 min, so nothing can start there.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04"
+                      },
+                      "link": "/fleet/machines/3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                      "since": 1795214880000
+                    },
+                    {
+                      "key": "unmatched-jobs",
+                      "severity": "critical",
+                      "title": "3 queued jobs match no pool",
+                      "detail": "3 queued jobs ask for labels no runner pool offers; they will wait until one does.",
+                      "subject": {
+                        "kind": "fleet"
+                      },
+                      "link": "/queued-jobs",
+                      "since": 1795215240000
+                    },
+                    {
+                      "key": "disk:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03",
+                      "severity": "warning",
+                      "title": "callisto is low on disk",
+                      "detail": "callisto has 16 GiB free of 200 GiB, under its 20 GiB warning floor.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03"
+                      },
+                      "link": "/fleet/machines/3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03",
+                      "since": 1795204800000
+                    },
+                    {
+                      "key": "uncertain:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e01",
+                      "severity": "warning",
+                      "title": "io has an uncertain placement",
+                      "detail": "1 placement on io is uncertain: GridOps can't tell whether its runner is running.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e01"
+                      },
+                      "link": "/fleet/machines/3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e01",
+                      "since": 1795214100000
+                    },
+                    {
+                      "key": "start-gate:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "severity": "warning",
+                      "title": "Jupiter's starts are paused",
+                      "detail": "3 runner starts failed on Jupiter in 15 min, so GridOps has paused starting runners there.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02"
+                      },
+                      "link": "/fleet/machines/3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "since": 1795215060000
+                    },
+                    {
+                      "key": "oldest-queued",
+                      "severity": "warning",
+                      "title": "A job has waited 7 min",
+                      "detail": "integration tests (2/4) in acme/app has waited 7 min to start.",
+                      "subject": {
+                        "kind": "fleet"
+                      },
+                      "link": "/queued-jobs",
+                      "since": 1795215180000
+                    },
+                    {
+                      "key": "fleet-component:queue-wait",
+                      "severity": "warning",
+                      "title": "Jobs wait too long to start",
+                      "detail": "Queue wait scores 61: queue p90 was 4 min 30 s against a 1 min target.",
+                      "subject": {
+                        "kind": "fleet"
+                      },
+                      "link": "/fleet/health",
+                      "since": null
+                    },
+                    {
+                      "key": "fleet-component:start-reliability",
+                      "severity": "warning",
+                      "title": "Runner starts fail too often",
+                      "detail": "Start reliability scores 61: 91.6% of runner starts succeeded against a 99% target.",
+                      "subject": {
+                        "kind": "fleet"
+                      },
+                      "link": "/fleet/health",
+                      "since": null
+                    },
+                    {
+                      "key": "host-score:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "severity": "warning",
+                      "title": "Jupiter scores 63",
+                      "detail": "Jupiter's weakest part is Start reliability (0): 62.5% of its runner starts succeeded.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02"
+                      },
+                      "link": "/fleet/health#machine-3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "since": null
+                    },
+                    {
+                      "key": "host-slow:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03:2000",
+                      "severity": "warning",
+                      "title": "callisto is slow at 2 CPUs",
+                      "detail": "callisto takes 1.42× as long as the fleet at 2 CPUs; most behind it: acme/app / CI / e2e (14 min 30 s against 10 min).",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03"
+                      },
+                      "link": "/fleet/health#machine-3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e03",
+                      "since": null
+                    },
+                    {
+                      "key": "host-idle-while-queued:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "severity": "warning",
+                      "title": "Jupiter is idle while jobs wait",
+                      "detail": "Jupiter was busy 20% of its CPU budget while the fleet's queue wait scored 61.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02"
+                      },
+                      "link": "/fleet/health#machine-3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e02",
+                      "since": null
+                    },
+                    {
+                      "key": "host-idle-while-queued:3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                      "severity": "warning",
+                      "title": "europa is idle while jobs wait",
+                      "detail": "europa was busy 25% of its CPU budget while the fleet's queue wait scored 61.",
+                      "subject": {
+                        "kind": "host",
+                        "id": "3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04"
+                      },
+                      "link": "/fleet/health#machine-3f6c1d2e-8a41-4b7c-9e05-1a2b3c4d5e04",
+                      "since": null
+                    },
+                    {
+                      "key": "category-other",
+                      "severity": "info",
+                      "title": "Many jobs have no category",
+                      "detail": "24% of the window's jobs are `other`: a job category rule may be missing.",
+                      "subject": {
+                        "kind": "fleet"
+                      },
+                      "link": "/settings/general",
+                      "since": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "description": "The window is not one of `1h`, `24h` or `7d`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "401": { "description": "Not signed in, or the token is not live", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "The caller is not a system administrator, or the token lacks `fleet:read`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "503": { "description": "The health source failed and there is no response under 10 minutes old to serve", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }
@@ -1308,6 +3281,47 @@
         "responses": {
           "200": { "description": "The Tart host", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TartHost" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
+        }
+      }
+    },
+    "/api/v1/settings/job-categories": {
+      "get": {
+        "tags": ["settings"],
+        "summary": "The job category rules, in order",
+        "description": "Each finished job gets the category of the first rule that matches it; a job no rule matches is `other`. Administrators only.",
+        "security": [{ "cookieAuth": [] }],
+        "responses": {
+          "200": { "description": "The rules, positions 0 to n-1", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRuleList" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller is not a system administrator", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } }
+        }
+      },
+      "put": {
+        "tags": ["settings"],
+        "summary": "Replace the job category rules",
+        "description": "Replaces the whole list, in the order given (an empty list is allowed). Jobs of the last 7 days are classified again under the new rules. A pattern that does not compile is a 422 naming each failing rule, and nothing is saved.",
+        "security": [{ "cookieAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRulesInput" } } } },
+        "responses": {
+          "200": { "description": "The saved rules", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRuleList" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller is not a system administrator", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "422": { "description": "A pattern does not compile: `code` is `invalid_job_category_rules` and `details` lists `{position, message}` for each failing rule", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
+        }
+      }
+    },
+    "/api/v1/settings/job-categories/preview": {
+      "post": {
+        "tags": ["settings"],
+        "summary": "Preview a proposed list of job category rules",
+        "description": "How many jobs completed in the last 7 days each proposed rule would classify (first match wins), and the 20 most common job names left in `other`, most jobs first. Nothing is saved.",
+        "security": [{ "cookieAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRulesInput" } } } },
+        "responses": {
+          "200": { "description": "The matches per rule and the commonest names left in `other`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryPreview" } } } },
+          "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "403": { "description": "The caller is not a system administrator", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
+          "422": { "description": "A pattern does not compile: `code` is `invalid_job_category_rules` and `details` lists `{position, message}` for each failing rule", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
         }
       }
     },

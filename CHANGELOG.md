@@ -34,8 +34,23 @@ Known problems in the current release are in the README's
   inventory snapshots, at most 20,000 rows a pass. The database file does not
   shrink: SQLite reuses the freed space. To get the space back, `VACUUM` the
   database while GridOps is stopped. (#152)
+- Migration `0050` adds the fleet health tables (job category rules, the
+  hourly job and machine rollups, the recompute list and the score
+  snapshots), a nullable `category` on workflow and GitLab jobs, the GitLab
+  job's name, project path and start and finish times, and indexes on both
+  job tables' `completed_at`. Existing jobs keep their rows and stay
+  unclassified; nothing is rebuilt. (#197)
 
 ### Added
+
+- **Fleet health, the groundwork.** A **Health** page under Machines
+  (`/fleet/health`, administrators only) with a section for each part of the
+  page, served from a fixed example fleet until the fleet health issues of
+  #198 fill them in; `GET /api/v1/fleet/health?window=1h|24h|7d`, which takes a
+  `fleet:read` token like the workload chart; and a **Job categories**
+  placeholder under **Settings → General**. New GitHub and GitLab jobs get a
+  `category` column, and the reconciler keeps 90 days of fleet health
+  rollups. See [Fleet health](docs/design/fleet-health.md). (#197)
 
 - **GitLab CI runners.** Connect a gitlab.com or self-managed GitLab project
   or group under **Settings → Connections**, add it to a runner pool, and

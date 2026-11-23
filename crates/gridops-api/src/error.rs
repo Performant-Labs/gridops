@@ -21,6 +21,16 @@ pub enum ApiError {
     /// A refusal a client can tell from other conflicts by its `code`.
     #[error("{message}")]
     Refused { code: &'static str, message: String },
+    /// A request the server understood but refuses as it stands (422): its
+    /// `code` tells the client why, and `details` says where (for example the
+    /// positions of the job-category rules that don't compile, #197).
+    #[error("{message}")]
+    #[cfg_attr(not(test), allow(dead_code, reason = "#199's rule check returns it"))]
+    Invalid {
+        code: &'static str,
+        message: String,
+        details: serde_json::Value,
+    },
     #[error("{0}")]
     PayloadTooLarge(String),
     #[error("{0}")]
@@ -38,6 +48,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
             Self::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
             Self::Refused { message, .. } => (StatusCode::CONFLICT, message.clone()),
+            Self::Invalid { message, .. } => (StatusCode::UNPROCESSABLE_ENTITY, message.clone()),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message.clone()),
             Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message.clone()),
             Self::Internal(error) => {
@@ -49,8 +60,13 @@ impl IntoResponse for ApiError {
             }
         };
         let mut body = json!({ "error": message });
-        if let Self::Refused { code, .. } = &self {
-            body["code"] = json!(code);
+        match &self {
+            Self::Refused { code, .. } => body["code"] = json!(code),
+            Self::Invalid { code, details, .. } => {
+                body["code"] = json!(code);
+                body["details"] = details.clone();
+            }
+            _ => {}
         }
         (status, Json(body)).into_response()
     }

@@ -16,8 +16,9 @@ use crate::{
 };
 use gridops_core::{
     assigned_queued_jobs, associate_runner_with_job, compatible_runner_provider,
-    finish_earlier_attempts, now_millis, provider_capacities, provider_capacity_deficit,
-    record_job_report, scale_up_target,
+    finish_earlier_attempts,
+    fleet_health::classifier_cache::{JobOrigin, NewJob, category_for_insert},
+    now_millis, provider_capacities, provider_capacity_deficit, record_job_report, scale_up_target,
 };
 
 mod gitlab;
@@ -641,11 +642,37 @@ async fn process_workflow_job(
         insert_placeholder_run(database, payload, job, run_id, now).await?;
     }
     let status = string(job, "status").or(action).unwrap_or("queued");
+    // The category is bound for a new row only: the `ON CONFLICT` update
+    // below never touches it (#197, W-15).
+    let category = {
+        let labels = job
+            .get("labels")
+            .and_then(Value::as_array)
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut connection = database.acquire().await?;
+        category_for_insert(
+            &mut connection,
+            &NewJob {
+                job_name: string(job, "name"),
+                labels: &labels,
+                origin: JobOrigin::GitHubRun(run_id),
+            },
+            now,
+        )
+        .await
+    };
     sqlx::query(
         r#"INSERT INTO workflow_jobs (
           id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,
-          runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at,
+          category
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET status=excluded.status,conclusion=excluded.conclusion,
           runner_id=excluded.runner_id,runner_name=excluded.runner_name,
           runner_group_id=excluded.runner_group_id,runner_group_name=excluded.runner_group_name,
@@ -667,6 +694,7 @@ async fn process_workflow_job(
     .bind(date_value(job, "completed_at"))
     .bind(now)
     .bind(now)
+    .bind(category.map(|category| category.as_str()))
     .execute(database)
     .await?;
     record_job_report(database, id, i64_value(job, "run_attempt"), now).await?;

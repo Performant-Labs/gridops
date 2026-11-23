@@ -142,6 +142,9 @@ pub struct Job {
     pub pipeline_id: ExternalId,
     pub status: JobStatus,
     pub tag_list: Vec<String>,
+    /// GitLab's job name, when the listing gave one (fleet health
+    /// classifies by it, #197).
+    pub name: Option<String>,
 }
 
 /// A GitLab job status, in GitLab's spelling. A status GitLab adds later
