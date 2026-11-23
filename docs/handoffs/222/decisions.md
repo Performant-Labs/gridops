@@ -1,0 +1,42 @@
+# Decision journal: #222 batch the retention deletes (host_samples lock storm)
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-22T20:06:22-08:00
+- **Decided:** PASS, with 0 block and 7 warn findings (`docs/handoffs/222/handoff-A.md`).
+  - **Placement (the brief left it to A):** a new crate-level `crates/gridops-core/src/retention.rs` (`pub mod retention`). It does not go under `fleet::registry`, because four of the five tables aren't fleet-registry data. It holds:
+    - `RetentionTable` (5 variants), with `ALL`, `as_str` and `prune_batch`, which returns one const statement per variant;
+    - `prune(pool, table, cutoff, batch_size, max_batches) -> Result<u64, sqlx::Error>`.
+  - **Sharing with `snapshot_retention`:**
+    - the 500/40/25 ms constants and the batch loop move into `retention`, the loop as `pub(crate) delete_in_batches(pool, &'static str, …)`;
+    - `snapshot_retention` re-exports the constants;
+    - `prune_inventory_snapshots` delegates to the loop, and its signature, `PRUNE_BATCH` and tests are unchanged.
+  - **Layering:** the cutoffs, settings, per-table loop and info/warn logging stay in the reconciler's `cleanup_retention`, as with #152. So the error-isolation test is a reconciler test: it extends `snapshot_retention_tests.rs` and its trigger-based fault injection.
+  - **The warns:**
+    - (3) extend `crates/gridops-core/tests/retention.rs`, the existing retention plan test over copied literals, instead of adding a second plan-test home;
+    - (4) the planner prints `USING COVERING INDEX`, with the exact step strings given;
+    - (5) open PR #221 also claims migration 0050, and the second to land renumbers;
+    - (6) #221 adds three unbatched deletes to `cleanup_retention`, and the second to land folds them into the enum;
+    - (7) the `fleet_agent_logs` delete (main.rs:701) is in the same class but out of scope, so it needs a follow-up.
+- **Assumed:**
+  - #222, the small hotfix, lands before #221, so 0050 stays as the brief says.
+  - The bundled SQLite (libsqlite3-sys 0.37.0, 3.51.3) plans these statements as the 3.54.0 CLI does, as #152's review found for the same shape.
+- **Hedged:**
+  - Sharing the batch loop with `prune_inventory_snapshots` is a judgment call. The brief permits leaving that function alone "if it can't share code cleanly". I judged that it can: the loop doesn't depend on the statement, and the binds are identical. F may keep them separate only with a concrete written reason.
+  - Findings 5 and 6 depend on the merge order of two open PRs, which neither run controls.
+  - Finding 7 is scope that I reported, not expanded.
+- **Evidence:**
+  - **Files read:**
+    - the brief and its round-1 result;
+    - `snapshot_retention.rs` and `snapshot_retention_tests.rs` (core), and `registry/{mod.rs, tests.rs, query_plan_tests.rs}`;
+    - `lib.rs`, `fleet/mod.rs` and `db.rs` (the migrator);
+    - `tests/retention.rs`;
+    - the reconciler `main.rs` (`reconcile`, `cleanup_retention`, `prune_inventory_snapshots`) and `snapshot_retention_tests.rs`;
+    - `compose.yaml` (`depends_on`);
+    - migrations 0001, 0022, 0027, 0034, 0036 and 0049;
+    - sqlx-core 0.9 `migrate/migrator.rs` and sqlx-sqlite 0.9 `migrate.rs`;
+    - #152's `handoff-A.md` and `decisions.md`.
+  - **Commands run:**
+    - applied migrations 0001-0049 plus the proposed 0050 to a scratch DB, then ran `EXPLAIN QUERY PLAN` on the five batch statements. All five plan as `SEARCH <t> USING COVERING INDEX <idx> (<col><?)`. Without 0050, host_samples plans as `SCAN host_samples USING COVERING INDEX host_samples_host_received_idx` plus a temp B-tree.
+    - `ORDER BY rowid` plans as `SCAN` (host_samples, audit_events).
+    - #221's 0050 tables plan as a `SEARCH` through their primary-key autoindexes.
+    - `git ls-tree` over all branches found `0050_fleet_health.sql` on `claude/fleet-197-contract`.
+    - `gh pr view 221` showed it OPEN and MERGEABLE. The master branch protection has `strict: true`.
