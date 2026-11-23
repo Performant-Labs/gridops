@@ -283,6 +283,17 @@ struct Chunked {
 /// empty, like a rule whose pattern does not compile: the rest still
 /// classify.
 fn compile_chunked(rules: &[CategoryRule]) -> ChunkedClassifier {
+    let cores = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let chunk_count = rules.len().div_ceil(CHUNK_RULES).min(cores).max(1);
+    compile_in_chunks(rules, chunk_count)
+}
+
+/// The chunk compiler behind [`compile_chunked`]: sorts `rules` by position,
+/// rewrites every `other` rule as [`JobCategory::FixAgent`] (the sentinel
+/// [`ChunkedClassifier::classify`] maps back), and splits the list into
+/// `chunk_count` even chunks, one thread each (none when one chunk is asked
+/// for).
+fn compile_in_chunks(rules: &[CategoryRule], chunk_count: usize) -> ChunkedClassifier {
     let mut ordered: Vec<CategoryRule> = rules.to_vec();
     ordered.sort_by_key(|rule| rule.position);
     for rule in &mut ordered {
@@ -290,8 +301,7 @@ fn compile_chunked(rules: &[CategoryRule]) -> ChunkedClassifier {
             rule.category = JobCategory::FixAgent;
         }
     }
-    let cores = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let chunk_count = ordered.len().div_ceil(CHUNK_RULES).min(cores).max(1);
+    let chunk_count = chunk_count.max(1);
     let chunk_len = ordered.len().div_ceil(chunk_count);
     let chunks: Vec<&[CategoryRule]> = ordered.chunks(chunk_len).collect();
     if chunks.len() <= 1 {
@@ -458,18 +468,13 @@ pub async fn category_for_insert(
 #[cfg(test)]
 mod tests {
     use super::{
-        CHUNK_RULES, ChunkedClassifier, JobCategory,
-        category::{self, RuleField},
-        compile_chunked,
+        ChunkedClassifier, JobCategory,
+        category::{self, CategoryRule, RuleField},
+        compile_chunked, compile_in_chunks,
     };
 
-    fn rule(
-        position: i64,
-        category: JobCategory,
-        field: RuleField,
-        pattern: &str,
-    ) -> category::CategoryRule {
-        category::CategoryRule {
+    fn rule(position: i64, category: JobCategory, field: RuleField, pattern: &str) -> CategoryRule {
+        CategoryRule {
             position,
             category,
             field,
@@ -477,24 +482,21 @@ mod tests {
         }
     }
 
-    /// The chunked rebuild answers what `Classifier::classify` on the whole
-    /// rule list answers: the `other`-as-`fix-agent` sentinel must not show,
-    /// whatever chunk a rule lands in. The list spans several chunks and
-    /// holds every rule field, an `other` rule ahead of a matching rule,
-    /// invalid patterns, and an `other` rule last.
-    #[test]
-    fn chunked_classify_answers_what_the_whole_classifier_answers() {
+    /// A rule list that spans several chunks: an `other` rule at position 0
+    /// ahead of a matching `deploy` rule and a last `other` rule (both would
+    /// be lost by a chunk that cannot tell "matched an `other` rule" from
+    /// "matched nothing"), a pattern that does not compile, and every rule
+    /// field.
+    fn spread() -> Vec<CategoryRule> {
         let mut rules = vec![
             rule(0, JobCategory::Other, RuleField::JobName, "sentinel"),
-            // A pattern that does not compile: skipped by both paths.
             rule(1, JobCategory::Test, RuleField::JobName, "([unclosed"),
             rule(2, JobCategory::Build, RuleField::WorkflowName, "^ci$"),
             rule(3, JobCategory::Check, RuleField::Repository, "acme/"),
             rule(4, JobCategory::Deploy, RuleField::JobName, "deploy"),
             rule(5, JobCategory::Test, RuleField::Labels, "docker"),
         ];
-        let filler = i64::try_from(4 * CHUNK_RULES).unwrap_or_default();
-        for index in 0..filler {
+        for index in 0..12_i64 {
             rules.push(rule(
                 6 + index,
                 if index % 2 == 0 {
@@ -506,19 +508,12 @@ mod tests {
                 &format!("^filler-{index}$"),
             ));
         }
-        rules.push(rule(
-            6 + filler,
-            JobCategory::Other,
-            RuleField::JobName,
-            "sentinel|deploy",
-        ));
+        rules.push(rule(18, JobCategory::Other, RuleField::JobName, "filler-5"));
+        rules
+    }
 
-        let whole = category::compile(&rules);
-        let chunked: ChunkedClassifier = compile_chunked(&rules);
-        assert!(
-            chunked.chunks.len() > 1,
-            "the list must span several chunks to pin the borders"
-        );
+    fn answers_agree(chunked: &ChunkedClassifier, rules: &[CategoryRule]) {
+        let whole = category::compile(rules);
         let labels = [vec!["docker".to_owned(), "self-hosted".to_owned()], vec![]];
         for job_name in [
             "sentinel",
@@ -542,5 +537,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The chunked rebuild answers what `Classifier::classify` on the whole
+    /// rule list answers, however the rules fall into chunks — one chunk,
+    /// chunks of a few rules, and the chunking [`compile_chunked`] picks.
+    #[tokio::test]
+    async fn chunked_classify_answers_what_the_whole_classifier_answers() {
+        // Held so these compiles never contend with a speed check on a
+        // one-core runner.
+        let _serial = super::super::testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        let rules = spread();
+        answers_agree(&compile_in_chunks(&rules, 1), &rules);
+        let many = compile_in_chunks(&rules, 6);
+        assert!(many.chunks.len() > 1, "several chunks must be pinned");
+        answers_agree(&many, &rules);
+        answers_agree(&compile_chunked(&rules), &rules);
+    }
+
+    /// The sentinel a chunk answers instead of `other` never escapes the
+    /// writers' path, even when a rule's own category would be it.
+    #[tokio::test]
+    async fn fix_agent_never_escapes_the_writers_path() {
+        let _serial = super::super::testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        let rules = vec![rule(0, JobCategory::Other, RuleField::JobName, "sentinel")];
+        let chunked = compile_in_chunks(&rules, 1);
+        assert_eq!(
+            chunked.classify("sentinel", None, None, &[]),
+            JobCategory::Other
+        );
+        assert_eq!(
+            chunked.classify("other job", None, None, &[]),
+            JobCategory::Other
+        );
     }
 }
