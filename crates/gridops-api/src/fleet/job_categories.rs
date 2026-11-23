@@ -17,10 +17,13 @@
 //! (an unknown category, `fix-agent`, an unknown field, an empty pattern,
 //! an unknown key) is named the same way. The preview compiles the proposed
 //! rules the same way, then classifies the jobs completed in the last 7 days
-//! (`workflow_jobs`, read through `workflow_jobs_completed_idx` and limited
-//! to its `name`, `run_id` and `labels` columns, with the workflow name and
-//! repository joined in by `run_id` for rules on those fields) and saves
-//! nothing. GitLab jobs are not previewed: their names are `gitlab_jobs`
+//! and saves nothing. It reads `workflow_jobs` through
+//! `workflow_jobs_completed_idx`, selecting only its `name`, `run_id` and
+//! `labels` columns, in six-hour chunks (one statement over the whole week
+//! would run far past the 100 ms slow-statement limit, #179); the workflow
+//! name and repository a rule on those fields matches are resolved by
+//! `run_id`, in batches of [`INSERT_BATCH`] runs, only when such a rule is
+//! proposed. GitLab jobs are not previewed: their names are `gitlab_jobs`
 //! rows, which carry no `run_id`.
 
 use std::collections::HashMap;
@@ -60,9 +63,12 @@ const INSERT_BATCH: usize = 500;
 /// The window the preview counts over, in milliseconds (7 days).
 const PREVIEW_WINDOW_MILLIS: i64 = 7 * 86_400_000;
 
-/// One window job read for the preview: its name, run, labels, and the
-/// workflow name and repository the run joins to.
-type WindowJob = (String, i64, String, Option<String>, Option<String>);
+/// How much of the window one preview statement reads at most (6 hours),
+/// bounded on both ends by the `completed_at` index.
+const READ_CHUNK_MILLIS: i64 = 6 * 3_600_000;
+
+/// One window job read for the preview: its name, run and labels.
+type WindowJob = (String, i64, String);
 
 /// `{"rules": [...]}`, the shape of `GET`'s and `PUT`'s answers.
 fn rules_json(rules: &[CategoryRule]) -> Value {
@@ -239,6 +245,35 @@ pub(crate) async fn save_rules(
     Ok((StatusCode::OK, Json(rules_json(&rules))).into_response())
 }
 
+/// The workflow name and repository of each of `run_ids`, read in batches so
+/// no one statement scans more than [`INSERT_BATCH`] runs (#179).
+async fn run_fields(
+    database: &sqlx::SqlitePool,
+    run_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, (String, Option<String>)>> {
+    let mut runs = HashMap::with_capacity(run_ids.len());
+    for batch in run_ids.chunks(INSERT_BATCH) {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT wr.id,wr.workflow_name,repo.full_name
+             FROM workflow_runs wr
+             LEFT JOIN repositories repo ON repo.id=wr.repository_id
+             WHERE wr.id IN (",
+        );
+        let mut ids = builder.separated(",");
+        for id in batch {
+            ids.push_bind(*id);
+        }
+        ids.push_unseparated(")");
+        let rows: Vec<(i64, String, Option<String>)> =
+            builder.build_query_as().fetch_all(database).await?;
+        runs.extend(
+            rows.into_iter()
+                .map(|(id, workflow_name, repository)| (id, (workflow_name, repository))),
+        );
+    }
+    Ok(runs)
+}
+
 /// `POST /api/v1/settings/job-categories/preview`.
 pub(crate) async fn preview(
     State(state): State<AppState>,
@@ -255,32 +290,54 @@ pub(crate) async fn preview(
             .collect();
         invalid_rules(&details)
     })?;
-    let since = now_millis() - PREVIEW_WINDOW_MILLIS;
-    let jobs: Vec<WindowJob> = sqlx::query_as(
-        "SELECT wj.name,wj.run_id,wj.labels,wr.workflow_name,repo.full_name
-         FROM workflow_jobs wj
-         LEFT JOIN workflow_runs wr ON wr.id=wj.run_id
-         LEFT JOIN repositories repo ON repo.id=wr.repository_id
-         WHERE wj.completed_at IS NOT NULL AND wj.completed_at>=?",
-    )
-    .bind(since)
-    .fetch_all(&state.database)
-    .await?;
+    let now = now_millis();
+    let since = now - PREVIEW_WINDOW_MILLIS;
+    // The window is read in time-bounded chunks, like the rollups read their
+    // hours: one statement over the whole week would run far past the 100 ms
+    // slow-statement limit (#179).
+    let mut jobs = Vec::new();
+    let mut low = since;
+    while low <= now {
+        let high = (low + READ_CHUNK_MILLIS).min(now + 1);
+        let batch: Vec<WindowJob> = sqlx::query_as(
+            "SELECT name,run_id,labels FROM workflow_jobs
+             WHERE completed_at>=? AND completed_at<?",
+        )
+        .bind(low)
+        .bind(high)
+        .fetch_all(&state.database)
+        .await?;
+        jobs.extend(batch);
+        low = high;
+    }
+    // Only a rule on the workflow name or repository needs the run's fields.
+    let runs = if rules
+        .iter()
+        .any(|rule| matches!(rule.field, RuleField::WorkflowName | RuleField::Repository))
+    {
+        let mut ids: Vec<i64> = jobs.iter().map(|(_, run_id, _)| *run_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        run_fields(&state.database, &ids).await?
+    } else {
+        HashMap::new()
+    };
     let mut matches = vec![0_u64; rules.len()];
     let mut other: HashMap<String, u64> = HashMap::new();
-    for (name, _run_id, labels, workflow_name, repository) in jobs {
+    for (name, run_id, labels) in jobs {
         let labels: Vec<String> = serde_json::from_str(&labels).unwrap_or_default();
+        let (workflow_name, repository) = runs
+            .get(&run_id)
+            .map_or((None, None), |(workflow, repository)| {
+                (Some(workflow.as_str()), repository.as_deref())
+            });
         let matched = rules
             .iter()
             .zip(&compiled)
             .position(|(rule, regex)| match rule.field {
                 RuleField::JobName => regex.is_match(&name),
-                RuleField::WorkflowName => workflow_name
-                    .as_deref()
-                    .is_some_and(|value| regex.is_match(value)),
-                RuleField::Repository => repository
-                    .as_deref()
-                    .is_some_and(|value| regex.is_match(value)),
+                RuleField::WorkflowName => workflow_name.is_some_and(|value| regex.is_match(value)),
+                RuleField::Repository => repository.is_some_and(|value| regex.is_match(value)),
                 RuleField::Labels => labels.iter().any(|label| regex.is_match(label)),
             });
         match matched {
@@ -304,8 +361,18 @@ pub(crate) async fn preview(
 #[cfg(test)]
 mod tests {
     use anyhow::{Result, bail};
+    use axum::http::Method;
+    use gridops_core::fleet_health::{
+        category,
+        testdata::{self, JobSeed},
+    };
 
     use super::*;
+    use crate::fleet::health_test_support::Harness;
+
+    const PREVIEW_PATH: &str = "/api/v1/settings/job-categories/preview";
+    /// `seed_fleet`'s repository, the one every seeded run joins to.
+    const SEEDED_REPOSITORY: &str = "acme/app";
 
     /// The 422 of `parse_rules`, as its `details`.
     fn problems(body: &Value) -> Result<Value> {
@@ -314,6 +381,36 @@ mod tests {
             Err(ApiError::Invalid { code, details, .. }) if code == CODE => Ok(details),
             Err(other) => bail!("not the rules 422: {other:?}"),
         }
+    }
+
+    /// The rules, as the request body carries them.
+    fn input(rules: &[CategoryRule]) -> Value {
+        json!({"rules": rules.iter().map(|rule| json!({
+            "category": rule.category.as_str(),
+            "field": rule.field.as_str(),
+            "pattern": rule.pattern,
+        })).collect::<Vec<_>>()})
+    }
+
+    /// What the preview answered for each rule position.
+    async fn preview_counts(harness: &Harness, body: Value) -> Result<Vec<i64>> {
+        let admin = harness.admin.clone();
+        let (status, answered) = harness
+            .send(Method::POST, PREVIEW_PATH, Some(&admin), Some(body))
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{answered}");
+        Ok(answered
+            .pointer("/rules")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|rule| {
+                rule.get("matches")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+            })
+            .collect())
     }
 
     /// A rule off-contract in each way the parser names.
@@ -384,5 +481,167 @@ mod tests {
             .map(|index| (format!("job{index}"), index))
             .collect();
         assert_eq!(top_other(many).len(), OTHER_NAMES_LIMIT);
+    }
+
+    /// The preview attributes each job exactly as `category::compile`'s
+    /// classifier would classify it, on every rule field (the `repository`
+    /// rule is checked apart, because every seeded job shares one).
+    #[tokio::test]
+    async fn the_preview_counts_what_the_classifier_classifies() -> Result<()> {
+        let harness = Harness::new().await?;
+        let fleet = testdata::seed_fleet(&harness.database).await?;
+        let io = fleet.host("io")?.id.clone();
+        let now = gridops_core::now_millis();
+        let job = |id: i64, name: &str, workflow: &str, labels: &[String]| {
+            let mut seed = JobSeed::completed(
+                id,
+                name,
+                Some(&io),
+                now - 60_000,
+                now - 50_000,
+                now - 40_000,
+            );
+            seed.workflow = workflow.to_owned();
+            seed.labels = labels.to_vec();
+            seed
+        };
+        let gpu = vec!["gpu".to_owned()];
+        let jobs = vec![
+            job(101, "anything", "deploy on push", &[]),
+            job(102, "misc", "CI", &gpu),
+            job(103, "build wheels", "CI", &[]),
+            job(104, "misc", "CI", &[]),
+            job(105, "misc", "CI", &gpu),
+            job(106, "build wheels", "CI", &[]),
+        ];
+        testdata::insert_jobs(&harness.database, &fleet, &jobs).await?;
+        let rules = vec![
+            CategoryRule {
+                position: 0,
+                category: JobCategory::Deploy,
+                field: RuleField::WorkflowName,
+                pattern: "^deploy on push$".to_owned(),
+            },
+            CategoryRule {
+                position: 1,
+                category: JobCategory::Check,
+                field: RuleField::Labels,
+                pattern: "^gpu$".to_owned(),
+            },
+            CategoryRule {
+                position: 2,
+                category: JobCategory::Build,
+                field: RuleField::JobName,
+                pattern: "wheels".to_owned(),
+            },
+        ];
+
+        // What the classifier itself says, per category.
+        let classifier = category::compile(&rules);
+        let mut expected: HashMap<JobCategory, u64> = HashMap::new();
+        for seed in &jobs {
+            let classified = classifier.classify(
+                &seed.name,
+                Some(&seed.workflow),
+                Some(SEEDED_REPOSITORY),
+                &seed.labels,
+            );
+            *expected.entry(classified).or_default() += 1;
+        }
+        let counted = preview_counts(&harness, input(&rules)).await?;
+        for (rule, matches) in rules.iter().zip(&counted) {
+            assert_eq!(
+                *matches,
+                i64::try_from(expected.get(&rule.category).copied().unwrap_or_default())?,
+                "rule {} ({}) counts what the classifier classifies",
+                rule.position,
+                rule.category
+            );
+        }
+        assert_eq!(
+            expected
+                .get(&JobCategory::Other)
+                .copied()
+                .unwrap_or_default(),
+            1,
+            "the unmatched job is other"
+        );
+
+        // A rule on the repository matches every seeded job through the join.
+        let repository_rule = vec![CategoryRule {
+            position: 0,
+            category: JobCategory::Build,
+            field: RuleField::Repository,
+            pattern: "^acme/".to_owned(),
+        }];
+        let counted = preview_counts(&harness, input(&repository_rule)).await?;
+        assert_eq!(counted, [i64::try_from(jobs.len())?]);
+        Ok(())
+    }
+
+    /// On a full synthetic week (#197's `build_week`, about 50,000 jobs) the
+    /// preview answers with no statement over the 100 ms slow-statement limit
+    /// and no write at all (`speed_check` fails the test otherwise), with
+    /// job-name rules (one read of the window) and with a workflow-name rule
+    /// (the run fields resolved in batches on top).
+    #[tokio::test]
+    async fn the_preview_stays_under_the_slow_statement_limit_on_a_week_of_jobs() -> Result<()> {
+        let harness = Harness::new().await?;
+        let hour = 3_600_000;
+        let end = gridops_core::now_millis() / hour * hour;
+        testdata::build_week(&harness.database, end).await?;
+        let admin = harness.admin.clone();
+
+        let classified_of = |answered: &Value| {
+            answered
+                .pointer("/rules")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .chain(
+                    answered
+                        .pointer("/other")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter(),
+                )
+                .map(|entry| entry.get("matches").or_else(|| entry.get("jobs")))
+                .map(|count| count.and_then(Value::as_i64).unwrap_or_default())
+                .sum::<i64>()
+        };
+        for (name, rules) in [
+            ("job-name rules", category::default_rules()),
+            (
+                "a workflow-name rule",
+                vec![CategoryRule {
+                    position: 0,
+                    category: JobCategory::Deploy,
+                    field: RuleField::WorkflowName,
+                    pattern: "^CI$".to_owned(),
+                }],
+            ),
+        ] {
+            let body = input(&rules);
+            let started = std::time::Instant::now();
+            let (status, answered) = gridops_core::fleet_health::speed_check::check(
+                &harness.database,
+                harness.send(Method::POST, PREVIEW_PATH, Some(&admin), Some(body)),
+            )
+            .await?;
+            let elapsed = started.elapsed();
+            assert_eq!(status, StatusCode::OK, "{answered}");
+            let classified = classified_of(&answered);
+            println!(
+                "preview over the synthetic week, {name}: {classified} jobs classified in \
+                 {elapsed:?} (queried through the completed_at index, nothing written)"
+            );
+            assert!(
+                classified >= 45_000,
+                "the week's jobs were not all counted: {classified}"
+            );
+        }
+        Ok(())
     }
 }

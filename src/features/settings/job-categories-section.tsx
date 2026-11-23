@@ -44,6 +44,7 @@ export function JobCategoriesSection() {
   const [saving, setSaving] = useState(false);
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [previewPaused, setPreviewPaused] = useState(false);
   const latestPreview = useRef(0);
 
   useEffect(() => {
@@ -73,10 +74,18 @@ export function JobCategoriesSection() {
       latestPreview.current = request;
       api<Preview>(PREVIEW, { body: { rules }, method: "POST" })
         .then((result) => {
-          if (latestPreview.current === request) setPreview(result);
+          if (latestPreview.current === request) {
+            setPreview(result);
+            setPreviewPaused(false);
+          }
         })
         .catch(() => {
-          /* a failed preview keeps the last one; saving reports its own errors */
+          /* counts from a list the server refused would sit on the wrong rows
+             after a move or delete, so they come off until it compiles again */
+          if (latestPreview.current === request) {
+            setPreview(null);
+            setPreviewPaused(true);
+          }
         });
     }, PREVIEW_DEBOUNCE_MILLIS);
     return () => clearTimeout(timer);
@@ -191,7 +200,9 @@ export function JobCategoriesSection() {
         label="Most common in other"
         stacked
       >
-        {preview === null ? (
+        {previewPaused ? (
+          <p className="text-sm text-muted-foreground">Preview paused: a rule does not compile.</p>
+        ) : preview === null ? (
           <p className="text-sm text-muted-foreground">Counting…</p>
         ) : preview.other.length > 0 ? (
           <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
