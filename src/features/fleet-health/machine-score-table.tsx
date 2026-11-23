@@ -19,12 +19,23 @@ import type { FleetHealthViewProps, HostHealth } from "./types";
 export function MachineScoreTable({ data, window: windowKey }: FleetHealthViewProps) {
   // A deep link (`#machine-<host>`) opens that machine before anything is clicked.
   const [expanded, setExpanded] = useState<string | null>(() => hashHostId());
+  // The hash this render last saw, so an in-page concern link (a same-route navigation) also
+  // opens its machine: the router re-renders this section, and the render-time sync below picks
+  // the hash up (React's adjust-state-when-a-value-changes pattern, no location subscription).
+  const [seenHash, setSeenHash] = useState<string | null>(() => globalThis.location?.hash ?? null);
+  const hash = globalThis.location?.hash ?? null;
+  if (hash !== seenHash) {
+    setSeenHash(hash);
+    const target = hashHostId();
+    if (target) setExpanded(target);
+  }
 
-  // Scroll the deep-linked machine into view once, after the rows exist. No-op in tests.
+  // Scroll the deep-linked machine into view. No-op in tests (jsdom has no scrollIntoView).
   useEffect(() => {
+    if (seenHash === null) return;
     const target = hashHostId();
     if (target) document.getElementById(`machine-${target}`)?.scrollIntoView?.({ block: "center" });
-  }, []);
+  }, [seenHash]);
 
   const hosts = worstFirst(data.hosts);
   return (

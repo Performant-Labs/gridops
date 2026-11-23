@@ -132,3 +132,22 @@ describe("machine detail slot", () => {
     expect(document.body.textContent).toContain("Expand a machine above");
   });
 });
+
+describe("deep links", () => {
+  it("survives a malformed machine hash", async () => {
+    window.location.hash = "#machine-%E0%A4";
+    const data = fixture();
+    await render(table(data));
+    expect(all("[data-machine-detail]")).toHaveLength(0);
+    expect(all('[id^="machine-"]')).toHaveLength(data.hosts.length);
+  });
+
+  it("opens the machine when the hash changes while mounted, as an in-page concern link does", async () => {
+    const data = fixture();
+    await render(table(data));
+    expect(all("[data-machine-detail]")).toHaveLength(0);
+    window.location.hash = `#machine-${hostByName(data, "io").id}`;
+    await render(table(data));
+    expect(all("[data-machine-detail]").map((detail) => detail.getAttribute("data-machine-detail"))).toEqual([hostByName(data, "io").id]);
+  });
+});
