@@ -2313,6 +2313,83 @@ impl RegistryService {
     }
 }
 
+/// What fleet health's live view (#201) reads of one machine: the parts of
+/// `list_hosts`' admin projection it needs, read the same way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostLiveRead {
+    pub id: HostId,
+    pub name: crate::fleet::ids::UpstreamText,
+    /// The machine's placements by state (`CountScope::Host`).
+    pub counts: FleetRecordCounts,
+    pub physical_budget: ResourceAmountDto,
+    /// Charged allocations on the root domain.
+    pub physical_allocation: AllocationReadV1,
+    pub latest_root_measurement: Option<MeasurementReadV1>,
+    pub failed_placements_last_hour: BrowserUint53,
+    pub start_gate: Option<StartGateReadV1>,
+}
+
+/// Every approved, non-deleted machine's [`HostLiveRead`] as of `now`, in id
+/// order, from one read transaction: what `list_hosts` gives a system admin
+/// for the same fields, without a browser principal (D-3(f)). The fleet
+/// health endpoint is admin-only, so it reads as one.
+///
+/// # Errors
+/// The control plane is not configured (`DependencyUnavailable`), or a read
+/// or stored value fails.
+pub async fn host_live_reads(
+    pool: &sqlx::SqlitePool,
+    now: i64,
+) -> Result<Vec<HostLiveRead>, QueryError> {
+    let mut tx = pool.begin().await?;
+    let incarnation: String =
+        sqlx::query_scalar("SELECT incarnation FROM fleet_control_plane WHERE singleton=1")
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(QueryError::DependencyUnavailable)?;
+    let snapshot = Snapshot {
+        user_id: String::new(),
+        system_admin: true,
+        incarnation: incarnation
+            .parse()
+            .map_err(|_| QueryError::DependencyUnavailable)?,
+        now,
+    };
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,name FROM fleet_hosts
+          WHERE enrollment_state='approved' AND deleted_at IS NULL ORDER BY id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut reads = Vec::with_capacity(rows.len());
+    for (id, name) in rows {
+        let host_id = parse_host_id(&id)?;
+        let root_id: String = sqlx::query_scalar(
+            "SELECT id FROM host_resource_domains WHERE host_id=? AND parent_domain_id IS NULL",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(QueryError::MalformedData)?;
+        let root_id = parse_domain_id(&root_id)?;
+        let counts = counts(&mut tx, &snapshot, host_id, None, None, CountScope::Host).await?;
+        let (failed_placements_last_hour, _) = placement_failures(&mut tx, host_id, now).await?;
+        reads.push(HostLiveRead {
+            id: host_id,
+            name: checked_text(name)?,
+            counts,
+            physical_budget: root_budget(&mut tx, host_id).await?,
+            physical_allocation: allocation_read(&mut tx, host_id, None, Some(root_id)).await?,
+            latest_root_measurement: latest_measurement(&mut tx, &snapshot, host_id, root_id)
+                .await?,
+            failed_placements_last_hour,
+            start_gate: start_gate_read(&mut tx, host_id, now).await?,
+        });
+    }
+    tx.commit().await?;
+    Ok(reads)
+}
+
 fn checked_text(value: String) -> Result<crate::fleet::ids::UpstreamText, QueryError> {
     crate::fleet::ids::UpstreamText::new(value).map_err(|_| QueryError::MalformedData)
 }

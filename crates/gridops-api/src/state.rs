@@ -4,7 +4,8 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use gridops_core::{
     BitbucketClient, Config, GitHubClient, Vault,
-    fleet::ExternalId,
+    fleet::{ExternalId, registry::RegistryClock},
+    fleet_health::FleetHealthSource,
     gitlab::{
         CreatedRunner, GitLabApi, GitLabCredentials, GitLabError, Job, RunnerSummary, Scope,
         ScopeKind,
@@ -34,6 +35,11 @@ pub struct AppState {
     /// [`AppState::with_gitlab`]; `main.rs` sets the real `GitLabClient` there.
     pub gitlab: Arc<dyn GitLabApi>,
     pub http: reqwest::Client,
+    /// The fleet health endpoint's source and clock (#197); its type and
+    /// default source live in `fleet/health.rs`. Tests swap them with
+    /// [`AppState::with_fleet_health_source`] and
+    /// [`AppState::with_fleet_health_clock`].
+    pub(crate) fleet_health: crate::fleet::FleetHealthState,
 }
 
 /// The GitLab client until #146's lands: every call fails with `Upstream`,
@@ -138,6 +144,7 @@ impl AppState {
             http: reqwest::Client::builder()
                 .user_agent("GridOps/0.1")
                 .build()?,
+            fleet_health: crate::fleet::FleetHealthState::new(),
         })
     }
 
@@ -146,6 +153,23 @@ impl AppState {
     #[must_use]
     pub fn with_gitlab(mut self, gitlab: Arc<dyn GitLabApi>) -> Self {
         self.gitlab = gitlab;
+        self
+    }
+
+    /// Replaces the fleet health source; tests inject
+    /// `FakeFleetHealthSource`.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_fleet_health_source(mut self, source: Arc<dyn FleetHealthSource>) -> Self {
+        self.fleet_health = self.fleet_health.with_source(source);
+        self
+    }
+
+    /// Replaces the clock the fleet health cache reads.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_fleet_health_clock(mut self, clock: Arc<dyn RegistryClock>) -> Self {
+        self.fleet_health = self.fleet_health.with_clock(clock);
         self
     }
 

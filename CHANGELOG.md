@@ -8,6 +8,29 @@ refer to <https://github.com/Performant-Labs/gridops/pulls>.
 Known problems in the current release are in the README's
 [Known issues](README.md#known-issues).
 
+## Unreleased
+
+### Upgrading
+
+- Migration `0050` adds the fleet health tables (job category rules, the
+  hourly job and machine rollups, the recompute list and the score
+  snapshots), a nullable `category` on workflow and GitLab jobs, the GitLab
+  job's name, project path and start and finish times, and indexes on both
+  job tables' `completed_at`. Existing jobs keep their rows and stay
+  unclassified; nothing is rebuilt. Timed on a copy of a 3 GB production
+  database: under a second. (#197)
+
+### Added
+
+- **Fleet health, the groundwork.** A **Health** page under Machines
+  (`/fleet/health`, administrators only) with a section for each part of the
+  page, served from a fixed example fleet until the fleet health issues of
+  #198 fill them in; `GET /api/v1/fleet/health?window=1h|24h|7d`, which takes a
+  `fleet:read` token like the workload chart; and a **Job categories**
+  placeholder under **Settings → General**. New GitHub and GitLab jobs get a
+  `category` column, and the reconciler keeps 90 days of fleet health
+  rollups. See [Fleet health](docs/design/fleet-health.md). (#197)
+
 ## 0.2.0 - 2026-11-22
 
 The version was set to 0.2.0 on 2026-11-04 (#120), but that tag was never

@@ -220,6 +220,10 @@ function NavLinkItem({ item, active, count, onNavigate }: { item: NavItem; activ
   const Icon = item.icon;
   return (
     <Link
+      // The router marks a link it calls active with aria-current="page" and data-status="active",
+      // after these props, and its default match is a prefix one (`/fleet` for `/fleet/health`).
+      // An item the app calls inactive is router-active only on an exact match, so the two agree.
+      activeOptions={{ exact: !active }}
       aria-current={active ? "page" : undefined}
       className={cn(
         "flex h-7 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors",

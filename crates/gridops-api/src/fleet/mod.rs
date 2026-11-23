@@ -8,11 +8,31 @@ mod commands;
 mod credentials;
 mod enrollment;
 mod error;
+// #197: the fleet health endpoint (#194), its live half (#201), its
+// database source (#204) and the job category settings (#199).
+mod health;
+mod health_live;
+mod health_source;
 mod inventory;
+pub(crate) mod job_categories;
 pub(crate) mod openapi;
 mod profiles;
 mod query;
 mod query_boundary;
+
+// #197: the fleet health tests. The contract tests are #197's whatever issue
+// fills them in (D-3(e)): a wave-1 agent removes its markers and edits nothing
+// here.
+#[cfg(test)]
+mod health_contract_tests;
+#[cfg(test)]
+mod health_live_contract_tests;
+#[cfg(test)]
+mod health_test_support;
+#[cfg(test)]
+mod health_wiring_tests;
+#[cfg(test)]
+mod job_categories_contract_tests;
 
 use axum::{
     Router,
@@ -24,6 +44,7 @@ use axum::{
 use gridops_core::fleet::protocol::{browser::ErrorCode, primitives::DEFAULT_JSON_BYTES};
 
 use self::error::RequestContext;
+pub(crate) use self::health::FleetHealthState;
 use crate::state::AppState;
 
 /// The token scope map, as data: every route, fleet or not, that accepts a
@@ -63,6 +84,7 @@ pub(crate) const TOKEN_SCOPED_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/api/v1/fleet/targets", "fleet:read"),
     ("GET", "/api/v1/fleet/workload", "fleet:read"),
+    ("GET", "/api/v1/fleet/health", "fleet:read"),
     ("GET", "/api/v1/fleet/pools/{pool_id}/profile", "fleet:read"),
     ("GET", "/api/v1/fleet/pools/{pool_id}/queue", "fleet:read"),
     (
@@ -158,6 +180,7 @@ pub(crate) fn router() -> Router<AppState> {
             get(profiles::capacity).put(profiles::save_capacity),
         )
         .route("/api/v1/fleet/workload", get(profiles::workload))
+        .route("/api/v1/fleet/health", get(health::health))
         .route("/api/v1/fleet/hosts", get(query::hosts))
         .route(
             "/api/v1/fleet/hosts/{host_id}",

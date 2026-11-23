@@ -38,7 +38,15 @@ export function PageHeader({
         {breadcrumbs.map((crumb) => (
           <span className="flex shrink-0 items-center gap-1" key={crumb.label}>
             {crumb.to ? (
-              <Link className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-muted-foreground hover:bg-hover hover:text-foreground" params={crumb.params} to={crumb.to}>
+              <Link
+                // A breadcrumb names an ancestor, never the current page (that crumb has no `to`).
+                // The router's default prefix match would mark `/fleet` as aria-current="page" on
+                // `/fleet/machines/<id>`, so a breadcrumb is router-active only on an exact match.
+                activeOptions={{ exact: true }}
+                className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-muted-foreground hover:bg-hover hover:text-foreground"
+                params={crumb.params}
+                to={crumb.to}
+              >
                 {crumb.label}
               </Link>
             ) : (
@@ -89,6 +97,10 @@ export function ViewTab({ active, children, count, ...props }: React.ComponentPr
 export function ViewTabLink({ active, children, count, ...props }: LinkProps & { active?: boolean; count?: number; children: React.ReactNode }) {
   return (
     <Link
+      // As in the sidebar: the router adds aria-current="page" to any link it calls active, with a
+      // prefix match by default, so a tab the app calls inactive is router-active only on an exact
+      // match and the two agree. A caller's own `activeOptions` still wins.
+      activeOptions={{ exact: !active }}
       className={cn(
         "inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors",
         active ? "border-border-strong bg-selected text-foreground" : "border-transparent text-muted-foreground hover:bg-hover hover:text-foreground",

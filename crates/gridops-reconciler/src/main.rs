@@ -1,10 +1,25 @@
 mod agent;
 mod builtin_host;
 mod fleet;
+// #197: the fleet health passes (#190, #191, #200, #204).
+mod fleet_health_backfill;
+mod fleet_health_rollup;
+mod fleet_health_snapshot;
+mod fleet_host_rollup;
 mod gitlab_lifecycle;
 mod gitlab_poll;
 mod tart_lane;
 
+// #197: the fleet health tests. The contract tests are #197's whatever issue
+// fills them in (D-3(e)).
+#[cfg(test)]
+mod fleet_health_backfill_contract_tests;
+#[cfg(test)]
+mod fleet_health_rollup_contract_tests;
+#[cfg(test)]
+mod fleet_health_wiring_tests;
+#[cfg(test)]
+mod fleet_host_rollup_contract_tests;
 #[cfg(test)]
 mod gitlab_lifecycle_tests;
 #[cfg(test)]
@@ -33,6 +48,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
+use gridops_core::fleet_health::classifier_cache::{JobOrigin, NewJob, category_for_insert};
 use gridops_core::gitlab::{GitLabApi, GitLabCredentials};
 use gridops_core::{
     BitbucketClient, BitbucketRunnerTarget, Config, GitHubClient, GitHubWorkflowJob,
@@ -605,6 +621,26 @@ async fn record_pass(database: &SqlitePool, started_at: i64, elapsed: Duration) 
     Ok(())
 }
 
+/// The fleet health passes (#197), in order: classify new jobs (#190), roll
+/// up the hours (#191, #200), then snapshot the scores (#204). Each failure
+/// is logged and the pass goes on; they run before the manager is asked, so
+/// an unavailable manager never stops them.
+async fn fleet_health_passes(database: &SqlitePool) {
+    let now = now_millis();
+    if let Err(error) = fleet_health_backfill::run_pass(database, now).await {
+        tracing::warn!(error = ?error, "fleet health job category backfill failed");
+    }
+    if let Err(error) = fleet_health_rollup::run_pass(database, now).await {
+        tracing::warn!(error = ?error, "fleet health hourly rollup failed");
+    }
+    if let Err(error) = fleet_host_rollup::run_pass(database, now).await {
+        tracing::warn!(error = ?error, "fleet health machine rollup failed");
+    }
+    if let Err(error) = fleet_health_snapshot::run_pass(database, now).await {
+        tracing::warn!(error = ?error, "fleet health snapshot failed");
+    }
+}
+
 async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Err(error) = retry_github_runner_cleanup(app).await {
         tracing::warn!(error = ?error, "deferred GitHub runner cleanup pass failed");
@@ -615,6 +651,7 @@ async fn reconcile(app: &Reconciler) -> Result<()> {
     if let Err(error) = fleet::tick(app).await {
         tracing::warn!(error = ?error, "fleet reconciliation pass failed");
     }
+    fleet_health_passes(&app.database).await;
     let provisioning_paused = setting_bool(&app.database, "provisioningPaused", false).await;
     let builtin_enabled = gridops_core::builtin_host::is_enabled(&app.database).await;
     if let Err(error) = gridops_core::builtin_host::sync_pool_states(&app.database).await {
@@ -2135,11 +2172,35 @@ async fn upsert_workflow_job(
     job: &GitHubWorkflowJob,
     now: i64,
 ) -> Result<()> {
+    // The category is bound for a new row only: the `ON CONFLICT` update
+    // below never touches it (#197, W-15), so a job row that already exists
+    // is not classified again. The classifier reads the run's workflow name
+    // and repository on this same connection.
+    let exists = sqlx::query("SELECT 1 FROM workflow_jobs WHERE id=?")
+        .bind(job.id)
+        .fetch_optional(&mut *connection)
+        .await?
+        .is_some();
+    let category = if exists {
+        None
+    } else {
+        category_for_insert(
+            &mut *connection,
+            &NewJob {
+                job_name: Some(&job.name),
+                labels: &job.labels,
+                origin: JobOrigin::GitHubRun(job.run_id),
+            },
+            now,
+        )
+        .await
+    };
     sqlx::query(
         r#"INSERT INTO workflow_jobs (
           id,run_id,name,status,conclusion,runner_id,runner_name,runner_group_id,
-          runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          runner_group_name,labels,html_url,started_at,completed_at,created_at,updated_at,
+          category
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,name=excluded.name,
           status=excluded.status,conclusion=excluded.conclusion,runner_id=excluded.runner_id,
           runner_name=excluded.runner_name,runner_group_id=excluded.runner_group_id,
@@ -2162,6 +2223,7 @@ async fn upsert_workflow_job(
     .bind(parse_github_date(job.completed_at.as_deref()))
     .bind(parse_github_date(job.started_at.as_deref()).unwrap_or(now))
     .bind(now)
+    .bind(category.map(|category| category.as_str()))
     .execute(&mut *connection)
     .await?;
     gridops_core::record_job_report(&mut *connection, job.id, job.run_attempt, now).await?;
@@ -3291,6 +3353,9 @@ async fn runners(app: &Reconciler, pool_id: &str) -> Result<Vec<Runner>> {
     .await?)
 }
 
+/// How long the fleet health rollups and snapshots are kept (#197).
+const FLEET_HEALTH_RETENTION_DAYS: i64 = 90;
+
 async fn cleanup_retention(app: &Reconciler) -> Result<()> {
     let now = now_millis();
     let webhook_cutoff =
@@ -3350,6 +3415,21 @@ async fn cleanup_retention(app: &Reconciler) -> Result<()> {
         .await?;
     sqlx::query("DELETE FROM reconciler_passes WHERE started_at < ?")
         .bind(capacity_cutoff)
+        .execute(&app.database)
+        .await?;
+    // Fleet health keeps 90 days (#197): the hourly rollups and the score
+    // snapshots, each read and deleted through its time index.
+    let fleet_health_cutoff = now - FLEET_HEALTH_RETENTION_DAYS * 86_400_000;
+    sqlx::query("DELETE FROM fleet_health_hourly WHERE hour < ?")
+        .bind(fleet_health_cutoff)
+        .execute(&app.database)
+        .await?;
+    sqlx::query("DELETE FROM fleet_host_hourly WHERE hour < ?")
+        .bind(fleet_health_cutoff)
+        .execute(&app.database)
+        .await?;
+    sqlx::query("DELETE FROM fleet_health_snapshots WHERE recorded_at < ?")
+        .bind(fleet_health_cutoff)
         .execute(&app.database)
         .await?;
     prune_inventory_snapshots(app, now).await;

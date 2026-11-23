@@ -7,15 +7,20 @@
 //! Which pool a job is under is decided once, by the same rule the reconciler
 //! scales from and a run's page uses ([`waiting_job_pools`]); nothing here
 //! matches labels itself.
+//!
+//! The fleet health page (#197, #201) reads the same split over every
+//! installation, with no viewer ([`fleet_queue_breakdown`]): the job and pool
+//! queries lose their user filter and nothing else changes, so for a user who
+//! sees every installation the two give the same numbers.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gridops_core::{
-    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, WaitingJobOwner, is_runner_system_label,
-    pool_platform_labels, waiting_job_pools,
+    LINUX_RUNNER_LABEL, MACOS_RUNNER_LABEL, WaitingJobOwner, fleet_health::JobCategory,
+    is_runner_system_label, pool_platform_labels, waiting_job_pools,
 };
 use serde_json::{Value, json};
-use sqlx::Row as _;
+use sqlx::{Row as _, SqlitePool, sqlite::SqliteRow};
 
 use super::json_array;
 use crate::{auth::AuthUser, error::ApiResult, state::AppState};
@@ -102,13 +107,13 @@ impl OfferedLabels {
 
 /// Jobs that ask for the same labels no pool has.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MissingLabels {
+pub(crate) struct MissingLabels {
     pub labels: Vec<String>,
     pub jobs: i64,
 }
 
 #[derive(Debug, Default)]
-pub(super) struct QueueBreakdown {
+pub(crate) struct QueueBreakdown {
     /// Jobs an autoscaling pool will start or free a runner for.
     pub waiting: i64,
     /// Jobs only a manual-mode pool can run: nothing starts a runner for them.
@@ -268,10 +273,18 @@ pub(super) async fn visible_pools(state: &AppState, user_id: &str) -> ApiResult<
     .bind(user_id)
     .fetch_all(&state.database)
     .await?;
+    pools_with_platforms(&state.database, &pool_rows).await
+}
+
+/// `pool_rows` (`id`, `name`, `labels`) with the platform labels each offers.
+async fn pools_with_platforms(
+    database: &SqlitePool,
+    pool_rows: &[SqliteRow],
+) -> ApiResult<Vec<VisiblePool>> {
     let mut platforms = if pool_rows.is_empty() {
         HashMap::new()
     } else {
-        pool_platform_labels(&state.database).await?
+        pool_platform_labels(database).await?
     };
     Ok(pool_rows
         .iter()
@@ -289,6 +302,39 @@ pub(super) async fn visible_pools(state: &AppState, user_id: &str) -> ApiResult<
         .collect())
 }
 
+fn waiting_job(row: &SqliteRow) -> WaitingJob {
+    WaitingJob {
+        id: row.get::<i64, _>("id"),
+        labels: json_array(row.get::<&str, _>("labels")),
+        created_at: row.get::<i64, _>("created_at"),
+    }
+}
+
+/// [`split_queue`] with the pool each job is under, from
+/// [`waiting_job_pools`].
+async fn split_waiting_jobs(
+    database: &SqlitePool,
+    jobs: &[WaitingJob],
+    pools: &[VisiblePool],
+    now: i64,
+) -> ApiResult<QueueBreakdown> {
+    let mut serving = HashMap::new();
+    let mut manual = HashMap::new();
+    if !jobs.is_empty() {
+        for owner in waiting_job_pools(database)
+            .await?
+            .into_iter()
+            .filter_map(|job| job.owner)
+        {
+            match owner {
+                WaitingJobOwner::Scaling(owner) => serving.insert(owner.job_id, owner.pool_id),
+                WaitingJobOwner::Manual { job_id, pool_id } => manual.insert(job_id, pool_id),
+            };
+        }
+    }
+    Ok(split_queue(jobs, &serving, &manual, pools, now))
+}
+
 /// The queue as `user` may see it: the jobs of their installations waiting to
 /// start in a run that hasn't finished, split by whether a pool serves them.
 pub(super) async fn queue_breakdown(
@@ -303,30 +349,53 @@ pub(super) async fn queue_breakdown(
     .bind(&user.id)
     .fetch_all(&state.database)
     .await?;
-    let jobs = job_rows
-        .iter()
-        .map(|row| WaitingJob {
-            id: row.get::<i64, _>("id"),
-            labels: json_array(row.get::<&str, _>("labels")),
-            created_at: row.get::<i64, _>("created_at"),
-        })
-        .collect::<Vec<_>>();
+    let jobs = job_rows.iter().map(waiting_job).collect::<Vec<_>>();
     let pools = visible_pools(state, &user.id).await?;
-    let mut serving = HashMap::new();
-    let mut manual = HashMap::new();
-    if !jobs.is_empty() {
-        for owner in waiting_job_pools(&state.database)
-            .await?
-            .into_iter()
-            .filter_map(|job| job.owner)
-        {
-            match owner {
-                WaitingJobOwner::Scaling(owner) => serving.insert(owner.job_id, owner.pool_id),
-                WaitingJobOwner::Manual { job_id, pool_id } => manual.insert(job_id, pool_id),
-            };
-        }
+    split_waiting_jobs(&state.database, &jobs, &pools, now).await
+}
+
+/// The whole fleet's queue, whoever can see it (#197, D-3(b)), and its
+/// queued jobs by category.
+#[derive(Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code, reason = "#201's collect_live reads it"))]
+pub(crate) struct FleetQueueBreakdown {
+    pub queue: QueueBreakdown,
+    /// Every queued job by its stored category; a job not yet classified
+    /// counts as `other`.
+    pub by_category: BTreeMap<JobCategory, i64>,
+}
+
+/// [`queue_breakdown`] over every installation with no viewer: the same
+/// queued jobs (`fleet_queued_jobs!`, the Overview's clause without its
+/// user) and every pool that covers an installation.
+#[cfg_attr(not(test), allow(dead_code, reason = "#201's collect_live reads it"))]
+pub(crate) async fn fleet_queue_breakdown(
+    database: &SqlitePool,
+    now: i64,
+) -> ApiResult<FleetQueueBreakdown> {
+    let job_rows = sqlx::query(concat!(
+        "SELECT wj.id,wj.labels,wj.created_at,wj.category ",
+        fleet_queued_jobs!()
+    ))
+    .fetch_all(database)
+    .await?;
+    let jobs = job_rows.iter().map(waiting_job).collect::<Vec<_>>();
+    let mut by_category = BTreeMap::new();
+    for row in &job_rows {
+        let category = JobCategory::from_column(row.get::<Option<&str>, _>("category"));
+        *by_category.entry(category).or_default() += 1;
     }
-    Ok(split_queue(&jobs, &serving, &manual, &pools, now))
+    let pool_rows = sqlx::query(
+        "SELECT p.id,p.name,p.labels FROM runner_pools p
+          WHERE EXISTS (SELECT 1 FROM runner_pool_installations mapped WHERE mapped.pool_id=p.id)",
+    )
+    .fetch_all(database)
+    .await?;
+    let pools = pools_with_platforms(database, &pool_rows).await?;
+    Ok(FleetQueueBreakdown {
+        queue: split_waiting_jobs(database, &jobs, &pools, now).await?,
+        by_category,
+    })
 }
 
 #[cfg(test)]

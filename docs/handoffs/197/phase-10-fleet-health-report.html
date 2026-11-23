@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spec audit report: Fleet health shared contract (#197), round 2</title>
+<style>
+  :root { --bg:#0e1013; --panel:#161a1f; --line:#2a3038; --text:#e6e9ee; --muted:#9aa3af; --ok:#3fb27f; --warn:#e0a03a; --bad:#e5534b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header.top { position:sticky; top:0; z-index:5; background:#0b0d10ee; border-bottom:1px solid var(--line); padding:8px 20px; display:flex; flex-wrap:wrap; gap:6px 18px; align-items:center; }
+  header.top a { color:var(--muted); text-decoration:none; font-size:13px; } header.top a:hover { color:var(--text); }
+  main { max-width:1340px; margin:0 auto; padding:24px 20px 80px; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:18px; margin:36px 0 10px; border-bottom:1px solid var(--line); padding-bottom:6px; } h3 { font-size:15px; margin:0 0 4px; }
+  .banner { background:var(--panel); border:1px solid var(--line); border-left:8px solid var(--ok); border-radius:8px; padding:16px 20px; display:flex; flex-wrap:wrap; gap:20px 40px; align-items:center; }
+  .verdict { font-size:44px; font-weight:800; letter-spacing:.02em; color:var(--ok); line-height:1; }
+  .banner table { border-collapse:collapse; font-size:14px; } .banner th, .banner td { text-align:left; padding:3px 14px 3px 0; } .banner th { color:var(--muted); font-weight:600; }
+  .ok { color:var(--ok); font-weight:700; } .warn { color:var(--warn); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+  .note { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; color:var(--muted); font-size:14px; margin:12px 0; }
+  ul.diffs li { margin:6px 0; }
+  .block { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:16px 0; }
+  .meta { color:var(--muted); margin:0 0 10px; font-size:13px; }
+  .wipe { position:relative; width:100%; border:1px solid var(--line); overflow:hidden; background:#000; }
+  .wipe img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; object-position:top left; user-select:none; -webkit-user-drag:none; }
+  .wipe img.top { clip-path: inset(0 50% 0 0); }
+  .wipe .handle { position:absolute; top:0; bottom:0; width:2px; background:#ff3b6b; left:50%; pointer-events:none; box-shadow:0 0 0 1px #0008; }
+  .slider { display:block; margin:10px 0; font-size:13px; color:var(--muted); } .slider input { display:block; width:100%; max-width:640px; margin-top:6px; }
+  details { margin:10px 0 0; } summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  img.full { width:100%; height:auto; border:1px solid var(--line); margin-top:8px; display:block; }
+  table.sections { width:100%; border-collapse:collapse; font-size:14px; background:var(--panel); border:1px solid var(--line); }
+  table.sections th, table.sections td { border-bottom:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  table.sections th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  table.sections img { width:300px; max-width:100%; height:auto; border:1px solid var(--line); background:#000; }
+  code { background:#0b0d10; padding:1px 5px; border-radius:4px; font-size:13px; }
+</style></head>
+<body>
+<header class="top"><strong>#197 spec audit</strong>
+  <a href="#verdict">Verdict</a><a href="#different">What I see different</a><a href="#v360">360</a><a href="#v768">768</a><a href="#v1280">1280</a><a href="#other">Light theme and 403</a><a href="#sections">Per-section table</a><a href="#recs">Recommendations</a></header>
+<main>
+<h1>Fleet health shared contract (#197): visual check after the rework</h1>
+<p class="meta">Spec audit round 2, branch <code>claude/fleet-197-contract</code>, head <code>e634843</code>, 2026-11-22. Page checked: <code>/fleet/health</code>.</p>
+
+<section id="verdict">
+  <div class="banner">
+    <div class="verdict">PASS</div>
+    <table><thead><tr><th>Viewport</th><th>Pixels different</th><th>Delta</th><th>Status</th></tr></thead><tbody><tr><td>360 x 800</td><td>352</td><td>0.1222%</td><td class="ok">MATCH</td></tr><tr><td>768 x 1024</td><td>352</td><td>0.0448%</td><td class="ok">MATCH</td></tr><tr><td>1280 x 800</td><td>352</td><td>0.0344%</td><td class="ok">MATCH</td></tr></tbody></table>
+  </div>
+  <div class="note"><strong>What the two sides are.</strong> This page is new and no design mock or preview exists for it, so there is nothing to measure it against. The comparison here is <em>before and after the rework</em>:
+    "before" is the round 1 capture (head <code>45dfed6</code>), "after" is today's capture (head <code>e634843</code>), taken the same way (headless Chromium, the same sample data, full page). It shows the rework changed nothing visible. It does not show that the page matches a design. The real sections (#195, #202, #203) carry their own screenshot checks.</div>
+</section>
+
+<section id="different">
+  <h2>What I see different</h2>
+  <ul class="diffs">
+    <li>The small grey build line at the very top of the page changed from "build 465 &middot; 45dfed6" to "build 469 &middot; e634843". That is the build number and commit id, which change with every commit. It is the only change at every size, in light and dark, and in the 403 state.</li>
+    <li>Nothing else moved or changed colour. The sidebar, the page header and window picker (1h, 24h, 7d, Refresh), and all six "Coming in #N" cards are identical to round 1 at 360, 768 and 1280.</li>
+    <li>The rework was an accessibility fix, not a visual one: the sidebar used to tell a screen reader that two items (Machines and Health) were the current page, while only Health looked selected. It now announces only Health. A pixel comparison cannot show that, so it was checked in the browser directly: on <code>/fleet/health</code> exactly one sidebar link carries the "current page" marker, Health, at 360, 768 and 1280 in light and dark.</li>
+  </ul>
+  <p class="meta">No other visible differences were detected at any viewport.</p>
+</section>
+
+<h2>Per-viewport comparison</h2>
+
+<section class="block" id="v360">
+  <h3>360 x 800 (phone), dark theme</h3>
+  <p class="meta">352 of 288000 pixels differ (0.1222%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:360px;aspect-ratio:360 / 800" data-wipe>
+    <img class="bottom" src="screenshots/s-health-360-dark-20261122.png" alt="Round 1, before the rework (360 x 800 (phone), dark theme)" width="360" height="800">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-360-dark-live-20261122.png" alt="Round 2, after the rework (360 x 800 (phone), dark theme)" width="360" height="800">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 360 x 800 (phone), dark theme"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-360-dark-diff-20261122.png" alt="Pixel difference, 360 x 800 (phone), dark theme" style="max-width:360px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-360-dark-composite-20261122.png" alt="Before and after side by side, 360 x 800 (phone), dark theme"></details>
+</section>
+
+<section class="block" id="v768">
+  <h3>768 x 1024 (tablet), dark theme</h3>
+  <p class="meta">352 of 786432 pixels differ (0.0448%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:768px;aspect-ratio:768 / 1024" data-wipe>
+    <img class="bottom" src="screenshots/s-health-768-dark-20261122.png" alt="Round 1, before the rework (768 x 1024 (tablet), dark theme)" width="768" height="1024">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-768-dark-live-20261122.png" alt="Round 2, after the rework (768 x 1024 (tablet), dark theme)" width="768" height="1024">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 768 x 1024 (tablet), dark theme"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-768-dark-diff-20261122.png" alt="Pixel difference, 768 x 1024 (tablet), dark theme" style="max-width:768px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-768-dark-composite-20261122.png" alt="Before and after side by side, 768 x 1024 (tablet), dark theme"></details>
+</section>
+
+<section class="block" id="v1280">
+  <h3>1280 x 800 (desktop), dark theme</h3>
+  <p class="meta">352 of 1024000 pixels differ (0.0344%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:1280px;aspect-ratio:1280 / 800" data-wipe>
+    <img class="bottom" src="screenshots/s-health-1280-dark-20261122.png" alt="Round 1, before the rework (1280 x 800 (desktop), dark theme)" width="1280" height="800">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-1280-dark-live-20261122.png" alt="Round 2, after the rework (1280 x 800 (desktop), dark theme)" width="1280" height="800">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 1280 x 800 (desktop), dark theme"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-dark-diff-20261122.png" alt="Pixel difference, 1280 x 800 (desktop), dark theme" style="max-width:1280px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-dark-composite-20261122.png" alt="Before and after side by side, 1280 x 800 (desktop), dark theme"></details>
+</section>
+
+<h2 id="other">Light theme and the 403 state</h2>
+
+<section class="block" id="v360l">
+  <h3>360 x 800, light theme</h3>
+  <p class="meta">363 of 288000 pixels differ (0.1260%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:360px;aspect-ratio:360 / 800" data-wipe>
+    <img class="bottom" src="screenshots/s-health-360-light-20261122.png" alt="Round 1, before the rework (360 x 800, light theme)" width="360" height="800">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-360-light-live-20261122.png" alt="Round 2, after the rework (360 x 800, light theme)" width="360" height="800">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 360 x 800, light theme"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-360-light-diff-20261122.png" alt="Pixel difference, 360 x 800, light theme" style="max-width:360px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-360-light-composite-20261122.png" alt="Before and after side by side, 360 x 800, light theme"></details>
+</section>
+
+<section class="block" id="v1280l">
+  <h3>1280 x 800, light theme</h3>
+  <p class="meta">363 of 1024000 pixels differ (0.0354%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:1280px;aspect-ratio:1280 / 800" data-wipe>
+    <img class="bottom" src="screenshots/s-health-1280-light-20261122.png" alt="Round 1, before the rework (1280 x 800, light theme)" width="1280" height="800">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-1280-light-live-20261122.png" alt="Round 2, after the rework (1280 x 800, light theme)" width="1280" height="800">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 1280 x 800, light theme"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-light-diff-20261122.png" alt="Pixel difference, 1280 x 800, light theme" style="max-width:1280px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-light-composite-20261122.png" alt="Before and after side by side, 1280 x 800, light theme"></details>
+</section>
+
+<section class="block" id="v1280x">
+  <h3>1280 x 800, the 'Administrators only' (403) state</h3>
+  <p class="meta">352 of 1024000 pixels differ (0.0344%). All of them are inside the 73 x 10 pixel box at the top of the page where the build stamp is printed.</p>
+  <div class="wipe" style="max-width:1280px;aspect-ratio:1280 / 800" data-wipe>
+    <img class="bottom" src="screenshots/s-health-1280-403-20261122.png" alt="Round 1, before the rework (1280 x 800, the 'Administrators only' (403) state)" width="1280" height="800">
+    <img class="top" src="screenshots/cycle-2/t3-fleet-health-1280-403-live-20261122.png" alt="Round 2, after the rework (1280 x 800, the 'Administrators only' (403) state)" width="1280" height="800">
+    <div class="handle" aria-hidden="true"></div>
+  </div>
+  <label class="slider">Drag to compare. Left of the line: after the rework (round 2). Right of the line: before (round 1).
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe between before and after, 1280 x 800, the 'Administrators only' (403) state"></label>
+  <details open><summary>Difference image (red = a pixel that changed)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-403-diff-20261122.png" alt="Pixel difference, 1280 x 800, the 'Administrators only' (403) state" style="max-width:1280px"></details>
+  <details><summary>Side by side (left: before, round 1. Right: after, round 2)</summary>
+    <img class="full" src="screenshots/cycle-2/t3-fleet-health-1280-403-composite-20261122.png" alt="Before and after side by side, 1280 x 800, the 'Administrators only' (403) state"></details>
+</section>
+
+<section id="sections">
+  <h2>Per-section delta table (1280, dark)</h2>
+  <p class="meta">Crops are cut from the red difference image. A section with no red in its crop is unchanged. The same result holds at 360 and 768.</p>
+  <table class="sections">
+    <thead><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop preview</th></tr></thead>
+    <tbody>
+      <tr><td>Top bar: build stamp</td><td>All</td><td class="warn">DELTA (expected)</td><td>The build number and commit id text changed (465 to 469, 45dfed6 to e634843). It changes on every commit and is not part of the page's design.</td><td><img src="screenshots/cycle-2/t3-fleet-health-buildstamp-1280-diffcrop-20261122.png" alt="Difference crop of the build stamp"><br><img src="screenshots/cycle-2/t3-fleet-health-buildstamp-1280-crop-20261122.png" alt="Build stamp before (top) and after (bottom)"></td></tr>
+      <tr><td>Sidebar and highlighted item</td><td>1280</td><td class="ok">MATCH</td><td>Same items, same order, only Health is highlighted, as before.</td><td><img src="screenshots/cycle-2/t3-fleet-health-sidebar-1280-crop-20261122.png" alt="Difference crop of the sidebar"></td></tr>
+      <tr><td>Page header and window picker</td><td>1280</td><td class="ok">MATCH</td><td>"Fleet health" title, the 1h, 24h, 7d buttons and Refresh are unchanged.</td><td><img src="screenshots/cycle-2/t3-fleet-health-header-1280-crop-20261122.png" alt="Difference crop of the page header"></td></tr>
+      <tr><td>The six placeholder cards</td><td>1280</td><td class="ok">MATCH</td><td>Right now, Areas of concern, Fleet score, Job categories, Machines and Machine detail: same positions and text.</td><td><img src="screenshots/cycle-2/t3-fleet-health-cards-1280-crop-20261122.png" alt="Difference crop of the six cards"></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="recs">
+  <h2>Sub-issue recommendations</h2>
+  <p>None. The verdict is PASS. The merge conditions that need a push or production access (the Mars database timing, the two Fleet health guard test PRs, the required check, and the comments on #190, #194 and #201) are listed in <code>handoff-S.md</code>.</p>
+</section>
+</main>
+<script>
+  // Wipe sliders: the range input sets how much of the top (after) image is shown, from the left.
+  document.querySelectorAll("[data-wipe]").forEach(function (wipe) {
+    var input = wipe.parentElement.querySelector("input[type=range]");
+    var top = wipe.querySelector("img.top");
+    var handle = wipe.querySelector(".handle");
+    function update() {
+      var v = Number(input.value);
+      top.style.clipPath = "inset(0 " + (100 - v) + "% 0 0)";
+      handle.style.left = v + "%";
+    }
+    input.addEventListener("input", update);
+    update();
+  });
+</script>
+</body></html>

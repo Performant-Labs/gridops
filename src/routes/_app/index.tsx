@@ -19,6 +19,7 @@ import { AttentionAlerts } from "~/features/dashboard/attention-alerts";
 import { OldestQueuedJob } from "~/features/dashboard/queued-job-reference";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
+import { useFleetHealth } from "~/features/fleet-health/api";
 import { metricTiles } from "~/features/dashboard/metric-tiles";
 import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
@@ -119,9 +120,11 @@ function ConfigurationCallout({ data }: { data: DashboardOverview }) {
 }
 
 function MetricStrip({ data }: { data: DashboardOverview }) {
-  const metrics = metricTiles(data.metrics);
+  // Administrators only: a member's 403 leaves `health.data` empty and the strip as it was.
+  const health = useFleetHealth("24h", { enabled: data.authenticated });
+  const metrics = metricTiles(data.metrics, health.data);
   return (
-    <section aria-label="Runner metrics" className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border xl:grid-cols-5">
+    <section aria-label="Runner metrics" className={cn("grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border", metrics.length > 5 ? "xl:grid-cols-6" : "xl:grid-cols-5")}>
       {metrics.map((metric) => (
         <Link className="group flex flex-col gap-1 bg-panel px-4 py-3.5 transition-colors hover:bg-hover" key={metric.label} to={metric.to}>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">

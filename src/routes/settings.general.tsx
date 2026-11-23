@@ -9,6 +9,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { saveSettingsAction } from "~/features/operations/operations.functions";
+import { JobCategoriesSection } from "~/features/settings/job-categories-section";
 import { MacosVmSlotsRow, TartAgentCapWarning, tartAgentCapWarning } from "~/features/runner-pools/tart-agent-cap";
 
 export const Route = createFileRoute("/settings/general")({
@@ -114,6 +115,8 @@ function GeneralSettings() {
         <div className="flex justify-end">
           <Button disabled={pending} type="submit">{pending ? <LoaderCircle className="animate-spin" /> : null}{pending ? "Saving…" : "Save changes"}</Button>
         </div>
+
+        <JobCategoriesSection />
       </SettingsLayout>
     </form>
   );

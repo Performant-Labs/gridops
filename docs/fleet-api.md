@@ -33,6 +33,7 @@ bot-driven automation.
 | GET | `/api/v1/fleet/hosts/{host_id}/grants` | browser, `fleet:read` | Target grants |
 | GET | `/api/v1/fleet/targets` | browser, `fleet:read` | CI targets |
 | GET | `/api/v1/fleet/workload` | browser, `fleet:read` | Workload overview |
+| GET | `/api/v1/fleet/health` | browser, `fleet:read` | Fleet health over a window (`1h`, `24h`, `7d`), administrators only |
 | GET | `/api/v1/fleet/pools/{pool_id}/profile` | browser, `fleet:read` | Pool fleet execution profile |
 | GET | `/api/v1/fleet/pools/{pool_id}/queue` | browser, `fleet:read` | Queued runners and blocked hosts |
 | GET | `/api/v1/fleet/pools/{pool_id}/capacity` | browser, `fleet:read` | The pool's minimum, desired and maximum runner counts |
@@ -183,6 +184,9 @@ cookie-only on purpose. Paths not listed here answer `404`.
 | PUT | `/api/v1/settings` | required | — | foreign refused | 403 `token_not_accepted` |
 | PUT | `/api/v1/settings/runner-host` | required | — | foreign refused | 403 `token_not_accepted` |
 | PUT | `/api/v1/settings/runner-host/budget` | required | — | foreign refused | 403 `token_not_accepted` |
+| GET | `/api/v1/settings/job-categories` | required | — | — | 403 `token_not_accepted` |
+| PUT | `/api/v1/settings/job-categories` | required | — | foreign refused | 403 `token_not_accepted` |
+| POST | `/api/v1/settings/job-categories/preview` | required | — | foreign refused | 403 `token_not_accepted` |
 | GET | `/api/v1/platform-connections/bitbucket` | required | — | — | 403 `token_not_accepted` |
 | POST | `/api/v1/platform-connections/bitbucket` | required | — | foreign refused | 403 `token_not_accepted` |
 | PUT | `/api/v1/platform-connections/bitbucket/{connection_id}` | required | — | foreign refused | 403 `token_not_accepted` |
@@ -219,6 +223,7 @@ cookie-only on purpose. Paths not listed here answer `404`.
 | POST | `/api/v1/fleet/hosts/{host_id}/credentials/rotate` | required | — | exact | 403 `token_not_accepted` |
 | GET | `/api/v1/fleet/targets` | required | `fleet:read` | — | accepted |
 | GET | `/api/v1/fleet/workload` | required | `fleet:read` | — | accepted |
+| GET | `/api/v1/fleet/health` | required | `fleet:read` | — | accepted |
 | GET | `/api/v1/fleet/pools/{pool_id}/profile` | required | `fleet:read` | — | accepted |
 | PUT | `/api/v1/fleet/pools/{pool_id}/profile` | required | `fleet:operate` | exact | accepted |
 | GET | `/api/v1/fleet/pools/{pool_id}/queue` | required | `fleet:read` | — | accepted |

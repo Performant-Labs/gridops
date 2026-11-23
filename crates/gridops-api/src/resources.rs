@@ -87,10 +87,27 @@ macro_rules! visible_queued_jobs {
     };
 }
 
+/// Every queued job of the fleet, whoever can see it: the clause of
+/// `visible_queued_jobs!` without its user (#197, the fleet health page).
+macro_rules! fleet_queued_jobs {
+    () => {
+        "FROM workflow_jobs wj
+          JOIN workflow_runs wr ON wr.id=wj.run_id
+          JOIN repositories repo ON repo.id=wr.repository_id
+          WHERE wj.status IN ('queued','waiting','pending','requested') AND wr.status!='completed'"
+    };
+}
+
 mod gitlab;
 #[cfg(test)]
 mod gitlab_tests;
 mod overview_queue;
+// #201's `collect_live` reads it (D-3(b)).
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use self::overview_queue::fleet_queue_breakdown;
+// #197 (D-3(b)): the fleet-wide queue breakdown #201 reads.
+#[cfg(test)]
+mod fleet_queue_tests;
 mod tart_host;
 pub(crate) use self::gitlab::credentials as gitlab_credentials;
 pub use self::gitlab::{

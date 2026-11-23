@@ -9,6 +9,7 @@ pub mod db;
 pub mod disk;
 pub mod fix_agent;
 pub mod fleet;
+pub mod fleet_health;
 pub mod github;
 pub mod gitlab;
 pub mod job_log;
