@@ -15,6 +15,7 @@ pub mod gitlab;
 pub mod job_log;
 pub mod models;
 pub mod provisioning;
+pub mod retention;
 pub mod tart_host;
 
 pub use autoscaling::{

@@ -7,8 +7,10 @@
 //!   classified yet), and D-1's `gitlab_jobs` name, path and timing columns;
 //! - `fleet_health_hourly`, `fleet_host_hourly`, `fleet_health_recompute` and
 //!   `fleet_health_snapshots`, all `STRICT` with explicit `CHECK`s;
-//! - the `completed_at` indexes the rollups and the speed index read through,
-//!   and an index under each 90-day retention `DELETE`.
+//! - the `completed_at` indexes the rollups and the speed index read through.
+//!   (The 90-day retention deletes of the three tables are batched through
+//!   `gridops_core::retention` since #222; `tests/retention.rs` pins their
+//!   plans with every other `RetentionTable`'s.)
 //!
 //! The column lists are the contract (`docs/design/fleet-health.md`); the
 //! wave-1 contract tests use these exact names.
@@ -371,7 +373,7 @@ async fn the_checks_refuse_values_outside_the_contract() -> Result<()> {
 }
 
 #[tokio::test]
-async fn window_reads_and_retention_deletes_go_through_an_index() -> Result<()> {
+async fn window_reads_go_through_an_index() -> Result<()> {
     let db = Database::at(None).await?;
     assert!(
         leading_index_columns(&db.pool, "workflow_jobs")
@@ -388,10 +390,6 @@ async fn window_reads_and_retention_deletes_go_through_an_index() -> Result<()> 
     for sql in [
         "SELECT id,name,run_id,labels FROM workflow_jobs WHERE completed_at>=1 AND completed_at<2",
         "SELECT id,job_name FROM gitlab_jobs WHERE completed_at>=1 AND completed_at<2",
-        // The three 90-day retention deletes (#191, #200, #204).
-        "DELETE FROM fleet_health_hourly WHERE hour<1",
-        "DELETE FROM fleet_host_hourly WHERE hour<1",
-        "DELETE FROM fleet_health_snapshots WHERE recorded_at<1",
     ] {
         let details = plan(&db.pool, sql).await?;
         assert!(
