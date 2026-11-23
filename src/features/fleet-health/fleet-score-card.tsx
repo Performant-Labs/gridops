@@ -115,6 +115,8 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
     <li
       className={cn("min-w-0", insufficient && "cursor-help opacity-60")}
       data-component-key={component.key}
+      // The reason rides in a tooltip, so the row itself takes focus for keyboard and touch.
+      tabIndex={insufficient ? 0 : undefined}
       {...(insufficient ? { "data-insufficient": "true" as const } : {})}
     >
       <div className="flex items-baseline gap-2">
@@ -130,7 +132,7 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
         />
       </div>
       <p className={cn("mt-1 text-xs leading-4", insufficient ? "text-faint" : "text-muted-foreground")}>
-        {insufficient ? "Not enough data" : (component.deduction ?? "On target")}
+        {insufficient ? INSUFFICIENT_REASON : (component.deduction ?? "On target")}
       </p>
     </li>
   );

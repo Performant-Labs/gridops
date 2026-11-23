@@ -13,8 +13,14 @@ const SEVERITY_TONES: Record<Severity, HealthTone> = { critical: "danger", warni
 /** How many concerns show before "Show all N". */
 const VISIBLE_CONCERNS = 5;
 
-/** The local clock time a concern has held ("since 3:12 PM"). */
-const sinceFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+/** The local clock time a concern has held ("since 3:12 PM"), with the day once it is not today. */
+const sinceTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const sinceDayTime = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+function formatSince(epochMilliseconds: number): string {
+  const date = new Date(epochMilliseconds);
+  return date.toDateString() === new Date().toDateString() ? sinceTime.format(date) : sinceDayTime.format(date);
+}
 
 const NO_KEYS: ReadonlySet<string> = new Set();
 
@@ -82,7 +88,7 @@ function ConcernRow({ concern, isNew }: { concern: Concern; isNew: boolean }) {
           <span className="min-w-0 font-medium text-foreground">{concern.title}</span>
           {concern.since === null ? null : (
             <span className="ml-auto shrink-0 text-xs text-faint">
-              since <time dateTime={new Date(concern.since).toISOString()}>{sinceFormat.format(concern.since)}</time>
+              since <time dateTime={new Date(concern.since).toISOString()}>{formatSince(concern.since)}</time>
             </span>
           )}
         </div>
