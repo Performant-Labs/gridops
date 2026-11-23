@@ -5,8 +5,8 @@
 
 use super::score::{duration, whole_percent};
 use super::{
-    Concern, ConcernSubject, FleetHealthInputs, HostInfo, JobCategory, ScoreComponent, ScoredFleet,
-    ScoredHost, Severity, SpeedResult,
+    Concern, ConcernSubject, FleetHealthInputs, HostInfo, HourlyJobRow, JobCategory,
+    ScoreComponent, ScoredFleet, ScoredHost, Severity, SpeedResult,
 };
 
 /// A speed index at or above this makes a machine slow (`host-slow`).
@@ -214,9 +214,14 @@ pub fn windowed(inputs: &FleetHealthInputs, scored: &ScoredFleet) -> Vec<Concern
     for host in &scored.hosts {
         concerns.extend(host_idle_while_queued(host, fleet_queue));
     }
-    let total: u64 = inputs.hourly.iter().map(|row| row.job_count).sum();
-    let other: u64 = inputs
+    let start = inputs.now - inputs.window.millis();
+    let window: Vec<&HourlyJobRow> = inputs
         .hourly
+        .iter()
+        .filter(|row| row.hour >= start && row.hour < inputs.now)
+        .collect();
+    let total: u64 = window.iter().map(|row| row.job_count).sum();
+    let other: u64 = window
         .iter()
         .filter(|row| row.category == JobCategory::Other)
         .map(|row| row.job_count)
@@ -230,7 +235,8 @@ pub fn windowed(inputs: &FleetHealthInputs, scored: &ScoredFleet) -> Vec<Concern
 #[cfg(test)]
 mod tests {
     use crate::fleet_health::{
-        FleetLiveStats, HealthTargets, HealthWindow, Histogram, HourlyJobRow, RollupHost, SpeedKey,
+        FleetLiveStats, HOUR_MILLIS, HealthTargets, HealthWindow, Histogram, HourlyJobRow,
+        RollupHost, SpeedKey,
     };
 
     use super::*;
@@ -266,8 +272,12 @@ mod tests {
     }
 
     fn job_row(category: JobCategory, count: u64) -> HourlyJobRow {
+        job_row_at(0, category, count)
+    }
+
+    fn job_row_at(hour: i64, category: JobCategory, count: u64) -> HourlyJobRow {
         HourlyJobRow {
-            hour: 0,
+            hour,
             host: RollupHost::Unmanaged,
             pool_id: "unmanaged".to_owned(),
             category,
@@ -284,7 +294,7 @@ mod tests {
     fn inputs(speed: Vec<SpeedResult>, hourly: Vec<HourlyJobRow>) -> FleetHealthInputs {
         FleetHealthInputs {
             window: HealthWindow::Day,
-            now: 0,
+            now: HOUR_MILLIS,
             hosts: vec![info("h-1", "io")],
             hourly,
             host_hourly: Vec::new(),
@@ -314,6 +324,10 @@ mod tests {
             vec![
                 job_row(JobCategory::Other, 50),
                 job_row(JobCategory::Test, 50),
+                // Outside the window, at its end and before its start: their
+                // 9,999 test jobs must not dilute the window's `other` share.
+                job_row_at(HOUR_MILLIS, JobCategory::Test, 9_999),
+                job_row_at(-24 * HOUR_MILLIS, JobCategory::Test, 9_999),
             ],
         );
         let scored = ScoredFleet {

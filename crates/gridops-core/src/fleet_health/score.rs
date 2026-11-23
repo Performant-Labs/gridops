@@ -78,7 +78,9 @@ fn gib(bytes: u64) -> String {
 /// One component: `measured` scored through `scored` (linear, clamped),
 /// rounded to `u8`, with the deduction sentence `"{body}: −N."` unless it
 /// scored 100. `None` is "not enough data". The points lost are
-/// `round(weight × (100 − raw) / 100)`, from the unrounded score.
+/// `round(weight × (100 − raw) / 100)`, from the unrounded score, so a
+/// component just under 100 can lose a rounded `0` points and still say so
+/// (`−0.`, as the fixture's own "Speed index 1.01 …: −0." does).
 fn component<T: Copy>(
     key: &str,
     label: &str,
@@ -576,6 +578,7 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
         .map(|row| row.start_failures.values().sum::<u32>())
         .sum();
     let infra_failures: u64 = jobs.iter().map(|row| row.infra_failure_count).sum();
+    let completed: u64 = jobs.iter().map(|row| row.completed_count).sum();
     let queue = fleet_queue_wait(
         enough_jobs.then(|| percentile(&wait, 0.9)).flatten(),
         targets,
@@ -584,7 +587,7 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
         queue.clone(),
         fleet_start_reliability(start_success(attempts, failures, targets), targets),
         fleet_infra_failures(
-            enough_jobs.then(|| infra_failures as f64 / total_jobs as f64),
+            (enough_jobs && completed > 0).then(|| infra_failures as f64 / completed as f64),
             targets,
         ),
         fleet_capacity_fit(
@@ -892,14 +895,14 @@ mod tests {
             .map(|component| (component.key.as_str(), component.score))
             .collect();
         // p90 of the merged waits (150 in 2–5 min over 1_000 jobs) is 3 min;
-        // starts 190/200; infra 10/1_000; one misfit hour of 24; online
-        // minutes weighted 18_000_000/28_800_000.
+        // starts 190/200; infra 10 of the 880 successful; one misfit hour of
+        // 24; online minutes weighted 18_000_000/28_800_000.
         assert_eq!(
             summary,
             [
                 ("queue-wait", Some(78)),
                 ("start-reliability", Some(79)),
-                ("infra-failures", Some(80)),
+                ("infra-failures", Some(77)),
                 ("capacity-fit", Some(83)),
                 ("availability", Some(0)),
             ]
@@ -915,7 +918,7 @@ mod tests {
         assert_eq!(
             scored.components[2].deduction.as_deref(),
             Some(
-                "1.0% of completed jobs failed on the infrastructure against a 0% target: \u{2212}3."
+                "1.1% of completed jobs failed on the infrastructure against a 0% target: \u{2212}3."
             )
         );
         assert_eq!(
