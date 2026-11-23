@@ -88,6 +88,7 @@ function MachinePage() {
             <Button aria-label="Refresh" disabled={host.isFetching} onClick={() => void host.refetch()} size="sm" variant="ghost">
               <RefreshCw className={cn(host.isFetching && "animate-spin")} />
             </Button>
+            <Link className={buttonVariants({ size: "sm", variant: "outline" })} hash={`machine-${item.id}`} to="/fleet/health">Health</Link>
             <AgentLogDrawer hostId={item.id} name={item.name} />
             {item.projection === "host" && item.enrollment === "approved" ? <RotateCredentialButton generation={item.credentialGeneration} hostId={item.id} /> : null}
           </>
