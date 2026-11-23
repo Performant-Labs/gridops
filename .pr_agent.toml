@@ -13,11 +13,11 @@
 verbosity_level = 1
 max_description_tokens = 1500
 max_commits_tokens = 1500
-# Context window and output cap: when PR-Agent runs through pr-review-reusable.yml,
-# these two are overridden by .agents/pr-review.yml's pr_agent.max_tokens /
-# output_tokens (the workflow passes them as CONFIG.* env vars, and PR-Agent
-# re-applies env overrides after reading this file). They only apply when PR-Agent
-# runs some other way, e.g. its CLI.
+# Context window (both keys; neither is an output cap): when PR-Agent runs through
+# pr-review-reusable.yml, the workflow sets both from .agents/pr-review.yml's
+# pr_agent.max_tokens as CONFIG.* env vars, and PR-Agent re-applies env overrides
+# after reading this file. The output cap is pr_agent.output_tokens (API path only).
+# These values only apply when PR-Agent runs some other way, e.g. its CLI.
 custom_model_max_tokens = 131072
 max_model_tokens = 131072  # a context clamp, not an output cap (#920)
 
