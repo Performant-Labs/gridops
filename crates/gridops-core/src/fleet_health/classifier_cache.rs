@@ -11,6 +11,16 @@
 //! stays unclassified) and [`ClassifierCache::current`] compiles the rules on
 //! every call. #190 makes the cache rebuild only when the rules change
 //! (`MAX(updated_at)` or `COUNT(*)`), checked at most once a minute.
+//!
+//! [`category_for_insert`] may run while its caller holds the write lock: the
+//! GitLab writer classifies inside the webhook's `BEGIN IMMEDIATE` and the
+//! GitLab poll's one transaction per page of jobs, and the GitHub poll
+//! (`upsert_workflow_job`) inside its page's transaction. Only the GitHub
+//! webhook classifies outside a transaction. So it must stay cheap, including
+//! the first call after a rule change, when the cache recompiles: the
+//! caller's write transaction stays under the speed check's 50 ms
+//! (`classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly`,
+//! a #190 contract test).
 
 use std::sync::{
     Arc,
