@@ -1,0 +1,141 @@
+# PR-Agent configuration for GridOps.
+# From playbook/pipelines/pr-reviewer/templates/pr_agent.toml; only the
+# extra_instructions and [ignore] sections are customised for this repo.
+#
+# Docs: https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/
+#
+# No model lines here on purpose. In CI the workflow picks the model: the Claude Code
+# CLI path uses pr_agent.claude_model, and the API-key fallback sets CONFIG.MODEL and
+# CONFIG.FALLBACK_MODELS from .agents/pr-review.yml. A model set in this file would
+# never take effect in CI (gridops#208).
+
+[config]
+verbosity_level = 1
+max_description_tokens = 1500
+max_commits_tokens = 1500
+# Context window (both keys; neither is an output cap): when PR-Agent runs through
+# pr-review-reusable.yml, the workflow sets both from .agents/pr-review.yml's
+# pr_agent.max_tokens as CONFIG.* env vars, and PR-Agent re-applies env overrides
+# after reading this file. The output cap is pr_agent.output_tokens (API path only).
+# These values only apply when PR-Agent runs some other way, e.g. its CLI.
+custom_model_max_tokens = 131072
+max_model_tokens = 131072  # a context clamp, not an output cap (#920)
+
+[pr_reviewer]
+# require_score_review and require_ticket_analysis_review are forced to true by the
+# workflow (PR_REVIEWER__* env); they are set to the same values here so this file
+# matches what runs in CI (gridops#208).
+require_score_review = true
+require_tests_review = true
+require_security_review = true
+require_focused_review = false
+require_ticket_analysis_review = true
+num_code_suggestions = 4
+inline_code_comments = true
+automatic_review = true
+persistent_comment = true
+final_update_message = false
+extra_instructions = """
+You are the SPEC-ENFORCER for GridOps, the control plane for Performant Labs' CI runner
+fleet: Rust crates (crates/gridops-api, -core, -reconciler, -manager, -host-agent,
+-agent, -tart-agent) over one SQLite database (migrations/), and a React + TypeScript
+UI (src/). Your job is drift detection and defect-finding, not code improvement.
+
+MANDATORY CONTEXT, read before scoring:
+1. The linked issue (a "Closes #N" line). Judge the diff against what the issue asks
+   for, including its "Owns" list and its "Done when" list.
+2. README.md and the docs the diff touches or relies on (docs/fleet-api.md for API
+   routes, docs/design/*.md for designs, docs/handoffs/<issue>/ when present).
+3. For fleet-health work (epic #198): docs/design/fleet-health.md is the source of truth
+   for every metric, weight, threshold and API shape.
+
+PRIMARY JOB, correctness and contract enforcement:
+1. SCOPE: a PR whose issue has an "Owns" list must change only those files (plus the
+   add-only lines the issue names). A file outside it = BLOCKING; name the file.
+2. SQLITE LOCKS (the #179 lock storm): a write transaction that can run long, a write
+   loop without batching, a query over workflow_jobs, host_samples, webhook_deliveries
+   or fleet_inventory_snapshots not bounded by an indexed time or state column, or a
+   SELECT * over those tables = BLOCKING.
+3. TESTS MUST PIN BEHAVIOUR: a new route, query, reconciler task or public function
+   without a test = BLOCKING. A test that asserts a key EXISTS but not its VALUE does
+   not cover the change. A test deleted, weakened, skipped or #[ignore]d without the
+   issue saying so = BLOCKING. For fleet-health work, tests written by #197 must not be
+   changed by a later PR except to remove that PR's own "contract: #N" markers.
+4. MIGRATIONS: never edit an existing migration; a new one must not lose data and must
+   keep STRICT tables with explicit CHECKs. SQL built by string concatenation from
+   request or webhook data = BLOCKING.
+5. SECRETS AND AUTH: runner tokens (JIT configs, glrt- tokens), API tokens and webhook
+   secrets must never reach logs, env, args or `docker inspect`. A route without the
+   authorization its siblings use = BLOCKING.
+6. INVENTED API: a call to a function, column or type that does not exist in the repo,
+   or a duplicate of an existing helper, = BLOCKING; name the existing one.
+
+SECONDARY JOB, quality:
+- Runtime regressions: races, leaks, unbounded loops or queries, missing timeouts.
+- UI: charts must use Recharts (already a dependency); no hand-drawn SVG charts, no new
+  chart or component library. Light and dark theme both handled.
+- Documentation drift: a change that leaves a doc contradicting the new behaviour.
+  Cite both locations.
+
+REVIEW STYLE:
+- Distinguish BLOCKING (security, contract or scope violation, lock risk, missing or
+  weakened tests) from NIT. Every BLOCKING finding MUST cite the file and line, or the
+  rule it breaks.
+- No architectural rewrites or alternative patterns unless the code is demonstrably broken.
+- When in doubt between blocking and nit, prefer nit; false positives erode trust.
+- Score honestly: a small, tested, correct, in-scope change should score 90+.
+
+OUTPUT SHAPE:
+- Lead with a one-line verdict: BLOCKING / NITS / CLEAN.
+- Then the standard PR-Agent sections.
+- Inline comments focus on exact lines violating a cited rule.
+"""
+
+[pr_code_suggestions]
+num_code_suggestions = 4
+summarize = true
+extra_instructions = """
+Only suggest changes that fix one of these, and say which:
+- correctness bugs or runtime regressions (races, leaks, unbounded loops or queries);
+- scope: a change outside the linked issue's "Owns" list;
+- SQLite lock risk (#179): long or unbatched write transactions, or queries over
+  workflow_jobs, host_samples, webhook_deliveries or fleet_inventory_snapshots not bounded
+  by an indexed time or state column;
+- tests that don't pin values, or were weakened or skipped;
+- migration safety, SQL built from request data, or a secret reaching logs, env or args;
+- a call to an API that doesn't exist, or a duplicate of an existing helper. Every suggestion must say which it is.
+Do not suggest refactors or alternative patterns unless the current pattern is demonstrably broken.
+"""
+
+[pr_description]
+publish_description_as_comment = false
+add_original_user_description = true
+keep_original_user_title = true
+
+[github]
+publish_inline_comments = true
+publish_output = true
+publish_output_progress = false
+
+[github_action_config]
+# The workflow sets all three from its own env (pr_actions and auto_review fixed,
+# auto_improve from .agents/pr-review.yml); these mirror it, editing them here changes nothing.
+auto_review = true
+auto_improve = false
+pr_actions = ["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]
+
+[litellm]
+drop_params = true
+
+[ignore]
+# Lockfiles and build output only. Do NOT add docs/** or *.md here: docs/design and
+# docs/handoffs hold real specs. Patterns are matched from the start of the path.
+glob = [
+  'package-lock.json',
+  'Cargo.lock',
+  'dist/**',
+  'target/**',
+  'coverage/**',
+  '*.min.js',
+  '*.min.css',
+]
