@@ -137,9 +137,10 @@ pub async fn speed_indexes(
             sorted.sort_unstable();
             let host_median = median(&sorted);
             let fleet_median = median(&fleet[key]);
-            if fleet_median <= 0 {
-                // Every run of the key recorded no time: nothing to divide
-                // by, so the key says nothing about the machine's speed.
+            if host_median <= 0 || fleet_median <= 0 {
+                // A median of no measurable time — sub-second jobs at GitHub's
+                // second granularity, or clock skew — on the machine or the
+                // fleet: dividing by it, or logging it, is not an index.
                 continue;
             }
             let ratio = host_median as f64 / fleet_median as f64;
@@ -535,7 +536,13 @@ mod tests {
             .await?;
         harness.runs("Jupiter", 2_000, "e2e", 6, 600_000).await?;
         harness.runs("Jupiter", 2_000, "build", 6, 300_000).await?;
-        // "instant" records no time anywhere: it says nothing about speed.
+        // "flash" records no time on Jupiter alone, "instant" nowhere: a
+        // median of no measurable time says nothing about speed, whichever
+        // side of the division it is on.
+        harness.runs("io", 2_000, "flash", 6, 40_000).await?;
+        harness.runs("europa", 2_000, "flash", 6, 40_000).await?;
+        harness.runs("callisto", 2_000, "flash", 6, 40_000).await?;
+        harness.runs("Jupiter", 2_000, "flash", 6, 0).await?;
         harness.runs("Jupiter", 2_000, "instant", 6, 0).await?;
         let results = harness.indexes().await?;
         let index = harness
