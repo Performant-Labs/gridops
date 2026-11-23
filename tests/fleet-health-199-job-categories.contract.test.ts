@@ -74,7 +74,7 @@ async function mount() {
 }
 
 describe("job category rules", () => {
-  it.skip("[contract: #199] moves a rule up and down and saves the new order", async () => {
+  it("moves a rule up and down and saves the new order", async () => {
     const calls = serve();
     await mount();
     const second = rows()[1];
@@ -93,7 +93,7 @@ describe("job category rules", () => {
     }]);
   });
 
-  it.skip("[contract: #199] adds an empty rule at the end and deletes one", async () => {
+  it("adds an empty rule at the end and deletes one", async () => {
     const calls = serve();
     await mount();
     await click(button("Add rule"));
@@ -112,7 +112,7 @@ describe("job category rules", () => {
     expect(body?.rules.map((rule) => rule.pattern)).toEqual([defaults[0]?.pattern, defaults[1]?.pattern, defaults[3]?.pattern, "notify"]);
   });
 
-  it.skip("[contract: #199] shows a 422's message on the rule it names", async () => {
+  it("shows a 422's message on the rule it names", async () => {
     const message = "regex parse error: unclosed group";
     serve(() => ({
       status: 422,
@@ -128,7 +128,7 @@ describe("job category rules", () => {
     for (const index of [0, 2, 3]) expect(rows()[index]?.textContent ?? "").not.toContain(message);
   });
 
-  it.skip("[contract: #199] refreshes the preview once, 500 ms after the last edit", async () => {
+  it("refreshes the preview once, 500 ms after the last edit", async () => {
     const calls = serve();
     await mount();
     await new Promise((resolve) => setTimeout(resolve, 600));

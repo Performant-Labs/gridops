@@ -75,7 +75,6 @@ fn host(id: &str, score: Option<u8>, components: Vec<ScoreComponent>) -> ScoredH
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn fleet_components_have_their_keys_labels_and_weights() {
     let t = targets();
     let fleet = [
@@ -133,7 +132,6 @@ fn fleet_components_have_their_keys_labels_and_weights() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn each_fleet_component_at_100_at_0_at_the_midpoint_and_beyond_both_ends() {
     let t = targets();
     check_table(
@@ -199,7 +197,6 @@ fn each_fleet_component_at_100_at_0_at_the_midpoint_and_beyond_both_ends() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn each_machine_component_at_100_at_0_at_the_midpoint_and_beyond_both_ends() {
     let t = targets();
     check_table(
@@ -291,7 +288,6 @@ fn each_machine_component_at_100_at_0_at_the_midpoint_and_beyond_both_ends() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn deduction_sentences_name_the_value_the_target_and_the_points_lost() {
     let t = targets();
     // #192's own example: 7 min 12 s scores 31.1; 40 × 0.689 = 27.6 points.
@@ -317,7 +313,6 @@ fn deduction_sentences_name_the_value_the_target_and_the_points_lost() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn a_component_without_enough_data_spreads_its_weight_and_the_weights_still_sum_to_100() {
     let all = [
         component("queue-wait", 40.0, Some(100)),
@@ -376,7 +371,6 @@ fn a_component_without_enough_data_spreads_its_weight_and_the_weights_still_sum_
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn histogram_percentiles_interpolate_inside_the_crossing_bucket() {
     let mut single = [0_u64; HISTOGRAM_BUCKETS];
     single[3] = 10; // all ten jobs waited 1 to 2 minutes
@@ -398,7 +392,6 @@ fn histogram_percentiles_interpolate_inside_the_crossing_bucket() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn on_the_fixture_the_weak_machines_score_lowest_and_its_concerns_come_out() {
     let inputs = fake::fixture_inputs();
     let scored = score::score_fleet(&inputs);
@@ -447,7 +440,6 @@ fn on_the_fixture_the_weak_machines_score_lowest_and_its_concerns_come_out() {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn each_concern_rule_fires_at_its_threshold_and_not_just_below_it() {
     // fleet-component:<key>: critical under 50, warning under 70.
     for (score, expected) in [
@@ -597,7 +589,6 @@ impl Inputs {
 }
 
 #[test]
-#[ignore = "contract: #192"]
 fn no_score_is_ever_outside_0_to_100_on_1000_seeded_inputs() {
     let t = targets();
     let mut inputs = Inputs(197);

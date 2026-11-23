@@ -109,7 +109,6 @@ fn assert_readable(concern: &Concern) {
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn a_machine_silent_for_6_minutes_is_offline_since_its_last_sample() -> Result<()> {
     let seeded = Seeded::new().await?;
     let io = seeded.id("io")?;
@@ -149,7 +148,6 @@ async fn a_machine_silent_for_6_minutes_is_offline_since_its_last_sample() -> Re
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn a_machine_with_no_cpu_budget_never_raises_host_offline() -> Result<()> {
     let seeded = Seeded::new().await?;
     let laptop = seeded.fleet.host("MacBookPro")?;
@@ -182,7 +180,6 @@ async fn a_machine_with_no_cpu_budget_never_raises_host_offline() -> Result<()> 
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn three_start_failures_set_the_start_gate_concern_and_two_do_not() -> Result<()> {
     let seeded = Seeded::new().await?;
     let europa = seeded.fleet.host("europa")?.clone();
@@ -229,7 +226,6 @@ async fn three_start_failures_set_the_start_gate_concern_and_two_do_not() -> Res
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn the_root_disk_alarm_follows_disk_alarm_for_at_each_threshold() -> Result<()> {
     // Every seeded root disk is 100 GiB: critical below 5 GiB free, warning
     // below 10 GiB (`disk::alarm_for`).
@@ -264,7 +260,6 @@ async fn the_root_disk_alarm_follows_disk_alarm_for_at_each_threshold() -> Resul
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn a_queued_job_no_pool_can_run_is_an_unmatched_jobs_concern() -> Result<()> {
     let seeded = Seeded::new().await?;
     let queued = JobSeed::queued(1, "unit tests", NOW - 30 * SECOND);
@@ -289,7 +284,6 @@ async fn a_queued_job_no_pool_can_run_is_an_unmatched_jobs_concern() -> Result<(
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn the_oldest_queued_job_warns_over_5_minutes_and_is_critical_over_10() -> Result<()> {
     for (wait, expected) in [
         (5 * MINUTE, None),
@@ -325,7 +319,6 @@ async fn the_oldest_queued_job_warns_over_5_minutes_and_is_critical_over_10() ->
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn a_machine_with_an_uncertain_placement_is_a_warning() -> Result<()> {
     let seeded = Seeded::new().await?;
     let europa = seeded.id("europa")?;
@@ -362,7 +355,6 @@ async fn a_machine_with_an_uncertain_placement_is_a_warning() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn the_running_counts_by_category_add_up_to_the_runners_running_now() -> Result<()> {
     let seeded = Seeded::new().await?;
     let io = seeded.id("io")?;
@@ -435,7 +427,6 @@ async fn the_running_counts_by_category_add_up_to_the_runners_running_now() -> R
 /// queued; the live read must count exactly those, by category, and finish
 /// with no statement over 100 ms, with all the finished jobs behind it.
 #[tokio::test]
-#[ignore = "contract: #201"]
 async fn the_live_read_over_a_week_of_jobs_counts_the_running_and_queued_with_no_slow_statement()
 -> Result<()> {
     let directory =

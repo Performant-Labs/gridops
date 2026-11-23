@@ -37,7 +37,7 @@ const leadingNumber = (element: Element) => Number.parseInt((element.textContent
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
 
 describe("live strip", () => {
-  it.skip("[contract: #203] shows category counts that add up to the totals", async () => {
+  it("shows category counts that add up to the totals", async () => {
     const data = fixture();
     await render(createElement(LiveStrip, { data, window: "24h" }));
     const queued = leadingNumber(one('[data-testid="live-queued-total"]'));
@@ -51,7 +51,7 @@ describe("live strip", () => {
     }
   });
 
-  it.skip("[contract: #203] formats the oldest wait in seconds, minutes and hours", () => {
+  it("formats the oldest wait in seconds, minutes and hours", () => {
     expect(formatOldestWait(45_000)).toBe("45 s");
     expect(formatOldestWait(59_999)).toBe("59 s");
     expect(formatOldestWait(60_000)).toBe("1 min");
@@ -85,7 +85,7 @@ describe("the Overview's Fleet health tile", () => {
     return found;
   };
 
-  it.skip("[contract: #203] takes its tone from the score's band", () => {
+  it("takes its tone from the score's band", () => {
     expect(tile(health(95, 0)).tone).toBe("success");
     expect(tile(health(75, 0)).tone).toBe("warning");
     expect(tile(health(40, 0)).tone).toBe("danger");
@@ -94,7 +94,7 @@ describe("the Overview's Fleet health tile", () => {
     expect(tile(health(95, 0)).to).toBe("/fleet/health");
   });
 
-  it.skip("[contract: #203] counts the critical concerns in its hint", () => {
+  it("counts the critical concerns in its hint", () => {
     expect(tile(health(95, 0)).hint).toBe("No critical concerns");
     expect(tile(health(80, 1)).hint).toBe("1 critical concern");
     expect(tile(health(60, 2)).hint).toBe("2 critical concerns");

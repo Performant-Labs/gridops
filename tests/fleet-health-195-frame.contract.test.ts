@@ -41,7 +41,7 @@ const keys = () => all("[data-concern-key]").map((row) => row.getAttribute("data
 const concerns = (data: FleetHealth) => createElement(AreasOfConcern, { data, window: "24h" });
 
 describe("Areas of concern", () => {
-  it.skip("[contract: #195] lists the first five concerns in the API's order, then all of them on Show all", async () => {
+  it("lists the first five concerns in the API's order, then all of them on Show all", async () => {
     const data = fixture();
     const total = data.concerns.length;
     expect(total).toBeGreaterThan(5);
@@ -51,13 +51,13 @@ describe("Areas of concern", () => {
     expect(keys()).toEqual(data.concerns.map((concern) => concern.key));
   });
 
-  it.skip("[contract: #195] says so when there is nothing to show", async () => {
+  it("says so when there is nothing to show", async () => {
     await render(concerns({ ...fixture(), concerns: [] }));
     expect(keys()).toEqual([]);
     expect(document.body.textContent).toContain("No areas of concern");
   });
 
-  it.skip("[contract: #195] keeps each row by key across a refresh and highlights only the new concern", async () => {
+  it("keeps each row by key across a refresh and highlights only the new concern", async () => {
     const data = fixture();
     await render(concerns(data));
     expect(all('[data-new="true"]')).toHaveLength(0);
@@ -76,7 +76,7 @@ describe("Areas of concern", () => {
 });
 
 describe("Fleet score card", () => {
-  it.skip("[contract: #195] colours the score by its band", async () => {
+  it("colours the score by its band", async () => {
     for (const score of [95, 90, 75, 40, null]) {
       const data = fixture();
       data.fleet.score = score;
@@ -85,7 +85,7 @@ describe("Fleet score card", () => {
     }
   });
 
-  it.skip("[contract: #195] greys out a component that has not enough data", async () => {
+  it("greys out a component that has not enough data", async () => {
     const data = fixture();
     const [first, ...rest] = data.fleet.components;
     if (!first) throw new Error("the fixture's fleet has components");
@@ -106,7 +106,7 @@ describe("the remembered window", () => {
     storage = installMemoryStorage();
   });
 
-  it.skip("[contract: #195] remembers the chosen window, 24h by default and when storage fails", () => {
+  it("remembers the chosen window, 24h by default and when storage fails", () => {
     expect(loadHealthWindow()).toBe("24h");
     saveHealthWindow("7d");
     expect(storage.getItem("gridops.fleetHealth.window")).toBe("7d");

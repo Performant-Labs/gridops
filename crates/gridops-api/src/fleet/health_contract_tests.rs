@@ -40,7 +40,6 @@ fn expected(window: &str) -> Result<Value> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #194"]
 async fn the_response_equals_the_openapi_example_for_each_window() -> Result<()> {
     let harness = Harness::new().await?;
     assert_eq!(expected("24h")?, fixture()?);
@@ -55,7 +54,6 @@ async fn the_response_equals_the_openapi_example_for_each_window() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "contract: #194"]
 async fn a_bad_window_is_a_400_and_callers_without_access_are_refused() -> Result<()> {
     let harness = Harness::new().await?;
     for bad in ["30d", "1d", "24H", ""] {
@@ -98,7 +96,6 @@ async fn a_bad_window_is_a_400_and_callers_without_access_are_refused() -> Resul
 }
 
 #[tokio::test]
-#[ignore = "contract: #194"]
 async fn a_second_call_within_30_seconds_does_not_call_the_source() -> Result<()> {
     let harness = Harness::new().await?;
     let uri = format!("{HEALTH}?window=24h");
@@ -128,7 +125,6 @@ async fn a_second_call_within_30_seconds_does_not_call_the_source() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "contract: #194"]
 async fn ten_concurrent_calls_on_an_empty_cache_call_the_source_once() -> Result<()> {
     let harness = std::sync::Arc::new(Harness::new().await?);
     harness.source.hold();
@@ -159,7 +155,6 @@ async fn ten_concurrent_calls_on_an_empty_cache_call_the_source_once() -> Result
 }
 
 #[tokio::test]
-#[ignore = "contract: #194"]
 async fn a_failing_source_serves_the_stale_response_then_a_503_after_10_minutes() -> Result<()> {
     let harness = Harness::new().await?;
     let uri = format!("{HEALTH}?window=24h");

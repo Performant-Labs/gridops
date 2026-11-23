@@ -51,13 +51,13 @@ const table = (data: FleetHealth) => createElement(MachineScoreTable, { data, wi
 const toggle = (hostId: string) => one<HTMLButtonElement>("button[aria-expanded]", one(`#machine-${hostId}`));
 
 describe("machine score table", () => {
-  it.skip("[contract: #202] sorts the machines worst first", async () => {
+  it("sorts the machines worst first", async () => {
     const data = fixture();
     await render(table(data));
     expect(rowIds()).toEqual(worstFirst(data.hosts).map((host) => `machine-${host.id}`));
   });
 
-  it.skip("[contract: #202] shows each runner size's speed index", async () => {
+  it("shows each runner size's speed index", async () => {
     const data = fixture();
     await render(table(data));
     for (const host of data.hosts) {
@@ -68,7 +68,7 @@ describe("machine score table", () => {
     }
   });
 
-  it.skip("[contract: #202] expands a row into its detail with the per-category table", async () => {
+  it("expands a row into its detail with the per-category table", async () => {
     const data = fixture();
     const host = data.hosts.find((candidate) => candidate.categories.length > 0);
     if (!host) throw new Error("the fixture has a machine with categories");
@@ -86,7 +86,7 @@ describe("machine score table", () => {
     expect(all("[data-machine-detail]")).toHaveLength(0);
   });
 
-  it.skip("[contract: #202] opens the machine named in the #machine- link", async () => {
+  it("opens the machine named in the #machine- link", async () => {
     const data = fixture();
     const target = worstFirst(data.hosts)[2];
     if (!target) throw new Error("the fixture has five machines");
