@@ -43,7 +43,6 @@ fn defaults() -> Value {
 }
 
 #[tokio::test]
-#[ignore = "contract: #199"]
 async fn the_rules_are_listed_in_order() -> Result<()> {
     let harness = Harness::new().await?;
     let (status, body) = harness.admin_get(RULES).await?;
@@ -53,7 +52,6 @@ async fn the_rules_are_listed_in_order() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #199"]
 async fn saving_replaces_the_whole_list_and_keeps_its_order() -> Result<()> {
     let harness = Harness::new().await?;
     let admin = harness.admin.clone();
@@ -88,7 +86,6 @@ async fn saving_replaces_the_whole_list_and_keeps_its_order() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #199"]
 async fn an_invalid_regex_is_a_422_naming_the_rule_and_nothing_is_saved() -> Result<()> {
     let harness = Harness::new().await?;
     let admin = harness.admin.clone();
@@ -146,7 +143,6 @@ async fn an_invalid_regex_is_a_422_naming_the_rule_and_nothing_is_saved() -> Res
 }
 
 #[tokio::test]
-#[ignore = "contract: #199"]
 async fn the_preview_counts_each_rule_and_lists_the_commonest_names_left_in_other() -> Result<()> {
     let harness = Harness::new().await?;
     let admin = harness.admin.clone();
@@ -249,7 +245,6 @@ async fn the_preview_counts_each_rule_and_lists_the_commonest_names_left_in_othe
 }
 
 #[tokio::test]
-#[ignore = "contract: #199"]
 async fn only_administrators_may_read_save_or_preview() -> Result<()> {
     let harness = Harness::new().await?;
     let member = harness.member.clone();
