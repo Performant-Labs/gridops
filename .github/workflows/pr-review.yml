@@ -27,7 +27,8 @@ env:
 
 jobs:
   pr-review:
-    # Runner: the reusable's job runs on vars.CI_RUNNER (the org's self-hosted-linux pool).
+    # Runner: the reusable's job runs on vars.CI_RUNNER_LIGHT when the repo sets it, else
+    # vars.CI_RUNNER (the org's self-hosted-linux pool); see the reusable's `runs-on`.
     # Extends the reusable's own job `if` (pr-review-reusable.yml, job `pr-agent`); keep the shared part
     # identical. It is repeated here so that the job-level `concurrency` below is taken only by a
     # run that will actually review: bot events and comments that are not PR-Agent commands are
