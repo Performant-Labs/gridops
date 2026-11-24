@@ -440,10 +440,32 @@ pub async fn audit(
     target_id: Option<&str>,
     metadata: serde_json::Value,
 ) -> ApiResult<()> {
+    let mut connection = state.database.acquire().await?;
+    audit_in(
+        &mut connection,
+        user,
+        action,
+        target_type,
+        target_id,
+        metadata,
+    )
+    .await
+}
+
+/// [`audit`] on `connection`: run on a write's own transaction, the audit
+/// event commits with the write or not at all (#240).
+pub async fn audit_in(
+    connection: &mut sqlx::SqliteConnection,
+    user: &AuthUser,
+    action: &str,
+    target_type: &str,
+    target_id: Option<&str>,
+    metadata: serde_json::Value,
+) -> ApiResult<()> {
     let (actor_label, metadata) = audit_actor(user, metadata);
     sqlx::query("INSERT INTO audit_events (id,actor_user_id,actor_label,action,target_type,target_id,metadata,created_at) VALUES (?,?,?,?,?,?,?,?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&user.id).bind(actor_label).bind(action).bind(target_type).bind(target_id)
-        .bind(metadata.to_string()).bind(now_millis()).execute(&state.database).await?;
+        .bind(metadata.to_string()).bind(now_millis()).execute(&mut *connection).await?;
     Ok(())
 }
 

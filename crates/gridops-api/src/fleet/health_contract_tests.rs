@@ -182,8 +182,10 @@ async fn a_failing_source_serves_the_stale_response_then_a_503_after_10_minutes(
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(error_code(&body), Some("dependency_unavailable"));
 
-    // Once the source recovers, fresh data comes back.
+    // Once the source recovers, fresh data comes back on the next try, 30 s
+    // after the last failure (#240: a failed window waits 30 s to retry).
     harness.source.set_failing(false);
+    harness.clock.advance(30 * SECOND);
     let (status, body) = harness.admin_get(&uri).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.get("stale"), Some(&json!(false)));

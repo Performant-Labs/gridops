@@ -480,13 +480,14 @@
         "properties": {
           "rules": {
             "type": "array",
-            "description": "The whole list, in order; the first rule that matches a job decides its category.",
+            "description": "The whole list, in order; the first rule that matches a job decides its category. At most 200 rules.",
+            "maxItems": 200,
             "items": {
               "type": "object",
               "properties": {
                 "category": { "$ref": "#/components/schemas/JobCategory" },
                 "field": { "$ref": "#/components/schemas/JobCategoryField" },
-                "pattern": { "type": "string" }
+                "pattern": { "type": "string", "minLength": 1, "maxLength": 1024, "description": "A case-insensitive regular expression, at most 1 KiB (1,024 bytes of UTF-8; `maxLength` counts characters, so a pattern of multi-byte characters is refused sooner)." }
               },
               "required": ["category", "field", "pattern"],
               "additionalProperties": false
@@ -822,7 +823,7 @@
       "get": {
         "tags": ["fleet-read"],
         "summary": "Fleet health",
-        "description": "The fleet's health over a window: the fleet and per-machine scores with their components, each machine's relative speed per runner size, CPU use by job category, the live queue and running counts, and the areas of concern (windowed and live, merged, worst first). Administrators only (a member gets `403 forbidden`). The response is cached per window for 30 seconds; when the source fails, the last response is served with `stale: true` for up to 10 minutes, then `503 dependency_unavailable`. See docs/design/fleet-health.md.",
+        "description": "The fleet's health over a window: the fleet and per-machine scores with their components, each machine's relative speed per runner size, CPU use by job category, the live queue and running counts, and the areas of concern (windowed and live, merged, worst first). Administrators only (a member gets `403 forbidden`). The response is cached per window for 30 seconds. A computation that fails, or takes over 2 seconds, counts as a failure: the last response is served with `stale: true` (a 200) while it is under 10 minutes old, and `503 dependency_unavailable` otherwise; after a failure the window is not computed again for 30 seconds, and serves the same stale response or 503 meanwhile. See docs/design/fleet-health.md.",
         "security": [{ "bearerAuth": ["fleet:read"] }, { "cookieAuth": [] }],
         "parameters": [
           { "name": "window", "in": "query", "required": false, "description": "The window the scores, speed and usage cover. Anything else is a 400.", "schema": { "type": "string", "enum": ["1h", "24h", "7d"], "default": "24h" } }
@@ -2709,7 +2710,7 @@
           "400": { "description": "The window is not one of `1h`, `24h` or `7d`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
           "401": { "description": "Not signed in, or the token is not live", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
           "403": { "description": "The caller is not a system administrator, or the token lacks `fleet:read`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
-          "503": { "description": "The health source failed and there is no response under 10 minutes old to serve", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "503": { "description": "The health source failed or took over 2 seconds, on this request or within the last 30 seconds, and there is no response under 10 minutes old to serve (a younger one is served as a 200 with `stale: true`)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
           "default": { "$ref": "#/components/responses/ErrorResponse" }
         }
       }
@@ -3299,14 +3300,14 @@
       "put": {
         "tags": ["settings"],
         "summary": "Replace the job category rules",
-        "description": "Replaces the whole list, in the order given (an empty list is allowed). Jobs of the last 7 days are classified again under the new rules. A pattern that does not compile is a 422 naming each failing rule, and nothing is saved.",
+        "description": "Replaces the whole list, in the order given (an empty list is allowed). Jobs of the last 7 days are classified again under the new rules. A pattern that does not compile, an empty pattern or one over 1 KiB is a 422 naming each such rule, and a list of over 200 rules is a 422 as a whole; nothing is saved. The save writes a `job_categories.updated` audit event with the lists before and after.",
         "security": [{ "cookieAuth": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRulesInput" } } } },
         "responses": {
           "200": { "description": "The saved rules", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryRuleList" } } } },
           "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
           "403": { "description": "The caller is not a system administrator", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
-          "422": { "description": "A pattern does not compile: `code` is `invalid_job_category_rules` and `details` lists `{position, message}` for each failing rule", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
+          "422": { "description": "The rules are invalid, `code` `invalid_job_category_rules`: `details` lists `{position, message}` for each rule whose pattern does not compile, is empty or is over 1 KiB (1,024 bytes of UTF-8), or is otherwise off-contract; a list of over 200 rules is refused as a whole, with empty `details` and the limit in `error`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
         }
       }
     },
@@ -3321,7 +3322,7 @@
           "200": { "description": "The matches per rule and the commonest names left in `other`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobCategoryPreview" } } } },
           "401": { "description": "Not signed in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
           "403": { "description": "The caller is not a system administrator", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorBody" } } } },
-          "422": { "description": "A pattern does not compile: `code` is `invalid_job_category_rules` and `details` lists `{position, message}` for each failing rule", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
+          "422": { "description": "The rules are invalid, `code` `invalid_job_category_rules`: `details` lists `{position, message}` for each rule whose pattern does not compile, is empty or is over 1 KiB (1,024 bytes of UTF-8), or is otherwise off-contract; a list of over 200 rules is refused as a whole, with empty `details` and the limit in `error`", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiInvalidBody" } } } }
         }
       }
     },

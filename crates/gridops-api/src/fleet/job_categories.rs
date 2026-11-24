@@ -10,8 +10,11 @@
 //! - `POST …/preview` with a proposed list → `{"rules": [{position,
 //!   matches}], "other": [{name, jobs}]}`.
 //!
-//! Saving replaces the table in one short transaction (delete, then batched
-//! multi-row inserts of at most [`INSERT_BATCH`] rules). A proposed rule is
+//! A list holds at most [`MAX_RULES`] rules, each pattern at most
+//! [`MAX_PATTERN_BYTES`] (#240). Saving replaces the table in one short
+//! transaction (delete, then batched multi-row inserts of at most
+//! [`INSERT_BATCH`] rules) that also writes the `job_categories.updated`
+//! audit event with the lists before and after (#240). A proposed rule is
 //! checked with `fleet_health::category::validate`, which names every rule
 //! whose pattern does not compile (D-3(d)); anything else off-contract
 //! (an unknown category, `fix-agent`, an unknown field, an empty pattern,
@@ -45,7 +48,7 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
 use crate::{
-    auth::{AuthUser, require_system_admin},
+    auth::{AuthUser, audit_in, require_system_admin},
     error::{ApiError, ApiResult},
     resources::SameOrigin,
     state::AppState,
@@ -59,6 +62,13 @@ const OTHER_NAMES_LIMIT: usize = 20;
 
 /// One multi-row insert holds at most this many rules (#179's batch bound).
 const INSERT_BATCH: usize = 500;
+
+/// The most rules a list may hold (#240): each is compiled on every save,
+/// preview and classifier load.
+const MAX_RULES: usize = 200;
+
+/// The longest a pattern may be, in UTF-8 bytes (1 KiB, #240).
+const MAX_PATTERN_BYTES: usize = 1024;
 
 /// The window the preview counts over, in milliseconds (7 days).
 const PREVIEW_WINDOW_MILLIS: i64 = 7 * 86_400_000;
@@ -132,6 +142,12 @@ category"
     if pattern.is_empty() {
         return Err("the pattern is empty".to_owned());
     }
+    if pattern.len() > MAX_PATTERN_BYTES {
+        return Err(format!(
+            "the pattern is {} bytes long; at most {MAX_PATTERN_BYTES} (1 KiB)",
+            pattern.len()
+        ));
+    }
     let position =
         i64::try_from(position).map_err(|_| "the list of rules is too long".to_owned())?;
     Ok(CategoryRule {
@@ -143,7 +159,9 @@ category"
 }
 
 /// The body's `{"rules": [...]}`, as positioned rules, or the 422 naming
-/// every rule that is off-contract.
+/// every rule that is off-contract. A list over [`MAX_RULES`] is refused as a
+/// whole (`details` empty, the limit in the message) before any rule is read;
+/// a pattern over [`MAX_PATTERN_BYTES`] is named at its position (#240).
 fn parse_rules(body: &Value) -> Result<Vec<CategoryRule>, ApiError> {
     if let Some(key) = body
         .as_object()
@@ -164,6 +182,13 @@ fn parse_rules(body: &Value) -> Result<Vec<CategoryRule>, ApiError> {
             details: json!([]),
         });
     };
+    if list.len() > MAX_RULES {
+        return Err(ApiError::Invalid {
+            code: CODE,
+            message: format!("At most {MAX_RULES} rules: the list has {}.", list.len()),
+            details: json!([]),
+        });
+    }
     let mut rules = Vec::with_capacity(list.len());
     let mut details = Vec::new();
     for (position, item) in list.iter().enumerate() {
@@ -235,14 +260,37 @@ pub(crate) async fn save_rules(
     }
     let now = now_millis();
     let mut transaction = state.database.begin().await?;
-    sqlx::query("DELETE FROM job_category_rules")
-        .execute(&mut *transaction)
-        .await?;
+    // The delete is the transaction's first statement, so it takes the write
+    // lock at once (no read-then-upgrade), and returns the list it replaces
+    // for the audit event.
+    let mut before: Vec<(i64, String, String, String)> =
+        sqlx::query_as("DELETE FROM job_category_rules RETURNING position,category,field,pattern")
+            .fetch_all(&mut *transaction)
+            .await?;
+    before.sort_by_key(|(position, ..)| *position);
     for batch in rules.chunks(INSERT_BATCH) {
         insert_batch(&mut transaction, batch, now).await?;
     }
+    let after = rules_json(&rules);
+    audit_in(
+        &mut transaction,
+        &user,
+        "job_categories.updated",
+        "system",
+        Some("job_categories"),
+        json!({
+            "before": before.into_iter().map(|(position, category, field, pattern)| json!({
+                "position": position,
+                "category": category,
+                "field": field,
+                "pattern": pattern,
+            })).collect::<Vec<_>>(),
+            "after": after["rules"],
+        }),
+    )
+    .await?;
     transaction.commit().await?;
-    Ok((StatusCode::OK, Json(rules_json(&rules))).into_response())
+    Ok((StatusCode::OK, Json(after)).into_response())
 }
 
 /// The workflow name and repository of each of `run_ids`, read in batches so
@@ -370,6 +418,7 @@ mod tests {
     use super::*;
     use crate::fleet::health_test_support::Harness;
 
+    const RULES_PATH: &str = "/api/v1/settings/job-categories";
     const PREVIEW_PATH: &str = "/api/v1/settings/job-categories/preview";
     /// `seed_fleet`'s repository, the one every seeded run joins to.
     const SEEDED_REPOSITORY: &str = "acme/app";
@@ -441,6 +490,161 @@ mod tests {
                 "{detail}"
             );
         }
+        Ok(())
+    }
+
+    /// `n` valid rules, as the request body carries them.
+    fn many(n: usize) -> Value {
+        json!({"rules": (0..n).map(|index| json!({
+            "category": "test", "field": "job_name", "pattern": format!("job{index}"),
+        })).collect::<Vec<_>>()})
+    }
+
+    /// #240 item 7: at most 200 rules, and at most 1 KiB (UTF-8 bytes) per
+    /// pattern, each over-long pattern named at its position.
+    #[test]
+    fn the_list_and_each_pattern_are_bounded() -> Result<()> {
+        assert_eq!(parse_rules(&many(MAX_RULES))?.len(), 200);
+        let too_many = problems(&many(MAX_RULES + 1));
+        let Err(ApiError::Invalid { message, .. }) = parse_rules(&many(MAX_RULES + 1)) else {
+            bail!("201 rules parsed: {too_many:?}");
+        };
+        assert!(message.contains("200"), "{message}");
+
+        let longest = "a".repeat(MAX_PATTERN_BYTES);
+        let over = "a".repeat(MAX_PATTERN_BYTES + 1);
+        // 513 two-byte characters: 1,026 bytes.
+        let wide = "é".repeat(513);
+        let details = problems(&json!({"rules": [
+            {"category": "test", "field": "job_name", "pattern": longest},
+            {"category": "build", "field": "job_name", "pattern": over},
+            {"category": "check", "field": "labels", "pattern": wide},
+        ]}))?;
+        let entries = details.as_array().cloned().unwrap_or_default();
+        let positions: Vec<i64> = entries
+            .iter()
+            .filter_map(|detail| detail.get("position").and_then(Value::as_i64))
+            .collect();
+        assert_eq!(positions, [1, 2], "{entries:?}");
+        for detail in &entries {
+            let message = detail
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(message.contains("1024"), "{message}");
+        }
+        Ok(())
+    }
+
+    /// #240 item 7: the routes answer the limits with the 422 and save
+    /// nothing.
+    #[tokio::test]
+    async fn over_the_limits_the_routes_answer_422_and_save_nothing() -> Result<()> {
+        let harness = Harness::new().await?;
+        let admin = harness.admin.clone();
+        let (_, before) = harness.get_as(RULES_PATH, Some(&admin)).await?;
+        let long = json!({"rules": [{"category": "test", "field": "job_name", "pattern": "a".repeat(1025)}]});
+        for body in [many(201), long] {
+            for (method, path) in [(Method::PUT, RULES_PATH), (Method::POST, PREVIEW_PATH)] {
+                let (status, answered) = harness
+                    .send(method.clone(), path, Some(&admin), Some(body.clone()))
+                    .await?;
+                assert_eq!(
+                    status,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{method} {path}: {answered}"
+                );
+                assert_eq!(answered.get("code").and_then(Value::as_str), Some(CODE));
+            }
+        }
+        let (_, after) = harness.get_as(RULES_PATH, Some(&admin)).await?;
+        assert_eq!(after, before, "nothing saved");
+        Ok(())
+    }
+
+    /// The `job_categories.updated` audit events, oldest first:
+    /// `(actor_label, target_type, target_id, metadata)`.
+    async fn audit_events(
+        harness: &Harness,
+    ) -> Result<Vec<(String, String, Option<String>, Value)>> {
+        let rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+            "SELECT actor_label,target_type,target_id,metadata FROM audit_events
+              WHERE action='job_categories.updated' ORDER BY created_at,rowid",
+        )
+        .fetch_all(&harness.database)
+        .await?;
+        rows.into_iter()
+            .map(|(actor, target_type, target_id, metadata)| {
+                Ok((
+                    actor,
+                    target_type,
+                    target_id,
+                    serde_json::from_str(&metadata)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// #240 item 8: a save writes `job_categories.updated` with the lists
+    /// before and after; a refused save writes nothing.
+    #[tokio::test]
+    async fn a_save_is_audited_with_the_lists_before_and_after() -> Result<()> {
+        let harness = Harness::new().await?;
+        let admin = harness.admin.clone();
+        let (_, original) = harness.get_as(RULES_PATH, Some(&admin)).await?;
+        let first = json!({"rules": [{"category": "deploy", "field": "workflow_name", "pattern": "^release$"}]});
+        let (status, saved_first) = harness
+            .send(Method::PUT, RULES_PATH, Some(&admin), Some(first))
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{saved_first}");
+        let second = json!({"rules": []});
+        let (status, saved_second) = harness
+            .send(Method::PUT, RULES_PATH, Some(&admin), Some(second))
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{saved_second}");
+        let (status, _) = harness
+            .send(Method::PUT, RULES_PATH, Some(&admin), Some(many(201)))
+            .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let events = audit_events(&harness).await?;
+        assert_eq!(events.len(), 2, "one per save: {events:?}");
+        let (actor, target_type, target_id, metadata) = &events[0];
+        assert_eq!(actor, "admin-1");
+        assert_eq!(
+            (target_type.as_str(), target_id.as_deref()),
+            ("system", Some("job_categories"))
+        );
+        assert_eq!(metadata.get("before"), original.get("rules"));
+        assert_eq!(metadata.get("after"), saved_first.get("rules"));
+        let (_, _, _, metadata) = &events[1];
+        assert_eq!(metadata.get("before"), saved_first.get("rules"));
+        assert_eq!(metadata.get("after"), Some(&json!([])));
+        Ok(())
+    }
+
+    /// #240 item 8: the audit event is written in the save's transaction:
+    /// when it cannot be written, the rules are not saved either.
+    #[tokio::test]
+    async fn a_save_whose_audit_event_fails_saves_nothing() -> Result<()> {
+        let harness = Harness::new().await?;
+        let admin = harness.admin.clone();
+        let (_, before) = harness.get_as(RULES_PATH, Some(&admin)).await?;
+        sqlx::query(
+            "CREATE TRIGGER refuse_job_category_audit BEFORE INSERT ON audit_events
+             WHEN NEW.action='job_categories.updated'
+             BEGIN SELECT RAISE(ABORT,'audit refused'); END",
+        )
+        .execute(&harness.database)
+        .await?;
+        let body =
+            json!({"rules": [{"category": "build", "field": "job_name", "pattern": "make"}]});
+        let (status, answered) = harness
+            .send(Method::PUT, RULES_PATH, Some(&admin), Some(body))
+            .await?;
+        assert!(status.is_server_error(), "{status}: {answered}");
+        let (_, after) = harness.get_as(RULES_PATH, Some(&admin)).await?;
+        assert_eq!(after, before, "the rules are unchanged");
         Ok(())
     }
 
