@@ -2684,4 +2684,135 @@ mod live_plan_tests {
         );
         Ok(())
     }
+
+    /// #245 (review of #244): `live_counts` gives every count `counts` gives
+    /// for `CountScope::Host` (the read `host_live_reads` made before #240),
+    /// except the known-runner count, for a machine with a placement in each
+    /// of the twelve states crossed with no allocation and each of the five
+    /// allocation states: a finished placement still holding capacity is
+    /// charged (and uncertain) in both, and nothing of the finished history
+    /// is lost or added.
+    #[tokio::test]
+    async fn the_live_counts_equal_the_full_counts_but_for_the_runners() -> Result<()> {
+        use crate::fleet_health::testdata::{self, JobSeed};
+
+        const PLACEMENT_STATES: [&str; 12] = [
+            "reserved",
+            "preparing",
+            "registering",
+            "starting",
+            "running",
+            "draining",
+            "stopping",
+            "stopped",
+            "cleaned",
+            "retryable",
+            "failed",
+            "uncertain",
+        ];
+        const ALLOCATION_STATES: [Option<&str>; 6] = [
+            None,
+            Some("reserved"),
+            Some("committed"),
+            Some("releasing"),
+            Some("uncertain"),
+            Some("released"),
+        ];
+        let directory =
+            std::env::temp_dir().join(format!("gridops-live-counts-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let fleet = testdata::seed_fleet(&pool).await?;
+        let io = fleet.host("io")?.id.clone();
+        let jobs: Vec<JobSeed> = (0..PLACEMENT_STATES.len() * ALLOCATION_STATES.len())
+            .map(|index| {
+                let at = 1_000_000 + i64::try_from(index).unwrap_or_default() * 60_000;
+                JobSeed::completed(
+                    i64::try_from(index).unwrap_or_default() + 1,
+                    "unit tests",
+                    Some(&io),
+                    at,
+                    at + 1_000,
+                    at + 30_000,
+                )
+            })
+            .collect();
+        testdata::insert_jobs(&pool, &fleet, &jobs).await?;
+        let placements: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM workload_placements WHERE host_id=? ORDER BY id")
+                .bind(&io)
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(placements.len(), jobs.len());
+        for (index, placement) in placements.iter().enumerate() {
+            let state = PLACEMENT_STATES[index % PLACEMENT_STATES.len()];
+            let allocation = ALLOCATION_STATES[index / PLACEMENT_STATES.len()];
+            sqlx::query(
+                "UPDATE workload_placements SET state=?,local_absence_proven_at=1,delayed_starts_excluded_at=1 WHERE id=?",
+            )
+            .bind(state)
+            .bind(placement)
+            .execute(&pool)
+            .await?;
+            if let Some(allocation) = allocation {
+                sqlx::query(
+                    "INSERT INTO capacity_allocations (id,placement_id,host_id,backend_id,host_epoch,domain_id,policy_revision,cpu_millis,memory_mib,disk_bytes,state,created_at,updated_at,released_at)
+                     SELECT 'allocation-'||p.id,p.id,p.host_id,p.backend_id,p.host_epoch,d.id,1,100,64,0,?1,1,1,
+                            CASE WHEN ?1='released' THEN 1 END
+                       FROM workload_placements p
+                       JOIN host_resource_domains d ON d.host_id=p.host_id AND d.parent_domain_id IS NULL
+                      WHERE p.id=?2",
+                )
+                .bind(allocation)
+                .bind(placement)
+                .execute(&pool)
+                .await?;
+            }
+        }
+
+        let mut tx = pool.begin().await?;
+        let incarnation: String =
+            sqlx::query_scalar("SELECT incarnation FROM fleet_control_plane WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await?;
+        let snapshot = super::Snapshot {
+            user_id: String::new(),
+            system_admin: true,
+            incarnation: incarnation
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad incarnation {incarnation}"))?,
+            now: 2_000_000_000_000,
+        };
+        for host in &fleet.hosts {
+            let host_id = super::parse_host_id(&host.id)?;
+            let mut full = super::counts(
+                &mut tx,
+                &snapshot,
+                host_id,
+                None,
+                None,
+                super::CountScope::Host,
+            )
+            .await?;
+            let live = super::live_counts(&mut tx, host_id).await?;
+            if host.id == io {
+                // Six running; 4 × 12 holding an unreleased allocation; six
+                // uncertain plus the eleven others holding an uncertain one.
+                assert_eq!(
+                    (
+                        live.running_ci_placement_count.get(),
+                        live.charged_ci_placement_count.get(),
+                        live.uncertain_placement_count.get(),
+                    ),
+                    (6, 48, 17),
+                    "{live:?}"
+                );
+            }
+            full.known_managed_runner_count = live.known_managed_runner_count;
+            assert_eq!(live, full, "{}", host.name);
+        }
+        tx.rollback().await?;
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
 }

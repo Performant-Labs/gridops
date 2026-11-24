@@ -410,6 +410,36 @@ mod tests {
         Ok(())
     }
 
+    /// Item 1, for a miss (#245): a miss on one window starts its own
+    /// computation while another window's computation hangs, instead of
+    /// queueing behind it. With one computation lock for every window the
+    /// 1h miss could only call the source once the 7d computation had given
+    /// up, 2 s after it started.
+    #[tokio::test]
+    async fn a_miss_does_not_wait_on_another_windows_computation() -> Result<()> {
+        let harness = Arc::new(Harness::new().await?);
+        harness.source.hold();
+        let started = std::time::Instant::now();
+        let week = spawn_get(&harness, "7d");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let hour = spawn_get(&harness, "1h");
+        while harness.source.windowed_calls() < 2 && started.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let waited = started.elapsed();
+        assert_eq!(harness.source.windowed_calls(), 2);
+        assert!(
+            waited < Duration::from_millis(1_500),
+            "the 1h miss called the source {waited:?} after the 7d one: it waited on it"
+        );
+        harness.source.release();
+        for call in [week, hour] {
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), call).await???;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        Ok(())
+    }
+
     /// Item 2: a source that hangs is given up on after 2 s and counts as a
     /// failure: the last good response is served stale (or a 503 when there
     /// is none), and the source is not called again for 30 s.
