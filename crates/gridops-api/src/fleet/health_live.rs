@@ -773,6 +773,8 @@ mod tests {
     async fn live_path_timings_on_the_synthetic_week() -> Result<()> {
         use std::time::{Duration, Instant};
 
+        use axum::http::StatusCode;
+
         use crate::fleet::health_test_support::{HEALTH, Harness};
 
         const RUNS: usize = 21;
@@ -820,11 +822,15 @@ mod tests {
         for _ in 0..RUNS {
             harness.clock.advance(31_000);
             let started = Instant::now();
-            harness.admin_get(&uri).await?;
+            let (status, body) = harness.admin_get(&uri).await?;
             cold.push(started.elapsed());
+            // PR-Agent 0c2908df410d: time the 200s, never an error path.
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body.get("stale"), Some(&serde_json::json!(false)));
             let started = Instant::now();
-            harness.admin_get(&uri).await?;
+            let (status, body) = harness.admin_get(&uri).await?;
             cached.push(started.elapsed());
+            assert_eq!(status, StatusCode::OK, "{body}");
         }
         summary("GET /fleet/health, cold (fake source)", cold);
         summary("GET /fleet/health, cached", cached);

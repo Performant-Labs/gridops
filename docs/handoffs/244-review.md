@@ -31,9 +31,9 @@ Notes, not defects:
 
 - Item 1: a request for a window whose response has expired, while that window's own computation is running, waits for it (at most the 2 s timeout). That is the existing "one computation shared by the concurrent misses" rule, not a hit.
 - Item 3: a computation that joins a live reading already in flight gets the live part read at the first computation's `now`, at most 2 s earlier.
-- Item 6: Bitbucket runners publish no busy signal (`crates/gridops-reconciler/src/main.rs` :1579), so they still never count as running. Not in #240's scope.
+- Item 6: Bitbucket runners still never count as running. Not a defect of #244, and no follow-up filed: GridOps records no busy signal for a Bitbucket runner at all ("Bitbucket does not publish a per-step busy signal to GridOps", `crates/gridops-reconciler/src/main.rs` :1579), so there is nothing for the live read to count. Counting them needs a new data source, which is a product decision, not a fix.
 - Item 7: the 25 MB body limit still applies before `parse_rules` runs; the limits bound the compile and the write, which is what #240 asked.
-- The Overview's own queue read (`visible_queued_jobs!`, `resources.rs` :80-88) walks every run of the user's repositories (`workflow_runs_repository_status_idx (repository_id=?)`). Adding the same `status<>'completed'` term does not change its plan, so it is left alone here: it is the Overview's, not fleet health's, and outside #240.
+- The Overview's own queue read (`visible_queued_jobs!`, `resources.rs` :80-88) walks every run of the user's repositories in the covering index `workflow_runs_repository_status_idx (repository_id=?)`. Adding the same `status<>'completed'` term does not change its plan. Not a #244 defect (it is the Overview's read, untouched by #240), and no follow-up filed: on a copy of the synthetic week (90,400 runs, one user seeing the repository) its `COUNT(*)` takes about 4 ms (SQLite CLI, three runs: 5.6, 4.7, 4.0 ms), reading index entries only. It grows linearly with runs, so it is worth a look when #204 times the Mars copy, not before.
 
 ## Revert tests
 
