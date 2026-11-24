@@ -122,12 +122,19 @@ async fn fast_work_passes_and_its_value_and_errors_come_through() -> Result<()> 
 async fn the_synthetic_week_has_the_fixture_machines_at_realistic_volume() -> Result<()> {
     let (directory, pool) = database().await?;
     let end = 1_800_000_000_000_i64; // a whole hour: 500,000 hours since the epoch
+    // The budget is for the work, not for a busy machine (#247): the time
+    // the threads waited for a CPU is not the builder's.
     let started = Instant::now();
-    let week = speed_check::check(&pool, testdata::build_week(&pool, end)).await?;
-    let elapsed = started.elapsed();
+    let (week, took) = speed_check::work_time(
+        &pool,
+        speed_check::check(&pool, testdata::build_week(&pool, end)),
+    )
+    .await;
+    let week = week?;
     assert!(
-        elapsed < Duration::from_secs(20),
-        "building the week took {elapsed:?}"
+        took < Duration::from_secs(20),
+        "building the week took {took:?} less waits for a CPU ({:?} by the clock)",
+        started.elapsed()
     );
 
     let hosts: Vec<(String, i64)> = sqlx::query_as(
@@ -173,4 +180,255 @@ async fn the_synthetic_week_has_the_fixture_machines_at_realistic_volume() -> Re
     .await?;
     assert_eq!(placed, 4, "jobs run on every machine with a CPU budget");
     close(directory, pool).await
+}
+
+/// #247: the check times the work, not the machine. Under load the same
+/// synthetic week failed with "a write transaction held the write lock 71
+/// ms", because a thread kept off the CPU by other processes still counted
+/// as holding the lock. Here a transaction that does about 15 ms of work
+/// shares one CPU with 11 spinning threads, so it takes far longer than
+/// either limit by the wall clock, and the check passes it; on the same
+/// busy CPU, a transaction that does 150 ms of work, a 300 ms read, or a
+/// lock held while the caller sleeps, still fails.
+///
+/// The work runs in a child process of this test binary, pinned to one CPU
+/// with `taskset` (util-linux), so the load costs one CPU whatever the
+/// machine. The timings come from Linux's `/proc/<thread>/schedstat`:
+/// elsewhere the check keeps wall-clock time and this test does not apply.
+#[cfg(target_os = "linux")]
+#[test]
+fn work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails() -> Result<()> {
+    busy_cpu::run_pinned("busy_cpu::on_one_busy_cpu")
+}
+
+#[cfg(target_os = "linux")]
+mod busy_cpu {
+    use std::{
+        future::Future,
+        process::Command,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::JoinHandle,
+        time::{Duration, Instant},
+    };
+
+    use anyhow::{Context as _, Result, bail, ensure};
+    use gridops_core::fleet_health::speed_check::{self, SLOW_STATEMENT_LIMIT, WRITE_LOCK_LIMIT};
+    use sqlx::SqlitePool;
+
+    use super::{close, database};
+
+    /// Set for the child, which is pinned to one CPU.
+    const PINNED: &str = "GRIDOPS_SPEED_CHECK_PINNED";
+
+    /// Threads spinning on the child's one CPU: the work gets about a
+    /// twelfth of it.
+    const SPINNERS: usize = 11;
+
+    /// What the light transaction does, by the clock of an idle CPU: well
+    /// under [`WRITE_LOCK_LIMIT`].
+    const LIGHT_WORK: Duration = Duration::from_millis(15);
+
+    /// Runs `inner` in a child process of this test binary, pinned to the
+    /// first CPU this process may use.
+    pub(super) fn run_pinned(inner: &str) -> Result<()> {
+        let status = std::fs::read_to_string("/proc/self/status")?;
+        let allowed = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .context("Cpus_allowed_list in /proc/self/status")?
+            .trim();
+        let cpu: String = allowed.chars().take_while(char::is_ascii_digit).collect();
+        ensure!(!cpu.is_empty(), "no CPU in {allowed:?}");
+        let output = Command::new("taskset")
+            .args(["-c", &cpu])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                inner,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PINNED, "1")
+            .output()
+            .context("taskset (util-linux) pins this test's child to one CPU")?;
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure!(
+            output.status.success() && printed.contains("1 passed"),
+            "the pinned child failed:\n{printed}"
+        );
+        Ok(())
+    }
+
+    /// Threads that keep the CPU busy until dropped.
+    struct Spinners {
+        stop: Arc<AtomicBool>,
+        threads: Vec<JoinHandle<()>>,
+    }
+
+    impl Spinners {
+        fn start(count: usize) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let threads = (0..count)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            Self { stop, threads }
+        }
+    }
+
+    impl Drop for Spinners {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            for thread in self.threads.drain(..) {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// One statement that writes `rows` rows, in its own transaction: the
+    /// time the statement took, by the wall clock.
+    async fn write_rows(pool: &SqlitePool, rows: i64) -> Result<Duration> {
+        let mut tx = pool.begin().await?;
+        let started = Instant::now();
+        sqlx::query(
+            "INSERT INTO busy_work (x) WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<?) SELECT x FROM c",
+        )
+        .bind(rows)
+        .execute(&mut *tx)
+        .await?;
+        let took = started.elapsed();
+        tx.commit().await?;
+        Ok(took)
+    }
+
+    /// One statement that counts `rows` rows and writes nothing: the time
+    /// it took, by the wall clock.
+    async fn count_rows(pool: &SqlitePool, rows: i64) -> Result<Duration> {
+        let started = Instant::now();
+        let counted: i64 = sqlx::query_scalar(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<?) SELECT COUNT(*) FROM c",
+        )
+        .bind(rows)
+        .fetch_one(pool)
+        .await?;
+        ensure!(counted == rows);
+        Ok(started.elapsed())
+    }
+
+    /// How many rows `work` handles in `budget` on this CPU while it is
+    /// idle: from the fastest of a few tries, so a busy moment can only make
+    /// the work lighter.
+    async fn rows_in<F: Future<Output = Result<Duration>>>(
+        budget: Duration,
+        work: impl Fn(i64) -> F,
+    ) -> Result<i64> {
+        const PROBE: i64 = 20_000;
+        let mut fastest = Duration::MAX;
+        for _ in 0..5 {
+            fastest = fastest.min(work(PROBE).await?);
+        }
+        let per_row = fastest.as_secs_f64() / 20_000.0;
+        let rows = (budget.as_secs_f64() / per_row) as i64;
+        Ok(rows.max(1_000))
+    }
+
+    #[tokio::test]
+    #[ignore = "run pinned to one CPU by work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails"]
+    async fn on_one_busy_cpu() -> Result<()> {
+        if std::env::var_os(PINNED).is_none() {
+            bail!(
+                "run by work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails, pinned to one CPU"
+            );
+        }
+        let (directory, pool) = database().await?;
+        sqlx::query("CREATE TABLE busy_work (x INTEGER NOT NULL)")
+            .execute(&pool)
+            .await?;
+        let rows = rows_in(LIGHT_WORK, |rows| write_rows(&pool, rows)).await?;
+        // A read that takes well over the statement limit on an idle CPU.
+        let slow_read = rows_in(SLOW_STATEMENT_LIMIT * 3, |rows| count_rows(&pool, rows)).await?;
+
+        // This process is fresh: after a first check (whose hooks create
+        // its dispatcher), sqlx's slow-statement warning is first reached
+        // outside a check. A check must still see the next slow statement;
+        // it once stopped seeing them for good.
+        speed_check::check(&pool, write_rows(&pool, 10)).await?;
+        count_rows(&pool, slow_read).await?;
+        let seen = speed_check::check(&pool, count_rows(&pool, slow_read)).await;
+        ensure!(
+            seen.is_err_and(|error| format!("{error:#}").contains("slow statement")),
+            "a slow statement after one outside a check passed the check"
+        );
+
+        let spinners = Spinners::start(SPINNERS);
+        // Light work, slowed by the busy CPU: it passes, and its work time
+        // is the work's. Until the CPU slows one write past both limits by
+        // the clock, which proves the timers took the wait off.
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            let (took, work) =
+                speed_check::work_time(&pool, speed_check::check(&pool, write_rows(&pool, rows)))
+                    .await;
+            let took = took.context("light work on a busy CPU failed the check")?;
+            ensure!(
+                work < WRITE_LOCK_LIMIT,
+                "light work on a busy CPU took {work:?} of work time ({took:?} by the clock)"
+            );
+            slowest = slowest.max(took);
+            if slowest > SLOW_STATEMENT_LIMIT {
+                break;
+            }
+        }
+        ensure!(
+            slowest > SLOW_STATEMENT_LIMIT,
+            "the busy CPU slowed {rows} rows only to {slowest:?}, so this proves nothing"
+        );
+        // Ten times the work, on the same busy CPU: it fails.
+        let heavy = speed_check::check(&pool, write_rows(&pool, rows * 10)).await;
+        let error = match heavy {
+            Ok(took) => bail!("150 ms of work in a write transaction passed the check ({took:?})"),
+            Err(error) => format!("{error:#}"),
+        };
+        ensure!(error.contains("write transaction"), "{error}");
+        ensure!(error.contains("slow statement"), "{error}");
+        // A slow read, on the same busy CPU: it fails, though its row comes
+        // back before the worker, kept off the CPU, writes its log line.
+        let read = speed_check::check(&pool, count_rows(&pool, slow_read)).await;
+        ensure!(
+            read.is_err_and(|error| format!("{error:#}").contains("slow statement")),
+            "a 300 ms read on a busy CPU passed the check"
+        );
+        // The lock held while the caller sleeps, on the same busy CPU: it
+        // fails, because a sleep is not a wait for the CPU.
+        let held = speed_check::check(&pool, async {
+            let mut tx = pool.begin().await?;
+            sqlx::query("INSERT INTO busy_work (x) VALUES (1)")
+                .execute(&mut *tx)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            tx.commit().await?;
+            Ok(())
+        })
+        .await;
+        ensure!(
+            held.is_err_and(|error| format!("{error:#}").contains("write transaction")),
+            "a write lock held through a 150 ms sleep on a busy CPU passed the check"
+        );
+        drop(spinners);
+        close(directory, pool).await
+    }
 }
