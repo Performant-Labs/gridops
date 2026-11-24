@@ -7,9 +7,17 @@
 //!
 //! The real agent talks to the API binary through the recovery proxy, which
 //! fails the requests a test picks and records every request it answers.
+//!
+//! The proxy records a request only once the API's reply has reached it, so
+//! for a moment the database already shows what a request did and the proxy
+//! has not recorded it yet. A loaded machine stretches that moment (#247), so
+//! these tests put [`SlowReplies`] between the proxy and the API to hold it
+//! open every time, and read the proxy only after waiting for what they
+//! expect it to have recorded.
 
 use std::{sync::Arc, time::Instant};
 
+use axum::{body::Body, extract::State, http::Request, response::IntoResponse};
 use gridops_host_agent::supervisor::Stop;
 
 use super::{
@@ -35,7 +43,8 @@ struct Proxied {
 async fn proxied_machine() -> Result<Proxied> {
     let f = Fixture::new().await?;
     seed_pool(&f).await?;
-    let proxy = Proxy::start(&f.origin).await?;
+    let slow = SlowReplies::start(&f.origin).await?;
+    let proxy = Proxy::start(&slow.origin).await?;
     let machine = active_machine(&f, &proxy.origin, Arc::new(FakeDocker::default())).await?;
     let host = machine.host.to_string();
     let session = agent_session(&f, &host).await?.context("agent session")?;
@@ -47,6 +56,75 @@ async fn proxied_machine() -> Result<Proxied> {
         host,
         session,
     })
+}
+
+/// How long [`SlowReplies`] holds a reply: longer than any poll of the
+/// database in these tests, so a test that reads the proxy as soon as the
+/// database changes reads it too early every time.
+const SLOW_REPLY: Duration = Duration::from_millis(500);
+
+/// The replies [`SlowReplies`] holds: those the tests count after waiting on
+/// the database.
+const SLOW_PATHS: [&str; 2] = ["/handshake", "/commands/result"];
+
+/// A relay between the proxy and the API that holds the API's replies to
+/// [`SLOW_PATHS`] for [`SLOW_REPLY`]: the API has committed the request, the
+/// proxy has not recorded it yet.
+struct SlowReplies {
+    origin: String,
+}
+
+impl SlowReplies {
+    async fn start(upstream: &str) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let app = axum::Router::new()
+            .fallback(relay)
+            .with_state(Arc::new((upstream.to_owned(), Client::new())));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok(Self { origin })
+    }
+}
+
+async fn relay(
+    State(state): State<Arc<(String, Client)>>,
+    request: Request<Body>,
+) -> axum::response::Response {
+    let (upstream, client) = state.as_ref();
+    let path = request
+        .uri()
+        .path_and_query()
+        .map_or("/", |path| path.as_str())
+        .to_owned();
+    let method = request.method().clone();
+    let headers = request.headers().clone();
+    let Ok(body) = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024).await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let mut forwarded = client.request(method, format!("{upstream}{path}"));
+    for (name, value) in &headers {
+        if name != header::HOST {
+            forwarded = forwarded.header(name, value);
+        }
+    }
+    let Ok(response) = forwarded.body(body).send().await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let Ok(bytes) = response.bytes().await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    if SLOW_PATHS.iter().any(|slow| path.ends_with(slow)) {
+        tokio::time::sleep(SLOW_REPLY).await;
+    }
+    let mut reply = (status, bytes).into_response();
+    for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+        if let Some(value) = headers.get(&name) {
+            reply.headers_mut().insert(name, value.clone());
+        }
+    }
+    reply
 }
 
 fn handshakes(proxy: &Proxy) -> usize {
@@ -68,6 +146,18 @@ async fn wait_for<T>(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Waits for the proxy to have recorded what `probe` looks for. The proxy
+/// records a request only once the API's reply reaches it, after the
+/// database shows what the request did, so a test that has just seen the
+/// database change waits here before it counts what the proxy saw.
+async fn proxy_records<T>(
+    limit: Duration,
+    what: &str,
+    probe: impl FnMut() -> Option<T>,
+) -> Result<T> {
+    wait_for(limit, &format!("the proxy to record {what}"), probe).await
 }
 
 async fn shut_down(machine: Machine) -> Result<()> {
@@ -260,14 +350,24 @@ async fn a_result_the_api_cannot_take_still_ends_the_session() -> Result<()> {
             .map(|_| ()))
     })
     .await?;
+    // The new session delivers the result from its journal after the
+    // handshake, and both replies reach the proxy after the database.
+    let results = proxy_records(
+        Duration::from_secs(30),
+        "the second handshake and the result answered",
+        || {
+            let results: Vec<StatusCode> = p
+                .proxy
+                .faults
+                .seen("/commands/result")
+                .iter()
+                .map(|seen| seen.status)
+                .collect();
+            (handshakes(&p.proxy) >= 2 && results.len() >= 2).then_some(results)
+        },
+    )
+    .await?;
     assert_eq!(handshakes(&p.proxy), 2);
-    let results: Vec<StatusCode> = p
-        .proxy
-        .faults
-        .seen("/commands/result")
-        .iter()
-        .map(|seen| seen.status)
-        .collect();
     assert_eq!(results, [StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK]);
     shut_down(p.machine).await
 }

@@ -471,9 +471,69 @@ transaction is timed from its first row change to its commit or rollback, and wh
 armed a connection's worker thread routes its `tracing` events to the check's own dispatcher
 (set as that thread's default from a hook), which records sqlx's slow-statement warning. Limits:
 a `BEGIN IMMEDIATE` held before any write, or a write to a `WITHOUT ROWID` table, is not timed;
-a statement is seen only once SQLite has run 1,000 instructions of it. Catching those is a
-non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock that `BEGIN IMMEDIATE`
-holds before its first write, or a slow write to a `WITHOUT ROWID` table.
+a statement that has run fewer than 1,000 instructions and changed no row is timed by the
+worker's CPU since the previous statement's log line (one instruction can walk a whole table:
+`SELECT COUNT(*)`), so one slow only because it waited for the lock is not a slow statement; and
+a check sees a worker's statements only once one of its hooks has run on that worker during the
+check, so such a read as the first statement on a connection in a check is not seen at all.
+Catching those is a non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock
+that `BEGIN IMMEDIATE` holds before its first write, a slow write to a `WITHOUT ROWID` table, or
+an unbounded `SELECT COUNT(*)` that is a connection's first statement in a check.
+
+The timing checks measure the work, not the machine (#247). Wall-clock time counts the time a
+loaded host keeps the work's threads off the CPU, or its disk keeps a write waiting, as if the
+work had spent it: at load 22+ the synthetic week failed with "held the write lock 71 ms" and
+passed on a rerun, so a red check could not be told from a regression. The limits stay (100 ms a
+statement, 50 ms a write transaction, 20 s to build the synthetic week). What changed is what is
+measured, from Linux's `/proc/<thread>/schedstat` for the connection's worker thread and the
+thread that called `check`:
+
+- a statement, from its first progress callback or row change to sqlx's log line for it, is the
+  CPU time those two threads used, plus the worker's time blocked in the kernel when the statement
+  read from the disk (a scan on a cold database waits for its own pages): what the statement did,
+  whatever else the host was doing;
+- a write transaction is wall-clock time less the time those two threads spent runnable and
+  waiting for a CPU (`run_delay`), less the time the worker spent blocked in the kernel inside
+  statements that return no rows and read nothing from the disk (a write's disk I/O, which a busy
+  disk stretches; a scan's reads from a cold database, such as a copy of Mars's, still count), and
+  never less than the CPU time the two used.
+
+A full scan counts in full in both: it holds the lock as long on a busy host as on an idle one. A
+transaction still counts the caller's work between statements, a lock held while the caller sleeps
+or waits on anything but a CPU, and a worker blocked inside a statement that returns rows (it may
+be waiting for the caller to take them), except the statement the transaction commits in, whose
+rows are not known until its log line after the commit: an autocommit `INSERT … RETURNING` whose
+rows the caller takes slowly has that wait taken off, as an autocommit write's disk stall must be.
+Timing transactions by CPU time alone, or by counting statements and rows, would miss a lock held
+across a slow call. `speed_check::work_time(&pool,
+work)` times any work the transaction's way (the synthetic week's 20 s budget). Limits: two
+threads waiting for a CPU at once both have their waits taken off (the CPU-time floor bounds it);
+a check whose work runs its statements from other threads (a multi-thread runtime moving the
+task) keeps those threads' waits; CPU time itself still grows when the host slows the CPU (a busy
+hyperthread sibling, a lower clock); where there is no `schedstat` (macOS) the timings are
+wall-clock time, as before.
+
+Two more ways the check went wrong under load or by test order (#247): it waited a fixed 25 ms
+for the last statement's log line, which sqlx writes after the caller has its row, so a slow
+statement on a busy CPU could be missed; it now waits until every statement it saw start has
+logged, and fails if one has not within 10 s. And tracing-core, while only one dispatcher is registered, asks the default of the thread
+that first reaches a callsite whether it is of interest, so once sqlx's statement log was first
+reached outside a check, no check saw it again; the check registers a second, inert dispatcher so
+that tracing-core asks the registered ones.
+
+`work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails` (`tests/fleet_health_speed_check.rs`)
+pins a child of the test binary to one CPU with `taskset` (util-linux), beside 11 spinning
+threads: about 15 ms of work passes there though the clock shows it past both limits, while ten
+times that work, a 300 ms read, or a lock held through a 150 ms sleep still fails. Each timing
+check was also shown to turn red with a full scan put back into its write transactions (#247's
+pull request).
+
+The agent tests in `crates/gridops-api/tests/fleet_http/busy_database.rs` read what the recovery
+proxy recorded only after waiting for it: the proxy records a request once the API's reply
+reaches it, so for a moment the database shows a new session or a delivered result that the proxy
+has not recorded. A relay between the proxy and the API holds the handshake and result replies
+for 500 ms, so a test that reads the proxy as soon as the database changes fails every time
+instead of once in a while.
 
 `fleet_health::testdata` seeds realistic data in batches: `seed_fleet` (the five fixture
 machines with their budgets, one installation, repository `acme/app` and a pool labelled
