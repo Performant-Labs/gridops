@@ -1206,22 +1206,33 @@ fn amount(cpu: i64, memory: i64, disk: i64) -> Result<ResourceAmountDto, QueryEr
     })
 }
 
+/// [`allocation_read`]'s statement, filtered by backend and/or domain. The
+/// unreleased states are listed (not `state!='released'`) so a domain's read
+/// seeks them through `capacity_allocations_domain_idx (domain_id,state)`
+/// instead of reading every allocation the domain ever had (#240).
+fn allocation_sql(backend: bool, domain: bool) -> String {
+    let mut sql = "SELECT COALESCE(SUM(a.cpu_millis),0) AS cpu,COALESCE(SUM(a.memory_mib),0) AS memory,COALESCE(SUM(a.disk_bytes),0) AS disk,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.cpu_millis ELSE 0 END),0) AS uncertain_cpu,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.memory_mib ELSE 0 END),0) AS uncertain_memory,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.disk_bytes ELSE 0 END),0) AS uncertain_disk FROM capacity_allocations a JOIN host_resource_domains d ON d.id=a.domain_id AND d.host_id=a.host_id WHERE a.host_id=? AND a.state IN (".to_owned()
+        + UNRELEASED_ALLOCATION_STATES
+        + ")";
+    if backend {
+        sql.push_str(" AND a.backend_id=?");
+    }
+    if domain {
+        sql.push_str(" AND a.domain_id=?");
+    }
+    if backend && !domain {
+        sql.push_str(" AND d.parent_domain_id IS NULL");
+    }
+    sql
+}
+
 async fn allocation_read(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: HostId,
     backend_id: Option<BackendId>,
     domain_id: Option<ResourceDomainId>,
 ) -> Result<AllocationReadV1, QueryError> {
-    let mut sql = "SELECT COALESCE(SUM(a.cpu_millis),0) AS cpu,COALESCE(SUM(a.memory_mib),0) AS memory,COALESCE(SUM(a.disk_bytes),0) AS disk,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.cpu_millis ELSE 0 END),0) AS uncertain_cpu,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.memory_mib ELSE 0 END),0) AS uncertain_memory,COALESCE(SUM(CASE WHEN a.state='uncertain' THEN a.disk_bytes ELSE 0 END),0) AS uncertain_disk FROM capacity_allocations a JOIN host_resource_domains d ON d.id=a.domain_id AND d.host_id=a.host_id WHERE a.host_id=? AND a.state!='released'".to_owned();
-    if backend_id.is_some() {
-        sql.push_str(" AND a.backend_id=?");
-    }
-    if domain_id.is_some() {
-        sql.push_str(" AND a.domain_id=?");
-    }
-    if backend_id.is_some() && domain_id.is_none() {
-        sql.push_str(" AND d.parent_domain_id IS NULL");
-    }
+    let sql = allocation_sql(backend_id.is_some(), domain_id.is_some());
     let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(host_id.to_string());
     if let Some(backend_id) = backend_id {
         query = query.bind(backend_id.to_string());
@@ -1261,7 +1272,7 @@ async fn counts(
         ""
     };
     let sql = format!(
-        "{prefix} SELECT COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.runner_id IS NOT NULL AND r.deleted_at IS NULL THEN p.runner_id END) AS runners,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_fix,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.state='running' THEN p.id END) AS running_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND p.state='running' THEN p.id END) AS running_fix,COUNT(DISTINCT CASE WHEN p.state='uncertain' OR EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state='uncertain' AND ca.state!='released') THEN p.id END) AS uncertain FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id LEFT JOIN runners r ON r.id=p.runner_id WHERE p.host_id=?{backend_clause}{target_clause}",
+        "{prefix} SELECT {COUNTS_COLUMNS} FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id LEFT JOIN runners r ON r.id=p.runner_id WHERE p.host_id=?{backend_clause}{target_clause}",
         prefix = prefix,
         backend_clause = if backend_id.is_some() {
             " AND p.backend_id=?"
@@ -1289,6 +1300,65 @@ async fn counts(
         query = query.bind(target_id);
     }
     let row = query.fetch_one(&mut **tx).await?;
+    counts_from_row(&row, scope)
+}
+
+/// The placement counts of [`counts`] and [`live_counts`], over placements
+/// `p` (with intent `i` and runner `r`).
+const COUNTS_COLUMNS: &str = "COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.runner_id IS NOT NULL AND r.deleted_at IS NULL THEN p.runner_id END) AS runners,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_fix,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.state='running' THEN p.id END) AS running_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND p.state='running' THEN p.id END) AS running_fix,COUNT(DISTINCT CASE WHEN p.state='uncertain' OR EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state='uncertain' AND ca.state!='released') THEN p.id END) AS uncertain";
+
+/// Every placement state but the finished ones (`stopped`, `cleaned` and
+/// `failed`, the list `targets.rs`' `live_placement!` shares), spelled out
+/// so `workload_placements_host_idx (host_id,state)` seeks each of them.
+const UNFINISHED_PLACEMENT_STATES: &str = "'reserved','preparing','registering','starting','running','draining','stopping','retryable','uncertain'";
+
+/// Every allocation state but `released`, spelled out so
+/// `capacity_allocations_domain_idx (domain_id,state)` seeks each of them.
+const UNRELEASED_ALLOCATION_STATES: &str = "'reserved','committed','releasing','uncertain'";
+
+/// The statement of [`live_counts`]: [`COUNTS_COLUMNS`] over the machine's
+/// live placements only, the unfinished ones (through
+/// `workload_placements_host_idx`) and the finished ones still holding
+/// capacity (through its domains' unreleased allocations), so it reads
+/// nothing of the machine's finished history, which retention never deletes.
+/// Binds the machine's id twice.
+fn live_counts_sql() -> String {
+    format!(
+        "WITH live(id) AS (
+           SELECT id FROM workload_placements WHERE host_id=? AND state IN ({UNFINISHED_PLACEMENT_STATES})
+           UNION
+           SELECT a.placement_id FROM host_resource_domains d
+             JOIN capacity_allocations a ON a.domain_id=d.id AND a.host_id=d.host_id
+            WHERE d.host_id=? AND a.state IN ({UNRELEASED_ALLOCATION_STATES}))
+         SELECT {COUNTS_COLUMNS} FROM live
+           JOIN workload_placements p ON p.id=live.id
+           JOIN workload_intents i ON i.id=p.intent_id
+           LEFT JOIN runners r ON r.id=p.runner_id"
+    )
+}
+
+/// The machine's counts over its live placements (fleet health's live read,
+/// #240): every count is what [`counts`] gives for `CountScope::Host`, since
+/// a finished placement holding no capacity is never running, charged or
+/// uncertain, except `known_managed_runner_count`, which counts only the
+/// runners of live placements.
+async fn live_counts(
+    tx: &mut Transaction<'_, Sqlite>,
+    host_id: HostId,
+) -> Result<FleetRecordCounts, QueryError> {
+    let host = host_id.to_string();
+    let row = sqlx::query(sqlx::AssertSqlSafe(live_counts_sql()))
+        .bind(&host)
+        .bind(&host)
+        .fetch_one(&mut **tx)
+        .await?;
+    counts_from_row(&row, CountScope::Host)
+}
+
+fn counts_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    scope: CountScope,
+) -> Result<FleetRecordCounts, QueryError> {
     let counter = |name: &str| -> Result<BrowserUint53, QueryError> {
         BrowserUint53::new(
             u64::try_from(row.get::<i64, _>(name)).map_err(|_| QueryError::MalformedData)?,
@@ -2319,7 +2389,11 @@ impl RegistryService {
 pub struct HostLiveRead {
     pub id: HostId,
     pub name: crate::fleet::ids::UpstreamText,
-    /// The machine's placements by state (`CountScope::Host`).
+    /// The machine's live placements by state (`CountScope::Host`): the
+    /// unfinished ones and the finished ones still holding capacity, never
+    /// its finished history (#240). Every count equals `list_hosts`' except
+    /// `known_managed_runner_count`, which counts the runners of those
+    /// placements only.
     pub counts: FleetRecordCounts,
     pub physical_budget: ResourceAmountDto,
     /// Charged allocations on the root domain.
@@ -2372,7 +2446,7 @@ pub async fn host_live_reads(
         .await?
         .ok_or(QueryError::MalformedData)?;
         let root_id = parse_domain_id(&root_id)?;
-        let counts = counts(&mut tx, &snapshot, host_id, None, None, CountScope::Host).await?;
+        let counts = live_counts(&mut tx, host_id).await?;
         let (failed_placements_last_hour, _) = placement_failures(&mut tx, host_id, now).await?;
         reads.push(HostLiveRead {
             id: host_id,
@@ -2494,3 +2568,120 @@ fn freshness(value: Option<i64>, now: i64) -> Freshness {
 #[cfg(test)]
 #[path = "query_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+mod live_plan_tests {
+    //! #240 item 4: the live read's statements seek the placements and
+    //! allocations that may still hold a machine through the `(…, state)`
+    //! indexes, instead of reading a machine's whole history.
+
+    use anyhow::Result;
+
+    /// `EXPLAIN QUERY PLAN` of `sql` (every `?` bound to a dummy text), one
+    /// line per step.
+    async fn plan(sql: &str) -> Result<Vec<String>> {
+        let directory = std::env::temp_dir().join(format!("gridops-plan-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let mut query = sqlx::query_as::<_, (i64, i64, i64, String)>(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {sql}"
+        )));
+        for _ in 0..sql.matches('?').count() {
+            query = query.bind("x");
+        }
+        let rows = query.fetch_all(&pool).await?;
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(rows.into_iter().map(|row| row.3).collect())
+    }
+
+    /// The live counts seek the machine's unfinished placements by state and
+    /// its domains' unreleased allocations; nothing reads a machine's
+    /// placements by `host_id` alone, which is its whole history.
+    #[tokio::test]
+    async fn the_live_counts_read_only_live_placements() -> Result<()> {
+        let steps = plan(&super::live_counts_sql()).await?;
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.contains("workload_placements_host_idx (host_id=? AND state=?)")),
+            "{steps:#?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|step| step
+                    .contains("capacity_allocations_domain_idx (domain_id=? AND state=?)")),
+            "{steps:#?}"
+        );
+        assert!(
+            !steps.iter().any(
+                |step| step.contains("workload_placements_host_idx (host_id=?)")
+                    || step.starts_with("SCAN p")
+                    || step.contains("SCAN workload_placements")
+            ),
+            "{steps:#?}"
+        );
+        Ok(())
+    }
+
+    /// The states a table's `CHECK (state IN (...))` allows, from the
+    /// migrated schema.
+    async fn checked_states(table: &str) -> Result<std::collections::BTreeSet<String>> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-states-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let sql: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await?;
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        let list = sql
+            .split("CHECK (state IN (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .ok_or_else(|| anyhow::anyhow!("{table} has no state CHECK: {sql}"))?;
+        Ok(states(list))
+    }
+
+    fn states(list: &str) -> std::collections::BTreeSet<String> {
+        list.split(',')
+            .map(|state| state.trim().trim_matches('\'').to_owned())
+            .collect()
+    }
+
+    /// PR-Agent aa53610c99c5: the spelled-out state lists are the schema's
+    /// lists less the finished placement states (`targets.rs`'
+    /// `live_placement!`) and less `released`; a state a migration adds
+    /// fails this test instead of silently dropping out of the live counts
+    /// and the allocation sums.
+    #[tokio::test]
+    async fn the_spelled_out_states_are_the_schemas_less_the_finished_ones() -> Result<()> {
+        let mut placements = states(super::UNFINISHED_PLACEMENT_STATES);
+        assert!(
+            placements.is_disjoint(&states("'stopped','cleaned','failed'")),
+            "{placements:?}"
+        );
+        placements.extend(states("'stopped','cleaned','failed'"));
+        assert_eq!(placements, checked_states("workload_placements").await?);
+        let mut allocations = states(super::UNRELEASED_ALLOCATION_STATES);
+        assert!(!allocations.contains("released"));
+        allocations.insert("released".to_owned());
+        assert_eq!(allocations, checked_states("capacity_allocations").await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_root_allocation_read_seeks_the_unreleased_states() -> Result<()> {
+        let steps = plan(&super::allocation_sql(false, true)).await?;
+        assert!(
+            steps
+                .iter()
+                .any(|step| step
+                    .contains("capacity_allocations_domain_idx (domain_id=? AND state=?)")),
+            "{steps:#?}"
+        );
+        Ok(())
+    }
+}

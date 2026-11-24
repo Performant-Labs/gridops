@@ -197,6 +197,7 @@ pub async fn seed_fleet(db: &SqlitePool) -> anyhow::Result<SeededFleet> {
         .bind(&host.root_domain_id)
         .execute(&mut *tx)
         .await?;
+        seed_observed_root(&mut tx, &host, index).await?;
         hosts.push(host);
     }
     sqlx::query(
@@ -232,6 +233,55 @@ pub async fn seed_fleet(db: &SqlitePool) -> anyhow::Result<SeededFleet> {
         target_id,
         profile_id,
     })
+}
+
+/// `host`'s root disk as its agent reports it (`fleet_observed_domains`,
+/// `local_key` `root`, [`DISK_BYTES`] like its budget), through the
+/// credential and observation session the row hangs off. The Overview's disk
+/// alarm and fleet health's (#240) read the disk's size from here.
+async fn seed_observed_root(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    host: &SeededHost,
+    index: i64,
+) -> anyhow::Result<()> {
+    let credential = uuid(0x0f00_0007, index);
+    let session = uuid(0x0f00_0008, index);
+    // A SHA-256 in base64url (43 characters), one per machine.
+    let digest = format!("{index:A<43}");
+    sqlx::query(
+        "INSERT INTO host_credentials (id,host_id,host_epoch,generation,verifier,created_at)
+         VALUES (?,?,1,1,?,1)",
+    )
+    .bind(&credential)
+    .bind(&host.id)
+    .bind(&digest)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fleet_observation_sessions (session_id,host_id,host_epoch,boot_id,control_plane_incarnation,negotiated_protocol,initial_credential_id,initial_credential_generation,current_credential_id,current_credential_generation,initial_request_id,initial_body_digest,state,created_at,last_seen_at,lease_expires_at,handshake_received_at,handshake_lease_expires_at,handshake_state,current_inventory_sequence)
+         VALUES (?1,?2,1,'testdata-boot',?3,1,?4,1,?4,1,'testdata-request',?5,'ready',1,1,1,1,1,'ready',1)",
+    )
+    .bind(&session)
+    .bind(&host.id)
+    .bind(INCARNATION)
+    .bind(&credential)
+    .bind(&digest)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fleet_observed_domains (host_id,local_key,domain_id,parent_local_key,kind,observed_name,runtime_identity,cpu_millis,memory_mib,disk_bytes,session_id,host_epoch,control_plane_incarnation,inventory_sequence,received_at)
+         VALUES (?,'root',?,NULL,'physical','root','testdata-root',?,?,?,?,1,?,1,1)",
+    )
+    .bind(&host.id)
+    .bind(&host.root_domain_id)
+    .bind(i64::from(host.cpu_budget_millis))
+    .bind(i64::from(host.memory_budget_mib))
+    .bind(host.disk_bytes)
+    .bind(&session)
+    .bind(INCARNATION)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// How a job's placement ended.
@@ -736,7 +786,9 @@ impl SampleSeed {
     }
 }
 
-/// Writes `samples` for `host`'s root domain, in batches.
+/// Writes `samples` for `host`'s root domain, in batches, and moves the
+/// machine's `last_heartbeat_at` up to the newest one received (an agent's
+/// heartbeat carries its samples).
 ///
 /// # Errors
 /// A write fails.
@@ -767,6 +819,15 @@ pub async fn insert_samples(
         .bind(&host.id)
         .bind(&host.root_domain_id)
         .bind(&wire)
+        .execute(db)
+        .await?;
+    }
+    if let Some(received_at) = samples.iter().map(|sample| sample.received_at).max() {
+        sqlx::query(
+            "UPDATE fleet_hosts SET last_heartbeat_at=MAX(COALESCE(last_heartbeat_at,0),?) WHERE id=?",
+        )
+        .bind(received_at)
+        .bind(&host.id)
         .execute(db)
         .await?;
     }

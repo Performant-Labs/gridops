@@ -5915,10 +5915,49 @@ async fn disk_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
             }));
         }
     }
-    // Fleet hosts: latest free space from each fresh host's samples against
-    // the root domain's observed capacity.
+    if let Ok(disks) = fleet_root_disks(&state.database, now).await {
+        for disk in disks {
+            if let Some(alarm) = gridops_core::disk::alarm_for(disk.total_bytes, disk.free_bytes) {
+                let name = disk.host_name;
+                alerts.push(json!({
+                    "level": level(alarm),
+                    "title": format!("Fleet machine {name} is running out of disk"),
+                    "detail": detail(disk.total_bytes, disk.free_bytes),
+                    "href": "/fleet",
+                }));
+            }
+        }
+    }
+    alerts
+}
+
+/// How recent a fleet machine's heartbeat must be for its disk to alarm.
+const DISK_ALARM_HEARTBEAT_MILLIS: i64 = 120_000;
+
+/// A fleet machine's root disk, as its disk alarm reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FleetRootDisk {
+    pub(crate) host_id: String,
+    pub(crate) host_name: String,
+    /// The root domain's observed size (`fleet_observed_domains`), not its
+    /// admin-set budget.
+    pub(crate) total_bytes: u64,
+    /// The newest sample's free space.
+    pub(crate) free_bytes: u64,
+}
+
+/// The root disk of every approved, unretired fleet machine with a heartbeat
+/// in the last 120 s: the newest sample's free space against the root
+/// domain's observed size. The one read behind both disk alarms, the
+/// Overview's and fleet health's (#240), so they always agree; each machine's
+/// alarm is `disk::alarm_for(total_bytes, free_bytes)`. A machine with no
+/// observed size or no sample with free space is left out.
+pub(crate) async fn fleet_root_disks(
+    database: &sqlx::SqlitePool,
+    now: i64,
+) -> sqlx::Result<Vec<FleetRootDisk>> {
     let rows = sqlx::query(
-        r#"SELECT fh.name AS host_name,
+        r#"SELECT fh.id AS host_id,fh.name AS host_name,
                   (SELECT s.disk_free_bytes FROM host_samples s
                     WHERE s.host_id=fh.id AND s.disk_free_bytes IS NOT NULL
                     ORDER BY s.observed_at DESC LIMIT 1) AS free_bytes,
@@ -5930,32 +5969,22 @@ async fn disk_alerts(state: &AppState, role: &str, now: i64) -> Vec<Value> {
               AND fh.lifecycle_state NOT IN ('retired')
               AND fh.last_heartbeat_at>=?"#,
     )
-    .bind(now - 120_000)
-    .fetch_all(&state.database)
-    .await;
-    if let Ok(rows) = rows {
-        for row in rows {
-            let Ok((Some(free), Some(total))) = TryInto::<(Option<i64>, Option<i64>)>::try_into((
-                row.get::<Option<i64>, _>("free_bytes"),
-                row.get::<Option<i64>, _>("total_bytes"),
-            )) else {
-                continue;
-            };
-            let (free, total) = (u64::try_from(free), u64::try_from(total));
-            if let (Ok(free), Ok(total)) = (free, total) {
-                if let Some(alarm) = gridops_core::disk::alarm_for(total, free) {
-                    let name: String = row.get("host_name");
-                    alerts.push(json!({
-                        "level": level(alarm),
-                        "title": format!("Fleet machine {name} is running out of disk"),
-                        "detail": detail(total, free),
-                        "href": "/fleet",
-                    }));
-                }
-            }
-        }
-    }
-    alerts
+    .bind(now - DISK_ALARM_HEARTBEAT_MILLIS)
+    .fetch_all(database)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let free = u64::try_from(row.get::<Option<i64>, _>("free_bytes")?).ok()?;
+            let total = u64::try_from(row.get::<Option<i64>, _>("total_bytes")?).ok()?;
+            Some(FleetRootDisk {
+                host_id: row.get("host_id"),
+                host_name: row.get("host_name"),
+                total_bytes: total,
+                free_bytes: free,
+            })
+        })
+        .collect())
 }
 
 /// One alert per machine set aside from new placements because it keeps

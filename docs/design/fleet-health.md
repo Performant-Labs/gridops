@@ -325,7 +325,7 @@ enough data never raises one.
 |---|---|---|
 | `host-offline:<host>` | critical | a machine with a CPU budget above 0 has no `host_samples` row in the last 5 minutes; `since` is its last sample |
 | `start-gate:<host>` | warning | `start_health::start_gate` sets the machine aside from new placements |
-| `disk:<host>` | critical or warning | `disk::alarm_for` gives an alarm for the root disk, from the measurement `/fleet/hosts` shows as `latestRootMeasurement` |
+| `disk:<host>` | critical or warning | the Overview's disk alarm, from the same read (`crate::resources::fleet_root_disks`, #240): `disk::alarm_for` on the newest sample's free space against the root disk's observed size (`fleet_observed_domains`, not the admin-set budget), only for a machine whose heartbeat is at most 120 s old |
 | `unmatched-jobs` | critical | queued jobs no pool can run (the Overview's split, `fleet_queue_breakdown`) |
 | `oldest-queued` | critical over 10 min, warning over 5 min | the oldest queued job's wait; `detail` names the job and the repository |
 | `uncertain:<host>` | warning | the machine has placements in state `uncertain` |
@@ -335,20 +335,28 @@ enough data never raises one.
 ## The live half
 
 `collect_live(db, now) -> (FleetLiveStats, Vec<HostLiveStats>, Vec<Concern>)` (#201) reads only
-what is true now, with no principal, through two fleet-wide reads #197 added for it:
+what is true now, with no principal, through the fleet-wide reads #197 added for it and the
+Overview's disk read:
 
 - `gridops_core::fleet::registry::host_live_reads(pool, now)`: every approved, non-deleted machine
   in id order, built by the same helpers `/fleet/hosts` uses for an administrator (counts,
   `physicalBudget`, `physicalAllocation`, `latestRootMeasurement`, placement failures in the last
-  hour, the start gate), in one read transaction;
+  hour, the start gate), in one read transaction. Its counts are over the machine's live
+  placements only (#240): the unfinished ones through `workload_placements_host_idx(host_id,state)`
+  and the finished ones still holding capacity, never its finished history, which retention
+  never deletes; every count equals `/fleet/hosts`' but the known-runner count;
 - `crate::resources::fleet_queue_breakdown(pool, now)`: the Overview's queue split
   (`split_queue` over `waiting_job_pools`) over every installation, with the queued jobs by
   category (NULL as `other`). For a user who sees every installation it gives exactly the
-  Overview's numbers.
+  Overview's numbers;
+- `crate::resources::fleet_root_disks(pool, now)`: the read behind the Overview's fleet disk
+  alarms (#240), so the two always agree.
 
 **Per machine:** online (a sample in the last 5 minutes), or offline with the last-seen time;
-runners running now by category (`runners.current_job_id` → the job's category, NULL as `other`,
-plus fix-agent runs from fix placements); CPU and memory reserved against the budget; CPU, memory
+runners running now by category (each running CI placement whose runner has a
+`current_job_id` or is busy, `status='busy'` and `busy=1`, counted once: a GitLab runner is only
+ever marked busy. A GitHub runner's `current_job_id` gives the job's category; no job row, or a
+NULL category, is `other`. Plus fix-agent runs from fix placements); CPU and memory reserved against the budget; CPU, memory
 and disk used from the latest sample; start failures in the last hour. **Fleet:** queued jobs by
 category and by pool, the unmatched count and the oldest queued job with its wait; running jobs
 by category. The per-category counts add up to their totals. Every query is bounded (by state
@@ -386,6 +394,12 @@ Machines are in id order on the wire; the page sorts them worst score first.
   Concurrent requests for an expired window wait for one computation. When the source fails, the
   last response is served with `"stale": true` while it is under 10 minutes old, and a 503
   `dependency_unavailable` after that.
+- **Locks, timeout and retries (#240):** each window has its own lock, held only by a
+  computation of that window; a cache hit takes no lock, so it never waits on a computation. A
+  computation over 2 s is given up on and counts as a failure. After a failure a window is not
+  computed again for 30 s, and serves stale or 503 (the rule above) meanwhile. The live part is
+  read once per computation; computations of several windows in flight at once share one live
+  reading, and nothing of it is kept once it is read (no cache across requests).
 
 Until #194 lands, the handler ignores `window`, has no cache, and answers the 24-hour response.
 
@@ -395,10 +409,10 @@ Until #194 lands, the handler ignores `window`, has no cache, and answers the 24
 | Route | Body | Answer |
 |---|---|---|
 | `GET /api/v1/settings/job-categories` | | `{"rules": [{position, category, field, pattern}]}`, positions `0..n` |
-| `PUT /api/v1/settings/job-categories` | `{"rules": [{category, field, pattern}]}`, the whole list in order (empty allowed) | the saved list; an invalid pattern is a 422 `{error, code: "invalid_job_category_rules", details: [{position, message}]}` and nothing is saved |
+| `PUT /api/v1/settings/job-categories` | `{"rules": [{category, field, pattern}]}`, the whole list in order (empty allowed), at most 200 rules and 1 KiB (UTF-8) per pattern | the saved list, with a `job_categories.updated` audit event (the lists before and after) in the same transaction; an invalid pattern (or one over 1 KiB) is a 422 `{error, code: "invalid_job_category_rules", details: [{position, message}]}`, a list over 200 rules a 422 with empty `details`, and nothing is saved |
 | `POST /api/v1/settings/job-categories/preview` | the proposed list | `{"rules": [{position, matches}], "other": [{name, jobs}]}`: jobs completed in the last 7 days each rule would classify (first match wins), and the 20 commonest names left in `other` |
 
-The 422 is `ApiError::Invalid { code, message, details }`; no other error body changed. The
+The 422 is `ApiError::Invalid { code, message, details }`; no other error body changed. The page checks the same limits before it sends anything, shows each 422 message on its row (from a save or a preview), and calls the preview unavailable, not invalid, on a server or network failure; a newer edit aborts the preview in flight (#240). The
 browser's `ApiError` (`src/lib/api.ts`) keeps the body's `code` and `details`. Until #199 lands,
 the three routes check the caller and answer 501.
 

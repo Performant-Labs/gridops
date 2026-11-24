@@ -6,9 +6,12 @@
 //! Everything a principal would gate is read through #197's fleet-wide reads
 //! with none: `gridops_core::fleet::registry::host_live_reads` (per-machine
 //! counts, root budget and allocation, latest root measurement, placement
-//! failures, start gate) and `crate::resources::fleet_queue_breakdown` (the
-//! Overview's queue split over every installation, with the queued jobs by
-//! category). The only queries here are the ones those two can't answer, each
+//! failures, start gate; live placements only, #240),
+//! `crate::resources::fleet_queue_breakdown` (the Overview's queue split over
+//! every installation, with the queued jobs by category) and
+//! `crate::resources::fleet_root_disks` (the Overview's disk alarm read: the
+//! observed root disk of each machine with a recent heartbeat, #240). The
+//! only queries here are the ones those two can't answer, each
 //! a bounded index read (#179): a machine's newest sample (per host, on
 //! `host_samples`' `(host_id, observed_at, id)` index), the categories of the
 //! jobs its runners are running now (per host, on `workload_placements`'
@@ -43,6 +46,12 @@ pub(crate) async fn collect_live(
 ) -> anyhow::Result<(FleetLiveStats, Vec<HostLiveStats>, Vec<Concern>)> {
     let reads = host_live_reads(db, now).await?;
     let queue = crate::resources::fleet_queue_breakdown(db, now).await?;
+    let disks: HashMap<String, crate::resources::FleetRootDisk> =
+        crate::resources::fleet_root_disks(db, now)
+            .await?
+            .into_iter()
+            .map(|disk| (disk.host_id.clone(), disk))
+            .collect();
     let mut hosts = Vec::with_capacity(reads.len());
     let mut concerns = Vec::new();
     let mut fleet_running: BTreeMap<JobCategory, u32> = BTreeMap::new();
@@ -75,17 +84,25 @@ pub(crate) async fn collect_live(
                 .flatten(),
         };
 
-        // What its runners are running now, by category: a running CI
-        // placement's runner's current job, NULL category as `other`. Runs on
-        // `workload_placements`' `(host_id, state)` index; running
-        // fix placements (a category no job row has) come from the counts.
+        // What its runners are running now, by category: each running CI
+        // placement whose runner has a current job or is busy, once. Only
+        // GitHub's `associate_runner_with_job` sets `current_job_id`; a
+        // GitLab runner is only ever marked busy (`set_gitlab_runner_busy`:
+        // `status='busy'`, `busy=1`), and so is a GitHub runner GitHub says
+        // is running a job GridOps never matched. A job is categorised from
+        // its `workflow_jobs` row only for a GitHub runner (another
+        // platform's job ids are not `workflow_jobs` ids); with no row it is
+        // `other`, like a NULL category. Runs on `workload_placements`'
+        // `(host_id, state)` index; running fix placements (a category no
+        // job row has) come from the counts.
         let running: Vec<(Option<String>, i64)> = sqlx::query_as(
             "SELECT wj.category,COUNT(*) FROM workload_placements p
                JOIN workload_intents i ON i.id=p.intent_id
                JOIN runners r ON r.id=p.runner_id
-               LEFT JOIN workflow_jobs wj ON wj.id=r.current_job_id
+               LEFT JOIN workflow_jobs wj
+                 ON wj.id=r.current_job_id AND r.ci_platform='github'
               WHERE p.host_id=? AND p.state='running' AND i.kind='ci_runner'
-                AND r.current_job_id IS NOT NULL
+                AND (r.current_job_id IS NOT NULL OR (r.status='busy' AND r.busy=1))
               GROUP BY wj.category",
         )
         .bind(&id)
@@ -169,18 +186,18 @@ pub(crate) async fn collect_live(
             });
         }
 
-        // `disk`: the root disk's alarm, on the measurement `/fleet/hosts`
-        // shows as `latestRootMeasurement` against the root domain's size.
-        let disk_total = read.physical_budget.disk_bytes.get();
-        let disk_free = measurement
-            .and_then(|row| row.disk_free_bytes)
-            .map(|value| value.get());
-        if let Some(alarm) = disk_free.and_then(|free| disk::alarm_for(disk_total, free)) {
+        // `disk`: the Overview's disk alarm, from the same read
+        // (`fleet_root_disks`): the newest sample's free space against the
+        // root disk's observed size (not its admin-set budget), and only for
+        // a machine with a heartbeat in the last 120 s.
+        if let Some((alarm, free, disk_total)) = disks.get(&id).and_then(|disk| {
+            disk::alarm_for(disk.total_bytes, disk.free_bytes)
+                .map(|alarm| (alarm, disk.free_bytes, disk.total_bytes))
+        }) {
             let (severity, level) = match alarm {
                 disk::DiskAlarm::Critical => (Severity::Critical, "critical"),
                 disk::DiskAlarm::Warning => (Severity::Warning, "warning"),
             };
-            let free = disk_free.unwrap_or_default();
             concerns.push(Concern {
                 key: format!("disk:{id}"),
                 severity,
@@ -407,5 +424,276 @@ fn gib_text(bytes: u64) -> String {
         format!("{}", rounded as u64)
     } else {
         format!("{value:.1}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! #240: the live read's cost on a long placement history (item 4), the
+    //! disk alarm's source and heartbeat rule (item 5), and busy runners with
+    //! no `current_job_id` (item 6).
+
+    use std::path::PathBuf;
+
+    use anyhow::Result;
+    use gridops_core::fleet_health::{
+        JobCategory, Severity, speed_check,
+        testdata::{self, JobSeed, SampleSeed, SeededFleet},
+    };
+    use sqlx::SqlitePool;
+
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000_000;
+    const SECOND: i64 = 1_000;
+    const MINUTE: i64 = 60 * SECOND;
+    const DAY: i64 = 24 * 60 * MINUTE;
+    const GIB: i64 = 1024 * 1024 * 1024;
+
+    struct Seeded {
+        directory: PathBuf,
+        db: SqlitePool,
+        fleet: SeededFleet,
+    }
+
+    impl Seeded {
+        /// The seeded fleet, each budgeted machine with a sample (and so a
+        /// heartbeat) 30 s ago and half its root disk free.
+        async fn new() -> Result<Self> {
+            let directory =
+                std::env::temp_dir().join(format!("gridops-live-240-{}", uuid::Uuid::new_v4()));
+            let db = gridops_core::connect_database_path(&directory.join("db.sqlite")).await?;
+            let fleet = testdata::seed_fleet(&db).await?;
+            let seeded = Self {
+                directory,
+                db,
+                fleet,
+            };
+            for host in &seeded.fleet.hosts {
+                if host.cpu_budget_millis > 0 {
+                    seeded
+                        .sample(&host.name, NOW - 30 * SECOND, 50 * GIB)
+                        .await?;
+                }
+            }
+            Ok(seeded)
+        }
+
+        fn id(&self, name: &str) -> Result<String> {
+            Ok(self.fleet.host(name)?.id.clone())
+        }
+
+        async fn sample(&self, name: &str, observed_at: i64, disk_free_bytes: i64) -> Result<()> {
+            let mut sample = SampleSeed::at(observed_at);
+            sample.disk_free_bytes = Some(disk_free_bytes);
+            testdata::insert_samples(&self.db, self.fleet.host(name)?, &[sample]).await
+        }
+
+        /// `name`'s running jobs now, by category.
+        async fn running(&self, name: &str) -> Result<BTreeMap<JobCategory, u32>> {
+            let id = self.id(name)?;
+            let (_, hosts, _) = collect_live(&self.db, NOW).await?;
+            Ok(hosts
+                .into_iter()
+                .find(|stats| stats.host_id == id)
+                .map(|stats| stats.running_by_category)
+                .unwrap_or_default())
+        }
+
+        async fn close(self) -> Result<()> {
+            self.db.close().await;
+            std::fs::remove_dir_all(self.directory)?;
+            Ok(())
+        }
+    }
+
+    /// Item 4: the live read reads only the placements that may still be on
+    /// a machine, however long its history. On top of the synthetic week, io
+    /// has four more weeks of finished jobs (each a stopped placement), and
+    /// both `host_live_reads` and `collect_live` stay under the speed check.
+    #[tokio::test]
+    async fn the_live_path_passes_the_speed_check_however_long_the_placement_history() -> Result<()>
+    {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-live-history-{}", uuid::Uuid::new_v4()));
+        let db = gridops_core::connect_database_path(&directory.join("db.sqlite")).await?;
+        let week = testdata::build_week(&db, NOW).await?;
+        let io = week.fleet.host("io")?.id.clone();
+        let start = NOW - 35 * DAY;
+        let history: Vec<JobSeed> = (0..40_000_i64)
+            .map(|index| {
+                let created = start + index * MINUTE;
+                JobSeed::completed(
+                    10_000_000 + index,
+                    "old job",
+                    Some(&io),
+                    created,
+                    created + SECOND,
+                    created + 30 * SECOND,
+                )
+            })
+            .collect();
+        testdata::insert_jobs(&db, &week.fleet, &history).await?;
+        let placements: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workload_placements WHERE host_id=?")
+                .bind(&io)
+                .fetch_one(&db)
+                .await?;
+        assert!(
+            placements >= 40_000,
+            "io's history: {placements} placements"
+        );
+
+        let reads = speed_check::check(&db, async {
+            host_live_reads(&db, NOW).await.map_err(anyhow::Error::from)
+        })
+        .await?;
+        let io_read = reads
+            .iter()
+            .find(|read| read.id.to_string() == io)
+            .ok_or_else(|| anyhow::anyhow!("io was not read"))?;
+        assert_eq!(io_read.counts.running_ci_placement_count.get(), 0);
+        assert_eq!(io_read.counts.uncertain_placement_count.get(), 0);
+        let (fleet, _, _) = speed_check::check(&db, collect_live(&db, NOW)).await?;
+        assert_eq!(
+            fleet.running_total, 0,
+            "every job of the history is finished"
+        );
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// Item 5: the disk alarm is the Overview's: the disk's observed size,
+    /// not the admin-set budget. A 2 TiB root with a 500 GiB budget and
+    /// 60 GiB free is critical (under 5 % of 2 TiB), as the Overview says.
+    #[tokio::test]
+    async fn the_disk_alarm_uses_the_observed_disk_not_the_admin_budget() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        let io = seeded.id("io")?;
+        sqlx::query("UPDATE host_resource_domains SET disk_bytes=? WHERE host_id=? AND parent_domain_id IS NULL")
+            .bind(500 * GIB)
+            .bind(&io)
+            .execute(&seeded.db)
+            .await?;
+        sqlx::query(
+            "UPDATE fleet_observed_domains SET disk_bytes=? WHERE host_id=? AND local_key='root'",
+        )
+        .bind(2048 * GIB)
+        .bind(&io)
+        .execute(&seeded.db)
+        .await?;
+        seeded.sample("io", NOW - 10 * SECOND, 60 * GIB).await?;
+        let (_, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        let disk = concerns
+            .iter()
+            .find(|concern| concern.key == format!("disk:{io}"))
+            .ok_or_else(|| anyhow::anyhow!("no disk concern for io: {concerns:?}"))?;
+        assert_eq!(disk.severity, Severity::Critical);
+        assert!(disk.detail.contains("of 2048 GiB"), "{}", disk.detail);
+
+        // The other way round: a budget over the disk alarms on the disk.
+        sqlx::query("UPDATE host_resource_domains SET disk_bytes=? WHERE host_id=? AND parent_domain_id IS NULL")
+            .bind(4096 * GIB)
+            .bind(&io)
+            .execute(&seeded.db)
+            .await?;
+        sqlx::query(
+            "UPDATE fleet_observed_domains SET disk_bytes=? WHERE host_id=? AND local_key='root'",
+        )
+        .bind(100 * GIB)
+        .bind(&io)
+        .execute(&seeded.db)
+        .await?;
+        let (_, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != format!("disk:{io}")),
+            "60 GiB free of an observed 100 GiB is fine: {concerns:?}"
+        );
+        seeded.close().await
+    }
+
+    /// Item 5: like the Overview, only a machine whose heartbeat is at most
+    /// 120 s old raises a disk alarm.
+    #[tokio::test]
+    async fn a_machine_with_an_old_heartbeat_raises_no_disk_alarm() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        let io = seeded.id("io")?;
+        seeded.sample("io", NOW - 10 * SECOND, GIB).await?;
+        for (heartbeat, alarms) in [(NOW - 121 * SECOND, false), (NOW - 120 * SECOND, true)] {
+            sqlx::query("UPDATE fleet_hosts SET last_heartbeat_at=? WHERE id=?")
+                .bind(heartbeat)
+                .bind(&io)
+                .execute(&seeded.db)
+                .await?;
+            let (_, _, concerns) = collect_live(&seeded.db, NOW).await?;
+            assert_eq!(
+                concerns
+                    .iter()
+                    .any(|concern| concern.key == format!("disk:{io}")),
+                alarms,
+                "heartbeat {} s ago: {concerns:?}",
+                (NOW - heartbeat) / SECOND
+            );
+        }
+        seeded.close().await
+    }
+
+    /// Item 6: a GitLab runner is running a job while it is busy
+    /// (`status='busy'`, `busy=1`), which is all `set_gitlab_runner_busy`
+    /// writes: it never sets `current_job_id`. It counts once, as `other`
+    /// (its job is no `workflow_jobs` row), and not while it is online.
+    #[tokio::test]
+    async fn a_busy_gitlab_runner_counts_as_running_once_and_an_online_one_does_not() -> Result<()>
+    {
+        let seeded = Seeded::new().await?;
+        let io = seeded.id("io")?;
+        let mut github = JobSeed::running(
+            1,
+            "unit tests",
+            Some(&io),
+            NOW - 3 * MINUTE,
+            NOW - 2 * MINUTE,
+        );
+        github.category = Some(JobCategory::Test);
+        let mut gitlab =
+            JobSeed::running(2, "rspec", Some(&io), NOW - 3 * MINUTE, NOW - 2 * MINUTE);
+        gitlab.gitlab = true;
+        testdata::insert_jobs(&seeded.db, &seeded.fleet, &[github, gitlab]).await?;
+        let set_gitlab = |busy: bool, current_job_id: Option<i64>| {
+            sqlx::query(
+                "UPDATE runners SET busy=?,status=CASE WHEN ? THEN 'busy' ELSE 'online' END,current_job_id=?
+                  WHERE ci_platform='gitlab'",
+            )
+            .bind(busy)
+            .bind(busy)
+            .bind(current_job_id)
+            .execute(&seeded.db)
+        };
+
+        set_gitlab(true, None).await?;
+        assert_eq!(
+            seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
+            "the GitHub job, and the busy GitLab runner's"
+        );
+
+        set_gitlab(false, None).await?;
+        assert_eq!(
+            seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1)]),
+            "an online GitLab runner runs nothing"
+        );
+
+        // With `current_job_id` set (here the GitHub job's id) it still
+        // counts once, and never takes that unrelated job's category.
+        set_gitlab(true, Some(1)).await?;
+        assert_eq!(
+            seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
+        );
+        seeded.close().await
     }
 }
