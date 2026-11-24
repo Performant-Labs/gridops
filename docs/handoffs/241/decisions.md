@@ -29,3 +29,9 @@
 - **Assumed:** Free budget is drawn as its own `var(--selected)` segment, the old track colour, since the wireframe lists four segments. An unknown hash host sets the expansion to an id no row matches, which shows the prompt. The scope cap is not triggered: it is one page, the plan was already gated as one unit, and splitting after RED would strand the suite.
 - **Hedged:** I did not edit the design-doc sentence at `docs/design/fleet-health.md:352` (A warn 4 left it to O). I did not run Tier 2 or Tier 3. The real glyphs and stacked bars in a browser are U's.
 - **Evidence:** `npx vitest run` gives 66 files and 701 tests passed. `npm run lint` exits 0. `npm run build` (vite and `tsc --noEmit`) exits 0. A deleted jsdom probe showed the segment rectangles, two distinct hatch ids and the `aria-label`s. Evidence entries are in `docs/handoffs/241/evidence.md`.
+
+## Phase 7 (Verify GREEN + Tier 2) - T — 2026-11-24
+- **Decided:** PASS. Full suite 701/701, lint and build clean, three temporary mutations each failed the intended test, `ResourceBar` is driven by `resourceSegments`. No test edited.
+- **Assumed:** No Playwright suite exists (no config found), so the e2e step is N/A.
+- **Hedged:** Did not drive a browser; real glyph and chart rendering is U's. Did not re-check the design-doc sentence (O's).
+- **Evidence:** `npx vitest run` 66 files / 701 tests; `npm run lint`; `npm run build`; mutation runs on `live-strip.tsx`, `areas-of-concern.tsx`, `page.tsx` (3 failed, 63 passed, reverted, tree clean).
