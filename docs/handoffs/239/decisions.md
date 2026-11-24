@@ -132,3 +132,9 @@
   - `cargo fmt --check` and `clippy +1.98.1 -D warnings` are clean.
   - EXPLAIN QUERY PLAN for the new SQL shows `workflow_jobs_completed_idx`, `workflow_jobs_run_status_idx`, `runners_github_id_idx` and `workload_placements_runner_idx`.
   - Source facts are in `docs/handoffs/239/evidence.md`.
+
+## T (Phase 7, GREEN)
+- **Decided:** run the mutation checks by editing the production file in the working tree and restoring it with `git checkout` straight after, since F's work is committed. The tree was clean before and after.
+- **Assumed:** F's reported timing flakes are load-related. They did not recur, and the diff does not touch the seed or the write path of those tests.
+- **Hedged:** none.
+- **Evidence:** suite counts 365 and 151 passed; mutation failures listed in `handoff-T-green.md`; clippy 1.98.1 clean.

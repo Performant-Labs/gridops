@@ -68,3 +68,11 @@
   > /// 50,000 successful GitHub jobs, each its own run at attempt 1, spread over
   > /// the four machines with a CPU budget, and a root sample every 30 s for all
   > /// five machines.
+
+## Phase 7 (T)
+
+- **Fact:** the scorer's `ceil_div` rounds up, so `first_hour` is the first whole hour at or after `now − W`, and the covered time is always positive for W >= 1 h.
+  **Source:** `crates/gridops-core/src/fleet_health/score.rs:566-568` (read in the working tree at a8e55f3)
+  **Verbatim excerpt:**
+  > fn first_hour(inputs: &FleetHealthInputs) -> i64 {
+  >     ceil_div(inputs.now - inputs.window.millis(), HOUR_MILLIS) * HOUR_MILLIS
