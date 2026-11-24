@@ -39,11 +39,14 @@ const ROLLUP_NEXT_SETTING: &str = "fleet_health.rollup_next";
 const WRITE_BATCH: usize = 500;
 
 /// The hour's GitHub jobs (`workflow_jobs_completed_idx`), final attempts
-/// only: a job counts unless a later attempt of its run (by
-/// `workflow_job_sync.run_attempt`, unknown counts as 1) ran a job of the
-/// same name. A "re-run failed jobs" attempt runs only the failed jobs, and
-/// the run's other jobs keep their earlier attempt, so they still count. The runner and its newest `workload_placements` row give the
-/// machine, pool and CPU size; no runner row, or no placement, is unmanaged.
+/// only: a job counts unless a later attempt of its run ran a job of the
+/// same name. "Later" is a higher `workflow_job_sync.run_attempt`; when
+/// either attempt is unknown (GitHub didn't give one), the higher job id,
+/// since GitHub numbers a re-run's jobs after the attempt it re-runs. A
+/// "re-run failed jobs" attempt runs only the failed jobs, and the run's
+/// other jobs keep their earlier attempt, so they still count. The runner
+/// and its newest `workload_placements` row give the machine, pool and CPU
+/// size; no runner row, or no placement, is unmanaged.
 const GITHUB_JOBS: &str = r#"
 SELECT wj.category,
        COALESCE(wj.conclusion='success',0) AS success,
@@ -62,9 +65,12 @@ SELECT wj.category,
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE wj.completed_at>=? AND wj.completed_at<?
    AND NOT EXISTS (SELECT 1 FROM workflow_jobs later_job
-          JOIN workflow_job_sync later ON later.job_id=later_job.id
+          LEFT JOIN workflow_job_sync later ON later.job_id=later_job.id
          WHERE later_job.run_id=wj.run_id AND later_job.name=wj.name
-           AND later.run_attempt>COALESCE(sync.run_attempt,1))"#;
+           AND later_job.id<>wj.id
+           AND (later.run_attempt>sync.run_attempt
+                OR ((later.run_attempt IS NULL OR sync.run_attempt IS NULL)
+                    AND later_job.id>wj.id)))"#;
 
 /// The hour's GitLab jobs (`gitlab_jobs_completed_idx`), joined to their
 /// machines through `runners.gitlab_runner_id` the same way. A GitLab job is
@@ -87,20 +93,22 @@ SELECT gj.category,
  WHERE gj.completed_at>=? AND gj.completed_at<?"#;
 
 /// The other hours in which the earlier attempts of the hour's re-run jobs
-/// (the same run and job name) completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
+/// (the same run and job name, earlier as [`GITHUB_JOBS`] orders them)
+/// completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
 /// rolled while its attempt was still the run's newest, so it counts there
 /// until the hour is rolled again (#239). The hour itself is left out; its own
 /// rows already read only final attempts.
 const EARLIER_ATTEMPT_HOURS: &str = r#"
 SELECT DISTINCT earlier.completed_at-(earlier.completed_at%3600000) AS hour
   FROM workflow_jobs wj
-  JOIN workflow_job_sync sync ON sync.job_id=wj.id
+  LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
   JOIN workflow_jobs earlier ON earlier.run_id=wj.run_id AND earlier.name=wj.name
-                            AND earlier.status='completed'
+                            AND earlier.status='completed' AND earlier.id<>wj.id
   LEFT JOIN workflow_job_sync earlier_sync ON earlier_sync.job_id=earlier.id
  WHERE wj.completed_at>=? AND wj.completed_at<?
-   AND sync.run_attempt>1
-   AND COALESCE(earlier_sync.run_attempt,1)<sync.run_attempt
+   AND (earlier_sync.run_attempt<sync.run_attempt
+        OR ((earlier_sync.run_attempt IS NULL OR sync.run_attempt IS NULL)
+            AND earlier.id<wj.id))
    AND earlier.completed_at>=?
    AND (earlier.completed_at<? OR earlier.completed_at>=?)
  ORDER BY hour"#;
@@ -527,6 +535,28 @@ mod tests {
             "lint's attempt 1 was replaced"
         );
         assert_eq!(harness.counted(c).await?, 1, "lint's attempt 2");
+        harness.finish().await
+    }
+
+    /// GitHub doesn't always give a job's attempt: a re-run job whose
+    /// attempt is unknown is later than the same-named job it re-runs by its
+    /// higher job id, so the run still counts once and the earlier hour is
+    /// listed. An unknown attempt never makes an earlier job id replace a
+    /// later one.
+    #[tokio::test]
+    async fn a_re_run_job_with_no_known_attempt_still_replaces_the_earlier_one() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b) = (NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 70, 1, a + 30 * MINUTE).await?;
+        harness.job(2, 70, 2, b + 10 * MINUTE).await?;
+        sqlx::query("UPDATE workflow_job_sync SET run_attempt=NULL WHERE job_id=2")
+            .execute(&harness.db)
+            .await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(b).await?, 1, "the re-run job counts");
+        assert_eq!(harness.listed().await?, [a], "the earlier hour is listed");
+        rollup_hour(&harness.db, a, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 0, "the earlier job was replaced");
         harness.finish().await
     }
 
