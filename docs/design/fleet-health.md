@@ -404,7 +404,11 @@ A stale response shows a warning above the sections.
 
 The sections, each taking `{ data, window }` and using only the router's `Link`: the live strip
 and category legend (#203), Areas of concern and the fleet score card (#195), the machine table
-and detail (#202). Until its issue lands, each renders a placeholder card ("Coming in #N").
+and detail (#202). The machine table and detail also share the expanded machine, which the frame
+owns (#241): the frame reads the router's hash (`useRouterState`), opens the machine a
+`#machine-<host>` hash names on load and whenever the hash changes, and passes `expanded`,
+`onExpandedChange` and `hash` to the table and `expandedId` to the detail, so the detail slot
+shows the machine expanded in the table. Without those props the table keeps its own expansion. Until its issue lands, each renders a placeholder card ("Coming in #N").
 Each section sits in its own slot, an element carrying `data-health-section`: `live-strip`,
 `areas-of-concern`, `fleet-score`, `category-legend`, `machine-table` and `machine-detail`, six
 in all (the stale warning is not a slot). The slots are part of the composition: wave 1 fills a

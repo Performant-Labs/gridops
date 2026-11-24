@@ -9,7 +9,10 @@ import type { FleetHealth, FleetHealthViewProps, HealthWindow, ScoreComponent } 
 /** The word under the gauge: which band the score is in. */
 const BAND_LABELS: Record<ScoreBand, string> = { good: "Good", fair: "Fair", poor: "Poor", none: "No score" };
 
-/** Why a component with no score is greyed out (`docs/design/fleet-health.md`, Scores). */
+/**
+ * Why a component with no score is greyed out (`docs/design/fleet-health.md`, Scores), when the
+ * API gives no reason of its own in the component's `deduction`.
+ */
 const INSUFFICIENT_REASON = "Not enough data in this window: fewer than 20 jobs, or no samples.";
 
 /** The local time of a trend point: an hour on the shorter windows, a day on 7 d. */
@@ -108,9 +111,14 @@ function TrendTooltip({ active, label, payload, window }: {
   );
 }
 
-/** One component: its score as a bar in its band's colour, its weight and its deduction. */
+/**
+ * One component: its score as a bar in its band's colour, its weight as a whole percent ("—" when
+ * it has no score) and its deduction. A component with no score gives the API's reason (its
+ * `deduction`), or the card's own when the API gives none.
+ */
 function ComponentRow({ component }: { component: ScoreComponent }) {
   const insufficient = component.score === null;
+  const reason = component.deduction || INSUFFICIENT_REASON;
   const row = (
     <li
       className={cn("min-w-0", insufficient && "cursor-help opacity-60")}
@@ -123,7 +131,7 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
         <span className={cn("min-w-0 truncate text-sm font-medium", insufficient ? "text-muted-foreground" : "text-foreground")}>
           {component.label}
         </span>
-        <span className="ml-auto shrink-0 text-xs text-faint tabular">{component.weight}%</span>
+        <span className="ml-auto shrink-0 text-xs text-faint tabular">{insufficient ? "—" : `${Math.round(component.weight)}%`}</span>
       </div>
       <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full" style={{ backgroundColor: TRACK_COLOR }}>
         <div
@@ -132,12 +140,12 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
         />
       </div>
       <p className={cn("mt-1 text-xs leading-4", insufficient ? "text-faint" : "text-muted-foreground")}>
-        {insufficient ? INSUFFICIENT_REASON : (component.deduction ?? "On target")}
+        {insufficient ? reason : (component.deduction ?? "On target")}
       </p>
     </li>
   );
   return insufficient ? (
-    <Tooltip content={INSUFFICIENT_REASON} side="top">
+    <Tooltip content={reason} side="top">
       {row}
     </Tooltip>
   ) : (

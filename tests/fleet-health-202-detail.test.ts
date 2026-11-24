@@ -2,27 +2,23 @@
 /**
  * #202's own tests for what the contract leaves open: the "Now" readings in an expanded detail,
  * the per-category numbers against the fixture, the slowest job keys, the speed-index lines and
- * the machine-detail slot's state when no machine is expanded.
+ * the machine-detail slot's state.
+ *
+ * No `vi.mock` of the router here (#241): the slot and in-page link tests render the whole page
+ * under a real router (`./fleet-health-router`), and nothing else this file renders imports it.
  */
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { MachineDetail } from "~/features/fleet-health/machine-detail";
 import { slowestKeys, usagePoints } from "~/features/fleet-health/machine-detail-window";
 import { MachineScoreTable } from "~/features/fleet-health/machine-score-table";
 import type { FleetHealth } from "~/features/fleet-health/types";
 
-import { all, click, fixture, one, render, mountEachTest } from "./fleet-health-dom";
-
-vi.mock("@tanstack/react-router", async () => {
-  const { createElement: element } = await import("react");
-  return {
-    Link: ({ children, to, ...props }: { children?: unknown; to: string } & Record<string, unknown>) =>
-      element("a", { ...props, href: to }, children as never),
-  };
-});
+import { all, button, click, fixture, one, render, mountEachTest, settle } from "./fleet-health-dom";
+import { renderHealthPageAt, resetLocationEachTest } from "./fleet-health-router";
 
 mountEachTest();
+resetLocationEachTest();
 
 const table = (data: FleetHealth) => createElement(MachineScoreTable, { data, window: "24h" });
 const toggle = (hostId: string) => one<HTMLButtonElement>("button[aria-expanded]", one(`#machine-${hostId}`));
@@ -126,10 +122,25 @@ describe("machine detail — in the window", () => {
 });
 
 describe("machine detail slot", () => {
-  it("explains itself when no machine is expanded", async () => {
-    await render(createElement(MachineDetail, { data: fixture(), window: "24h" }));
-    expect(all("[data-machine-detail]")).toHaveLength(0);
-    expect(document.body.textContent).toContain("Expand a machine above");
+  const PROMPT = "Expand a machine above to see what it is doing now and what it ran in the window.";
+  const slot = () => one('[data-health-section="machine-detail"]');
+
+  // #241 item 6: the slot names the machine expanded in the table, and prompts when none is.
+  it("explains itself when no machine is expanded, and names the machine once one is", async () => {
+    const data = fixture();
+    const callisto = hostByName(data, "callisto");
+    await renderHealthPageAt("/fleet/health", data);
+    expect(slot().textContent).toContain(PROMPT);
+
+    await click(toggle(callisto.id));
+    expect(slot().textContent).toContain(callisto.name);
+    expect(slot().textContent).not.toContain(PROMPT);
+    // The full detail stays in the row: the slot names the machine, it does not repeat it.
+    expect(all("[data-machine-detail]").map((detail) => detail.getAttribute("data-machine-detail"))).toEqual([callisto.id]);
+
+    await click(toggle(callisto.id));
+    expect(slot().textContent).toContain(PROMPT);
+    expect(slot().textContent).not.toContain(callisto.name);
   });
 });
 
@@ -142,12 +153,22 @@ describe("deep links", () => {
     expect(all('[id^="machine-"]')).toHaveLength(data.hosts.length);
   });
 
-  it("opens the machine when the hash changes while mounted, as an in-page concern link does", async () => {
+  // #241 item 2: a concern link on the page itself is a same-route navigation, which re-renders
+  // nothing that reads `window.location`. Click the real `Link` under a real router and render
+  // nothing again: a second `render()` or a `router.navigate` would hide the bug.
+  it("opens the machine when an in-page concern link is clicked", async () => {
     const data = fixture();
-    await render(table(data));
-    expect(all("[data-machine-detail]")).toHaveLength(0);
-    window.location.hash = `#machine-${hostByName(data, "io").id}`;
-    await render(table(data));
-    expect(all("[data-machine-detail]").map((detail) => detail.getAttribute("data-machine-detail"))).toEqual([hostByName(data, "io").id]);
+    const callisto = hostByName(data, "callisto");
+    await renderHealthPageAt("/fleet/health", data);
+    expect(toggle(callisto.id).getAttribute("aria-expanded")).toBe("false");
+
+    // The fixture's in-page machine links are past the first five concerns.
+    await click(button(`Show all ${data.concerns.length}`));
+    await click(one(`a[href="/fleet/health#machine-${callisto.id}"]`));
+    await settle();
+
+    expect(window.location.hash, "the navigation happened").toBe(`#machine-${callisto.id}`);
+    expect(toggle(callisto.id).getAttribute("aria-expanded")).toBe("true");
+    expect(all("[data-machine-detail]").map((detail) => detail.getAttribute("data-machine-detail"))).toEqual([callisto.id]);
   });
 });

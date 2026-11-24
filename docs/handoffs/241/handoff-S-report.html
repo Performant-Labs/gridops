@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#241 fleet health wave-1 fixes: visual audit (S)</title>
+<style>
+ :root{--bg:#111316;--panel:#1a1d21;--line:#2b3037;--fg:#e8eaed;--muted:#a0a7b1;--ok:#3fb27f;--warn:#e9a23b;--bad:#e5534b;--link:#6aa8ff}
+ *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+ header.nav{position:sticky;top:0;z-index:5;background:#0c0e10;border-bottom:1px solid var(--line);padding:8px 16px;display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
+ header.nav a{color:var(--link);text-decoration:none} main{max-width:1180px;margin:0 auto;padding:16px}
+ .banner{border:2px solid var(--ok);background:#12261e;border-radius:10px;padding:16px 20px;margin:12px 0}
+ .banner .v{font-size:38px;font-weight:800;color:var(--ok);letter-spacing:.02em} .banner table{margin-top:8px}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:16px 0}
+ h1{font-size:20px;margin:6px 0} h2{font-size:18px;margin:0 0 6px} h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 6px}
+ .meta{color:var(--muted);margin:4px 0 8px;font-size:13.5px} ul{margin:6px 0 6px 20px;padding:0} li{margin:5px 0}
+ table{border-collapse:collapse;width:100%;font-size:13.5px} th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top} th{background:#15181c;color:var(--muted)}
+ .tag{display:inline-block;font-size:11px;font-weight:700;border-radius:99px;padding:2px 9px;vertical-align:middle;margin-left:6px}
+ .tag.ok{background:#12261e;color:var(--ok);border:1px solid var(--ok)} .tag.delta{background:#2a2110;color:var(--warn);border:1px solid var(--warn)} .tag.info{background:#14202f;color:var(--link);border:1px solid var(--link)}
+ img.full{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:6px;background:#000}
+ .wipe .stage{position:relative;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#000}
+ .wipe .stage img{display:block;width:100%;height:auto} .wipe .stage img.live{position:absolute;top:0;left:0;clip-path:inset(0 50% 0 0)}
+ .wipe input{width:100%;margin-top:8px} .wipe .labels{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}
+ img.crop{max-width:300px;width:100%;height:auto;border:1px solid var(--line);border-radius:4px;background:#000}
+ code{background:#0c0e10;border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:12.5px}
+</style></head><body>
+<header class="nav"><b>#241 visual audit</b>
+ <a href="#verdict">Verdict</a><a href="#diff">What I see different</a><a href="#vp-1280">1280</a><a href="#vp-768">768</a><a href="#vp-360">360</a>
+ <a href="#sections">Per-section table</a><a href="#behaviour">Link click, before / after</a><a href="#checks">Other checks</a><a href="#rework">Sub-issues</a></header>
+<main>
+<section id="verdict" class="banner">
+ <div class="v">PASS</div>
+ <div>Fleet health wave-1 review fixes (#241), branch <code>claude/fh-241</code> (head a4b1bd5) against master <code>73de941</code> rendered in headless Chromium.</div>
+ <table><tr><th>Viewport</th><th>Pixels different (page, machine expanded)</th><th>Delta</th><th>Pixels different (no machine expanded)</th><th>Delta</th></tr>
+ <tr><td>1280×800</td><td>7,863</td><td>0.27%</td><td>6,476</td><td>0.34%</td></tr>
+ <tr><td>768×1024</td><td>7,738</td><td>0.39%</td><td>6,477</td><td>0.47%</td></tr>
+ <tr><td>360×800</td><td>7,886</td><td>0.6%</td><td>6,508</td><td>0.69%</td></tr></table>
+ <p class="meta">Every viewport is under 2%. All of the difference sits in three places that this change was meant to alter. Repeating a capture of the same build gives 0 to 15 differing pixels, so the numbers are real.</p>
+</section>
+
+<section id="diff" class="card"><h2>What I see different</h2>
+ <ul>
+  <li><b>Areas of concern, every viewport.</b> The small coloured dot in front of each concern is now a shaped icon: a red circle with a cross for critical, an amber clock for warning, a grey circle with a slash for info. The title and the sentence under it start about 6 px further to the right to make room. Nothing else in the list moved.</li>
+  <li><b>Memory bar in an expanded machine (callisto), every viewport.</b> Before, the bright "used" bar (11.7 GB) sat on top of the "reserved" bar (8 GB), so the reservation vanished. Now the bright part stops at 8 GB and the extra 3.7 GB is drawn as an orange hatch. The CPU bar looks the same as before (it was never hiding anything).</li>
+  <li><b>"Machine detail" box under the machine list, every viewport.</b> With a machine open it now reads "Showing callisto: what it is doing now and what it ran in the window are in its row above." in a solid-bordered box. With nothing open it is the same dashed box and the same sentence as before.</li>
+  <li><b>Clicking a concern that names a machine.</b> On master the page scrolls to the machine and leaves it closed. On this branch the machine opens and the box above names it (see "Link click, before / after").</li>
+  <li><b>Not visible in pictures, checked separately.</b> Weights are whole percents and "—" for no score (the demo data already had whole numbers, so nothing moves), the "not enough data" explanations come from the server, and the oldest-job wait now follows the clock (master 7 min, branch 84 h 54 min on today's clock).</li>
+  <li>The fleet score card, the live strip, the category legend and every other row of the machine list are pixel-identical at all three widths.</li>
+ </ul>
+</section>
+
+<section id="vp-1280" class="card">
+  <h2>1280×800 <span class="tag ok">MATCH outside the intended regions</span></h2>
+  <p class="meta">Machine expanded via deep link (shows every changed element). Whole page: <b>7,863 px</b> differ (<b>0.27%</b>). With no machine expanded: 6,476 px (0.34%). Picture size is the full scrolled page, so tall.</p>
+  <h3>Wipe slider</h3>
+  <p class="meta">Drag the handle. Left of it is <b>this branch</b> (live); right of it is <b>master 73de941</b> (reference).</p>
+  <div class="wipe" id="wipe-1280">
+    <div class="stage">
+      <img class="ref" src="screenshots/cycle-1/t3-health-1280-ref-20261124.png" alt="Reference (master) at 1280px">
+      <img class="live" src="screenshots/cycle-1/t3-health-1280-live-20261124.png" alt="Live (branch) at 1280px">
+    </div>
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe position at 1280px">
+    <div class="labels"><span>◀ live (branch)</span><span>reference (master) ▶</span></div>
+  </div>
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-1280-diff-20261124.png" alt="ImageMagick diff at 1280px">
+  <h3>Side by side (live left, reference right)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-1280-composite-20261124.png" alt="Composite at 1280px">
+</section>
+<section id="vp-768" class="card">
+  <h2>768×1024 <span class="tag ok">MATCH outside the intended regions</span></h2>
+  <p class="meta">Machine expanded via deep link (shows every changed element). Whole page: <b>7,738 px</b> differ (<b>0.39%</b>). With no machine expanded: 6,477 px (0.47%). Picture size is the full scrolled page, so tall.</p>
+  <h3>Wipe slider</h3>
+  <p class="meta">Drag the handle. Left of it is <b>this branch</b> (live); right of it is <b>master 73de941</b> (reference).</p>
+  <div class="wipe" id="wipe-768">
+    <div class="stage">
+      <img class="ref" src="screenshots/cycle-1/t3-health-768-ref-20261124.png" alt="Reference (master) at 768px">
+      <img class="live" src="screenshots/cycle-1/t3-health-768-live-20261124.png" alt="Live (branch) at 768px">
+    </div>
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe position at 768px">
+    <div class="labels"><span>◀ live (branch)</span><span>reference (master) ▶</span></div>
+  </div>
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-768-diff-20261124.png" alt="ImageMagick diff at 768px">
+  <h3>Side by side (live left, reference right)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-768-composite-20261124.png" alt="Composite at 768px">
+</section>
+<section id="vp-360" class="card">
+  <h2>360×800 <span class="tag ok">MATCH outside the intended regions</span></h2>
+  <p class="meta">Machine expanded via deep link (shows every changed element). Whole page: <b>7,886 px</b> differ (<b>0.6%</b>). With no machine expanded: 6,508 px (0.69%). Picture size is the full scrolled page, so tall.</p>
+  <h3>Wipe slider</h3>
+  <p class="meta">Drag the handle. Left of it is <b>this branch</b> (live); right of it is <b>master 73de941</b> (reference).</p>
+  <div class="wipe" id="wipe-360">
+    <div class="stage">
+      <img class="ref" src="screenshots/cycle-1/t3-health-360-ref-20261124.png" alt="Reference (master) at 360px">
+      <img class="live" src="screenshots/cycle-1/t3-health-360-live-20261124.png" alt="Live (branch) at 360px">
+    </div>
+    <input type="range" min="0" max="100" value="50" aria-label="Wipe position at 360px">
+    <div class="labels"><span>◀ live (branch)</span><span>reference (master) ▶</span></div>
+  </div>
+  <h3>Pixel difference (red = changed)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-360-diff-20261124.png" alt="ImageMagick diff at 360px">
+  <h3>Side by side (live left, reference right)</h3>
+  <img class="full" src="screenshots/cycle-1/t3-health-360-composite-20261124.png" alt="Composite at 360px">
+</section>
+
+<section id="sections" class="card"><h2>Per-section delta table</h2>
+ <p class="meta">Percentages are pixels that differ inside that section's box, machine-expanded page. Crops are cut from the diff pictures (red = changed).</p>
+ <table><tr><th>Section</th><th>Viewport</th><th>Status</th><th>Description</th><th>Crop preview</th></tr>
+ <tr><td>Areas of concern (rows)</td><td>1280: 3.56%<br>768: 2.81%<br>360: 4.71%</td><td><span class="tag delta">DELTA, intended</span></td><td>Dot replaced by a shaped icon; text starts about 6 px further right. Brief item 1, wireframe frame 1.</td>
+  <td><img class="crop" src="screenshots/cycle-1/t3-health-concern-rows-1280-crop-20261124.png" alt="Concern rows diff at 1280"><br><img class="crop" src="screenshots/cycle-1/t3-health-concern-rows-360-crop-20261124.png" alt="Concern rows diff at 360"></td></tr>
+ <tr><td>CPU and memory bars</td><td>1280: memory 10.63%, CPU 0.19%<br>768: memory 10.62%, CPU 0.21%<br>360: memory 10.59%, CPU 0.24%</td><td><span class="tag delta">DELTA, intended</span></td><td>Memory: used no longer hides the reservation; the part above it is hatched orange. CPU unchanged to the eye. Brief item 5.</td>
+  <td><img class="crop" src="screenshots/cycle-1/t3-health-resource-bars-1280-crop-20261124.png" alt="Resource bars diff at 1280"></td></tr>
+ <tr><td>Machine detail box</td><td>1280: 1.15%<br>768: 1.53%<br>360: 2.71%</td><td><span class="tag delta">DELTA, intended</span></td><td>Names the open machine, solid border instead of dashed. Brief item 6, wireframe frame 6.</td>
+  <td><img class="crop" src="screenshots/cycle-1/t3-health-detail-slot-1280-crop-20261124.png" alt="Detail slot diff at 1280"></td></tr>
+ <tr><td>Fleet score, live strip, category legend, rest of the machine table</td><td>all</td><td><span class="tag ok">MATCH</span></td><td>0 to 0.07% (the last is 140 px of a chart time label that varies between captures of the same build at 360).</td><td>All sections match.</td></tr>
+ </table>
+</section>
+
+<section id="behaviour" class="card"><h2>Link click, before / after</h2>
+ <p class="meta">1280 wide. Page opened with no hash, "Show all 13" clicked, then the concern link "Jupiter scores 63" clicked (same page, no reload). Live (branch) left, reference (master) right, scaled to 50%. This is a behaviour check, not a regression number: the two pages end up different on purpose, so a whole-page pixel count (3.5% at 1280) is not meaningful.</p>
+ <img class="full" src="screenshots/cycle-1/t3-health-clicked-1280-composite-20261124.png" alt="Clicked state, branch left, master right">
+ <table style="margin-top:10px"><tr><th></th><th>master 73de941</th><th>branch</th></tr>
+ <tr><td>Jupiter's row after the click</td><td><code>aria-expanded="false"</code>, still closed</td><td><code>aria-expanded="true"</code>, open, scrolled into view</td></tr>
+ <tr><td>Machine detail box</td><td>"Expand a machine above…"</td><td>"Showing Jupiter: …"</td></tr></table>
+</section>
+
+<section id="checks" class="card"><h2>Other checks</h2>
+ <ul>
+  <li><b>Accessibility (axe-core, WCAG 2.x A/AA and best practice, 360 and 1280).</b> The same single rule fails on master and on the branch, with the same node counts (12 at 360, 17 at 1280): colour contrast of the faint grey timestamps and weights. Nothing new from #241.</li>
+  <li><b>Glyph contrast against the card background (15, 16, 17).</b> Critical 5.47:1, warning 8.55:1, info 6.28:1. All above the 3:1 needed for graphics.</li>
+  <li><b>Console.</b> No errors and no warnings on either build at any viewport or state.</li>
+  <li><b>No sideways scroll</b> at 360 in any state.</li>
+ </ul>
+</section>
+
+<section id="rework" class="card"><h2>Sub-issue recommendations</h2>
+ <p>None. The verdict is PASS. Non-blocking notes for O are in the handoff (design-doc sentence, chart tab stops, text-faint contrast).</p>
+</section>
+</main>
+<script>
+document.querySelectorAll('.wipe').forEach(function(w){
+  var live=w.querySelector('img.live'), range=w.querySelector('input');
+  function set(){ live.style.clipPath='inset(0 '+(100-range.value)+'% 0 0)'; }
+  range.addEventListener('input',set); set();
+});
+</script>
+</body></html>

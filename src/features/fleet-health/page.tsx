@@ -1,3 +1,4 @@
+import { useRouterState } from "@tanstack/react-router";
 import { HeartPulse, RefreshCw } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
@@ -13,6 +14,7 @@ import { CategoryLegend } from "./category-legend";
 import { FleetScoreCard } from "./fleet-score-card";
 import { LiveStrip } from "./live-strip";
 import { MachineDetail } from "./machine-detail";
+import { hashHostId } from "./machine-format";
 import { MachineScoreTable } from "./machine-score-table";
 import { HEALTH_WINDOWS, healthWindowSchema, type FleetHealthViewProps, type HealthWindow } from "./types";
 
@@ -55,8 +57,10 @@ const WINDOW_LABELS: Record<HealthWindow, string> = { "1h": "1 hour", "24h": "24
 
 /**
  * `/fleet/health`: the fleet's health over a window. The frame (#195) lays out every section and
- * owns the window; each section takes `{ data, window }` and is filled in by its own issue. Only
- * administrators can read it, so a member sees why instead of an error.
+ * owns the window; each section takes `{ data, window }` and is filled in by its own issue. The
+ * frame also owns which machine is expanded, following the router's hash (#241), and hands it to
+ * the machine table and the detail slot. Only administrators can read it, so a member sees why
+ * instead of an error.
  */
 export function FleetHealthPage() {
   const [window_, setWindow_] = useState<HealthWindow>(loadHealthWindow);
@@ -119,6 +123,18 @@ function Slot({ name, children }: { name: HealthSlot; children: ReactNode }) {
 
 function HealthSections({ data, window }: FleetHealthViewProps) {
   const generatedAt = new Date(data.generatedAt).toISOString();
+  // The machine expanded in the table, which the detail slot names. A `#machine-<host>` hash opens
+  // its machine on load and whenever the hash changes, including a concern link on this page (a
+  // same-route navigation, which re-renders no section): the router's hash (no leading `#`) is
+  // read here and the expansion adjusted while rendering when it changes.
+  const hash = useRouterState({ select: (state) => state.location.hash });
+  const [expanded, setExpanded] = useState<string | null>(() => hashHostId(hash));
+  const [seenHash, setSeenHash] = useState(hash);
+  if (hash !== seenHash) {
+    setSeenHash(hash);
+    const target = hashHostId(hash);
+    if (target) setExpanded(target);
+  }
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4 p-3 sm:p-4" data-testid="fleet-health-sections">
       {data.stale ? (
@@ -132,8 +148,10 @@ function HealthSections({ data, window }: FleetHealthViewProps) {
         <Slot name="fleet-score"><FleetScoreCard data={data} window={window} /></Slot>
       </div>
       <Slot name="live-strip"><LiveStrip data={data} window={window} /></Slot>
-      <Slot name="machine-table"><MachineScoreTable data={data} window={window} /></Slot>
-      <Slot name="machine-detail"><MachineDetail data={data} window={window} /></Slot>
+      <Slot name="machine-table">
+        <MachineScoreTable data={data} expanded={expanded} hash={hash} onExpandedChange={setExpanded} window={window} />
+      </Slot>
+      <Slot name="machine-detail"><MachineDetail data={data} expandedId={expanded} window={window} /></Slot>
       <Slot name="category-legend"><CategoryLegend data={data} window={window} /></Slot>
     </div>
   );
