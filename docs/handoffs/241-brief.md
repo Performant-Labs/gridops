@@ -5,22 +5,45 @@ Part of #198. Found by the Opus review of the wave-1 UI PRs (#227, #231, #232), 
 1. **Severity is shown by colour alone.** In `src/features/fleet-health/areas-of-concern.tsx` (~:85), `StatusDot` is `aria-hidden` and the row has no severity text, so neither colour-blind users nor screen readers can tell critical from warning.
    - Fix: reuse `RunStatusIcon` through a severity-to-`RunState` map (failure, waiting, skipped), plus visually hidden "Critical", "Warning" or "Info" text, as `StatusBadge` does. Add no new export or copied glyph to `status-icon.tsx`.
    - Test it.
+   - What the source shows (`src/components/status-icon.tsx`, master 73de941): `RunStatusIcon({ status, className, size })` (:53) resolves `status` through `runState` and the `RUN_STATES` map (:6-21), where `failure`, `waiting` and `skipped` are all keys, so it renders three different glyphs for them (:59-60 waiting, :65-66 failure, :69-70 the default, which `skipped` reaches). Its SVG is `"aria-hidden": true` (:55). `StatusBadge` pairs the icon with a hidden label in its `iconOnly` branch (:89): `<span className="sr-only">{label}</span>`. `StatusDot` is `aria-hidden="true"` (:78), which is the defect. The map follows the brief's order: critical → `failure`, warning → `waiting`, info → `skipped`, the same red, amber and grey as `SEVERITY_TONES` (`areas-of-concern.tsx:11`: `danger`, `warning`, `neutral`).
+   - The observable assertion (so a colour-only change cannot pass): in a `tests/fleet-health-241-*.test.ts` file, render `AreasOfConcern` with the fixture (which has every severity of concern, `docs/design/fleet-health.md`, Decisions) and, for every `[data-concern-key]` row, assert (a) that its `.sr-only` element reads "Critical", "Warning" or "Info" to match the concern's `severity`, and (b) that the row's `svg` has the same `outerHTML` as `RunStatusIcon` rendered alone with the mapped status. Before the fix both fail: the row has no `.sr-only` text and no `svg`, only the `StatusDot` span.
 2. **A same-page concern link doesn't expand the machine row.** `machine-score-table.tsx` (~:25-31) reads the hash only when it re-renders. A same-route TanStack navigation doesn't re-render it, so the page scrolls to a collapsed row.
    - Fix: subscribe to the hash (`useRouterState({ select: s => s.location.hash })`), or pass it down from `page.tsx`, and expand in an effect.
    - **Decided:** call `useRouterState({ select: s => s.location.hash })` in `HealthSections` (the pattern at `app-shell.tsx:121`) and pass the hash down as an optional prop. Don't put the hook inside `MachineScoreTable`: that breaks the Link-only `vi.mock` in the `*.contract.test.ts` file.
    - Expand through the render-time `seenHash` adjustment already in `machine-score-table.tsx`, not by setting state in an effect. `react-hooks/set-state-in-effect` is an error in this repo. Keep only the scroll in the effect.
    - The router's `location.hash` has no leading `#`. Extend `hashHostId(hash)` to cover that rather than writing a second parser.
+   - **How items 2 and 6 fit together** (this changes neither Decided bullet; it says where each piece runs once item 6 lifts the state). With the expansion state in `HealthSections`, the hash-driven expansion is the same render-time adjustment as `machine-score-table.tsx:21-31` (React's adjust-state-when-a-value-changes pattern, also used at `areas-of-concern.tsx:44-51`), run in `HealthSections` beside the state it sets: keep the last hash seen in state, and when the `useRouterState` hash differs, record it and expand `hashHostId(hash)` when that gives a host. It cannot stay in the child: a child that sets its parent's state while rendering is a cross-component update during render, which React reports as an error ("Cannot update a component while rendering a different component"), and the effect path is ruled out above. What happens to the existing child code:
+     - `MachineScoreTable` keeps its own `expanded` state and its `seenHash` adjustment (reading `globalThis.location.hash`) only for when it is rendered with just `{ data, window }`, as the #202 contract test does ("opens the machine named in the #machine- link", `tests/fleet-health-202-machines.contract.test.ts:89-96`). When `HealthSections` passes the expansion props, the table renders from them, sends toggles through the change callback, and runs no hash adjustment of its own.
+     - The hash prop the Decided bullet passes down is what the table's scroll effect (`machine-score-table.tsx:34-38`, the only effect left) keys on when it is given; without it the effect keys on the table's own `seenHash`, as now.
+   - What the source shows for this item: `app-shell.tsx:121` is `const pathname = useRouterState({ select: (state) => state.location.pathname });`, the same hook-with-`select` pattern, selecting the pathname. `hashHostId` takes no argument today (`machine-format.tsx:48-56`): it matches `/^#machine-(.+)$/` against `globalThis.location?.hash` and `decodeURIComponent`s the id, returning null when that throws. In `@tanstack/router-core` 1.171.15 (the version in `package-lock.json`), `src/location.ts` documents `ParsedLocation.hash` as "excluding the leading hash character", and `src/router.ts`'s `parseLocation` builds it as `hash: decodePath(hash.slice(1)).path`. So the router's hash has no `#` and has already been through `decodePath` (`src/utils.ts`), which leaves `%25` and `%5C` encoded and leaves a malformed sequence such as `%E0%A4` in place rather than throwing. The malformed-hash test (`tests/fleet-health-202-detail.test.ts:137-143`) must keep passing on both paths.
+   - Why the hook cannot go in `MachineScoreTable`: `tests/fleet-health-202-machines.contract.test.ts:23-29` mocks the router with `Link` only:
+
+         vi.mock("@tanstack/react-router", async () => {
+           const { createElement: element } = await import("react");
+           return {
+             Link: ({ children, to, ...props }: { children?: unknown; to: string } & Record<string, unknown>) =>
+               element("a", { ...props, href: to }, children as never),
+           };
+         });
+
+     Vitest throws when code reads an export that a factory mock does not define, so a `useRouterState` call in the table would fail every test in that file. `tests/fleet-health-202-detail.test.ts:17-23` has the same mock.
+   - **Open, needs the operator's ruling (not decided here):** `tests/fleet-health-page.test.ts:21-27` has the same `Link`-only mock and renders `FleetHealthPage`, so `HealthSections`, where the Decided bullet puts `useRouterState`. Item 6 says not to change that file. Nothing in this brief yet says how both hold.
    - Rewrite `tests/fleet-health-202-detail.test.ts` (~:145-152) to click the real concern Link under a real `createRouter`/`RouterProvider` (as `tests/page-header-nav.test.ts` does), not `router.navigate` and not a second `render()`. That test currently hides the bug. Extending #197's router mock is in scope.
 3. **Weights render as raw floats.** `fleet-score-card.tsx` (~:126) shows values such as "47.05882352941177%". Round the weight, and show "—" for a component with no data.
+   - "A component with no data" is one with `component.score === null`, the card's existing `insufficient` flag (`fleet-score-card.tsx:113`); the schema has no other no-data signal (`weight` is always a number, `types.ts:44-50`). The "—" replaces only the weight text (`{component.weight}%`, :126). The reason line (:134-136) and the tooltip (:139-142) are separate elements and follow item 4, so a null-score component shows both: "—" as its weight and item 4's text as its reason. Neither fix overrides the other.
 4. **The "not enough data" tooltip ignores the API's reason.** `fleet-score-card.tsx` (~:13, :135, :140) always says the same thing. Show `component.deduction` when the score is null. `machine-score-table.tsx` (~:120) has the same fixed text: fix it the same way.
+   - What the source shows: `deduction` is `z.string().nullable()` (`types.ts:49`) and `Option<String>` in Rust (`crates/gridops-core/src/fleet_health/mod.rs:255`, documented at :244-247 as "the sentence that explains the points lost (or why there is no score)"). The scoring engine's no-data branch always sets `deduction: Some(format!("Not enough data: {no_data}."))` beside `score: None` (`crates/gridops-core/src/fleet_health/score.rs:96-100`), and every null-score component in `fixture.json` has one (MacBookPro's five, for example "Not enough data: no samples from this machine in the window."). The schema still allows a null deduction with a null score.
+   - Fallback: when the score is null and `deduction` is null or empty, keep today's fixed text: `INSUFFICIENT_REASON` (`fleet-score-card.tsx:13`) on the card's reason line and tooltip, and "not enough data" in the machine table's `title` (`machine-score-table.tsx:120`).
 5. **The CPU and memory bars aren't stacked.** In `machine-detail.tsx` (~:93-114), "used" is drawn on top of "reserved", so reserved disappears when used is larger.
    - Fix: a Recharts horizontal stacked `BarChart` (reserved, used, budget), as the issue asked. Copy `live-strip.tsx`'s stacked `BarChart` structure, and export the segment calculation as a pure, tested function, as `usagePoints` and `slowestKeys` are. Any hatch goes in the chart's `defs` and uses theme variables only.
+   - What the source shows: `live-strip.tsx:33-43` is a `ResponsiveContainer` around `<BarChart data={rows} layout="vertical" …>`, with a hidden numeric `XAxis` (`domain={[0, scale]}`), a hidden category `YAxis` (`dataKey="name"`), a cursor-only `ChartTooltip`, and one `<Bar … stackId="live" />` per segment. In Recharts a horizontal bar is `layout="vertical"`, as there. `usagePoints` (`machine-detail-window.tsx:26`) and `slowestKeys` (:133) are exported pure functions tested directly in `tests/fleet-health-202-detail.test.ts:97-117`.
 6. **The detail placeholder is wrong.** `machine-detail.tsx` (~:15-23) always says "Expand a machine above".
    - **Decided (option B):** name the expanded machine. Move the expansion state up into `HealthSections` (`page.tsx`), so the `machine-detail` slot always has a child: the named machine, or the "Expand a machine above" prompt when none is expanded.
    - `MachineScoreTable` must still work with only `{data, window}`, with the expansion props optional, so the #202 contract test stays untouched.
    - Update `tests/fleet-health-202-detail.test.ts` (~:128-133) to match.
    - Don't change `tests/fleet-health-page.test.ts`, or the design doc's rule that every section slot has content.
 7. **The oldest wait can be understated.** `live-strip.tsx` (~:97) shows `oldest.waitMs`, fixed when the cached or stale response was built. Show `max(waitMs, now - queuedAt)` through a pure helper whose `now` defaults to `Date.now()`, as `formatElapsed` does (`react-hooks/purity`). Pin the clock in the test.
+   - What the source shows: `formatElapsed` is in `src/features/agent/agent-state.ts:78`, not in `live-strip.tsx`: `export function formatElapsed(startedAt: string | null | undefined, completedAt: string | null | undefined, now = Date.now())`. The wait is rendered at `live-strip.tsx:97` as `formatOldestWait(oldest.waitMs)`, and `oldestQueued` carries both `queuedAt` and `waitMs` (`types.ts:110-116`). For the lint rules, `eslint.config.js:15` spreads `reactHooks.configs.flat.recommended.rules`. `package-lock.json` pins `eslint-plugin-react-hooks` 7.1.1, whose recommended preset has `purity`, `set-state-in-effect` and `set-state-in-render` all at error severity (read from the published 7.1.1 build, because `node_modules` is not installed in this worktree).
 
 ## Done when
 
@@ -28,9 +51,40 @@ Part of #198. Found by the Opus review of the wave-1 UI PRs (#227, #231, #232), 
 - [ ] Web build, lint and tests pass.
 - [ ] Recharts only, with no new dependency.
 - [ ] New tests go in `tests/fleet-health-241-*.test.ts`. Never add tests to a `*.contract.test.ts` file.
+  - "New tests" means net-new coverage. The edits that items 2 and 6 require in `tests/fleet-health-202-detail.test.ts` (rewriting ~:145-152 and updating ~:128-133) are in scope and are not covered by this rule.
 
 ## Constraints
 
 - Keep `CARGO_BUILD_JOBS=2` and `RUST_TEST_THREADS=2`. Use the shared cargo target from the untracked `.cargo/config.toml`, and never set `CARGO_TARGET_DIR`. Prefer `-p` crate test runs.
 - Work headless: no visible browsers and no screenshots on the desktop.
 - Open the PR against master on Performant-Labs/gridops, never upstream iamngoni/gridops.
+
+## Source material read
+
+Read for the round-1 amendment, at master 73de941 unless noted:
+
+- `docs/handoffs/241-brief.md` (this file)
+- `docs/design/fleet-health.md` (in full)
+- `src/features/fleet-health/areas-of-concern.tsx`
+- `src/features/fleet-health/fleet-score-card.tsx`
+- `src/features/fleet-health/machine-score-table.tsx`
+- `src/features/fleet-health/machine-format.tsx`
+- `src/features/fleet-health/machine-detail.tsx`
+- `src/features/fleet-health/machine-detail-window.tsx`
+- `src/features/fleet-health/live-strip.tsx`
+- `src/features/fleet-health/page.tsx`
+- `src/features/fleet-health/types.ts`
+- `src/features/fleet-health/fixture.json` (the null-score components and their deductions)
+- `src/components/status-icon.tsx`
+- `src/components/app-shell.tsx`
+- `src/features/agent/agent-state.ts` (`formatElapsed`, :77-88)
+- `tests/fleet-health-202-machines.contract.test.ts`
+- `tests/fleet-health-202-detail.test.ts`
+- `tests/fleet-health-page.test.ts`
+- `tests/page-header-nav.test.ts`
+- `tests/fleet-health-dom.ts`
+- `eslint.config.js`
+- `package.json` and `package-lock.json` (the `@tanstack/react-router`, `@tanstack/router-core` and `eslint-plugin-react-hooks` versions)
+- `crates/gridops-core/src/fleet_health/mod.rs` (`ScoreComponent`, :244-256)
+- `crates/gridops-core/src/fleet_health/score.rs` (module doc, :1-20; `component`, :77-112)
+- Published, not in this repository, because `node_modules` is not installed in this worktree: `@tanstack/router-core` 1.171.15 `src/location.ts`, `src/router.ts` (`parseLocation`) and `src/utils.ts` (`decodePath`, `decodeSegment`); `eslint-plugin-react-hooks` 7.1.1 `cjs/eslint-plugin-react-hooks.development.js` (rule presets and severities).
