@@ -602,7 +602,10 @@ fn fleet_online_share(inputs: &FleetHealthInputs, rows: &[&HourlyHostRow]) -> Op
             .filter(|row| row.host_id == host.id)
             .map(|row| row.online_minutes)
             .sum();
-        online += f64::from(minutes) * f64::from(host.cpu_budget_millis);
+        // The sampled minute in progress can put a machine one past the
+        // covered minutes; capped, it never offsets another's downtime.
+        let minutes = i64::from(minutes).min(covered);
+        online += minutes as f64 * f64::from(host.cpu_budget_millis);
         budget += f64::from(host.cpu_budget_millis);
     }
     (budget > 0.0 && covered > 0).then(|| online / (budget * covered as f64))
@@ -1282,8 +1285,8 @@ mod tests {
         let mut rows: Vec<HourlyHostRow> = (1..=23)
             .map(|back| host_row(T - back * HOUR_MILLIS, "a", 60, Some(1_000), None, None))
             .collect();
-        // The hour that just ended, as the source computes it live until its
-        // grace passes: the same row shape as a rolled one.
+        // The hour in progress, its 10 minutes computed live: the same row
+        // shape as a rolled one.
         rows.push(host_row(T, "a", 10, Some(1_000), None, None));
         let inputs = window_inputs(
             HealthWindow::Day,
@@ -1302,6 +1305,35 @@ mod tests {
             part(&scored.hosts[0].components, "availability"),
             Ok(Some(100)),
             "machine"
+        );
+    }
+
+    /// A machine's sampled minute in progress can put its `online_minutes`
+    /// one past the whole covered minutes; in the fleet's budget-weighted
+    /// share that extra minute must not make up for another machine's
+    /// downtime. At one minute past the hour on 1h, a machine online for 2
+    /// sampled minutes and an equal one down score as one online for 1.
+    #[test]
+    fn a_machine_past_the_covered_minutes_does_not_offset_another_s_downtime() {
+        let fleet_with = |minutes_a: u32| {
+            let inputs = window_inputs(
+                HealthWindow::Hour,
+                T + MINUTE + 30_000,
+                vec![info("a", 4_000, 1_000, None), info("b", 4_000, 1_000, None)],
+                Vec::new(),
+                vec![
+                    host_row(T, "a", minutes_a, Some(1_000), None, None),
+                    host_row(T, "b", 0, Some(1_000), None, None),
+                ],
+            );
+            part(&score_fleet(&inputs).components, "availability")
+        };
+        let exact = fleet_with(1);
+        assert_ne!(exact, Ok(Some(100)), "half the fleet is down");
+        assert_eq!(
+            fleet_with(2),
+            exact,
+            "the extra minute is capped at the covered one"
         );
     }
 
