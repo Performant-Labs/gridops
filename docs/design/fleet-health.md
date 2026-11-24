@@ -473,9 +473,12 @@ armed a connection's worker thread routes its `tracing` events to the check's ow
 a `BEGIN IMMEDIATE` held before any write, or a write to a `WITHOUT ROWID` table, is not timed;
 a statement that has run fewer than 1,000 instructions and changed no row is timed by the
 worker's CPU since the previous statement's log line (one instruction can walk a whole table:
-`SELECT COUNT(*)`), so one slow only because it waited for the lock is not a slow statement.
+`SELECT COUNT(*)`), so one slow only because it waited for the lock is not a slow statement; and
+a check sees a worker's statements only once one of its hooks has run on that worker during the
+check, so such a read as the first statement on a connection in a check is not seen at all.
 Catching those is a non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock
-that `BEGIN IMMEDIATE` holds before its first write, or a slow write to a `WITHOUT ROWID` table.
+that `BEGIN IMMEDIATE` holds before its first write, a slow write to a `WITHOUT ROWID` table, or
+an unbounded `SELECT COUNT(*)` that is a connection's first statement in a check.
 
 The timing checks measure the work, not the machine (#247). Wall-clock time counts the time a
 loaded host keeps the work's threads off the CPU, or its disk keeps a write waiting, as if the

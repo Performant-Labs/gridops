@@ -52,7 +52,12 @@
 //! has run fewer than [`PROGRESS_OPS`] instructions and changed no row is
 //! timed by the worker's CPU since the previous statement's log line, so a
 //! statement that is slow only because it waited (for the lock, a CPU or
-//! the disk) is not seen as slow (its writer's transaction is). Two threads waiting
+//! the disk) is not seen as slow (its writer's transaction is). A check sees
+//! a worker's statements only once one of its hooks has run on that worker
+//! during the check: a read that changes no row and runs under
+//! [`PROGRESS_OPS`] instructions as the first statement on a connection in
+//! a check (`SELECT COUNT(*)` alone, one `OP_Count` that can walk a whole
+//! table) logs to that thread's own default and is not seen. Two threads waiting
 //! for a CPU at once both have their waits taken off, which the CPU-time
 //! floor bounds. Only the worker's and the calling thread's waits are taken
 //! off: a check whose work runs its statements from other threads (a
@@ -867,9 +872,10 @@ mod tests {
     }
 
     /// A statement too small to be marked (no row change, under
-    /// [`PROGRESS_OPS`] instructions) did no work worth timing: one that is
-    /// slow by the clock only because it waited (here for the write lock,
-    /// as a busy CPU would make it wait too) is not a slow statement.
+    /// [`PROGRESS_OPS`] instructions) is timed by the worker's CPU
+    /// ([`unmarked_work`]): one that is slow by the clock only because it
+    /// waited (here for the write lock, as a busy CPU would make it wait too)
+    /// used next to none and is not a slow statement.
     #[tokio::test]
     async fn a_statement_too_small_to_mark_is_not_slow_by_the_clock() -> anyhow::Result<()> {
         if thread_times(Path::new(THIS_THREAD)).is_none() {
