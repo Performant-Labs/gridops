@@ -1,0 +1,26 @@
+## Brief Review (Round 1)
+
+### BLOCK findings
+**[B-2]** [new, correctness] Item 2's "Open, needs the operator's ruling" is an unresolved contradiction inside the brief itself, and it gates a Done-when criterion. The Decided bullet places `useRouterState({ select: s => s.location.hash })` in `HealthSections`; item 6 and the Done-when list say "Don't change `tests/fleet-health-page.test.ts`" and "Web build, lint and tests pass". The brief itself states: "`tests/fleet-health-page.test.ts:21-27` has the same `Link`-only mock and renders `FleetHealthPage`, so `HealthSections`, where the Decided bullet puts `useRouterState`. Item 6 says not to change that file. Nothing in this brief yet says how both hold." As written, following the Decided bullet will (per the brief's own Vitest-mocking claim) break a test that the brief forbids touching, so an implementer cannot satisfy both constraints and the Done-when "tests pass" is unreachable by the specified design. The brief must decide the mechanism now — e.g. an optional injection of the hash into `HealthSections` (a prop or context that the page supplies only where a router exists), or an explicit exemption to edit `fleet-health-page.test.ts` — not leave it "open".
+
+### Resolved findings
+**[R-1]** Earlier B-1: "Item 2 and Item 6 contradict each other on where hash-driven expansion happens… the child's render-time `seenHash` adjustment cannot expand the row… The brief must pick one coherent mechanism… and say what happens to the existing child-side `seenHash` code." The amendment's "How items 2 and 6 fit together" section now does exactly that: the render-time hash adjustment runs in `HealthSections` beside the lifted state, the child keeps `expanded` and `seenHash` "only for when it is rendered with just `{ data, window }`", and when props are passed the table "renders from them, sends toggles through the change callback, and runs no hash adjustment of its own." Both Decided bullets are preserved and reconciled.
+
+### Needs-verification findings
+**[NV-1]** Item 2's TanStack Router claims — that `@tanstack/router-core` 1.171.15's `ParsedLocation.hash` excludes the leading `#` and is built via `decodePath` (leaving `%25`/`%5C` encoded, leaving malformed sequences in place) — the evidence would be the published `src/router.ts` (`parseLocation`) and `src/utils.ts` (`decodePath`) excerpts, which this prompt does not show.
+**[NV-2]** Item 2's claim that Vitest throws when code reads an export a factory mock does not define — a Vitest source or documentation excerpt for `vi.mock` factory semantics would settle it.
+**[NV-3]** Item 7's claim that `eslint-plugin-react-hooks` 7.1.1's recommended preset sets `purity`, `set-state-in-effect` and `set-state-in-render` to error — the plugin's published `cjs/eslint-plugin-react-hooks.development.js` preset block would settle it (only the `flat.recommended` spread in `eslint.config.js:15` is shown here).
+**[NV-4]** Item 1's claims about `status-icon.tsx` — that `RunStatusIcon` resolves `failure`/`waiting`/`skipped` to three distinct glyphs with `aria-hidden` SVG, that `StatusBadge`'s `iconOnly` branch emits an `sr-only` label, and that `StatusDot` is `aria-hidden="true"` — a shown excerpt of `src/components/status-icon.tsx` would settle it.
+**[NV-5]** Item 5's claim that `live-strip.tsx:33-43` is a stacked `layout="vertical"` `BarChart` worth copying — a shown excerpt of `live-strip.tsx` would settle it.
+**[NV-6]** Item 7's claims that `live-strip.tsx:97` renders `formatOldestWait(oldest.waitMs)` and that `types.ts:110-116` gives `oldestQueued` both `queuedAt` and `waitMs` — shown excerpts of those lines would settle it.
+**[NV-7]** Item 3's claims that `fleet-score-card.tsx:113` has an `insufficient` flag from `component.score === null`, that `types.ts:44-50` always has numeric `weight`, and that `fixture.json`'s null-score components all carry deductions — shown excerpts would settle them.
+
+### WARN findings
+**[W-1]** Item 1's test assertion (b) compares `outerHTML` of the row's `svg` with `RunStatusIcon` rendered alone. `outerHTML` equality is brittle against class/attribute order and the `size`/`className` props the row will pass; the assertion should be defined at the glyph level (e.g. the SVG's `path`/`data` shape or a `data-status` attribute) or the brief should state the exact props the comparison will use, so the test doesn't fail spuriously after the fix.
+**[W-2]** Item 2's rewritten deep-link test ("click the real concern Link under a real `createRouter`/`RouterProvider`") needs a stated failure mode before the fix; otherwise a test that re-renders the table could pass both before and after, repeating the defect the current test hides. Say what the pre-fix assertion observes (row not expanded / detail absent after the click).
+
+### NIT findings
+**[NIT-1]** Item 6 says to update `tests/fleet-health-202-detail.test.ts` "~:128-133" but the shown excerpt places the "Expand a machine above" test at :129-133 and the deep-link tests at :136-152; the line references drift slightly and should be re-pinned to the current file.
+
+### Verdict
+BLOCK — 1 blocking finding; the brief's own admitted conflict between putting `useRouterState` in `HealthSections` and not touching `tests/fleet-health-page.test.ts` must be decided before implementation starts.
