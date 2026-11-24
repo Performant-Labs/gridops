@@ -98,7 +98,6 @@ impl Harness {
 }
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn a_polled_job_is_stored_with_its_category() -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
     let harness = Harness::new().await?;
@@ -134,7 +133,6 @@ async fn a_polled_job_is_stored_with_its_category() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn ten_thousand_rows_are_backfilled_in_short_transactions_and_a_rerun_changes_nothing()
 -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
@@ -185,7 +183,6 @@ async fn ten_thousand_rows_are_backfilled_in_short_transactions_and_a_rerun_chan
 }
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn a_rule_change_reclassifies_the_last_7_days_and_lists_their_hours() -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
     let harness = Harness::new().await?;
