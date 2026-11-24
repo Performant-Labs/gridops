@@ -47,9 +47,10 @@
 //! Limits, by design: a write transaction is timed from its first row
 //! change, so a `BEGIN IMMEDIATE` held before any write, or a write to a
 //! `WITHOUT ROWID` table (no update hook), is not timed; a statement is only
-//! seen once SQLite has run [`PROGRESS_OPS`] instructions of it on that
-//! worker, so a statement that is slow only because it waited for the lock
-//! is not seen as slow (its writer's transaction is). Two threads waiting
+//! timed once SQLite has run [`PROGRESS_OPS`] instructions of it on that
+//! worker or it has changed a row, so a statement that is slow only because
+//! it waited (for the lock, a CPU or the disk) is not seen as slow (its
+//! writer's transaction is). Two threads waiting
 //! for a CPU at once both have their waits taken off, which the CPU-time
 //! floor bounds. Only the worker's and the calling thread's waits are taken
 //! off: a check whose work runs its statements from other threads (a
@@ -648,9 +649,11 @@ impl Visit for Fields {
 impl SlowStatements {
     /// The work of the statement whose log line this is: the CPU time the
     /// worker and the threads running checks used since it was marked, up
-    /// to sqlx's `elapsed`. A statement nothing marked (one slow only because
-    /// it waited for the lock), or one on a kernel with no `schedstat`, keeps
-    /// sqlx's `elapsed`.
+    /// to sqlx's `elapsed`. A statement nothing marked changed no row and
+    /// ran under [`PROGRESS_OPS`] instructions, so it did no work worth
+    /// timing: by the clock it can only have waited (for the lock, a CPU or
+    /// the disk), and it counts as nothing. Where the kernel has no
+    /// `schedstat`, every statement keeps sqlx's `elapsed`.
     fn took(started: Option<&Mark>, fields: &Fields) -> Duration {
         let Some(elapsed) = fields
             .elapsed_secs
@@ -659,7 +662,11 @@ impl SlowStatements {
             return Duration::MAX;
         };
         let Some(started) = started else {
-            return elapsed;
+            return if thread_times(Path::new(THIS_THREAD)).is_some() {
+                Duration::ZERO
+            } else {
+                elapsed
+            };
         };
         let writes = if fields.rows_returned == Some(0) {
             started.worker_blocked(started.at.elapsed())
@@ -769,6 +776,54 @@ mod tests {
         assert_eq!(state.marked.load(Ordering::SeqCst) - before, 1);
         assert_eq!(state.in_flight.load(Ordering::SeqCst), 0);
         drop(conn);
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// A statement too small to be marked (no row change, under
+    /// [`PROGRESS_OPS`] instructions) did no work worth timing: one that is
+    /// slow by the clock only because it waited (here for the write lock,
+    /// as a busy CPU would make it wait too) is not a slow statement.
+    #[tokio::test]
+    async fn a_statement_too_small_to_mark_is_not_slow_by_the_clock() -> anyhow::Result<()> {
+        if thread_times(Path::new(THIS_THREAD)).is_none() {
+            // No `schedstat` (macOS): the clock is all there is.
+            return Ok(());
+        }
+        let directory =
+            std::env::temp_dir().join(format!("gridops-speed-check-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let mut holder = pool.acquire().await?;
+        let mut waiter = pool.acquire().await?;
+        // Both connections have read the schema, so the delete below runs a
+        // handful of instructions and changes no row.
+        for conn in [&mut holder, &mut waiter] {
+            sqlx::query("SELECT COUNT(*) FROM settings")
+                .fetch_one(&mut **conn)
+                .await?;
+        }
+        // The write lock, held without a write (which is not timed).
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *holder).await?;
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            sqlx::query("ROLLBACK").execute(&mut *holder).await
+        };
+        let wait = check(&pool, async {
+            let started = Instant::now();
+            sqlx::query("DELETE FROM settings WHERE key='absent'")
+                .execute(&mut *waiter)
+                .await?;
+            Ok(started.elapsed())
+        });
+        let (released, waited) = tokio::join!(release, wait);
+        released?;
+        let waited = waited?;
+        assert!(
+            waited > SLOW_STATEMENT_LIMIT,
+            "the delete waited only {waited:?} for the lock, so this proves nothing"
+        );
+        drop((holder, waiter));
         pool.close().await;
         std::fs::remove_dir_all(directory)?;
         Ok(())

@@ -242,6 +242,18 @@ mod busy_cpu {
             .trim();
         let cpu: String = allowed.chars().take_while(char::is_ascii_digit).collect();
         ensure!(!cpu.is_empty(), "no CPU in {allowed:?}");
+        // `cargo test -- --include-ignored` runs the child test unpinned: it
+        // must pass there (as a no-op) rather than fail the run.
+        let unpinned = Command::new(std::env::current_exe()?)
+            .args(["--exact", inner, "--ignored", "--test-threads=1"])
+            .env_remove(PINNED)
+            .output()?;
+        ensure!(
+            unpinned.status.success(),
+            "the child test failed when run unpinned by --include-ignored:\n{}{}",
+            String::from_utf8_lossy(&unpinned.stdout),
+            String::from_utf8_lossy(&unpinned.stderr)
+        );
         let output = Command::new("taskset")
             .args(["-c", &cpu])
             .arg(std::env::current_exe()?)
@@ -350,9 +362,12 @@ mod busy_cpu {
     #[ignore = "run pinned to one CPU by work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails"]
     async fn on_one_busy_cpu() -> Result<()> {
         if std::env::var_os(PINNED).is_none() {
-            bail!(
-                "run by work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails, pinned to one CPU"
+            // Run unpinned (`--include-ignored`): there is no busy CPU to
+            // test on, and the parent test is the one that checks this.
+            eprintln!(
+                "skipped: work_slowed_by_a_busy_cpu_passes_and_real_work_still_fails runs this pinned to one CPU"
             );
+            return Ok(());
         }
         let (directory, pool) = database().await?;
         sqlx::query("CREATE TABLE busy_work (x INTEGER NOT NULL)")

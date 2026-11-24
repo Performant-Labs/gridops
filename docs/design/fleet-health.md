@@ -471,9 +471,9 @@ transaction is timed from its first row change to its commit or rollback, and wh
 armed a connection's worker thread routes its `tracing` events to the check's own dispatcher
 (set as that thread's default from a hook), which records sqlx's slow-statement warning. Limits:
 a `BEGIN IMMEDIATE` held before any write, or a write to a `WITHOUT ROWID` table, is not timed;
-a statement is seen only once SQLite has run 1,000 instructions of it. Catching those is a
-non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock that `BEGIN IMMEDIATE`
-holds before its first write, or a slow write to a `WITHOUT ROWID` table.
+a statement is timed only once SQLite has run 1,000 instructions of it or it has changed a row.
+Catching those is a non-goal for #197: a wave-1 rollup can't rely on the check to flag a lock
+that `BEGIN IMMEDIATE` holds before its first write, or a slow write to a `WITHOUT ROWID` table.
 
 The timing checks measure the work, not the machine (#247). Wall-clock time counts the time a
 loaded host keeps the work's threads off the CPU, or its disk keeps a write waiting, as if the
