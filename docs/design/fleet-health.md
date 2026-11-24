@@ -266,13 +266,13 @@ one reconcile interval (30 s by default), or the catch-up after downtime, one ho
 | `start-reliability` | Start reliability | 20 | successful starts ÷ start attempts (machine-fault failures only) | ≥ 99% | ≤ 80% |
 | `infra-failures` | Infrastructure failures | 15 | infrastructure-failed jobs ÷ every completed final-attempt job (`job_count`: successes and failures alike, so an outage still scores) | 0% | ≥ 5% |
 | `capacity-fit` | Capacity fit | 15 | share of hours with jobs waiting over 1 min while the fleet's CPU used p50 was under 50% of budget | 0% | ≥ 25% |
-| `availability` | Availability | 10 | online minutes weighted by each machine's CPU budget ÷ covered minutes | 100% | ≤ 80% |
+| `availability` | Availability | 10 | online minutes weighted by each machine's CPU budget ÷ covered minutes, each machine's online minutes capped at the covered minutes first (its sampled minute in progress can put it one over) | 100% | ≤ 80% |
 
 **Machine:**
 
 | Key | Label | Weight | Measures | 100 at | 0 at |
 |---|---|---|---|---|---|
-| `availability` | Availability | 25 | online minutes ÷ covered minutes | 100% | ≤ 80% |
+| `availability` | Availability | 25 | online minutes ÷ covered minutes, read as 100% when the sampled minute in progress puts it over | 100% | ≤ 80% |
 | `start-reliability` | Start reliability | 25 | as above, this machine only | ≥ 99% | ≤ 80% |
 | `relative-speed` | Relative speed | 25 | the speed index (#193) | ≤ 1.0 | ≥ 2.0 |
 | `headroom` | Headroom | 15 | the lower of disk (minimum free against `disk::alarm_for`'s levels) and memory (p95 used ÷ budget: 100 under 80%, 0 at 100%) | | |

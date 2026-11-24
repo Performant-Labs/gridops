@@ -45,7 +45,7 @@
   >   requested_at INTEGER NOT NULL
   > ) STRICT;
 
-- **Fact:** a job's attempt lives in `workflow_job_sync.run_attempt`, keyed by `job_id`, and is nullable. The lookup reads an unknown attempt as 1.
+- **Fact:** a job's attempt lives in `workflow_job_sync.run_attempt`, keyed by `job_id`, and is nullable. The rollup orders same-named jobs of a run by it, and by the higher job id when either attempt is unknown (`fleet_health_rollup.rs`, `GITHUB_JOBS` and `EARLIER_ATTEMPT_HOURS`).
   **Source:** `migrations/0043_workflow_job_attempts.sql:19-24`
   **Verbatim excerpt:**
   > CREATE TABLE workflow_job_sync (
