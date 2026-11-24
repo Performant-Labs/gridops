@@ -258,6 +258,15 @@ describe("item 5: CPU and memory as stacked bars", () => {
         }
       }
     }
+
+    // Each bar is one image read out by its label: nothing inside it is a tab stop or
+    // claims a role of its own (Recharts' accessibility layer would add a `tabindex="0"`
+    // `role="application"` svg per bar).
+    const images = all('[role="img"]', now);
+    expect(images, "one labelled image per resource").toHaveLength(2);
+    for (const image of images) {
+      expect(all(`[tabindex]:not([tabindex^="-"]), [role]`, image).map((inner) => `${inner.tagName} ${inner.getAttribute("role")} ${inner.getAttribute("tabindex")}`), `inside ${image.getAttribute("aria-label")}`).toEqual([]);
+    }
   });
 });
 

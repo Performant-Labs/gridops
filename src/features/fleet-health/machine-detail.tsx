@@ -142,7 +142,7 @@ function ResourceBar({ budget, format, label, reserved, used }: {
       </div>
       <div aria-label={`${label}: ${summary}`} className="h-2 w-full overflow-hidden rounded-full" role="img">
         <ResponsiveContainer height="100%" width="100%">
-          <BarChart barCategoryGap={0} data={[{ name: label, ...segments }]} layout="vertical" margin={{ bottom: 0, left: 0, right: 0, top: 0 }}>
+          <BarChart accessibilityLayer={false} barCategoryGap={0} data={[{ name: label, ...segments }]} layout="vertical" margin={{ bottom: 0, left: 0, right: 0, top: 0 }}>
             <defs>
               <pattern height="4" id={hatchId} patternTransform="rotate(45)" patternUnits="userSpaceOnUse" width="4">
                 <rect fill="var(--warning)" height="4" width="4" />
