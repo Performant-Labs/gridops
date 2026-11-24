@@ -51,7 +51,6 @@ fn ext(value: u64) -> Result<ExternalId> {
 }
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn a_rule_change_is_picked_up_within_a_minute_and_nothing_recompiles_otherwise() -> Result<()>
 {
     let (directory, db) = database().await?;
@@ -127,7 +126,6 @@ async fn a_rule_change_is_picked_up_within_a_minute_and_nothing_recompiles_other
 }
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn a_gitlab_job_event_stores_the_expected_category() -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
     let (directory, db) = database().await?;
@@ -181,7 +179,6 @@ async fn a_gitlab_job_event_stores_the_expected_category() -> Result<()> {
 /// cache recompiles. #190's classifier must keep that under the speed check's
 /// write-lock limit (50 ms) with a large rule list (#199 allows many rules).
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn classifying_inside_a_gitlab_write_transaction_holds_the_lock_briefly() -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
     let (directory, db) = database().await?;

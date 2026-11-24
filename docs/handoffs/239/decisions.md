@@ -1,0 +1,146 @@
+# Decision journal: #239 fix scoring, rollup and speed-index defects from the wave-1 review
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-24T02:19:15-08:00
+- **Decided:** BLOCK, with 2 block and 8 warn findings (`docs/handoffs/239/handoff-A.md`).
+  - **Block 1 [completeness].** Items 7 and 9 (the 15-minute catch-up grace) leave the hour that just ended neither rolled nor in progress from :00 to :15. Item 1's covered-time denominator assumes that hour is there. #204's issue only computes "the in-progress hour" live.
+    - Result: on 24h at :10, a perfect machine reads 95.7% online, and availability scores 78.
+    - The brief must name the contract. Recommended: #204 computes live every hour of the window the rollups haven't written yet.
+  - **Block 2 [completeness].** The Done-when limits the design-doc change to one sentence, but #239 changes six documented rules: items 1, 2 (wording), 3, 6, 7/9, 8 and 10.
+    - #204's oracle is written from the design doc, and that is the stated reason #239 exists.
+    - The `0050` migration comment can't be the record (sqlx checksums), so the design doc is the only place left.
+  - **Decisions the brief left open:**
+    - **Item 8.** The machine rollup stops reading `fleet_health_recompute` and deleting from it. There is no consumer column: that would need a migration, a primary-key change, writes in #190 and #191, and a change to #197's schema pin, for a single consumer.
+    - **Item 5.** The unrounded value stays private to `score.rs`. `ScoreComponent` (a zod `int()` on the wire), `combine(&[ScoreComponent])` and the public component functions don't change.
+    - **Items 7 and 9.** One grace constant in `gridops_core::fleet_health`, beside `HOUR_MILLIS`.
+    - **Item 6.** The lookup happens in the read phase. The insert goes in the last write batch, before the hour's own delete, excluding H itself.
+    - **Item 11.** Both newest-row subqueries are copied: the runner and the placement.
+    - **Tests** go in each owning module's `mod tests`. Only item 8's contract test changes.
+    - **The PR description** uses no closing keyword before a wave-1 issue number.
+- **Assumed:**
+  - #204 is still unwritten, so the grace-hour contract can be set now without rework anywhere.
+  - Deployed databases have `0050` applied, so its file is checksum-frozen. I didn't check Mars. The rule holds for any database that has it.
+  - `workload_placements` can hold more than one row per `runner_id`. That rests on #191 ordering by `generation` and on the non-unique `workload_placements_runner_idx`. I didn't confirm it with a query on real data.
+- **Hedged:**
+  - Choosing how #204 detects an un-rolled hour, by time or by the rollups' markers, is a design call for the brief author. I recommended one but didn't make the choice.
+  - Detecting it by marker would also cover the catch-up lag after downtime. That gap exists before #239 too.
+  - Item 5's busy-share gate and the concern bands reading the rounded or the raw score is a spec ambiguity. I recommended the rounded score, which is current behaviour, and asked for it to be written down.
+  - The first-hour helper (warn 5) and the grace constant's home (warn 6) are calls about consistency in a codebase with no dominant pattern, so they are warns.
+- **Evidence:**
+  - **Files read:**
+    - the brief and its round-1 result;
+    - `gh issue view` for 239, 204, 240 and 241;
+    - `fleet_health/{mod.rs, score.rs, concerns.rs, speed.rs}`, and the relevant parts of `fake.rs`;
+    - `score_contract_tests.rs` (header, :280-445);
+    - `fleet_health_rollup.rs` and `fleet_host_rollup.rs` in full;
+    - `fleet_host_rollup_contract_tests.rs` (:1-40, :315-333) and `fleet_health_rollup_contract_tests.rs` (:400-458);
+    - `fleet_health_wiring_tests.rs`, `fleet_health_snapshot.rs`, and `main.rs:620-660`;
+    - `docs/design/fleet-health.md` (:95-240, :400-448) and `fleet-health-owners.json`;
+    - `scripts/fleet-health-guard.mjs` (the regex and the scope), and the `ci.yml` guard job;
+    - `src/features/fleet-health/types.ts` (the score schema);
+    - `fleet_health_contract.rs` (header);
+    - `db.rs` (the migrator);
+    - migrations 0001, 0013, 0022, 0043 and 0050 (indexes and the recompute DDL);
+    - `git show e71dcf6`;
+    - #222's `handoff-A.md` and `decisions.md`, for format.
+  - **Commands run:**
+    - `grep` for `fleet_health_recompute` writers and readers, `combine` callers, `ScoreComponent {` literals (25 in 6 files), and the newest-row subquery copies;
+    - `gh pr list` (open: #237 on the backfill, and #121);
+    - `git log` (HEAD 73de941, origin/master 20c22ad).
+
+## Phase 3 Architecture (A, up-front plan review, round 2) - 2026-11-24T02:33:05-08:00
+- **Decided:** PASS, with 0 block and 8 warn findings (`docs/handoffs/239/handoff-A.md`, which overwrites round 1's; round 1 is in git at 0b435f8).
+  - **Round-1 block 1 [completeness]: resolved.** Item 1 now states the grace-hour contract (#204 computes live, by time, with one shared constant) and its test.
+  - **Round-1 block 2 [completeness]: resolved.** The Done-when lists design-doc rules (a)-(i), and Constraints forbid editing `0050`.
+  - **New warns, binding on F:**
+    - The job rollup's listed-hours loop also waits for the grace (`fleet_health_rollup.rs:158-165`), so "written ⟺ past grace" holds. #190's `list_hours` (PR #237) can list the hour that just ended.
+    - Availability divides by whole covered minutes (an integer, the existing `/ 60_000` idiom), with the fleet path's `> 0` guard on both paths. The minute-granular numerator would otherwise deflate availability on 1h, and item 3 removes the host path's only zero guard (NaN rounds to `0u8`).
+    - `ROLLUP_GRACE_MILLIS` goes in `gridops_core::fleet_health`, because `gridops-api` can't import the reconciler.
+    - Rule (d) states item 6's interim double count for #204's oracle.
+  - **Carried over from round 1:** item 6's read-phase lookup and insert placement; both of item 11's subqueries; where the tests go; the #240 design-doc rebase.
+- **Assumed:**
+  - Agents sample about every 30 s, taken from the synthetic week (`fleet-health.md:402`). I didn't measure it on Mars.
+  - #204's live hour counts minutes the way the machine rollup's bitmask does.
+- **Hedged:**
+  - A minimum covered span for time shares (busy-share noise at the top of each hour on 1h) is a spec decision. I left it for O as a follow-up and didn't invent it here.
+  - Findings 1 and 2 are warns, not blocks. Each is resolvable inside the brief's own items following existing code idioms, and needs no human decision.
+- **Evidence:**
+  - **Files read:**
+    - the amended brief (blob f4a2e56), round-1 `handoff-A.md` and the brief gate's results;
+    - `fleet_health_rollup.rs` in full;
+    - `fleet_host_rollup.rs` (:1-341);
+    - `score.rs` (:20-120, :245-262, :476-512, :598-660);
+    - `speed.rs` (:120-240);
+    - `mod.rs` (`HealthWindow`, `HOUR_MILLIS`, the availability targets);
+    - `health_source.rs` (still #197's stub);
+    - `fleet_health_backfill.rs` (still a stub);
+    - `fleet_health_rollup_contract_tests.rs` (:30-45, :395-470) and `fleet_health_wiring_tests.rs` (:140-160);
+    - `main.rs` (the reconcile interval, `fleet_health_passes`);
+    - `gridops-api/Cargo.toml`;
+    - `fleet-health.md` (:112-224).
+  - **Commands run:**
+    - `gh issue view 204` and `gh issue view 240`;
+    - `gh pr diff 237` (`list_hours`, no rollup edits);
+    - `gh pr list`;
+    - `grep` for `fleet_health_recompute`, `window.millis()` and `host_samples`.
+
+## Phase 4 Tester (T, author / RED) - 2026-11-24T02:58:07-08:00
+- **Decided:** RED is valid (`docs/handoffs/239/handoff-T-red.md`). 18 tests are new or updated. 17 fail on their feature assertion; 1 is a preservation guard that passes by design.
+  - **`score.rs`, items 1-5:**
+    - 4 covered-time tests: 1h at :30, 24h at H+10 min, whole minutes at H+5:29 and H+0:29, and busy share.
+    - An outage test for item 2.
+    - Tests for item 3 (0 online minutes) and item 4 (CPU budget 0).
+    - An unrounded-combine test for item 5.
+    - 2 pinned values updated: the fleet infra score 77 becomes 80 (item 2), and host `a` 56 becomes 55 (item 5). Raw start reliability 52.63 makes host `a` 55.41, not 55.5.
+    - A guard that the busy-share gate reads the rounded queue score (rule (h)).
+  - **`speed.rs`, items 10-11:** `topKeys` holds only ratios above 1.0, and a job counts once despite a duplicate older runner row or a gen-2 placement.
+  - **`fleet_health_rollup.rs` (new `mod tests`):** item 6 (a cross-hour re-run lists the earlier hour and counts once), item 7 (catch-up grace with a late arrival), and A warn 1 (a listed hour waits for the grace).
+  - **`fleet_host_rollup.rs`:** item 9 (catch-up grace with late samples).
+  - **`fleet_host_rollup_contract_tests.rs`:** item 8. It replaces `a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list` with `a_pass_leaves_the_recompute_list_to_the_job_rollup`, the one contract change in scope.
+  - The tests spell the grace as the literal `15 * MINUTE` rather than `ROLLUP_GRACE_MILLIS`, so they compile before the constant exists.
+- **Assumed:**
+  - #204's live hours use the same `HourlyHostRow` and `HourlyJobRow` shapes as rolled ones, so "the ended hour supplied as the source would supply it" is a plain row in `host_hourly`.
+  - A duplicate runner row is older (`created_at` lower) than the live one, which is the re-registration case 0013 allows.
+- **Hedged:**
+  - The fixture concern guard (`on_the_fixture_…`) wasn't recomputed by hand under all five scoring fixes. It stays a guard, and if it fails F adjusts `fake.rs` data, not the test.
+  - Item 6's test also asserts that the earlier hour is listed in `fleet_health_recompute`, because the brief and rule (d) make that listing the contract. It isn't only the end count.
+- **Evidence:**
+  - `cargo test -p gridops-core --features test-support --lib`: 353 passed, 12 failed.
+  - `cargo test -p gridops-reconciler`: 146 passed, 5 failed.
+  - In both crates the only failures are the new or updated tests.
+  - The `gridops-core` integration suites are green.
+  - `cargo fmt --check` is clean.
+  - `cargo +1.98.1 clippy --all-targets -D warnings` is clean on both crates.
+
+## Phase 6 Implement (F) - 2026-11-24T03:22:15-08:00
+- **Decided:** done (`docs/handoffs/239/handoff-F.md`). Items 1-11 are implemented in their owning modules, and the design doc states rules (a)-(i). Every RED test is now GREEN.
+  - **Item 5.** A private `Measured { component, raw }`, with private `measure_*` functions and `combine_measured`. The public functions, `combine`, `ScoreComponent` and the wire are unchanged.
+  - **Item 4.** A budget-0 machine says "the machine has no CPU budget" only on components that had data, so the fixture's MacBookPro wording doesn't change and `fake.rs`, `fixture.json` and the OpenAPI example aren't edited.
+  - **Item 6.** The lookup is bounded to the job rollup's 7-day reach. The listings ride the last write batch, or one of their own when that batch has no room under 500 rows.
+  - **Item 9.** `floor_hour(now − ROLLUP_GRACE_MILLIS)`, equivalent to `next + 1 h + grace <= now`, so `floor_hour` and its existing test stay.
+  - **`ROLLUP_GRACE_MILLIS`** lives in `gridops_core::fleet_health`, the one copy of the rule.
+- **Assumed:**
+  - #204's live hours count online minutes as whole sampled minutes, like the rollup's bitmask. This is carried over from A.
+  - The two timing failures under load average 22+ are load, not this diff:
+    - the job-rollup week check, whose seed has no re-runs, so the listing path never runs there;
+    - the synthetic-week seed check, which runs only unchanged `testdata`.
+    - Both passed on rerun.
+- **Hedged:** I didn't run the mutation checks for items 1, 2, 3 and 6. T-red assigns them to T's GREEN phase.
+- **Evidence:**
+  - `cargo test -p gridops-core --features test-support --lib`: 365 passed.
+  - `cargo test -p gridops-reconciler`: 151 passed.
+  - The core integration suites and the `gridops-api` `health` tests are green.
+  - `cargo fmt --check` and `clippy +1.98.1 -D warnings` are clean.
+  - EXPLAIN QUERY PLAN for the new SQL shows `workflow_jobs_completed_idx`, `workflow_jobs_run_status_idx`, `runners_github_id_idx` and `workload_placements_runner_idx`.
+  - Source facts are in `docs/handoffs/239/evidence.md`.
+
+## T (Phase 7, GREEN)
+- **Decided:** run the mutation checks by editing the production file in the working tree and restoring it with `git checkout` straight after, since F's work is committed. The tree was clean before and after.
+- **Assumed:** F's reported timing flakes are load-related. They did not recur, and the diff does not touch the seed or the write path of those tests.
+- **Hedged:** none.
+- **Evidence:** suite counts 365 and 151 passed; mutation failures listed in `handoff-T-green.md`; clippy 1.98.1 clean.
+
+## A (Phase 7, anti-duplication gate)
+- **Decided:** PASS. Every item extends its owning object (`score.rs`, `speed.rs`, the two rollups, the design doc). The only new public object is the one `ROLLUP_GRACE_MILLIS` constant that the plan review required.
+- **Assumed:** the test-only `GRACE` constants in `#[cfg(test)]` code are independent expectations, not a second copy of the rule.
+- **Hedged:** none.
+- **Evidence:** `git diff 73de941..5368f69` over `crates` and the design doc; a grep for the grace value and constant across `crates`; the plan-review `handoff-A.md` and `handoff-F.md`.

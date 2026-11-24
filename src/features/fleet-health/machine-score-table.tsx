@@ -13,29 +13,44 @@ import type { FleetHealthViewProps, HostHealth } from "./types";
 /**
  * The machine score table (#202): every machine worst score first — a small score gauge and band,
  * its score components as small bars (greyed when there is not enough data), one speed-index line
- * per runner size, and whether it is online. A row expands into its `MachineDetail`; opening the
- * page with `#machine-<host>` expands and scrolls to that machine, which concern links point to.
+ * per runner size, and whether it is online. A row expands into its `MachineDetail`; a
+ * `#machine-<host>` hash expands and scrolls to that machine, which concern links point to.
+ *
+ * It works two ways. On the page, the frame owns the expansion (#241): it passes `expanded`, takes
+ * toggles through `onExpandedChange`, and passes the router's `hash`, so a same-route concern link
+ * opens its machine and the detail slot can name it. Rendered with only `{ data, window }` (as the
+ * #202 contract test does), the table keeps its own expansion and reads `window.location.hash`.
  */
-export function MachineScoreTable({ data, window: windowKey }: FleetHealthViewProps) {
-  // A deep link (`#machine-<host>`) opens that machine before anything is clicked.
-  const [expanded, setExpanded] = useState<string | null>(() => hashHostId());
-  // The hash this render last saw, so an in-page concern link (a same-route navigation) also
-  // opens its machine: the router re-renders this section, and the render-time sync below picks
-  // the hash up (React's adjust-state-when-a-value-changes pattern, no location subscription).
+export function MachineScoreTable({ data, expanded: expandedProp, hash: routerHash, onExpandedChange, window: windowKey }: FleetHealthViewProps & {
+  expanded?: string | null;
+  hash?: string;
+  onExpandedChange?: (id: string | null) => void;
+}) {
+  const controlled = expandedProp !== undefined;
+  // On its own, a deep link (`#machine-<host>`) opens that machine before anything is clicked.
+  const [ownExpanded, setOwnExpanded] = useState<string | null>(() => (controlled ? null : hashHostId()));
+  // On its own, the hash this render last saw, so a later hash also opens its machine when the
+  // table re-renders (React's adjust-state-when-a-value-changes pattern). On the page the frame
+  // does this from the router's hash instead, since a same-route navigation re-renders no section.
   const [seenHash, setSeenHash] = useState<string | null>(() => globalThis.location?.hash ?? null);
-  const hash = globalThis.location?.hash ?? null;
-  if (hash !== seenHash) {
-    setSeenHash(hash);
-    const target = hashHostId();
-    if (target) setExpanded(target);
+  if (!controlled) {
+    const hash = globalThis.location?.hash ?? null;
+    if (hash !== seenHash) {
+      setSeenHash(hash);
+      const target = hashHostId();
+      if (target) setOwnExpanded(target);
+    }
   }
+  const expanded = controlled ? expandedProp : ownExpanded;
+  const setExpanded = (next: string | null) => (controlled ? onExpandedChange?.(next) : setOwnExpanded(next));
 
-  // Scroll the deep-linked machine into view. No-op in tests (jsdom has no scrollIntoView).
+  // Scroll the hash's machine into view. No-op in tests (jsdom has no scrollIntoView).
+  const scrollHash = routerHash ?? seenHash;
   useEffect(() => {
-    if (seenHash === null) return;
-    const target = hashHostId();
+    if (scrollHash === null) return;
+    const target = hashHostId(scrollHash);
     if (target) document.getElementById(`machine-${target}`)?.scrollIntoView?.({ block: "center" });
-  }, [seenHash]);
+  }, [scrollHash]);
 
   const hosts = worstFirst(data.hosts);
   return (
@@ -50,7 +65,7 @@ export function MachineScoreTable({ data, window: windowKey }: FleetHealthViewPr
               data={data}
               host={host}
               key={host.id}
-              onToggle={() => setExpanded((current) => (current === host.id ? null : host.id))}
+              onToggle={() => setExpanded(expanded === host.id ? null : host.id)}
               open={expanded === host.id}
               window={windowKey}
             />
@@ -107,7 +122,10 @@ function MachineRow({ data, host, open, onToggle, window: windowKey }: { data: F
   );
 }
 
-/** The machine's score components as small bars, greyed when a component has no score. */
+/**
+ * The machine's score components as small bars, greyed when a component has no score; a bar's
+ * title gives its score, or the API's reason when it has none ("not enough data" without one).
+ */
 function ComponentBars({ host }: { host: HostHealth }) {
   return (
     <div aria-label="Score components" className="flex items-end gap-1">
@@ -117,7 +135,7 @@ function ComponentBars({ host }: { host: HostHealth }) {
           data-component-key={component.key}
           data-insufficient={component.score === null ? "true" : undefined}
           key={component.key}
-          title={`${component.label}: ${component.score === null ? "not enough data" : component.score}`}
+          title={`${component.label}: ${component.score === null ? component.deduction || "not enough data" : component.score}`}
         >
           <span
             className="absolute inset-x-0 bottom-0"

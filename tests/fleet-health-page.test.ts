@@ -23,6 +23,8 @@ vi.mock("@tanstack/react-router", async () => {
   return {
     Link: ({ children, to, ...props }: { children?: unknown; to: string } & Record<string, unknown>) =>
       element("a", { ...props, href: to }, children as never),
+    // #241: the frame reads the location's hash; this page has none (scaffolding only).
+    useRouterState: <T>({ select }: { select: (state: { location: { hash: string } }) => T }) => select({ location: { hash: "" } }),
   };
 });
 

@@ -75,13 +75,26 @@ fn gib(bytes: u64) -> String {
     }
 }
 
+/// What a machine with a CPU budget of 0 says for each component: it has no
+/// score (#239 item 4).
+const NO_BUDGET: &str = "the machine has no CPU budget";
+
+/// A component and its unrounded score, which [`combine_measured`] weighs so
+/// that only the final score is rounded (#239 item 5). `raw` is `None`
+/// exactly when `component.score` is. Private: the wire, [`combine`] and the
+/// public component functions keep the rounded `ScoreComponent`.
+struct Measured {
+    component: ScoreComponent,
+    raw: Option<f64>,
+}
+
 /// One component: `measured` scored through `scored` (linear, clamped),
 /// rounded to `u8`, with the deduction sentence `"{body}: −N."` unless it
 /// scored 100. `None` is "not enough data". The points lost are
 /// `round(weight × (100 − raw) / 100)`, from the unrounded score, so a
 /// component just under 100 can lose a rounded `0` points and still say so
 /// (`−0.`, as the fixture's own "Speed index 1.01 …: −0." does).
-fn component<T: Copy>(
+fn measure<T: Copy>(
     key: &str,
     label: &str,
     weight: f64,
@@ -89,32 +102,61 @@ fn component<T: Copy>(
     scored: impl FnOnce(T) -> f64,
     body: impl FnOnce(T) -> String,
     no_data: &str,
-) -> ScoreComponent {
+) -> Measured {
     let Some(value) = measured else {
-        return ScoreComponent {
-            key: key.to_owned(),
-            label: label.to_owned(),
-            weight,
-            score: None,
-            deduction: Some(format!("Not enough data: {no_data}.")),
+        return Measured {
+            component: ScoreComponent {
+                key: key.to_owned(),
+                label: label.to_owned(),
+                weight,
+                score: None,
+                deduction: Some(format!("Not enough data: {no_data}.")),
+            },
+            raw: None,
         };
     };
     let raw = scored(value);
     let score = raw.round() as u8;
     let lost = (weight * (100.0 - raw) / 100.0).round() as i64;
-    ScoreComponent {
-        key: key.to_owned(),
-        label: label.to_owned(),
-        weight,
-        score: Some(score),
-        deduction: (score < 100).then(|| format!("{}: \u{2212}{lost}.", body(value))),
+    Measured {
+        component: ScoreComponent {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            weight,
+            score: Some(score),
+            deduction: (score < 100).then(|| format!("{}: \u{2212}{lost}.", body(value))),
+        },
+        raw: Some(raw),
+    }
+}
+
+/// `part` for a machine with a CPU budget of 0, which has no score: "not
+/// enough data", saying it has no budget where the component had data to
+/// score.
+fn unbudgeted(part: Measured) -> Measured {
+    let deduction = if part.raw.is_some() {
+        Some(format!("Not enough data: {NO_BUDGET}."))
+    } else {
+        part.component.deduction
+    };
+    Measured {
+        component: ScoreComponent {
+            score: None,
+            deduction,
+            ..part.component
+        },
+        raw: None,
     }
 }
 
 /// Queue wait, from the window's p90 queue wait in milliseconds.
 #[must_use]
 pub fn fleet_queue_wait(p90_ms: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_fleet_queue_wait(p90_ms, targets).component
+}
+
+fn measure_fleet_queue_wait(p90_ms: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "queue-wait",
         "Queue wait",
         40.0,
@@ -141,8 +183,8 @@ pub fn fleet_queue_wait(p90_ms: Option<f64>, targets: &HealthTargets) -> ScoreCo
 }
 
 /// The shared shape of the fleet's and a machine's start reliability.
-fn starts(success: Option<f64>, targets: &HealthTargets, weight: f64) -> ScoreComponent {
-    component(
+fn measure_starts(success: Option<f64>, targets: &HealthTargets, weight: f64) -> Measured {
+    measure(
         "start-reliability",
         "Start reliability",
         weight,
@@ -165,13 +207,17 @@ fn starts(success: Option<f64>, targets: &HealthTargets, weight: f64) -> ScoreCo
 /// Start reliability, from the share of runner starts that succeeded.
 #[must_use]
 pub fn fleet_start_reliability(success: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    starts(success, targets, 20.0)
+    measure_starts(success, targets, 20.0).component
 }
 
 /// Infrastructure failures, from their share of completed jobs.
 #[must_use]
 pub fn fleet_infra_failures(share: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_fleet_infra_failures(share, targets).component
+}
+
+fn measure_fleet_infra_failures(share: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "infra-failures",
         "Infrastructure failures",
         15.0,
@@ -194,7 +240,11 @@ pub fn fleet_infra_failures(share: Option<f64>, targets: &HealthTargets) -> Scor
 /// Capacity fit, from the share of hours jobs waited while CPU sat idle.
 #[must_use]
 pub fn fleet_capacity_fit(misfit: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_fleet_capacity_fit(misfit, targets).component
+}
+
+fn measure_fleet_capacity_fit(misfit: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "capacity-fit",
         "Capacity fit",
         15.0,
@@ -223,7 +273,11 @@ pub fn fleet_capacity_fit(misfit: Option<f64>, targets: &HealthTargets) -> Score
 /// Availability, from the budget-weighted share of machine-minutes online.
 #[must_use]
 pub fn fleet_availability(online: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_fleet_availability(online, targets).component
+}
+
+fn measure_fleet_availability(online: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "availability",
         "Availability",
         10.0,
@@ -249,7 +303,11 @@ pub fn fleet_availability(online: Option<f64>, targets: &HealthTargets) -> Score
 /// A machine's availability, from its share of minutes online.
 #[must_use]
 pub fn host_availability(online: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_host_availability(online, targets).component
+}
+
+fn measure_host_availability(online: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "availability",
         "Availability",
         25.0,
@@ -275,13 +333,17 @@ pub fn host_availability(online: Option<f64>, targets: &HealthTargets) -> ScoreC
 /// A machine's start reliability.
 #[must_use]
 pub fn host_start_reliability(success: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    starts(success, targets, 25.0)
+    measure_starts(success, targets, 25.0).component
 }
 
 /// A machine's relative speed, from its speed index (#193).
 #[must_use]
 pub fn host_relative_speed(index: Option<f64>, targets: &HealthTargets) -> ScoreComponent {
-    component(
+    measure_host_relative_speed(index, targets).component
+}
+
+fn measure_host_relative_speed(index: Option<f64>, targets: &HealthTargets) -> Measured {
+    measure(
         "relative-speed",
         "Relative speed",
         25.0,
@@ -330,6 +392,14 @@ pub fn host_headroom(
     memory_used: Option<f64>,
     targets: &HealthTargets,
 ) -> ScoreComponent {
+    measure_host_headroom(disk, memory_used, targets).component
+}
+
+fn measure_host_headroom(
+    disk: Option<DiskHeadroom>,
+    memory_used: Option<f64>,
+    targets: &HealthTargets,
+) -> Measured {
     let disk = disk.map(|disk| {
         let (warn, critical) = disk_floors(disk.total_bytes);
         (
@@ -364,7 +434,7 @@ pub fn host_headroom(
         (None, Some((memory, memory_body))) => (Some(memory), memory_body),
         (None, None) => (None, String::new()),
     };
-    component(
+    measure(
         "headroom",
         "Headroom",
         15.0,
@@ -383,8 +453,16 @@ pub fn host_busy_share(
     fleet_queue: Option<u8>,
     targets: &HealthTargets,
 ) -> ScoreComponent {
+    measure_host_busy_share(busy, fleet_queue, targets).component
+}
+
+fn measure_host_busy_share(
+    busy: Option<f64>,
+    fleet_queue: Option<u8>,
+    targets: &HealthTargets,
+) -> Measured {
     let deducts = fleet_queue.is_some_and(|queue| queue < 100);
-    component(
+    measure(
         "busy-share",
         "Busy share",
         10.0,
@@ -403,7 +481,7 @@ pub fn host_busy_share(
                 whole_percent(targets.busy_share_good)
             )
         },
-        "the machine has no CPU budget",
+        NO_BUDGET,
     )
 }
 
@@ -411,35 +489,45 @@ pub fn host_busy_share(
 /// its weight over the others in proportion. `None` when none has a score.
 #[must_use]
 pub fn combine(components: &[ScoreComponent]) -> CombinedScore {
-    let scored_weight: f64 = components
+    let parts: Vec<Measured> = components
         .iter()
-        .filter_map(|component| component.score.map(|_| component.weight))
-        .sum();
-    let scaled: Vec<ScoreComponent> = components
-        .iter()
-        .map(|component| ScoreComponent {
-            weight: match component.score {
-                Some(_) if scored_weight > 0.0 => component.weight * 100.0 / scored_weight,
-                None if scored_weight == 0.0 => component.weight,
-                _ => 0.0,
-            },
-            ..component.clone()
+        .map(|component| Measured {
+            component: component.clone(),
+            raw: component.score.map(f64::from),
         })
         .collect();
+    combine_measured(&parts)
+}
+
+/// [`combine`] over the unrounded scores: the weighted sum is rounded once,
+/// at the end (#239 item 5). The components keep their rounded scores, with
+/// the weights rescaled.
+fn combine_measured(parts: &[Measured]) -> CombinedScore {
+    let scored_weight: f64 = parts
+        .iter()
+        .filter_map(|part| part.raw.map(|_| part.component.weight))
+        .sum();
+    let scaled = |part: &Measured| match part.raw {
+        Some(_) if scored_weight > 0.0 => part.component.weight * 100.0 / scored_weight,
+        None if scored_weight == 0.0 => part.component.weight,
+        _ => 0.0,
+    };
     let score = (scored_weight > 0.0).then(|| {
-        let weighted: f64 = scaled
+        let weighted: f64 = parts
             .iter()
-            .filter_map(|component| {
-                component
-                    .score
-                    .map(|score| f64::from(score) * component.weight)
-            })
+            .filter_map(|part| part.raw.map(|raw| raw * scaled(part)))
             .sum();
         (weighted / 100.0).round() as u8
     });
     CombinedScore {
         score,
-        components: scaled,
+        components: parts
+            .iter()
+            .map(|part| ScoreComponent {
+                weight: scaled(part),
+                ..part.component.clone()
+            })
+            .collect(),
     }
 }
 
@@ -475,10 +563,37 @@ fn start_success(attempts: u32, failures: u32, targets: &HealthTargets) -> Optio
         .then(|| f64::from(attempts.saturating_sub(failures)) / f64::from(attempts))
 }
 
-/// The fleet's budget-weighted share of machine-minutes online. A machine
-/// with no rows in the window counts as offline, at its full budget.
+/// The first hour the window's rows cover: `ceil_hour(now − W)`. Rows are
+/// whole hours, so the window's rows run from here to `now`, the hour in
+/// progress included.
+fn first_hour(inputs: &FleetHealthInputs) -> i64 {
+    ceil_div(inputs.now - inputs.window.millis(), HOUR_MILLIS) * HOUR_MILLIS
+}
+
+/// The time the window's rows cover, in milliseconds: `now − ceil_hour(now −
+/// W)`, the denominator of every time share (#239 item 1). It is the full
+/// window only on the hour, and always over `W − 1 h`, so above 0.
+///
+/// Under the grace-hour contract with #204, the source supplies every hour of
+/// it: the hours past their rollup grace from the hourly tables, and the rest
+/// (the hour in progress, and the hour that just ended until its grace
+/// passes) computed live.
+fn covered_millis(inputs: &FleetHealthInputs) -> i64 {
+    inputs.now - first_hour(inputs)
+}
+
+/// The whole minutes of [`covered_millis`]: the unit `online_minutes` counts
+/// in, so a machine online every whole minute is fully available while the
+/// minute in progress is still unsampled.
+fn covered_minutes(inputs: &FleetHealthInputs) -> i64 {
+    covered_millis(inputs) / 60_000
+}
+
+/// The fleet's budget-weighted share of machine-minutes online over the
+/// covered minutes. A machine with no rows in the window counts as offline,
+/// at its full budget. `None` with no budget or no whole minute covered.
 fn fleet_online_share(inputs: &FleetHealthInputs, rows: &[&HourlyHostRow]) -> Option<f64> {
-    let window_minutes = inputs.window.millis() / 60_000;
+    let covered = covered_minutes(inputs);
     let mut online = 0.0_f64;
     let mut budget = 0.0_f64;
     for host in &inputs.hosts {
@@ -487,10 +602,13 @@ fn fleet_online_share(inputs: &FleetHealthInputs, rows: &[&HourlyHostRow]) -> Op
             .filter(|row| row.host_id == host.id)
             .map(|row| row.online_minutes)
             .sum();
-        online += f64::from(minutes) * f64::from(host.cpu_budget_millis);
+        // The sampled minute in progress can put a machine one past the
+        // covered minutes; capped, it never offsets another's downtime.
+        let minutes = i64::from(minutes).min(covered);
+        online += minutes as f64 * f64::from(host.cpu_budget_millis);
         budget += f64::from(host.cpu_budget_millis);
     }
-    (budget > 0.0 && window_minutes > 0).then(|| online / (budget * window_minutes as f64))
+    (budget > 0.0 && covered > 0).then(|| online / (budget * covered as f64))
 }
 
 /// `value` divided by `by`, rounded up (both positive or negative).
@@ -505,7 +623,7 @@ fn capacity_misfit(
     jobs: &[&HourlyJobRow],
     rows: &[&HourlyHostRow],
 ) -> Option<f64> {
-    let first = ceil_div(inputs.now - inputs.window.millis(), HOUR_MILLIS) * HOUR_MILLIS;
+    let first = first_hour(inputs);
     let hours = (inputs.now - first) / HOUR_MILLIS;
     let mut misfit = 0_u32;
     let mut counted = 0_u32;
@@ -578,29 +696,33 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
         .map(|row| row.start_failures.values().sum::<u32>())
         .sum();
     let infra_failures: u64 = jobs.iter().map(|row| row.infra_failure_count).sum();
-    let completed: u64 = jobs.iter().map(|row| row.completed_count).sum();
-    let queue = fleet_queue_wait(
+    let queue = measure_fleet_queue_wait(
         enough_jobs.then(|| percentile(&wait, 0.9)).flatten(),
         targets,
     );
+    // The busy-share gate reads the rounded queue-wait score, as the concern
+    // bands read rounded components (design rule (h)).
+    let fleet_queue_score = queue.component.score;
     let fleet_components = vec![
-        queue.clone(),
-        fleet_start_reliability(start_success(attempts, failures, targets), targets),
-        fleet_infra_failures(
-            (enough_jobs && completed > 0).then(|| infra_failures as f64 / completed as f64),
+        queue,
+        measure_starts(start_success(attempts, failures, targets), targets, 20.0),
+        // Of every completed final-attempt job, not only the successes, so an
+        // outage where nothing succeeds still scores (#239 item 2).
+        measure_fleet_infra_failures(
+            (enough_jobs && total_jobs > 0).then(|| infra_failures as f64 / total_jobs as f64),
             targets,
         ),
-        fleet_capacity_fit(
+        measure_fleet_capacity_fit(
             enough_jobs
                 .then(|| capacity_misfit(inputs, &jobs, &hosts))
                 .flatten(),
             targets,
         ),
-        fleet_availability(fleet_online_share(inputs, &hosts), targets),
+        measure_fleet_availability(fleet_online_share(inputs, &hosts), targets),
     ];
-    let fleet_queue_score = queue.score;
 
-    let window_seconds = inputs.window.millis() as f64 / 1000.0;
+    let covered_minutes = covered_minutes(inputs);
+    let covered_seconds = covered_millis(inputs) as f64 / 1000.0;
     let scored_hosts = inputs
         .hosts
         .iter()
@@ -615,7 +737,6 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
                 .copied()
                 .filter(|row| row.host.as_str() == host.id)
                 .collect();
-            let window_minutes = inputs.window.millis() / 60_000;
             let online_minutes: u32 = rows.iter().map(|row| row.online_minutes).sum();
             let attempts: u32 = rows.iter().map(|row| row.start_attempts).sum();
             let failures: u32 = rows
@@ -644,21 +765,27 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
                 .max()
                 .filter(|_| host.memory_budget_mib > 0)
                 .map(|p95| f64::from(p95) / f64::from(host.memory_budget_mib));
-            let busy = (host.cpu_budget_millis > 0).then(|| {
+            let budgeted = host.cpu_budget_millis > 0;
+            let busy = budgeted.then(|| {
                 let cpu_seconds: f64 = job_rows.iter().map(|row| row.cpu_seconds_sum).sum();
-                cpu_seconds / (f64::from(host.cpu_budget_millis) / 1000.0 * window_seconds)
+                cpu_seconds / (f64::from(host.cpu_budget_millis) / 1000.0 * covered_seconds)
             });
-            let components = vec![
-                host_availability(
-                    (online_minutes > 0).then(|| f64::from(online_minutes) / window_minutes as f64),
-                    targets,
-                ),
-                host_start_reliability(start_success(attempts, failures, targets), targets),
-                host_relative_speed(index, targets),
-                host_headroom(disk, memory, targets),
-                host_busy_share(busy, fleet_queue_score, targets),
+            // Only no rows at all is missing data: rows with 0 online minutes
+            // are a machine that was offline, and score 0 (#239 item 3).
+            let online = (!rows.is_empty() && covered_minutes > 0)
+                .then(|| f64::from(online_minutes) / covered_minutes as f64);
+            let mut parts = vec![
+                measure_host_availability(online, targets),
+                measure_starts(start_success(attempts, failures, targets), targets, 25.0),
+                measure_host_relative_speed(index, targets),
+                measure_host_headroom(disk, memory, targets),
+                measure_host_busy_share(busy, fleet_queue_score, targets),
             ];
-            let combined = combine(&components);
+            // A machine with a CPU budget of 0 has no score (#239 item 4).
+            if !budgeted {
+                parts = parts.into_iter().map(unbudgeted).collect();
+            }
+            let combined = combine_measured(&parts);
             ScoredHost {
                 host_id: host.id.clone(),
                 name: host.name.clone(),
@@ -668,7 +795,7 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
             }
         })
         .collect();
-    let combined = combine(&fleet_components);
+    let combined = combine_measured(&fleet_components);
     ScoredFleet {
         score: combined.score,
         components: combined.components,
@@ -895,14 +1022,15 @@ mod tests {
             .map(|component| (component.key.as_str(), component.score))
             .collect();
         // p90 of the merged waits (150 in 2–5 min over 1_000 jobs) is 3 min;
-        // starts 190/200; infra 10 of the 880 successful; one misfit hour of
-        // 24; online minutes weighted 18_000_000/28_800_000.
+        // starts 190/200; infra 10 of the 1_000 completed (every final-attempt
+        // job, not only the 880 that succeeded: #239 item 2); one misfit hour
+        // of 24; online minutes weighted 18_000_000/28_800_000.
         assert_eq!(
             summary,
             [
                 ("queue-wait", Some(78)),
                 ("start-reliability", Some(79)),
-                ("infra-failures", Some(77)),
+                ("infra-failures", Some(80)),
                 ("capacity-fit", Some(83)),
                 ("availability", Some(0)),
             ]
@@ -918,7 +1046,7 @@ mod tests {
         assert_eq!(
             scored.components[2].deduction.as_deref(),
             Some(
-                "1.1% of completed jobs failed on the infrastructure against a 0% target: \u{2212}3."
+                "1.0% of completed jobs failed on the infrastructure against a 0% target: \u{2212}3."
             )
         );
         assert_eq!(
@@ -964,7 +1092,10 @@ mod tests {
                 ("busy-share", Some(10)),
             ]
         );
-        assert_eq!(hosts["a"].score, Some(56));
+        // Combined unrounded (#239 item 5): 100, 52.63, 50, 25 and 10 at
+        // 25/25/25/15/10 is 55.41, so 55; the rounded parts would give 55.5,
+        // so 56.
+        assert_eq!(hosts["a"].score, Some(55));
         assert_eq!(hosts["a"].busy_share, Some(0.05));
         assert_eq!(
             hosts["a"].components[1].deduction.as_deref(),
@@ -1069,5 +1200,420 @@ mod tests {
         // What the machine can still measure scores: availability 100,
         // headroom 25 and busy 100 over the 50 weight left, so 77.5 → 78.
         assert_eq!(host.score, Some(78));
+    }
+    // #239's scoring fixes. Every test below reads as of a `now` that is
+    // not necessarily on the hour: the window's rows cover the whole hours
+    // from `ceil_hour(now − W)` to `now`, the hour in progress included, and
+    // every time share divides by that covered span.
+
+    /// A whole hour: the base every #239 test offsets `now` from.
+    const T: i64 = 1_800_000_000_000;
+    const MINUTE: i64 = 60_000;
+
+    /// Inputs for `window` as of `now`: the default targets, no speed and no
+    /// live stats.
+    fn window_inputs(
+        window: HealthWindow,
+        now: i64,
+        hosts: Vec<HostInfo>,
+        hourly: Vec<HourlyJobRow>,
+        host_hourly: Vec<HourlyHostRow>,
+    ) -> FleetHealthInputs {
+        FleetHealthInputs {
+            window,
+            now,
+            hosts,
+            hourly,
+            host_hourly,
+            speed: Vec::new(),
+            live: FleetLiveStats::default(),
+            host_live: Vec::new(),
+            targets: HealthTargets::default(),
+        }
+    }
+
+    /// The score of the component `key` in `components` (`Ok(None)` is "not
+    /// enough data"), or an error without that component.
+    fn part(components: &[ScoreComponent], key: &str) -> Result<Option<u8>, String> {
+        components
+            .iter()
+            .find(|component| component.key == key)
+            .map(|component| component.score)
+            .ok_or_else(|| format!("no {key} component"))
+    }
+
+    /// Item 1: at 10:30 on 1h the window holds only the 10:00 hour, 30
+    /// minutes of it. A machine online all of them is fully available, and
+    /// no `fleet-component:availability` concern fires on a load that is not
+    /// exactly on the hour.
+    #[test]
+    fn availability_on_1h_divides_by_the_covered_half_hour_not_the_full_window() {
+        let inputs = window_inputs(
+            HealthWindow::Hour,
+            T + 30 * MINUTE,
+            vec![info("a", 4_000, 1_000, None)],
+            Vec::new(),
+            vec![host_row(T, "a", 30, Some(1_000), None, None)],
+        );
+        let scored = score_fleet(&inputs);
+        assert_eq!(
+            part(&scored.components, "availability"),
+            Ok(Some(100)),
+            "fleet"
+        );
+        assert_eq!(
+            part(&scored.hosts[0].components, "availability"),
+            Ok(Some(100)),
+            "machine"
+        );
+        let concerns = crate::fleet_health::concerns::windowed(&inputs, &scored);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "fleet-component:availability"),
+            "a fully online fleet raised {concerns:?}"
+        );
+    }
+
+    /// Item 1's grace-hour contract: at H + 10 min on 24h the source supplies
+    /// the 23 ended hours (rolled, or the one just ended computed live) and
+    /// the 10 minutes of the hour in progress. Online every one of those
+    /// minutes is availability 100, against the 1390 of 1440 minutes (83)
+    /// a full-window denominator reads.
+    #[test]
+    fn availability_on_24h_at_ten_past_counts_the_covered_23_hours_and_10_minutes() {
+        let mut rows: Vec<HourlyHostRow> = (1..=23)
+            .map(|back| host_row(T - back * HOUR_MILLIS, "a", 60, Some(1_000), None, None))
+            .collect();
+        // The hour in progress, its 10 minutes computed live: the same row
+        // shape as a rolled one.
+        rows.push(host_row(T, "a", 10, Some(1_000), None, None));
+        let inputs = window_inputs(
+            HealthWindow::Day,
+            T + 10 * MINUTE,
+            vec![info("a", 4_000, 1_000, None)],
+            Vec::new(),
+            rows,
+        );
+        let scored = score_fleet(&inputs);
+        assert_eq!(
+            part(&scored.components, "availability"),
+            Ok(Some(100)),
+            "fleet"
+        );
+        assert_eq!(
+            part(&scored.hosts[0].components, "availability"),
+            Ok(Some(100)),
+            "machine"
+        );
+    }
+
+    /// A machine's sampled minute in progress can put its `online_minutes`
+    /// one past the whole covered minutes; in the fleet's budget-weighted
+    /// share that extra minute must not make up for another machine's
+    /// downtime. At one minute past the hour on 1h, a machine online for 2
+    /// sampled minutes and an equal one down score as one online for 1.
+    #[test]
+    fn a_machine_past_the_covered_minutes_does_not_offset_another_s_downtime() {
+        let fleet_with = |minutes_a: u32| {
+            let inputs = window_inputs(
+                HealthWindow::Hour,
+                T + MINUTE + 30_000,
+                vec![info("a", 4_000, 1_000, None), info("b", 4_000, 1_000, None)],
+                Vec::new(),
+                vec![
+                    host_row(T, "a", minutes_a, Some(1_000), None, None),
+                    host_row(T, "b", 0, Some(1_000), None, None),
+                ],
+            );
+            part(&score_fleet(&inputs).components, "availability")
+        };
+        let exact = fleet_with(1);
+        assert_ne!(exact, Ok(Some(100)), "half the fleet is down");
+        assert_eq!(
+            fleet_with(2),
+            exact,
+            "the extra minute is capped at the covered one"
+        );
+    }
+
+    /// Item 1 (the plan review's finding 2): `online_minutes` counts whole
+    /// minutes with a sample, so availability divides by whole covered
+    /// minutes. At H + 5 min 29 s, with the minute in progress not yet
+    /// sampled, 5 online minutes of 5 covered is 100; at H + 29 s no whole
+    /// minute is covered, which is not enough data, not 0.
+    #[test]
+    fn availability_divides_by_whole_covered_minutes_and_none_covered_is_no_data() {
+        let host = || vec![info("a", 4_000, 1_000, None)];
+        let five = score_fleet(&window_inputs(
+            HealthWindow::Hour,
+            T + 5 * MINUTE + 29_000,
+            host(),
+            Vec::new(),
+            vec![host_row(T, "a", 5, Some(1_000), None, None)],
+        ));
+        assert_eq!(
+            part(&five.components, "availability"),
+            Ok(Some(100)),
+            "fleet"
+        );
+        assert_eq!(
+            part(&five.hosts[0].components, "availability"),
+            Ok(Some(100)),
+            "machine"
+        );
+
+        let none = score_fleet(&window_inputs(
+            HealthWindow::Hour,
+            T + 29_000,
+            host(),
+            Vec::new(),
+            vec![host_row(T, "a", 0, None, None, None)],
+        ));
+        assert_eq!(
+            part(&none.components, "availability"),
+            Ok(None),
+            "fleet, 0 covered minutes"
+        );
+        assert_eq!(
+            part(&none.hosts[0].components, "availability"),
+            Ok(None),
+            "machine, 0 covered minutes"
+        );
+    }
+
+    /// Item 1: busy share divides the CPU-seconds reserved by the budget over
+    /// the covered seconds. 1800 CPU-seconds on a 2-CPU machine over the
+    /// 1800 s covered at 10:30 on 1h is busy half the time, not a quarter.
+    #[test]
+    fn busy_share_on_1h_divides_by_the_covered_seconds() {
+        let scored = score_fleet(&window_inputs(
+            HealthWindow::Hour,
+            T + 30 * MINUTE,
+            vec![info("a", 2_000, 1_000, None)],
+            vec![job_row(
+                T,
+                "a",
+                JobCategory::Test,
+                (5, 5, 0),
+                1_800.0,
+                [0; HISTOGRAM_BUCKETS],
+            )],
+            vec![host_row(T, "a", 30, Some(1_000), None, None)],
+        ));
+        let busy = scored.hosts[0].busy_share;
+        assert!(
+            busy.is_some_and(|busy| (busy - 0.5).abs() < 1e-9),
+            "busy share {busy:?}"
+        );
+    }
+
+    /// Item 2: the infrastructure-failure share is of every completed
+    /// final-attempt job (`job_count`), not of the successes. In an outage
+    /// where nothing succeeds the component scores 0 and its critical concern
+    /// fires, instead of going to "not enough data".
+    #[test]
+    fn infra_failures_divide_by_every_completed_job_so_an_outage_scores_0() {
+        let inputs = window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![info("a", 4_000, 1_000, None)],
+            vec![job_row(
+                T - HOUR_MILLIS,
+                "a",
+                JobCategory::Test,
+                (40, 0, 40),
+                0.0,
+                {
+                    let mut waits = [0; HISTOGRAM_BUCKETS];
+                    waits[0] = 40;
+                    waits
+                },
+            )],
+            (1..=24)
+                .map(|back| host_row(T - back * HOUR_MILLIS, "a", 60, Some(1_000), None, None))
+                .collect(),
+        );
+        let scored = score_fleet(&inputs);
+        assert_eq!(part(&scored.components, "infra-failures"), Ok(Some(0)));
+        let concerns = crate::fleet_health::concerns::windowed(&inputs, &scored);
+        assert!(
+            concerns.iter().any(|concern| {
+                concern.key == "fleet-component:infra-failures"
+                    && concern.severity == crate::fleet_health::Severity::Critical
+            }),
+            "no critical infra-failures concern in {concerns:?}"
+        );
+    }
+
+    /// Item 3: only a machine with no rows has no availability data. One whose
+    /// rows say 0 online minutes all window (#200 writes those on purpose)
+    /// was offline, and scores 0.
+    #[test]
+    fn a_machine_offline_all_window_scores_availability_0_not_no_data() {
+        let scored = score_fleet(&window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![
+                info("a", 4_000, 1_000, None),
+                info("silent", 4_000, 1_000, None),
+            ],
+            Vec::new(),
+            (1..=24)
+                .map(|back| host_row(T - back * HOUR_MILLIS, "a", 0, None, None, None))
+                .collect(),
+        ));
+        let offline = &scored.hosts[0];
+        assert_eq!(offline.host_id, "a");
+        assert_eq!(part(&offline.components, "availability"), Ok(Some(0)));
+        assert_eq!(
+            offline.components[0].deduction.as_deref(),
+            Some("Online 0.0% of the window against a 100% target: \u{2212}25.")
+        );
+        // No rows at all is still not enough data.
+        let silent = &scored.hosts[1];
+        assert_eq!(part(&silent.components, "availability"), Ok(None));
+    }
+
+    /// Item 4: a machine with a CPU budget of 0 (`MacBookPro`) has no score:
+    /// every component is "not enough data" whatever its rows say, and it
+    /// raises no `host-score` concern.
+    #[test]
+    fn a_machine_with_no_cpu_budget_gets_no_score_and_no_host_score_concern() {
+        let mut rows: Vec<HourlyHostRow> = Vec::new();
+        for back in 1..=24 {
+            rows.push(host_row(
+                T - back * HOUR_MILLIS,
+                "a",
+                60,
+                Some(1_000),
+                None,
+                None,
+            ));
+            // Half online, memory near its budget: scored, it would be 0.
+            let mut laptop = host_row(T - back * HOUR_MILLIS, "laptop", 30, None, Some(990), None);
+            laptop.start_attempts = 1;
+            rows.push(laptop);
+        }
+        let inputs = window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![
+                info("a", 4_000, 1_000, None),
+                info("laptop", 0, 1_000, None),
+            ],
+            Vec::new(),
+            rows,
+        );
+        let scored = score_fleet(&inputs);
+        let laptop = &scored.hosts[1];
+        assert_eq!(laptop.host_id, "laptop");
+        assert_eq!(laptop.score, None);
+        assert_eq!(laptop.busy_share, None);
+        for component in &laptop.components {
+            assert_eq!(component.score, None, "{} has a score", component.key);
+            assert!(
+                component.deduction.is_some(),
+                "{} says nothing",
+                component.key
+            );
+        }
+        let deduction = |host: &crate::fleet_health::ScoredHost, key: &str| {
+            host.components
+                .iter()
+                .find(|component| component.key == key)
+                .and_then(|component| component.deduction.clone())
+        };
+        assert_eq!(
+            deduction(laptop, "availability").as_deref(),
+            Some("Not enough data: the machine has no CPU budget."),
+            "a component that had data says why it has no score"
+        );
+        let no_speed = deduction(&scored.hosts[0], "relative-speed");
+        assert!(
+            no_speed.is_some(),
+            "a budgeted machine with no speed says so"
+        );
+        assert_eq!(
+            deduction(laptop, "relative-speed"),
+            no_speed,
+            "a component with no data keeps its own reason"
+        );
+        let concerns = crate::fleet_health::concerns::windowed(&inputs, &scored);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "host-score:laptop"),
+            "a machine without a budget raised {concerns:?}"
+        );
+    }
+
+    /// Item 5: components are combined unrounded and only the final score is
+    /// rounded. Availability 49.65 (1295 of 1440 minutes), headroom 48.55
+    /// (memory p95 9029 of 10000 MiB) and busy share 100 over weights
+    /// 50/30/20 combine to 59.39, so 59; rounding the components first (50,
+    /// 49, 100) gives 59.7, so 60.
+    #[test]
+    fn components_combine_unrounded_and_only_the_final_score_is_rounded() {
+        let rows = (1..=24)
+            .map(|back| {
+                let minutes = if back == 1 { 53 } else { 54 };
+                host_row(
+                    T - back * HOUR_MILLIS,
+                    "a",
+                    minutes,
+                    None,
+                    Some(9_029),
+                    None,
+                )
+            })
+            .collect();
+        let scored = score_fleet(&window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![info("a", 4_000, 10_000, None)],
+            Vec::new(),
+            rows,
+        ));
+        let host = &scored.hosts[0];
+        // The wire still carries each component rounded.
+        assert_eq!(part(&host.components, "availability"), Ok(Some(50)));
+        assert_eq!(part(&host.components, "headroom"), Ok(Some(49)));
+        assert_eq!(part(&host.components, "busy-share"), Ok(Some(100)));
+        assert_eq!(host.score, Some(59));
+    }
+
+    /// Item 5's preservation rule (design rule (h)), a guard rather than a
+    /// fix: the busy-share gate reads the fleet's rounded queue-wait score. A
+    /// p90 of 62.16 s is a raw 99.6, rounded 100, so jobs did not wait and an
+    /// idle machine loses nothing for it.
+    #[test]
+    fn the_busy_share_gate_reads_the_rounded_queue_wait_score() {
+        // 8_640 jobs under 10 s and 1_000 in 1–2 min: p90 = 60 s + 0.036 min.
+        let mut waits = [0; HISTOGRAM_BUCKETS];
+        waits[0] = 8_640;
+        waits[3] = 1_000;
+        let scored = score_fleet(&window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![info("a", 4_000, 1_000, None)],
+            vec![job_row(
+                T - HOUR_MILLIS,
+                "unmanaged-elsewhere",
+                JobCategory::Test,
+                (9_640, 9_640, 0),
+                0.0,
+                waits,
+            )],
+            (1..=24)
+                .map(|back| host_row(T - back * HOUR_MILLIS, "a", 60, Some(1_000), None, None))
+                .collect(),
+        ));
+        assert_eq!(part(&scored.components, "queue-wait"), Ok(Some(100)));
+        assert_eq!(scored.hosts[0].busy_share, Some(0.0));
+        assert_eq!(
+            part(&scored.hosts[0].components, "busy-share"),
+            Ok(Some(100))
+        );
     }
 }

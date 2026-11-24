@@ -5,7 +5,7 @@
  * shares and settings link, and when the Fleet health tile exists at all.
  */
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { fleetHealthTile, metricTiles } from "~/features/dashboard/metric-tiles";
 import type { DashboardOverview } from "~/features/dashboard/types";
@@ -26,7 +26,14 @@ mountEachTest();
 
 describe("live strip", () => {
   it("links the oldest queued job's wait to the queue", async () => {
-    await render(createElement(LiveStrip, { data: fixture(), window: "24h" }));
+    // #241 item 7 reads the wait against the clock: pin it to when the fixture was built, where
+    // the clock's wait and `waitMs` agree (7 min).
+    const data = fixture();
+    vi.useFakeTimers({ now: data.generatedAt, toFake: ["Date"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    await render(createElement(LiveStrip, { data, window: "24h" }));
     const link = one('a[href="/queued-jobs"]');
     expect(link.textContent).toContain("7 min");
     expect(link.textContent).toContain("acme/app");
