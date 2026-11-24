@@ -150,11 +150,12 @@ export function JobCategoriesSection() {
     };
   }, [loaded, overLimits, rules]);
 
-  // Any change to the rules makes the last save's and the last preview's per-row messages stale
-  // (a move even shifts the position they name), so they come off with it.
+  // Any change to the rules makes the last save's and the last preview's messages stale (a move
+  // even shifts the position they name), so they come off with it until the next preview answers.
   const changeRules = (change: (current: Rule[]) => Rule[]) => {
     setRowErrors({});
     setPreviewRowErrors({});
+    setPreviewProblem(null);
     setRules(change);
   };
 

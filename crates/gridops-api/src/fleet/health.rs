@@ -331,9 +331,12 @@ pub(super) async fn health(
         }
         Err(error) => {
             tracing::warn!(error = ?error, "fleet health source failed");
-            entry.failed_at = Some(now);
+            // When it failed (up to 2 s after it started): the 30 s, and the
+            // stale response's age, count from now.
+            let failed_at = health.clock.now_millis();
+            entry.failed_at = Some(failed_at);
             entry
-                .after_failure(now)
+                .after_failure(failed_at)
                 .map(Json)
                 .map_err(|()| unavailable())
         }
@@ -460,6 +463,40 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body.get("stale"), Some(&json!(false)));
         assert_eq!(harness.source.windowed_calls(), 4);
+        Ok(())
+    }
+
+    /// Item 2 (PR-Agent c16c0a3c7aaa): the 30 s are counted from when the
+    /// computation failed, not from when it started: a computation that
+    /// hangs for its 2 s is not tried again 28 s later.
+    #[tokio::test]
+    async fn the_30_seconds_count_from_the_failure_not_the_start() -> Result<()> {
+        let harness = Arc::new(Harness::new().await?);
+        let (status, _) = harness.admin_get(&uri("24h")).await?;
+        assert_eq!(status, StatusCode::OK);
+        harness.clock.advance(31 * SECOND);
+        harness.source.hold();
+        let hung = spawn_get(&harness, "24h");
+        // The trusted clock moves on while the source hangs.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        harness.clock.advance(2 * SECOND);
+        let (status, body) = tokio::time::timeout(Duration::from_secs(5), hung).await???;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.get("stale"), Some(&json!(true)));
+        assert_eq!(harness.source.windowed_calls(), 2);
+        harness.source.release();
+
+        // 29 s after the timeout (31 s after the computation started).
+        harness.clock.advance(29 * SECOND);
+        let (status, body) = harness.admin_get(&uri("24h")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.get("stale"), Some(&json!(true)));
+        assert_eq!(harness.source.windowed_calls(), 2, "not tried again yet");
+        harness.clock.advance(SECOND);
+        let (status, body) = harness.admin_get(&uri("24h")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.get("stale"), Some(&json!(false)));
+        assert_eq!(harness.source.windowed_calls(), 3);
         Ok(())
     }
 

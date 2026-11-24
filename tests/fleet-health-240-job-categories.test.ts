@@ -90,10 +90,13 @@ describe("job category rules: preview failures (#240 item 9)", () => {
     expect(text()).toContain("Preview paused");
     expect(text()).not.toContain(COMPILE_FAILURE);
 
-    // Filled in, the row's message goes and the preview comes back.
+    // Filled in, the row's message goes at once, and so does the paused line that points at it
+    // (PR-Agent fbc0441e9fc5); then the preview comes back.
     const added = rows()[2];
     if (!added) throw new Error("no added row");
     type(pattern(added), "notify");
+    await settle();
+    expect(text()).not.toContain("Preview paused");
     await debounce();
     expect(rows()[2]?.textContent).not.toContain("the pattern is empty");
     expect(text()).not.toContain("Preview paused");

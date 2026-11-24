@@ -2624,6 +2624,54 @@ mod live_plan_tests {
         Ok(())
     }
 
+    /// The states a table's `CHECK (state IN (...))` allows, from the
+    /// migrated schema.
+    async fn checked_states(table: &str) -> Result<std::collections::BTreeSet<String>> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-states-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let sql: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await?;
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        let list = sql
+            .split("CHECK (state IN (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .ok_or_else(|| anyhow::anyhow!("{table} has no state CHECK: {sql}"))?;
+        Ok(states(list))
+    }
+
+    fn states(list: &str) -> std::collections::BTreeSet<String> {
+        list.split(',')
+            .map(|state| state.trim().trim_matches('\'').to_owned())
+            .collect()
+    }
+
+    /// PR-Agent aa53610c99c5: the spelled-out state lists are the schema's
+    /// lists less the finished placement states (`targets.rs`'
+    /// `live_placement!`) and less `released`; a state a migration adds
+    /// fails this test instead of silently dropping out of the live counts
+    /// and the allocation sums.
+    #[tokio::test]
+    async fn the_spelled_out_states_are_the_schemas_less_the_finished_ones() -> Result<()> {
+        let mut placements = states(super::UNFINISHED_PLACEMENT_STATES);
+        assert!(
+            placements.is_disjoint(&states("'stopped','cleaned','failed'")),
+            "{placements:?}"
+        );
+        placements.extend(states("'stopped','cleaned','failed'"));
+        assert_eq!(placements, checked_states("workload_placements").await?);
+        let mut allocations = states(super::UNRELEASED_ALLOCATION_STATES);
+        assert!(!allocations.contains("released"));
+        allocations.insert("released".to_owned());
+        assert_eq!(allocations, checked_states("capacity_allocations").await?);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn the_root_allocation_read_seeks_the_unreleased_states() -> Result<()> {
         let steps = plan(&super::allocation_sql(false, true)).await?;
