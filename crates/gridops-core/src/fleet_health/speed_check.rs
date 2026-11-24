@@ -591,16 +591,23 @@ pub async fn check<T>(
     // The last statement's log line can come after the caller has its row,
     // later still when the worker is kept off the CPU.
     let waiting = Instant::now();
-    while state.in_flight.load(Ordering::SeqCst) > 0 && waiting.elapsed() < LOG_WAIT {
+    let timed_out = loop {
+        if state.in_flight.load(Ordering::SeqCst) == 0 {
+            break false;
+        }
+        if waiting.elapsed() >= LOG_WAIT {
+            break true;
+        }
         tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    let unlogged = state.in_flight.swap(0, Ordering::SeqCst);
-    if unlogged > 0 {
+    };
+    if timed_out {
         // Far over the statement limit, or the check is not seeing the
-        // statement log at all: either way not a pass. The next check
-        // starts from zero rather than waiting for them again.
+        // statement log at all: either way not a pass. Only a wait that ran
+        // out says so: a statement that starts after the count was seen at
+        // zero (another task, another check) is not this check's.
         state.record(format!(
-            "{unlogged} statement(s) had no log line {} s after the work ended",
+            "{} statement(s) had no log line {} s after the work ended",
+            state.in_flight.load(Ordering::SeqCst),
             LOG_WAIT.as_secs()
         ));
     }
@@ -614,6 +621,12 @@ pub async fn check<T>(
         let mut observations = state.lock();
         observations.armed = observations.armed.saturating_sub(1);
         if observations.armed == 0 {
+            if timed_out {
+                // The last check out clears what never logged, so the next
+                // check does not wait for it again; one still running on
+                // this database keeps its own count.
+                state.in_flight.store(0, Ordering::SeqCst);
+            }
             std::mem::take(&mut observations.found)
         } else {
             observations.found.clone()
@@ -1056,6 +1069,39 @@ mod tests {
         };
         assert!(error.contains("no log line"), "{error}");
         assert_eq!(in_flight, 0, "the next check would wait for it again");
+        Ok(())
+    }
+
+    /// A check that gives up on a statement that never logged leaves the
+    /// count alone while another check on the same database still runs:
+    /// that one must go on waiting for its own statements.
+    #[tokio::test]
+    async fn a_check_that_gives_up_leaves_a_running_checks_count_alone() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-speed-check-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let state = database(pool.connect_options().get_filename())
+            .ok_or_else(|| anyhow::anyhow!("the pool is not instrumented"))?;
+        state.in_flight.fetch_add(1, Ordering::SeqCst);
+        let still_running = check(&pool, async {
+            tokio::time::sleep(LOG_WAIT * 2).await;
+            Ok(())
+        });
+        let gives_up = async {
+            let outcome = check(&pool, async { Ok(()) }).await;
+            (outcome, state.in_flight.load(Ordering::SeqCst))
+        };
+        let (running, (gave_up, left)) = tokio::join!(still_running, gives_up);
+        let after = state.in_flight.load(Ordering::SeqCst);
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        assert!(gave_up.is_err(), "the check that gave up passed");
+        assert!(running.is_err(), "the still-running check passed");
+        assert_eq!(
+            left, 1,
+            "the check that gave up cleared a running check's count"
+        );
+        assert_eq!(after, 0, "the last check out leaves the count for the next");
         Ok(())
     }
 
