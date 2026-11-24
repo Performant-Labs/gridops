@@ -38,6 +38,10 @@ mod classifier_cache_contract_tests;
 mod score_contract_tests;
 #[cfg(test)]
 mod speed_contract_tests;
+// #246: the tests that kill the mutants `cargo mutants` found surviving in
+// `score.rs`, `concerns.rs` and `speed.rs`.
+#[cfg(test)]
+mod mutation_tests;
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
