@@ -341,19 +341,41 @@ mod busy_cpu {
         Ok(started.elapsed())
     }
 
-    /// How many rows `work` handles in `budget` on this CPU while it is
-    /// idle: from the fastest of a few tries, so a busy moment can only make
-    /// the work lighter.
+    /// The CPU time every thread of this process has used, from Linux's
+    /// `/proc/self/task/*/schedstat`.
+    fn process_cpu() -> Result<Duration> {
+        let mut total = Duration::ZERO;
+        for task in std::fs::read_dir("/proc/self/task")? {
+            // A thread can end between the listing and the read.
+            let Ok(schedstat) = std::fs::read_to_string(task?.path().join("schedstat")) else {
+                continue;
+            };
+            let nanos: u64 = schedstat
+                .split_ascii_whitespace()
+                .next()
+                .context("schedstat")?
+                .parse()?;
+            total += Duration::from_nanos(nanos);
+        }
+        Ok(total)
+    }
+
+    /// How many rows `work` handles in `budget` of CPU time: measured by the
+    /// CPU the process used, not the clock, so a CPU shared with others
+    /// while it measures cannot make the work lighter (#247 review). The
+    /// cheapest of a few tries.
     async fn rows_in<F: Future<Output = Result<Duration>>>(
         budget: Duration,
         work: impl Fn(i64) -> F,
     ) -> Result<i64> {
         const PROBE: i64 = 20_000;
-        let mut fastest = Duration::MAX;
+        let mut cheapest = Duration::MAX;
         for _ in 0..5 {
-            fastest = fastest.min(work(PROBE).await?);
+            let before = process_cpu()?;
+            work(PROBE).await?;
+            cheapest = cheapest.min(process_cpu()?.saturating_sub(before));
         }
-        let per_row = fastest.as_secs_f64() / 20_000.0;
+        let per_row = cheapest.as_secs_f64().max(1e-9) / 20_000.0;
         let rows = (budget.as_secs_f64() / per_row) as i64;
         Ok(rows.max(1_000))
     }

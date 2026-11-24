@@ -489,8 +489,9 @@ thread that called `check`:
   CPU time those two threads used: what the statement did, whatever else the host was doing;
 - a write transaction is wall-clock time less the time those two threads spent runnable and
   waiting for a CPU (`run_delay`), less the time the worker spent blocked in the kernel inside
-  statements that return no rows (a write's disk I/O, which a busy disk stretches), and never less
-  than the CPU time the two used.
+  statements that return no rows and read nothing from the disk (a write's disk I/O, which a busy
+  disk stretches; a scan's reads from a cold database, such as a copy of Mars's, still count), and
+  never less than the CPU time the two used.
 
 A full scan counts in full in both: it holds the lock as long on a busy host as on an idle one. A
 transaction still counts the caller's work between statements, a lock held while the caller sleeps
@@ -507,7 +508,7 @@ wall-clock time, as before.
 Two more ways the check went wrong under load or by test order (#247): it waited a fixed 25 ms
 for the last statement's log line, which sqlx writes after the caller has its row, so a slow
 statement on a busy CPU could be missed; it now waits until every statement it saw start has
-logged. And tracing-core, while only one dispatcher is registered, asks the default of the thread
+logged, and fails if one has not within 10 s. And tracing-core, while only one dispatcher is registered, asks the default of the thread
 that first reaches a callsite whether it is of interest, so once sqlx's statement log was first
 reached outside a check, no check saw it again; the check registers a second, inert dispatcher so
 that tracing-core asks the registered ones.

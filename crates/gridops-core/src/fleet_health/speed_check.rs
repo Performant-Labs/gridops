@@ -19,7 +19,7 @@
 //!   global subscriber, are left alone;
 //! - [`check`] ends once every statement it saw start has written its log
 //!   line (sqlx writes it when the statement's cursor is dropped, which can be
-//!   after the caller has its row).
+//!   after the caller has its row), and fails if one has not within 10 s.
 //!
 //! What is timed is the work, not the machine (#247). Wall-clock time counts
 //! the time a loaded machine keeps the work's threads off the CPU, or its
@@ -33,8 +33,10 @@
 //! - a write transaction is timed by wall-clock time less the time those two
 //!   threads spent runnable and waiting for a CPU (`run_delay`, the second
 //!   field of `schedstat`) and less the time the worker spent blocked in the
-//!   kernel inside statements that return no rows (a write's disk I/O, which
-//!   a busy disk stretches), and never less than the CPU time the two used.
+//!   kernel inside statements that return no rows and read nothing from the
+//!   disk (a write's disk I/O, which a busy disk stretches; a scan's reads
+//!   from a cold database still count), and never less than the CPU time the
+//!   two used.
 //!
 //! So a full scan counts in full in both (it holds the lock as long on a busy
 //! machine as on an idle one), and a transaction still counts the caller's
@@ -90,7 +92,10 @@ pub const PROGRESS_OPS: i32 = 1_000;
 
 /// The longest [`check`] waits after the work for the log lines of the
 /// statements it saw start.
+#[cfg(not(test))]
 const LOG_WAIT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const LOG_WAIT: Duration = Duration::from_secs(1);
 
 const SLOW_TARGET: &str = "sqlx::query";
 
@@ -257,6 +262,8 @@ struct Mark {
     /// On a worker thread: its blocked time in writes so far
     /// ([`writes_blocked`]).
     writes_blocked: Duration,
+    /// On a worker thread: the bytes it had read from storage.
+    disk_reads: Option<u64>,
 }
 
 impl Mark {
@@ -269,6 +276,7 @@ impl Mark {
                 .filter_map(|path| thread_times(&path).map(|times| (path, times)))
                 .collect(),
             writes_blocked: Duration::ZERO,
+            disk_reads: None,
         }
     }
 
@@ -277,7 +285,14 @@ impl Mark {
     fn on_worker(state: &DatabaseState) -> Self {
         let mut mark = Self::of(std::iter::once(PathBuf::from(THIS_THREAD)).chain(state.drivers()));
         mark.writes_blocked = writes_blocked();
+        mark.disk_reads = disk_reads();
         mark
+    }
+
+    /// On the marked worker thread: the bytes it has read from storage
+    /// since the mark.
+    fn read_from_disk(&self) -> Option<u64> {
+        Some(disk_reads()?.saturating_sub(self.disk_reads?))
     }
 
     /// The times of the marked threads now, then and now, with `joined` the
@@ -360,6 +375,32 @@ fn unmarked_work(
     }
 }
 
+/// How much of a statement's `blocked` time (the worker neither running nor
+/// waiting for a CPU) is the machine's: all of it for a statement that
+/// returned no rows and read nothing from the disk, whose stall is the disk
+/// busy with others' writes; none otherwise. A statement that returns rows
+/// may be waiting for the caller to take them, and one that read from the
+/// disk (a scan on a cold database) was doing its own work.
+fn excused(blocked: Duration, rows_returned: Option<u64>, read_from_disk: Option<u64>) -> Duration {
+    if rows_returned == Some(0) && read_from_disk == Some(0) {
+        blocked
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// The bytes the calling thread has read from storage (`read_bytes` in
+/// Linux's `/proc/thread-self/io`), or `None` where there is no such file.
+fn disk_reads() -> Option<u64> {
+    std::fs::read_to_string("/proc/thread-self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("read_bytes:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The CPU time the threads used between each `(then, now)` of their
 /// times, up to `elapsed`.
 fn worked(elapsed: Duration, times: impl Iterator<Item = (ThreadTimes, ThreadTimes)>) -> Duration {
@@ -369,13 +410,18 @@ fn worked(elapsed: Duration, times: impl Iterator<Item = (ThreadTimes, ThreadTim
         .min(elapsed)
 }
 
-/// This worker thread's blocked time in statements that return no rows, the
-/// one it is running included (its rows are not known before its log line,
-/// and a write transaction ends inside its last statement).
+/// This worker thread's blocked time that is the machine's ([`excused`]),
+/// the statement it is running included as one that returns no rows (its
+/// rows are not known before its log line, and a write transaction ends
+/// inside its last statement).
 fn writes_blocked() -> Duration {
     let running = STATEMENT.with_borrow(|statement| {
         statement.as_ref().map_or(Duration::ZERO, |mark| {
-            mark.worker_blocked(mark.at.elapsed())
+            excused(
+                mark.worker_blocked(mark.at.elapsed()),
+                Some(0),
+                mark.read_from_disk(),
+            )
         })
     });
     WRITES_BLOCKED.get().saturating_add(running)
@@ -398,7 +444,12 @@ fn statement_started(state: &DatabaseState) {
 fn statement_ended(state: &DatabaseState) -> Option<Mark> {
     let mark = STATEMENT.take();
     if mark.is_some() {
-        state.in_flight.fetch_sub(1, Ordering::SeqCst);
+        // A check that gave up waiting has already set the count to zero.
+        let _ = state
+            .in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            });
     }
     mark
 }
@@ -537,6 +588,16 @@ pub async fn check<T>(
     let waiting = Instant::now();
     while state.in_flight.load(Ordering::SeqCst) > 0 && waiting.elapsed() < LOG_WAIT {
         tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let unlogged = state.in_flight.swap(0, Ordering::SeqCst);
+    if unlogged > 0 {
+        // Far over the statement limit, or the check is not seeing the
+        // statement log at all: either way not a pass. The next check
+        // starts from zero rather than waiting for them again.
+        state.record(format!(
+            "{unlogged} statement(s) had no log line {} s after the work ended",
+            LOG_WAIT.as_secs()
+        ));
     }
     if let Some(driver) = &driver {
         let mut drivers = state.drivers.lock().unwrap_or_else(PoisonError::into_inner);
@@ -690,11 +751,11 @@ impl SlowStatements {
         let Some(started) = started else {
             return unmarked_work(elapsed, last_log, now);
         };
-        let writes = if fields.rows_returned == Some(0) {
-            started.worker_blocked(started.at.elapsed())
-        } else {
-            Duration::ZERO
-        };
+        let writes = excused(
+            started.worker_blocked(started.at.elapsed()),
+            fields.rows_returned,
+            started.read_from_disk(),
+        );
         WRITES_BLOCKED.set(WRITES_BLOCKED.get().saturating_add(writes));
         let times = started.times(&[]);
         if times.is_empty() {
@@ -953,6 +1014,43 @@ mod tests {
             unmarked_work(Duration::from_millis(300), None, None),
             Duration::from_millis(300)
         );
+    }
+
+    #[test]
+    fn a_write_that_read_from_the_disk_keeps_its_stalls() {
+        let stalled = Duration::from_millis(30);
+        // A write that read nothing from the disk: its stall is the disk
+        // being busy with others' writes.
+        assert_eq!(excused(stalled, Some(0), Some(0)), stalled);
+        // A write that read pages from the disk (a scan on a cold
+        // database): those reads are its own work.
+        assert_eq!(excused(stalled, Some(0), Some(4_096)), Duration::ZERO);
+        // Unknown reads, or a statement that returned rows: nothing excused.
+        assert_eq!(excused(stalled, Some(0), None), Duration::ZERO);
+        assert_eq!(excused(stalled, Some(3), Some(0)), Duration::ZERO);
+    }
+
+    /// A statement the check saw start and never saw log fails the check
+    /// once the wait for its log line runs out, rather than passing quietly.
+    #[tokio::test]
+    async fn a_statement_that_never_logs_fails_the_check() -> anyhow::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-speed-check-{}", uuid::Uuid::new_v4()));
+        let pool = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        let state = database(pool.connect_options().get_filename())
+            .ok_or_else(|| anyhow::anyhow!("the pool is not instrumented"))?;
+        state.in_flight.fetch_add(1, Ordering::SeqCst);
+        let outcome = check(&pool, async { Ok(()) }).await;
+        let in_flight = state.in_flight.swap(0, Ordering::SeqCst);
+        pool.close().await;
+        std::fs::remove_dir_all(directory)?;
+        let error = match outcome {
+            Ok(()) => anyhow::bail!("a statement that never logged passed the check"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("no log line"), "{error}");
+        assert_eq!(in_flight, 0, "the next check would wait for it again");
+        Ok(())
     }
 
     #[test]
