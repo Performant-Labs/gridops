@@ -35,3 +35,6 @@
 - **Assumed:** No Playwright suite exists (no config found), so the e2e step is N/A.
 - **Hedged:** Did not drive a browser; real glyph and chart rendering is U's. Did not re-check the design-doc sentence (O's).
 - **Evidence:** `npx vitest run` 66 files / 701 tests; `npm run lint`; `npm run build`; mutation runs on `live-strip.tsx`, `areas-of-concern.tsx`, `page.tsx` (3 failed, 63 passed, reverted, tree clean).
+
+## A (Phase 7, anti-duplication gate) - PASS
+Each item extended the analogous object (RunStatusIcon, hashHostId, ResourceBar on the live-strip chart structure, formatOldestWait neighbor). No parallel path. Three warns: controlled/uncontrolled table parity, new shared test router helper, design doc sentence at fleet-health.md:352 left for O.
