@@ -781,18 +781,22 @@ fn waited(hour: i64, host: &str, jobs: u64, bucket: usize) -> HourlyJobRow {
 /// Capacity fit as of a real `now`, hour by hour: an hour is a misfit when
 /// jobs waited a minute or more (the 1–2 min bucket counts, the 30–60 s one
 /// does not) while that hour's sampled CPU p50 was strictly under half the
-/// budget (exactly half is not idle). Of the 24 hours only the 6th is a
-/// misfit: 1 of 24 scores 83.
+/// budget (exactly half is not idle). The window's hours are the 24 that
+/// ended in `[now − 24 h, now)`: the first, at exactly `now − 24 h`, counts,
+/// and the hour starting at `now` does not. Two misfits of 24 hours are
+/// 8.3%, which scores 67; the sentence's share pins the denominator (2 of
+/// 23 would be 8.7%, 2 of 25 8.0%).
 #[test]
 fn capacity_fit_counts_each_hour_of_a_real_window_on_its_own_rows() {
     let start = T - 24 * HOUR_MILLIS;
     let at = |index: i64| start + index * HOUR_MILLIS;
     let mut rows = Vec::new();
-    for index in 0..24 {
+    // Hour 24 starts at `now`: its row is outside the window.
+    for index in 0..=24 {
         let mut row = host_row(at(index), "a", 60);
         // 1 CPU of 4 is idle; 2 is exactly half, 3 busy.
         row.cpu_used_p50_millis = Some(match index {
-            5 | 10 | 15 => 1_000,
+            0 | 5 | 10 | 24 => 1_000,
             20 => 2_000,
             _ => 3_000,
         });
@@ -801,18 +805,31 @@ fn capacity_fit_counts_each_hour_of_a_real_window_on_its_own_rows() {
     let inputs = day_inputs(
         vec![host_info("a", 4_000, 1_000, None)],
         vec![
-            // Waited 1–2 min while idle: the one misfit.
+            // Waited 1–2 min while idle: the two misfits, the first at the
+            // window's very start.
+            waited(at(0), "a", 20, 3),
             waited(at(5), "a", 20, 3),
             // Waited 30–60 s while idle: not over a minute.
             waited(at(10), "a", 20, 2),
-            waited(at(15), "a", 20, 2),
             // Waited 1–2 min at exactly half the budget: not idle.
             waited(at(20), "a", 20, 3),
+            // A misfit in the hour starting at `now`: not the window's.
+            waited(at(24), "a", 20, 3),
         ],
         rows,
     );
     let scored = score::score_fleet(&inputs);
-    assert_eq!(part(&scored.components, "capacity-fit"), Some(83));
+    assert_eq!(part(&scored.components, "capacity-fit"), Some(67));
+    let deduction = scored
+        .components
+        .iter()
+        .find(|component| component.key == "capacity-fit")
+        .and_then(|component| component.deduction.clone())
+        .unwrap_or_default();
+    assert!(
+        deduction.starts_with("8.3% of the window's hours waited over a minute"),
+        "{deduction}"
+    );
 }
 
 /// On 1h at half past, the window has no ended hour yet: capacity fit has
