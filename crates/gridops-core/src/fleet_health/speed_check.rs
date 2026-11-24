@@ -42,7 +42,11 @@
 //! machine as on an idle one), and a transaction still counts the caller's
 //! work between statements, a lock held while the caller sleeps or waits on
 //! anything but a CPU, and a worker blocked inside a statement that returns
-//! rows (it may be waiting for the caller to take them). Where the kernel has
+//! rows (it may be waiting for the caller to take them), except the one the
+//! transaction commits in: its rows are not known until its log line, after
+//! the commit, so it is taken as one that returns none (an autocommit
+//! `INSERT … RETURNING` whose rows the caller takes slowly has that wait
+//! taken off; an autocommit write's disk stall is why). Where the kernel has
 //! no `schedstat` (macOS), both are wall-clock time, as before. [`work_time`]
 //! times any work the transaction's way.
 //!
@@ -416,9 +420,10 @@ fn worked(elapsed: Duration, times: impl Iterator<Item = (ThreadTimes, ThreadTim
 }
 
 /// This worker thread's blocked time that is the machine's ([`excused`]),
-/// the statement it is running included as one that returns no rows (its
-/// rows are not known before its log line, and a write transaction ends
-/// inside its last statement).
+/// the statement it is running included as one that returns no rows: its
+/// rows are not known before its log line, and an autocommit write commits
+/// inside it. So the commit of an autocommit `INSERT … RETURNING` whose rows
+/// the caller takes slowly has that wait taken off (the module's Limits).
 fn writes_blocked() -> Duration {
     let running = STATEMENT.with_borrow(|statement| {
         statement.as_ref().map_or(Duration::ZERO, |mark| {

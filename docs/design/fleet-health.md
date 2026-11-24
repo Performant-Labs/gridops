@@ -499,8 +499,11 @@ thread that called `check`:
 A full scan counts in full in both: it holds the lock as long on a busy host as on an idle one. A
 transaction still counts the caller's work between statements, a lock held while the caller sleeps
 or waits on anything but a CPU, and a worker blocked inside a statement that returns rows (it may
-be waiting for the caller to take them); timing transactions by CPU time alone, or by counting
-statements and rows, would miss a lock held across a slow call. `speed_check::work_time(&pool,
+be waiting for the caller to take them), except the statement the transaction commits in, whose
+rows are not known until its log line after the commit: an autocommit `INSERT … RETURNING` whose
+rows the caller takes slowly has that wait taken off, as an autocommit write's disk stall must be.
+Timing transactions by CPU time alone, or by counting statements and rows, would miss a lock held
+across a slow call. `speed_check::work_time(&pool,
 work)` times any work the transaction's way (the synthetic week's 20 s budget). Limits: two
 threads waiting for a CPU at once both have their waits taken off (the CPU-time floor bounds it);
 a check whose work runs its statements from other threads (a multi-thread runtime moving the
