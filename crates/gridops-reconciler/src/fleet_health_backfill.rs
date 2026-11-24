@@ -23,6 +23,15 @@ use gridops_core::fleet_health::{
 /// Rows per batch: one short transaction each.
 const BATCH: i64 = 500;
 
+/// Batches of NULL rows one pass classifies at most, so the first pass after
+/// the migration (every historical job NULL) doesn't run hundreds of write
+/// transactions back to back; the rest is picked up by later passes. The same
+/// bound as retention's (#152, #222).
+const MAX_BATCHES: usize = 40;
+
+/// The pause between two batches, so other writers get the lock in between.
+const BATCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// How far back a rules change reclassifies completed jobs.
 const RECLASSIFY_WINDOW_MS: i64 = 7 * 24 * HOUR_MILLIS;
 
@@ -36,7 +45,7 @@ const RULES_VERSION_KEY: &str = "fleet_health.rules_version";
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> anyhow::Result<()> {
     let mut conn = db.acquire().await?;
     reclassify_on_rules_change(&mut conn, now).await?;
-    backfill_unclassified(&mut conn, now).await?;
+    backfill_unclassified(&mut conn, now, MAX_BATCHES).await?;
     Ok(())
 }
 
@@ -102,7 +111,12 @@ async fn reclassify_github(
 ) -> anyhow::Result<()> {
     let batch = usize::try_from(BATCH)?;
     let mut after = (0_i64, 0_i64);
+    let mut first = true;
     loop {
+        if !first {
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+        first = false;
         let page: Vec<WorkflowJobRow> = sqlx::query_as(
             "SELECT id,run_id,name,labels,category,completed_at FROM workflow_jobs
               WHERE category IS NOT NULL AND completed_at>=?
@@ -155,7 +169,12 @@ async fn reclassify_gitlab(
 ) -> anyhow::Result<()> {
     let batch = usize::try_from(BATCH)?;
     let mut after = (0_i64, String::new(), 0_i64);
+    let mut first = true;
     loop {
+        if !first {
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+        first = false;
         let page: Vec<GitlabJobRow> = sqlx::query_as(
             "SELECT id,connection_id,job_id,job_name,tag_list,project_path,category,completed_at FROM gitlab_jobs
               WHERE category IS NOT NULL AND completed_at>=?
@@ -206,11 +225,26 @@ async fn reclassify_gitlab(
 /// Classifies the rows whose `category` is still NULL, GitHub and GitLab, in
 /// batches of one short transaction each, through the unclassified partial
 /// indexes.
-async fn backfill_unclassified(conn: &mut SqliteConnection, now: i64) -> anyhow::Result<()> {
+/// Classifies NULL-category jobs, GitHub then GitLab, in at most
+/// `max_batches` batches shared across both tables (the pass passes
+/// [`MAX_BATCHES`]); the next pass picks up the rest.
+async fn backfill_unclassified(
+    conn: &mut SqliteConnection,
+    now: i64,
+    max_batches: usize,
+) -> anyhow::Result<()> {
     let classifier = shared().current(conn, now).await?;
     let batch = usize::try_from(BATCH)?;
+    let mut batches = 0_usize;
     let mut after_id = 0_i64;
     loop {
+        if batches >= max_batches {
+            return Ok(());
+        }
+        if batches > 0 {
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+        batches += 1;
         let page: Vec<WorkflowJobRow> = sqlx::query_as(
             "SELECT id,run_id,name,labels,category,completed_at FROM workflow_jobs
               WHERE category IS NULL AND id>? ORDER BY id LIMIT ?",
@@ -242,6 +276,13 @@ async fn backfill_unclassified(conn: &mut SqliteConnection, now: i64) -> anyhow:
     }
     let mut after_id = String::new();
     loop {
+        if batches >= max_batches {
+            return Ok(());
+        }
+        if batches > 0 {
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+        batches += 1;
         let page: Vec<GitlabJobRow> = sqlx::query_as(
             "SELECT id,connection_id,job_id,job_name,tag_list,project_path,category,completed_at FROM gitlab_jobs
               WHERE category IS NULL AND id>? ORDER BY id LIMIT ?",
@@ -404,4 +445,70 @@ fn labels_of(stored: &str) -> Vec<String> {
 /// The hour a completion time falls in.
 fn hour_of(completed_at: i64) -> i64 {
     completed_at - completed_at.rem_euclid(HOUR_MILLIS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BATCH, backfill_unclassified};
+    use gridops_core::{
+        connect_database_path,
+        fleet_health::testdata::{self, JobSeed},
+        now_millis,
+    };
+
+    /// One pass classifies at most its batch budget of NULL rows, so the
+    /// first pass after the migration can't run the whole history's
+    /// transactions back to back; the next pass picks up the rest. The test
+    /// uses a budget of 2 batches: seeding the production budget's 20,000
+    /// rows takes many minutes in a debug build.
+    #[tokio::test]
+    async fn one_pass_classifies_at_most_its_batch_budget() -> anyhow::Result<()> {
+        let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        let directory =
+            std::env::temp_dir().join(format!("gridops-backfill-cap-{}", uuid::Uuid::new_v4()));
+        let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let fleet = testdata::seed_fleet(&db).await?;
+        let io = fleet.host("io")?.id.clone();
+        let now = now_millis();
+        const MAX: usize = 2;
+        let budget = i64::try_from(MAX)? * BATCH;
+        let total = budget + 300;
+        let jobs: Vec<JobSeed> = (0..total)
+            .map(|id| {
+                let completed = now - 3_600_000 - id * 1_000;
+                let mut job = JobSeed::completed(
+                    id + 1,
+                    "unit tests",
+                    Some(&io),
+                    completed - 120_000,
+                    completed - 60_000,
+                    completed,
+                );
+                job.category = None;
+                job
+            })
+            .collect();
+        testdata::insert_jobs(&db, &fleet, &jobs).await?;
+        let unclassified = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM workflow_jobs WHERE category IS NULL",
+            )
+            .fetch_one(&db)
+            .await
+        };
+
+        let mut conn = db.acquire().await?;
+        backfill_unclassified(&mut conn, now, MAX).await?;
+        assert_eq!(
+            unclassified().await?,
+            total - budget,
+            "one pass stops at its budget"
+        );
+        backfill_unclassified(&mut conn, now, MAX).await?;
+        assert_eq!(unclassified().await?, 0, "the next pass finishes the rest");
+        drop(conn);
+        db.close().await;
+        let _ = std::fs::remove_dir_all(directory);
+        Ok(())
+    }
 }

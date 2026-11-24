@@ -309,7 +309,7 @@ fn compile_in_chunks(rules: &[CategoryRule], chunk_count: usize) -> ChunkedClass
         }
     }
     let chunk_count = chunk_count.max(1);
-    let chunk_len = ordered.len().div_ceil(chunk_count);
+    let chunk_len = ordered.len().div_ceil(chunk_count).max(1);
     let chunks: Vec<&[CategoryRule]> = ordered.chunks(chunk_len).collect();
     if chunks.len() <= 1 {
         return ChunkedClassifier {
@@ -584,6 +584,24 @@ mod tests {
         assert!(many.chunks.len() > 1, "several chunks must be pinned");
         answers_agree(&many, &rules);
         answers_agree(&compile_chunked(&rules), &rules);
+    }
+
+    /// An empty rule list (an admin may save one through #199's PUT)
+    /// compiles, and every job is `other`. `chunks(0)` used to panic here,
+    /// inside the writers' transactions.
+    #[tokio::test]
+    async fn an_empty_rule_list_classifies_everything_as_other() {
+        let _serial = super::super::testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        for chunked in [
+            compile_chunked(&[]),
+            compile_in_chunks(&[], 1),
+            compile_in_chunks(&[], 4),
+        ] {
+            assert_eq!(
+                chunked.classify("unit tests", Some("ci"), Some("team/app"), &[]),
+                JobCategory::Other
+            );
+        }
     }
 
     /// The sentinel a chunk answers instead of `other` never escapes the
