@@ -94,11 +94,20 @@ function OldestQueuedWait({ oldest, queuedTotal }: { oldest: FleetLiveStats["old
   return (
     <Link className="ml-auto flex min-w-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground" to="/queued-jobs">
       <span className="truncate">
-        Oldest job waited <span className="tabular font-medium text-foreground">{formatOldestWait(oldest.waitMs)}</span> · {oldest.repository} · {oldest.jobName}
+        Oldest job waited <span className="tabular font-medium text-foreground">{formatOldestWait(oldestWaitMs(oldest))}</span> · {oldest.repository} · {oldest.jobName}
       </span>
       <ArrowRight className="size-3 shrink-0" />
     </Link>
   );
+}
+
+/**
+ * How long the oldest queued job has waited by `now`: the response's `waitMs` was fixed when it
+ * was built, so a cached or stale response would understate it, and the clock since `queuedAt`
+ * is used once it is longer. A viewer's clock behind the server's leaves `waitMs` standing.
+ */
+export function oldestWaitMs(oldest: Pick<NonNullable<FleetLiveStats["oldestQueued"]>, "queuedAt" | "waitMs">, now = Date.now()): number {
+  return Math.max(oldest.waitMs, now - oldest.queuedAt);
 }
 
 /**
