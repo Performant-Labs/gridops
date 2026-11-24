@@ -1,0 +1,48 @@
+# Decision journal: #239 fix scoring, rollup and speed-index defects from the wave-1 review
+
+## Phase 3 Architecture (A, up-front plan review) - 2026-11-24T02:19:15-08:00
+- **Decided:** BLOCK, with 2 block and 8 warn findings (`docs/handoffs/239/handoff-A.md`).
+  - **Block 1 [completeness].** Items 7 and 9 (the 15-minute catch-up grace) leave the hour that just ended neither rolled nor in progress from :00 to :15. Item 1's covered-time denominator assumes that hour is there. #204's issue only computes "the in-progress hour" live.
+    - Result: on 24h at :10, a perfect machine reads 95.7% online, and availability scores 78.
+    - The brief must name the contract. Recommended: #204 computes live every hour of the window the rollups haven't written yet.
+  - **Block 2 [completeness].** The Done-when limits the design-doc change to one sentence, but #239 changes six documented rules: items 1, 2 (wording), 3, 6, 7/9, 8 and 10.
+    - #204's oracle is written from the design doc, and that is the stated reason #239 exists.
+    - The `0050` migration comment can't be the record (sqlx checksums), so the design doc is the only place left.
+  - **Decisions the brief left open:**
+    - **Item 8.** The machine rollup stops reading `fleet_health_recompute` and deleting from it. There is no consumer column: that would need a migration, a primary-key change, writes in #190 and #191, and a change to #197's schema pin, for a single consumer.
+    - **Item 5.** The unrounded value stays private to `score.rs`. `ScoreComponent` (a zod `int()` on the wire), `combine(&[ScoreComponent])` and the public component functions don't change.
+    - **Items 7 and 9.** One grace constant in `gridops_core::fleet_health`, beside `HOUR_MILLIS`.
+    - **Item 6.** The lookup happens in the read phase. The insert goes in the last write batch, before the hour's own delete, excluding H itself.
+    - **Item 11.** Both newest-row subqueries are copied: the runner and the placement.
+    - **Tests** go in each owning module's `mod tests`. Only item 8's contract test changes.
+    - **The PR description** uses no closing keyword before a wave-1 issue number.
+- **Assumed:**
+  - #204 is still unwritten, so the grace-hour contract can be set now without rework anywhere.
+  - Deployed databases have `0050` applied, so its file is checksum-frozen. I didn't check Mars. The rule holds for any database that has it.
+  - `workload_placements` can hold more than one row per `runner_id`. That rests on #191 ordering by `generation` and on the non-unique `workload_placements_runner_idx`. I didn't confirm it with a query on real data.
+- **Hedged:**
+  - Choosing how #204 detects an un-rolled hour, by time or by the rollups' markers, is a design call for the brief author. I recommended one but didn't make the choice.
+  - Detecting it by marker would also cover the catch-up lag after downtime. That gap exists before #239 too.
+  - Item 5's busy-share gate and the concern bands reading the rounded or the raw score is a spec ambiguity. I recommended the rounded score, which is current behaviour, and asked for it to be written down.
+  - The first-hour helper (warn 5) and the grace constant's home (warn 6) are calls about consistency in a codebase with no dominant pattern, so they are warns.
+- **Evidence:**
+  - **Files read:**
+    - the brief and its round-1 result;
+    - `gh issue view` for 239, 204, 240 and 241;
+    - `fleet_health/{mod.rs, score.rs, concerns.rs, speed.rs}`, and the relevant parts of `fake.rs`;
+    - `score_contract_tests.rs` (header, :280-445);
+    - `fleet_health_rollup.rs` and `fleet_host_rollup.rs` in full;
+    - `fleet_host_rollup_contract_tests.rs` (:1-40, :315-333) and `fleet_health_rollup_contract_tests.rs` (:400-458);
+    - `fleet_health_wiring_tests.rs`, `fleet_health_snapshot.rs`, and `main.rs:620-660`;
+    - `docs/design/fleet-health.md` (:95-240, :400-448) and `fleet-health-owners.json`;
+    - `scripts/fleet-health-guard.mjs` (the regex and the scope), and the `ci.yml` guard job;
+    - `src/features/fleet-health/types.ts` (the score schema);
+    - `fleet_health_contract.rs` (header);
+    - `db.rs` (the migrator);
+    - migrations 0001, 0013, 0022, 0043 and 0050 (indexes and the recompute DDL);
+    - `git show e71dcf6`;
+    - #222's `handoff-A.md` and `decisions.md`, for format.
+  - **Commands run:**
+    - `grep` for `fleet_health_recompute` writers and readers, `combine` callers, `ScoreComponent {` literals (25 in 6 files), and the newest-row subquery copies;
+    - `gh pr list` (open: #237 on the backfill, and #121);
+    - `git log` (HEAD 73de941, origin/master 20c22ad).
