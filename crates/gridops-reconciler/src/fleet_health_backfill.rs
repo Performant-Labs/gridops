@@ -35,6 +35,11 @@ const MAX_BATCHES: usize = 40;
 /// The pause between two batches, so other writers get the lock in between.
 const BATCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
 
+/// How long the backfill leaves a GitLab job NULL while its project path is
+/// unknown (the poll stores jobs without one; a later webhook may store
+/// it), before classifying it without the repository.
+const PATH_GRACE_MS: i64 = HOUR_MILLIS;
+
 /// How far back a rules change reclassifies completed jobs.
 const RECLASSIFY_WINDOW_MS: i64 = 7 * 24 * HOUR_MILLIS;
 
@@ -195,6 +200,7 @@ struct GitlabJobRow {
     tag_list: String,
     project_path: Option<String>,
     category: Option<String>,
+    created_at: i64,
     completed_at: Option<i64>,
 }
 
@@ -285,7 +291,7 @@ async fn reclassify_gitlab(
         first = false;
         let page: Vec<GitlabJobRow> = match rows {
             Rows::Completed => sqlx::query_as(
-                "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,completed_at FROM gitlab_jobs
+                "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,created_at,completed_at FROM gitlab_jobs
                   WHERE category IS NOT NULL AND completed_at>=?
                     AND (completed_at>? OR (completed_at=? AND (connection_id>? OR (connection_id=? AND job_id>?))))
                   ORDER BY completed_at,connection_id,job_id LIMIT ?",
@@ -298,7 +304,7 @@ async fn reclassify_gitlab(
             .bind(after.2)
             .bind(BATCH),
             Rows::Open => sqlx::query_as(
-                "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,completed_at FROM gitlab_jobs
+                "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,created_at,completed_at FROM gitlab_jobs
                   WHERE category IS NOT NULL AND completed_at IS NULL AND id>?
                   ORDER BY id LIMIT ?",
             )
@@ -344,7 +350,10 @@ async fn reclassify_gitlab(
 /// Classifies the rows whose `category` is still NULL, GitHub then GitLab,
 /// through the unclassified partial indexes, one short transaction per
 /// batch, in at most `max_batches` batches shared across both tables (the
-/// pass passes [`MAX_BATCHES`]); the next pass picks up the rest.
+/// pass passes [`MAX_BATCHES`]); the next pass picks up the rest. A GitLab
+/// job whose project path is still unknown waits [`PATH_GRACE_MS`]; the
+/// hours of the window's jobs it moves off `other` are listed for the
+/// rollups.
 async fn backfill_unclassified(
     conn: &mut SqliteConnection,
     now: i64,
@@ -375,6 +384,7 @@ async fn backfill_unclassified(
         };
         let runs = run_contexts(conn, page.iter().map(|row| row.run_id)).await?;
         let mut classified: Vec<(i64, JobCategory)> = Vec::new();
+        let mut hours: BTreeSet<i64> = BTreeSet::new();
         for row in &page {
             let (workflow_name, repository) = runs.get(&row.run_id).cloned().unwrap_or_default();
             let category = classifier.classify(
@@ -383,9 +393,10 @@ async fn backfill_unclassified(
                 repository.as_deref(),
                 &labels_of(&row.labels),
             );
+            hours.extend(backfilled_hour(category, row.completed_at, now));
             classified.push((row.id, category));
         }
-        apply_workflow(conn, &classified, &BTreeSet::new(), now, Scope::Null).await?;
+        apply_workflow(conn, &classified, &hours, now, Scope::Null).await?;
         after_id = last.id;
         if page.len() < batch {
             break;
@@ -402,7 +413,7 @@ async fn backfill_unclassified(
         }
         batches += 1;
         let page: Vec<GitlabJobRow> = sqlx::query_as(
-            "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,completed_at FROM gitlab_jobs
+            "SELECT id,connection_id,job_id,project_id,job_name,tag_list,project_path,category,created_at,completed_at FROM gitlab_jobs
               WHERE category IS NULL AND id>? ORDER BY id LIMIT ?",
         )
         .bind(&after_id)
@@ -413,23 +424,39 @@ async fn backfill_unclassified(
             break;
         };
         let mut classified: Vec<(String, i64, JobCategory)> = Vec::new();
+        let mut hours: BTreeSet<i64> = BTreeSet::new();
         for row in &page {
             let repository = gitlab_repository(conn, &mut paths, row).await?;
+            if repository.is_none() && now >= row.created_at && now - row.created_at < PATH_GRACE_MS
+            {
+                continue;
+            }
             let category = classifier.classify(
                 row.job_name.as_deref().unwrap_or(""),
                 None,
                 repository.as_deref(),
                 &labels_of(&row.tag_list),
             );
+            hours.extend(backfilled_hour(category, row.completed_at, now));
             classified.push((row.connection_id.clone(), row.job_id, category));
         }
-        apply_gitlab(conn, &classified, &BTreeSet::new(), now, Scope::Null).await?;
+        apply_gitlab(conn, &classified, &hours, now, Scope::Null).await?;
         after_id = last.id.clone();
         if page.len() < batch {
             break;
         }
     }
     Ok(())
+}
+
+/// The hour a backfilled job's rollup must be recomputed for: a NULL job is
+/// rolled up as `other`, so a job of the reclassify window the backfill
+/// gives another category moves its hour's counts (a writer left it NULL,
+/// or the backfill waited for its project path).
+fn backfilled_hour(category: JobCategory, completed_at: Option<i64>, now: i64) -> Option<i64> {
+    completed_at
+        .filter(|at| category != JobCategory::Other && *at >= now - RECLASSIFY_WINDOW_MS)
+        .map(hour_of)
 }
 
 /// Which rows a batch of category updates may touch: the backfill's
@@ -568,7 +595,7 @@ fn hour_of(completed_at: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BATCH, SETTLE_MS, backfill_unclassified, run_pass};
+    use super::{BATCH, PATH_GRACE_MS, SETTLE_MS, backfill_unclassified, hour_of, run_pass};
     use gridops_core::{
         connect_database_path,
         fleet_health::testdata::{self, JobSeed, SeededFleet},
@@ -797,6 +824,118 @@ mod tests {
             Some("deploy"),
             "the reclassify"
         );
+        finish(directory, db).await;
+        Ok(())
+    }
+
+    /// A pathless GitLab job of a project outside the connection's scope:
+    /// the backfill takes a sibling row's path when one exists, waits up to
+    /// [`PATH_GRACE_MS`] while none does, then classifies without it. A job
+    /// it moves off `other` gets its hour listed, since the rollup counted
+    /// the NULL row as `other`.
+    #[tokio::test]
+    async fn the_backfill_waits_for_an_unknown_gitlab_path_then_lists_the_hour()
+    -> anyhow::Result<()> {
+        let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        let (directory, db, fleet) = database("backfill-path-grace").await?;
+        let io = fleet.host("io")?.id.clone();
+        let now = now_millis();
+        add_rule(&db, 4, "deploy", "repository", "^team/", now).await?;
+        let seed = |id: i64, name: &str| {
+            let mut job = JobSeed::completed(
+                id,
+                name,
+                Some(&io),
+                now - 3 * MINUTE,
+                now - 2 * MINUTE,
+                now - MINUTE,
+            );
+            job.gitlab = true;
+            job.category = None;
+            job
+        };
+        testdata::insert_jobs(
+            &db,
+            &fleet,
+            &[
+                seed(1, "notify slack"),
+                seed(2, "notify ops"),
+                seed(3, "notify team"),
+            ],
+        )
+        .await?;
+        // All three belong to project 78, outside the connection's scope; job
+        // 3's sibling row (job 1, below) will carry the path.
+        sqlx::query("UPDATE gitlab_jobs SET project_id=78, project_path=NULL")
+            .execute(&db)
+            .await?;
+        sqlx::query("DELETE FROM fleet_health_recompute")
+            .execute(&db)
+            .await?;
+
+        run_pass(&db, now).await?;
+        assert_eq!(gitlab_category(&db, 1).await?, None, "waits for the path");
+        assert_eq!(gitlab_category(&db, 2).await?, None);
+
+        // A webhook stores job 1's path; job 3 takes it from its sibling.
+        sqlx::query("UPDATE gitlab_jobs SET project_path='team/app' WHERE job_id=1")
+            .execute(&db)
+            .await?;
+        run_pass(&db, now).await?;
+        assert_eq!(gitlab_category(&db, 1).await?.as_deref(), Some("deploy"));
+        assert_eq!(
+            gitlab_category(&db, 3).await?.as_deref(),
+            Some("deploy"),
+            "the sibling's path"
+        );
+        assert_eq!(
+            gitlab_category(&db, 2).await?.as_deref(),
+            Some("deploy"),
+            "same project, same path"
+        );
+
+        let hours: Vec<i64> = sqlx::query_scalar("SELECT hour FROM fleet_health_recompute")
+            .fetch_all(&db)
+            .await?;
+        assert_eq!(
+            hours,
+            vec![hour_of(now - MINUTE)],
+            "the moved jobs' hour is listed"
+        );
+        finish(directory, db).await;
+        Ok(())
+    }
+
+    /// With no path anywhere, a pathless GitLab job is classified without
+    /// its repository once [`PATH_GRACE_MS`] has passed since it was created.
+    #[tokio::test]
+    async fn a_gitlab_job_with_no_path_anywhere_is_classified_after_the_grace() -> anyhow::Result<()>
+    {
+        let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
+        let (directory, db, fleet) = database("backfill-path-none").await?;
+        let io = fleet.host("io")?.id.clone();
+        let now = now_millis();
+        let mut job = JobSeed::completed(
+            1,
+            "notify slack",
+            Some(&io),
+            now - 3 * MINUTE,
+            now - 2 * MINUTE,
+            now - MINUTE,
+        );
+        job.gitlab = true;
+        job.category = None;
+        testdata::insert_jobs(&db, &fleet, &[job]).await?;
+        sqlx::query("UPDATE gitlab_jobs SET project_id=78, project_path=NULL")
+            .execute(&db)
+            .await?;
+        let created: i64 = sqlx::query_scalar("SELECT created_at FROM gitlab_jobs")
+            .fetch_one(&db)
+            .await?;
+        run_pass(&db, created + PATH_GRACE_MS - 1).await?;
+        assert_eq!(gitlab_category(&db, 1).await?, None);
+        run_pass(&db, created + PATH_GRACE_MS).await?;
+        assert_eq!(gitlab_category(&db, 1).await?.as_deref(), Some("other"));
         finish(directory, db).await;
         Ok(())
     }

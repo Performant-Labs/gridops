@@ -273,21 +273,16 @@ impl ChunkedClassifier {
     }
 }
 
-/// A memoized GitLab project path lookup: the path found, if any, and when
-/// it was looked up.
-type ProjectLookup = (Option<String>, i64);
-
 /// The writers' cached classifier, and when the cache last looked at the
 /// rules. `projects` remembers the GitLab project paths the poll had to
-/// look up, one per project instead of one per job, with when it looked; a
-/// rebuild clears it. A found path is kept; a miss is looked up again after
-/// [`CHECK_INTERVAL_MS`], since a later webhook may store the path.
+/// look up (a connection's scope, which doesn't change), one per project
+/// instead of one per job; a rebuild clears it.
 /// `last_check` is atomic so a check can move it through the shared
 /// `Arc<Chunked>` the writers hold.
 #[derive(Debug)]
 struct Chunked {
     classifier: ChunkedClassifier,
-    projects: Mutex<HashMap<(String, i64), ProjectLookup>>,
+    projects: Mutex<HashMap<(String, i64), Option<String>>>,
     version: RulesVersion,
     last_check: AtomicI64,
 }
@@ -387,17 +382,16 @@ async fn github_run(
     .context("no workflow run for the job")
 }
 
-/// A GitLab project's path, memoized on the cache entry: the poll
-/// classifies a whole page of one project's jobs, often inside one write
-/// transaction, and the lookup is per job. A miss is memoized for
-/// [`CHECK_INTERVAL_MS`] only, so the sibling scan runs inside a write
-/// transaction at most once a minute per unresolved project.
+/// A GitLab project's path as the writers find it: the connection's scope
+/// only, a primary-key read, since they may hold the write lock; the
+/// sibling lookup is the backfill's ([`gitlab_project_path`]). Memoized on
+/// the cache entry: the poll classifies a whole page of one project's jobs,
+/// and the lookup is per job.
 async fn project_path(
     conn: &mut SqliteConnection,
     cache: &Chunked,
     connection_id: &str,
     project_id: ExternalId,
-    now: i64,
 ) -> anyhow::Result<Option<String>> {
     let key = (
         connection_id.to_owned(),
@@ -405,24 +399,36 @@ async fn project_path(
     );
     {
         let projects = cache.projects.lock().await;
-        if let Some((path, looked_at)) = projects.get(&key)
-            && (path.is_some() || (now >= *looked_at && now - looked_at < CHECK_INTERVAL_MS))
-        {
+        if let Some(path) = projects.get(&key) {
             return Ok(path.clone());
         }
     }
-    let found = gitlab_project_path(conn, connection_id, project_id).await?;
-    cache
-        .projects
-        .lock()
-        .await
-        .insert(key, (found.clone(), now));
+    let found = gitlab_scope_path(conn, connection_id, project_id).await?;
+    cache.projects.lock().await.insert(key, found.clone());
     Ok(found)
+}
+
+/// The connection's scope path when the connection is scoped to that
+/// project: a primary-key read.
+async fn gitlab_scope_path(
+    conn: &mut SqliteConnection,
+    connection_id: &str,
+    project_id: ExternalId,
+) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT scope_path FROM gitlab_connections
+          WHERE id=? AND scope_kind='project' AND scope_id=?",
+    )
+    .bind(connection_id)
+    .bind(i64::try_from(project_id.get())?)
+    .fetch_optional(&mut *conn)
+    .await?)
 }
 
 /// A GitLab project's path: the connection's scope when the connection is
 /// scoped to that project, else the path another of the project's
-/// `gitlab_jobs` rows already stored. The backfill resolves a pathless row
+/// `gitlab_jobs` rows already stored (a scan of the connection's rows, so
+/// never inside a write transaction). The backfill resolves a pathless row
 /// the same way, so a job's category doesn't depend on which path
 /// classified it.
 ///
@@ -433,18 +439,10 @@ pub async fn gitlab_project_path(
     connection_id: &str,
     project_id: ExternalId,
 ) -> anyhow::Result<Option<String>> {
-    let project = i64::try_from(project_id.get())?;
-    if let Some(scope) = sqlx::query_scalar::<_, String>(
-        "SELECT scope_path FROM gitlab_connections
-          WHERE id=? AND scope_kind='project' AND scope_id=?",
-    )
-    .bind(connection_id)
-    .bind(project)
-    .fetch_optional(&mut *conn)
-    .await?
-    {
+    if let Some(scope) = gitlab_scope_path(conn, connection_id, project_id).await? {
         return Ok(Some(scope));
     }
+    let project = i64::try_from(project_id.get())?;
     Ok(sqlx::query_scalar::<_, Option<String>>(
         "SELECT project_path FROM gitlab_jobs
               WHERE connection_id=? AND project_id=? AND project_path IS NOT NULL
@@ -494,11 +492,11 @@ pub async fn category_for_insert(
         } => {
             let repository = match path {
                 Some(path) => Some(path.to_owned()),
-                None => match project_path(conn, &cache, connection_id, project_id, now).await {
+                None => match project_path(conn, &cache, connection_id, project_id).await {
                     // An unknown path would classify without the repository
                     // and store a category the repository rules might not
-                    // give; the backfill classifies the job once a path is
-                    // stored, or without one if none ever is.
+                    // give; the backfill looks for a sibling's path outside
+                    // the lock, and waits for one up to an hour.
                     Ok(None) => return None,
                     Ok(path) => path,
                     Err(error) => {
@@ -647,14 +645,14 @@ mod tests {
         );
     }
 
-    /// A GitLab job whose project path can't be found yet is left for the
-    /// backfill rather than classified without its repository, and the miss
-    /// is looked up again after [`CHECK_INTERVAL_MS`]: a path a later
-    /// webhook stored is then used.
+    /// The writers resolve a pathless GitLab job's path from its
+    /// connection's scope only: no sibling scan under the write lock. A job
+    /// of another project is left for the backfill, even once a sibling row
+    /// has the path.
     #[tokio::test]
-    async fn an_unresolved_gitlab_path_is_left_for_the_backfill_and_looked_up_again()
-    -> anyhow::Result<()> {
-        use super::{CHECK_INTERVAL_MS, JobOrigin, NewJob, category_for_insert};
+    async fn a_pathless_gitlab_job_outside_the_scope_is_left_for_the_backfill() -> anyhow::Result<()>
+    {
+        use super::{JobOrigin, NewJob, category_for_insert};
         use crate::{connect_database_path, fleet::ExternalId, fleet_health::testdata, now_millis};
 
         let _serial = super::super::testdata::CLASSIFIER_TEST_LOCK.lock().await;
@@ -665,51 +663,48 @@ mod tests {
         let now = now_millis();
         sqlx::query(
             "INSERT INTO job_category_rules (position,category,field,pattern,created_at,updated_at)
-             VALUES (4,'deploy','repository','^team/',?,?)",
+             VALUES (4,'deploy','repository','^acme/',?,?)",
         )
         .bind(now)
         .bind(now)
         .execute(&db)
         .await?;
-        // One job of the connection's own project creates the connection.
+        // One job of the connection's own project creates the connection
+        // and gives project 78 a sibling row with a path.
         let mut seeded = testdata::JobSeed::queued(1, "unit tests", now - 60_000);
         seeded.gitlab = true;
         testdata::insert_jobs(&db, &fleet, &[seeded]).await?;
-        let connection: String = sqlx::query_scalar("SELECT connection_id FROM gitlab_jobs")
-            .fetch_one(&db)
+        let (connection, scoped): (String, i64) =
+            sqlx::query_as("SELECT connection_id,project_id FROM gitlab_jobs")
+                .fetch_one(&db)
+                .await?;
+        sqlx::query("INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,project_path)
+                     SELECT 'sibling',connection_id,78,2,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,'acme/other' FROM gitlab_jobs")
+            .execute(&db)
             .await?;
 
-        // Another project of that connection: not its scope, no sibling row.
         let labels: Vec<String> = Vec::new();
-        let job = NewJob {
-            job_name: Some("notify slack"),
-            labels: &labels,
-            origin: JobOrigin::GitLabProject {
-                connection_id: &connection,
-                project_id: ExternalId::new(78)?,
-                path: None,
-            },
+        let job = |project: i64| -> anyhow::Result<NewJob<'_>> {
+            Ok(NewJob {
+                job_name: Some("notify slack"),
+                labels: &labels,
+                origin: JobOrigin::GitLabProject {
+                    connection_id: &connection,
+                    project_id: ExternalId::new(u64::try_from(project)?)?,
+                    path: None,
+                },
+            })
         };
         let mut conn = db.acquire().await?;
         assert_eq!(
-            category_for_insert(&mut conn, &job, now).await,
-            None,
-            "left for the backfill"
-        );
-
-        // A webhook stores the project's path.
-        sqlx::query("UPDATE gitlab_jobs SET project_id=78, project_path='team/other'")
-            .execute(&mut *conn)
-            .await?;
-        assert_eq!(
-            category_for_insert(&mut conn, &job, now + CHECK_INTERVAL_MS - 1).await,
-            None,
-            "the miss is memoized for a minute"
-        );
-        assert_eq!(
-            category_for_insert(&mut conn, &job, now + CHECK_INTERVAL_MS).await,
+            category_for_insert(&mut conn, &job(scoped)?, now).await,
             Some(JobCategory::Deploy),
-            "then looked up again"
+            "the scope gives the connection's own project its path"
+        );
+        assert_eq!(
+            category_for_insert(&mut conn, &job(78)?, now).await,
+            None,
+            "another project is left for the backfill"
         );
         drop(conn);
         db.close().await;
