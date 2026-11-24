@@ -10,6 +10,8 @@ All references are to master at 73de941.
    - At 10:30, a perfect machine on 24h reads 97.9% online. On **1h** it reads 50%: availability scores 0, and a critical `fleet-component:availability` concern fires on every load that isn't exactly on the hour.
    - Fix: use the covered time, `now − ceil_hour(now − W)`, for every time denominator.
    - Test with a `now` that isn't on the hour. Every test today uses an on-the-hour `FIXTURE_NOW`.
+   - **The grace-hour contract with #204.** #204's source computes live, bounded, every hour of `[ceil_hour(now − W), now)` the rollups haven't written: the in-progress hour, and the hour that just ended until `hour_end + 15 min`. #204 detects an unwritten hour **by time**, using the one shared grace constant from items 7 and 9. It does not use the rollups' markers. The scorer's covered time is `now − ceil_hour(now − W)` on that basis.
+   - Test: a perfect machine on 24h at `now = H + 10 min`, with the ended hour supplied as the source would supply it, scores availability 100.
 2. **Infra-failure share divides by successes.** ~:581/:590 divide by `completed_count`, which counts successes only. The design defines the denominator as every completed final-attempt job (`job_count`).
    - In an outage where nothing succeeds, the component goes to "not enough data" and its concern can't fire.
    - Fix: use `job_count` and update the pinned test. This reverses PR-Agent's "fix" e71dcf6.
@@ -17,6 +19,9 @@ All references are to master at 73de941.
    - #200 writes rows with `online_minutes = 0` on purpose. Only *no rows at all* is missing data, and 0 must score 0.
 4. **A machine with a CPU budget of 0 gets a score.** The design says it has none. It must get no machine score and raise no `host-score` concerns. That covers MacBookPro. Adjust #197's fixture wording if needed.
 5. **Component scores are rounded before combining.** :103 and :435 feed rounded `u8`s into `combine`. The design rounds only the final score. Keep `f64` until the end.
+   - **Decided:** keep the unrounded value private to `score.rs`, for example a private `measure()` returning `(ScoreComponent, Option<f64>)` and a raw combine that `combine()` calls.
+   - `ScoreComponent`, the wire format and the signatures of `combine(&[ScoreComponent])` and the public component functions don't change.
+   - The busy-share gate and the concern bands keep reading the rounded component score.
 
 ## Job rollup (`crates/gridops-reconciler/src/fleet_health_rollup.rs`, from #191 / PR #229)
 
@@ -30,7 +35,7 @@ All references are to master at 73de941.
 ## Machine rollup (`crates/gridops-reconciler/src/fleet_host_rollup.rs`, from #200 / PR #230)
 
 8. **It consumes the recompute queue meant for the job rollup.** It deletes every listed hour (~:267-273), so if the job rollup's pass errored first (log-and-continue), the hours #190 listed are lost. It also rolls and clears listed hours that haven't ended yet.
-   - Fix: give `fleet_health_recompute` a consumer column, or have the machine rollup not read it (its rows don't depend on categories). Either way, skip hours that haven't ended.
+   - **Decided:** the machine rollup stops reading and deleting `fleet_health_recompute`, because its rows don't depend on categories. There's no consumer column and no new migration. It still skips hours that haven't ended.
    - This changes #197's contract test `a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list`. That change is in scope here.
 9. **Late samples are lost.** Same as item 7: the catch-up at ~:287 rolls an hour as soon as it ends. Apply the same 15-minute grace.
 
@@ -43,11 +48,22 @@ All references are to master at 73de941.
 
 - [ ] Each item has a test that fails before the fix.
 - [ ] A mutation check is shown in the handoff for items 1, 2, 3 and 6.
-- [ ] The design doc gains one sentence: the fleet median includes the machine's own runs, so a machine running most of a key's jobs drifts toward 1.0.
+- [ ] `docs/design/fleet-health.md` states every rule this issue changes, because #204's oracle is written from it:
+  - (a) the covered-time denominators for availability (fleet and machine) and busy share, plus item 1's grace-hour contract;
+  - (b) infra failures `÷ job_count`;
+  - (c) only *no rows* is missing machine data, 0 online minutes scores 0, and a CPU budget of 0 gives no score and no `host-score` concern;
+  - (d) the job rollup lists an earlier attempt's hours in `fleet_health_recompute`;
+  - (e) the 15-minute grace before a catch-up hour is rolled;
+  - (f) only the job rollup reads `fleet_health_recompute`;
+  - (g) `topKeys` hold only keys with a ratio above 1.0;
+  - (h) the busy-share gate and the concern bands read the rounded component score;
+  - (i) the fleet median includes the machine's own runs, so a machine running most of a key's jobs drifts toward 1.0.
 - [ ] SQLite discipline holds: no write transaction over 50 ms, batches of at most 500 rows.
 
 ## Constraints
 
 - Keep `CARGO_BUILD_JOBS=2` and `RUST_TEST_THREADS=2`. Use the shared cargo target from the untracked `.cargo/config.toml`, and never set `CARGO_TARGET_DIR`. Prefer `-p` crate test runs.
+- Don't edit `migrations/0050_fleet_health.sql`: its checksum is applied.
+- In the PR description, put no closing keyword before a wave-1 issue number, or the Fleet health guard fails the PR.
 - Work headless: no visible browsers and no screenshots on the desktop.
 - Open the PR against master on Performant-Labs/gridops, never upstream iamngoni/gridops.
