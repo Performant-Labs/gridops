@@ -2,13 +2,19 @@ import { Link } from "@tanstack/react-router";
 import { CheckCircle2 } from "lucide-react";
 import { useState } from "react";
 
-import { StatusDot, type HealthTone } from "~/components/status-icon";
+import { RunStatusIcon, type RunState } from "~/components/status-icon";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import type { Concern, FleetHealthViewProps, Severity } from "./types";
 
-/** A concern's severity as a status tone: critical red, warning amber, info grey. */
-const SEVERITY_TONES: Record<Severity, HealthTone> = { critical: "danger", warning: "warning", info: "neutral" };
+/**
+ * A concern's severity as a run-status glyph, so it reads by shape and not colour alone: critical
+ * a red cross (`failure`), warning an amber clock (`waiting`), info a grey slash (`skipped`).
+ */
+const SEVERITY_ICONS: Record<Severity, RunState> = { critical: "failure", warning: "waiting", info: "skipped" };
+
+/** What a screen reader announces for a concern's severity (the glyph itself is `aria-hidden`). */
+const SEVERITY_LABELS: Record<Severity, string> = { critical: "Critical", warning: "Warning", info: "Info" };
 
 /** How many concerns show before "Show all N". */
 const VISIBLE_CONCERNS = 5;
@@ -26,7 +32,7 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 
 /**
  * The areas of concern (#195): the merged concern list, worst first then oldest, exactly as the
- * API orders it. One compact row per concern — its severity as a status dot, its title, its
+ * API orders it. One compact row per concern — its severity as a glyph with hidden text, its title, its
  * detail sentence and how long it has held — the first five until "Show all N". Each row is keyed
  * by the concern's `key` (`data-concern-key`), so a refresh keeps it, and a concern that wasn't
  * in the previous data is marked `data-new="true"` and fades in; nothing is new on the first
@@ -82,7 +88,8 @@ export function AreasOfConcern({ data }: FleetHealthViewProps) {
 function ConcernRow({ concern, isNew }: { concern: Concern; isNew: boolean }) {
   const body = (
     <>
-      <StatusDot className="mt-1.5" tone={SEVERITY_TONES[concern.severity]} />
+      <RunStatusIcon className="mt-0.5" status={SEVERITY_ICONS[concern.severity]} />
+      <span className="sr-only">{SEVERITY_LABELS[concern.severity]}</span>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="min-w-0 font-medium text-foreground">{concern.title}</span>

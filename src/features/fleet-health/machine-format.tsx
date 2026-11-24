@@ -44,9 +44,13 @@ export function windowPhrase(window: HealthWindow): string {
   return phrases[window];
 }
 
-/** The host id a `#machine-<host>` hash points at, or null when the hash is not one (or is malformed). */
-export function hashHostId(): string | null {
-  const match = /^#machine-(.+)$/.exec(globalThis.location?.hash ?? "");
+/**
+ * The host id a `#machine-<host>` hash points at, or null when the hash is not one (or is
+ * malformed). `hash` is the browser's (`#machine-…`, the default) or the router's, which has no
+ * leading `#` (`machine-…`).
+ */
+export function hashHostId(hash: string = globalThis.location?.hash ?? ""): string | null {
+  const match = /^#?machine-(.+)$/.exec(hash);
   if (match?.[1] === undefined) return null;
   try {
     return decodeURIComponent(match[1]);
