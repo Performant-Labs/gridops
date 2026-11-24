@@ -46,11 +46,11 @@
 //!
 //! Limits, by design: a write transaction is timed from its first row
 //! change, so a `BEGIN IMMEDIATE` held before any write, or a write to a
-//! `WITHOUT ROWID` table (no update hook), is not timed; a statement is only
-//! timed once SQLite has run [`PROGRESS_OPS`] instructions of it on that
-//! worker or it has changed a row, so a statement that is slow only because
-//! it waited (for the lock, a CPU or the disk) is not seen as slow (its
-//! writer's transaction is). Two threads waiting
+//! `WITHOUT ROWID` table (no update hook), is not timed; a statement that
+//! has run fewer than [`PROGRESS_OPS`] instructions and changed no row is
+//! timed by the worker's CPU since the previous statement's log line, so a
+//! statement that is slow only because it waited (for the lock, a CPU or
+//! the disk) is not seen as slow (its writer's transaction is). Two threads waiting
 //! for a CPU at once both have their waits taken off, which the CPU-time
 //! floor bounds. Only the worker's and the calling thread's waits are taken
 //! off: a check whose work runs its statements from other threads (a
@@ -171,6 +171,9 @@ thread_local! {
     /// The statement this worker thread is running, from its first progress
     /// callback while a check is armed until its log line.
     static STATEMENT: RefCell<Option<Mark>> = const { RefCell::new(None) };
+    /// This worker thread's times at its last statement log line, or when a
+    /// check began routing its events here.
+    static LAST_LOG: Cell<Option<ThreadTimes>> = const { Cell::new(None) };
     /// The time this worker thread has spent blocked in the kernel inside
     /// statements that returned no rows, ended ones only.
     static WRITES_BLOCKED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -197,6 +200,7 @@ fn on_worker(state: &Arc<DatabaseState>) {
             (true, false) => {
                 // A statement marked before this check began is not its.
                 statement_ended(state);
+                LAST_LOG.set(thread_times(Path::new(THIS_THREAD)));
                 entry.1 = Some(tracing::dispatcher::set_default(dispatch()));
             }
             (false, true) => {
@@ -335,6 +339,25 @@ fn busy(elapsed: Duration, times: impl Iterator<Item = (ThreadTimes, ThreadTimes
         },
     );
     elapsed.saturating_sub(waits).max(worked.min(elapsed))
+}
+
+/// The work of a statement nothing marked, `elapsed` by sqlx's clock: the
+/// worker's CPU time since its previous log line (`last_log`), up to
+/// `elapsed`. Nothing marks a statement that changes no row and runs under
+/// [`PROGRESS_OPS`] instructions, but one instruction can walk a whole table
+/// (`SELECT COUNT(*)` is a single `OP_Count`), so its CPU still counts; a
+/// statement that only waited (for the lock, a CPU or the disk) used none.
+/// The worker's CPU between log lines also holds its unlogged `BEGIN` and
+/// `COMMIT`, which only ever adds. Without `schedstat`, the clock.
+fn unmarked_work(
+    elapsed: Duration,
+    last_log: Option<ThreadTimes>,
+    now: Option<ThreadTimes>,
+) -> Duration {
+    match (last_log, now) {
+        (Some(last_log), Some(now)) => now.cpu.saturating_sub(last_log.cpu).min(elapsed),
+        _ => elapsed,
+    }
 }
 
 /// The CPU time the threads used between each `(then, now)` of their
@@ -649,12 +672,15 @@ impl Visit for Fields {
 impl SlowStatements {
     /// The work of the statement whose log line this is: the CPU time the
     /// worker and the threads running checks used since it was marked, up
-    /// to sqlx's `elapsed`. A statement nothing marked changed no row and
-    /// ran under [`PROGRESS_OPS`] instructions, so it did no work worth
-    /// timing: by the clock it can only have waited (for the lock, a CPU or
-    /// the disk), and it counts as nothing. Where the kernel has no
-    /// `schedstat`, every statement keeps sqlx's `elapsed`.
-    fn took(started: Option<&Mark>, fields: &Fields) -> Duration {
+    /// to sqlx's `elapsed`; a statement nothing marked, by
+    /// [`unmarked_work`]. Where the kernel has no `schedstat`, every
+    /// statement keeps sqlx's `elapsed`.
+    fn took(
+        started: Option<&Mark>,
+        fields: &Fields,
+        last_log: Option<ThreadTimes>,
+        now: Option<ThreadTimes>,
+    ) -> Duration {
         let Some(elapsed) = fields
             .elapsed_secs
             .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
@@ -662,11 +688,7 @@ impl SlowStatements {
             return Duration::MAX;
         };
         let Some(started) = started else {
-            return if thread_times(Path::new(THIS_THREAD)).is_some() {
-                Duration::ZERO
-            } else {
-                elapsed
-            };
+            return unmarked_work(elapsed, last_log, now);
         };
         let writes = if fields.rows_returned == Some(0) {
             started.worker_blocked(started.at.elapsed())
@@ -713,9 +735,11 @@ impl tracing::Subscriber for SlowStatements {
             return;
         };
         let started = statement_ended(&state);
+        let now = thread_times(Path::new(THIS_THREAD));
+        let last_log = LAST_LOG.replace(now);
         let mut fields = Fields::default();
         event.record(&mut fields);
-        let took = Self::took(started.as_ref(), &fields);
+        let took = Self::took(started.as_ref(), &fields, last_log, now);
         if !fields.message.contains("slow statement") || took <= SLOW_STATEMENT_LIMIT {
             return;
         }
@@ -905,6 +929,29 @@ mod tests {
         assert_eq!(
             worked(Duration::from_millis(30), [worker, caller].into_iter()),
             Duration::from_millis(30)
+        );
+    }
+
+    #[test]
+    fn a_statement_nothing_marked_is_the_workers_cpu_since_its_last_log_line() {
+        // `SELECT COUNT(*) FROM t` is one VM instruction (`OP_Count`) that
+        // walks the whole table, so nothing marks it: 150 ms of the worker's
+        // CPU since the previous statement's log line is its work.
+        let last = times(1_000, 400);
+        let now = times(1_150, 450);
+        assert_eq!(
+            unmarked_work(Duration::from_millis(210), Some(last), Some(now)),
+            Duration::from_millis(150)
+        );
+        // One that only waited (no CPU) did no work.
+        assert_eq!(
+            unmarked_work(Duration::from_millis(300), Some(now), Some(now)),
+            Duration::ZERO
+        );
+        // No `schedstat`: the clock.
+        assert_eq!(
+            unmarked_work(Duration::from_millis(300), None, None),
+            Duration::from_millis(300)
         );
     }
 
