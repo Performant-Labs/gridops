@@ -1,11 +1,12 @@
 # .agents/pr-review.yml — PR automation config for GridOps
 # Read by: .github/workflows/pr-review.yml (CI), via the vendored ./.github/workflows/pr-review-reusable.yml.
 #
-# This repo runs the playbook's DEFAULT reviewer: PR-Agent through the Claude Code
-# CLI (akalongman/pr-agent-cli-handlers), authenticated by the CLAUDE_CODE_OAUTH_TOKEN
-# secret. It deliberately sets NO model keys: every model is the playbook's default.
-# Claude is wanted here on purpose: much of the code is written by GLM agents, and a
-# review by a different model is more independent than one by the same model.
+# This repo runs PR-Agent on GLM 5.4 through the z.ai coding endpoint (the ZAI_API_KEY
+# secret), with glm-5.3 as the fallback. pr-review.yml passes no CLAUDE_CODE_OAUTH_TOKEN,
+# so the workflow takes its API path. It used the Claude Code CLI before (2026-11-24): the
+# Claude subscription's weekly limit blocked every review until it reset. Most new code is
+# now written by Claude agents, so a GLM review is the independent one; if GLM agents write
+# the code again, consider switching the reviewer back.
 #
 # Reference: playbook pipelines/pr-reviewer/README.md, "Config reference".
 
@@ -14,6 +15,8 @@ project:
   timezone: "America/Los_Angeles"
 
 pr_agent:
+  model: "openai/glm-5.4"
+  fallback_model: "openai/glm-5.3"
   high_stakes_label: "high-stakes"
   skip_docs_only: false
   score_labels: true
