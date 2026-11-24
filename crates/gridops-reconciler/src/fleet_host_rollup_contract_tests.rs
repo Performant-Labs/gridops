@@ -343,7 +343,7 @@ async fn a_pass_leaves_the_recompute_list_to_the_job_rollup() -> Result<()> {
     );
     assert!(
         rows(&harness.db, NOW).await?.is_empty(),
-        "the hour in progress was rolled"
+        "the hour in progress is not rolled"
     );
     harness.finish().await
 }

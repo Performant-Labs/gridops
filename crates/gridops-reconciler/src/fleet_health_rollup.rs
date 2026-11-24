@@ -39,10 +39,10 @@ const ROLLUP_NEXT_SETTING: &str = "fleet_health.rollup_next";
 const WRITE_BATCH: usize = 500;
 
 /// The hour's GitHub jobs (`workflow_jobs_completed_idx`), final attempts
-/// only: a job counts when its attempt (`workflow_job_sync.run_attempt`,
-/// unknown counts as 1) is the newest one known for its run, exactly the
-/// attempt `gridops_core::finish_earlier_attempts` finishes earlier jobs
-/// against. The runner and its newest `workload_placements` row give the
+/// only: a job counts unless a later attempt of its run (by
+/// `workflow_job_sync.run_attempt`, unknown counts as 1) ran a job of the
+/// same name. A "re-run failed jobs" attempt runs only the failed jobs, and
+/// the run's other jobs keep their earlier attempt, so they still count. The runner and its newest `workload_placements` row give the
 /// machine, pool and CPU size; no runner row, or no placement, is unmanaged.
 const GITHUB_JOBS: &str = r#"
 SELECT wj.category,
@@ -61,11 +61,10 @@ SELECT wj.category,
           ORDER BY latest.generation DESC,latest.updated_at DESC,latest.id DESC LIMIT 1)
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE wj.completed_at>=? AND wj.completed_at<?
-   AND COALESCE(sync.run_attempt,1)=MAX(
-         COALESCE((SELECT run.run_attempt FROM workflow_runs run WHERE run.id=wj.run_id),1),
-         COALESCE((SELECT MAX(later.run_attempt) FROM workflow_job_sync later
-                     JOIN workflow_jobs later_job ON later_job.id=later.job_id
-                    WHERE later_job.run_id=wj.run_id),1))"#;
+   AND NOT EXISTS (SELECT 1 FROM workflow_jobs later_job
+          JOIN workflow_job_sync later ON later.job_id=later_job.id
+         WHERE later_job.run_id=wj.run_id AND later_job.name=wj.name
+           AND later.run_attempt>COALESCE(sync.run_attempt,1))"#;
 
 /// The hour's GitLab jobs (`gitlab_jobs_completed_idx`), joined to their
 /// machines through `runners.gitlab_runner_id` the same way. A GitLab job is
@@ -87,8 +86,8 @@ SELECT gj.category,
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE gj.completed_at>=? AND gj.completed_at<?"#;
 
-/// The other hours in which the earlier attempts of the hour's re-runs
-/// completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
+/// The other hours in which the earlier attempts of the hour's re-run jobs
+/// (the same run and job name) completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
 /// rolled while its attempt was still the run's newest, so it counts there
 /// until the hour is rolled again (#239). The hour itself is left out; its own
 /// rows already read only final attempts.
@@ -96,7 +95,8 @@ const EARLIER_ATTEMPT_HOURS: &str = r#"
 SELECT DISTINCT earlier.completed_at-(earlier.completed_at%3600000) AS hour
   FROM workflow_jobs wj
   JOIN workflow_job_sync sync ON sync.job_id=wj.id
-  JOIN workflow_jobs earlier ON earlier.run_id=wj.run_id AND earlier.status='completed'
+  JOIN workflow_jobs earlier ON earlier.run_id=wj.run_id AND earlier.name=wj.name
+                            AND earlier.status='completed'
   LEFT JOIN workflow_job_sync earlier_sync ON earlier_sync.job_id=earlier.id
  WHERE wj.completed_at>=? AND wj.completed_at<?
    AND sync.run_attempt>1
@@ -438,10 +438,23 @@ mod tests {
         /// A successful job on io completing at `completed`, part of run
         /// `run_id` at `attempt`.
         async fn job(&self, id: i64, run_id: i64, attempt: i64, completed: i64) -> Result<()> {
+            self.named_job(id, run_id, attempt, "unit tests", completed)
+                .await
+        }
+
+        /// [`Self::job`] with the job's `name`.
+        async fn named_job(
+            &self,
+            id: i64,
+            run_id: i64,
+            attempt: i64,
+            name: &str,
+            completed: i64,
+        ) -> Result<()> {
             let io = self.fleet.host("io")?.id.clone();
             let mut job = JobSeed::completed(
                 id,
-                "unit tests",
+                name,
                 Some(&io),
                 completed - 3 * MINUTE,
                 completed - 2 * MINUTE,
@@ -484,6 +497,37 @@ mod tests {
             std::fs::remove_dir_all(self.directory)?;
             Ok(())
         }
+    }
+
+    /// A "re-run failed jobs" attempt runs only the failed job: the run's
+    /// other attempt-1 jobs are not run again and still count, in their own
+    /// hour, whenever it is rolled. Only the re-run job's earlier attempt is
+    /// replaced, and only its hour is listed for a recompute.
+    #[tokio::test]
+    async fn a_partial_re_run_keeps_the_jobs_it_did_not_run_again() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b, c) = (NOW - 4 * HOUR, NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness
+            .named_job(1, 60, 1, "build", a + 10 * MINUTE)
+            .await?;
+        harness.named_job(2, 60, 1, "lint", b + 10 * MINUTE).await?;
+        harness.named_job(3, 60, 2, "lint", c + 10 * MINUTE).await?;
+        rollup_hour(&harness.db, c, NOW).await?;
+        assert_eq!(
+            harness.listed().await?,
+            [b],
+            "only the re-run job's earlier hour is listed"
+        );
+        rollup_hour(&harness.db, a, NOW).await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 1, "build was not run again");
+        assert_eq!(
+            harness.counted(b).await?,
+            0,
+            "lint's attempt 1 was replaced"
+        );
+        assert_eq!(harness.counted(c).await?, 1, "lint's attempt 2");
+        harness.finish().await
     }
 
     /// Item 6: attempt 1 completes in hour A and is rolled there; the re-run

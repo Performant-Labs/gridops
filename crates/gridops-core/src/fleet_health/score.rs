@@ -1518,6 +1518,27 @@ mod tests {
                 component.key
             );
         }
+        let deduction = |host: &crate::fleet_health::ScoredHost, key: &str| {
+            host.components
+                .iter()
+                .find(|component| component.key == key)
+                .and_then(|component| component.deduction.clone())
+        };
+        assert_eq!(
+            deduction(laptop, "availability").as_deref(),
+            Some("Not enough data: the machine has no CPU budget."),
+            "a component that had data says why it has no score"
+        );
+        let no_speed = deduction(&scored.hosts[0], "relative-speed");
+        assert!(
+            no_speed.is_some(),
+            "a budgeted machine with no speed says so"
+        );
+        assert_eq!(
+            deduction(laptop, "relative-speed"),
+            no_speed,
+            "a component with no data keeps its own reason"
+        );
         let concerns = crate::fleet_health::concerns::windowed(&inputs, &scored);
         assert!(
             concerns
