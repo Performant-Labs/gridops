@@ -28,8 +28,9 @@
 //! a rerun. So:
 //! - a statement is timed by the CPU time the connection's worker thread and
 //!   the thread that called [`check`] used while it ran (Linux's
-//!   `/proc/<thread>/schedstat`): what the statement did, whatever the
-//!   machine was doing;
+//!   `/proc/<thread>/schedstat`), plus the worker's blocked time when it read
+//!   from the disk (`/proc/thread-self/io`: a cold scan's reads are its own):
+//!   what the statement did, whatever the machine was doing;
 //! - a write transaction is timed by wall-clock time less the time those two
 //!   threads spent runnable and waiting for a CPU (`run_delay`, the second
 //!   field of `schedstat`) and less the time the worker spent blocked in the
@@ -410,6 +411,25 @@ fn disk_reads() -> Option<u64> {
         .ok()
 }
 
+/// A marked statement's work, `elapsed` by sqlx's clock, from the CPU time
+/// its threads used (`cpu`) and the time its worker was `blocked` in the
+/// kernel: the CPU, and the blocked time too when the statement read from
+/// the disk (a scan on a cold database waits for its own pages), up to
+/// `elapsed`.
+fn statement_work(
+    elapsed: Duration,
+    cpu: Duration,
+    blocked: Duration,
+    read_from_disk: Option<u64>,
+) -> Duration {
+    let reads = if read_from_disk.is_some_and(|bytes| bytes > 0) {
+        blocked
+    } else {
+        Duration::ZERO
+    };
+    cpu.saturating_add(reads).min(elapsed)
+}
+
 /// The CPU time the threads used between each `(then, now)` of their
 /// times, up to `elapsed`.
 fn worked(elapsed: Duration, times: impl Iterator<Item = (ThreadTimes, ThreadTimes)>) -> Duration {
@@ -774,18 +794,21 @@ impl SlowStatements {
         let Some(started) = started else {
             return unmarked_work(elapsed, last_log, now);
         };
-        let writes = excused(
-            started.worker_blocked(started.at.elapsed()),
-            fields.rows_returned,
-            started.read_from_disk(),
-        );
+        let blocked = started.worker_blocked(started.at.elapsed());
+        let read_from_disk = started.read_from_disk();
+        let writes = excused(blocked, fields.rows_returned, read_from_disk);
         WRITES_BLOCKED.set(WRITES_BLOCKED.get().saturating_add(writes));
         let times = started.times(&[]);
         if times.is_empty() {
             // No `schedstat` (macOS): the clock.
             return elapsed;
         }
-        worked(elapsed, times.into_iter())
+        statement_work(
+            elapsed,
+            worked(elapsed, times.into_iter()),
+            blocked,
+            read_from_disk,
+        )
     }
 }
 
@@ -1108,6 +1131,33 @@ mod tests {
         );
         assert_eq!(after, 0, "the last check out leaves the count for the next");
         Ok(())
+    }
+
+    #[test]
+    fn a_statement_that_read_from_the_disk_counts_its_reads() {
+        let cpu = Duration::from_millis(20);
+        let blocked = Duration::from_millis(150);
+        // A scan on a cold database: 20 ms of CPU and 150 ms waiting for
+        // pages it read from the disk. The reads are its work.
+        assert_eq!(
+            statement_work(Duration::from_millis(180), cpu, blocked, Some(65_536)),
+            Duration::from_millis(170)
+        );
+        // Blocked without reading (a busy disk's write stall, or waiting
+        // for the lock): only its CPU.
+        assert_eq!(
+            statement_work(Duration::from_millis(180), cpu, blocked, Some(0)),
+            cpu
+        );
+        assert_eq!(
+            statement_work(Duration::from_millis(180), cpu, blocked, None),
+            cpu
+        );
+        // Never more than the clock.
+        assert_eq!(
+            statement_work(Duration::from_millis(100), cpu, blocked, Some(4_096)),
+            Duration::from_millis(100)
+        );
     }
 
     #[test]

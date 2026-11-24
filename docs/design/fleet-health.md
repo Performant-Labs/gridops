@@ -489,7 +489,9 @@ measured, from Linux's `/proc/<thread>/schedstat` for the connection's worker th
 thread that called `check`:
 
 - a statement, from its first progress callback or row change to sqlx's log line for it, is the
-  CPU time those two threads used: what the statement did, whatever else the host was doing;
+  CPU time those two threads used, plus the worker's time blocked in the kernel when the statement
+  read from the disk (a scan on a cold database waits for its own pages): what the statement did,
+  whatever else the host was doing;
 - a write transaction is wall-clock time less the time those two threads spent runnable and
   waiting for a CPU (`run_delay`), less the time the worker spent blocked in the kernel inside
   statements that return no rows and read nothing from the disk (a write's disk I/O, which a busy
