@@ -159,8 +159,12 @@ One row per (hour, host, pool, category) of the final-attempt jobs **completed**
 | `duration_histogram` | Of the durations |
 | `computed_at` | When the row was written |
 
-Only the final attempt of a re-run counts (`workflow_job_sync.run_attempt`). When an hour is
-rolled, the other hours of the last 7 days in which its re-runs' earlier attempts completed
+Only the final attempt of a re-run counts, per job: a job counts unless a later attempt of its
+run (`workflow_job_sync.run_attempt`, unknown counts as 1) ran a job of the same name. A
+"re-run failed jobs" attempt runs only the failed jobs, so the run's other jobs keep their
+earlier attempt and still count, in their own hour (#239). When an hour is rolled, the other
+hours of the last 7 days in which its re-run jobs' earlier attempts (same run, same job name)
+completed
 (through `workflow_jobs_run_status_idx`; never the hour itself) are listed in
 `fleet_health_recompute` in its last write transaction, so they are rolled again without them
 and a re-run whose attempts fall in different hours counts once (#239). Until the later
@@ -199,7 +203,11 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 1. A job key is `repository / workflow / job name` (`speed::job_key`), with a trailing shard
    counter stripped (` (n/m)`, ` [n/m]` or ` n/m`, then trimmed), so a suite's shards compare
    together.
-2. Only successful final-attempt runs completed inside the window count. They are grouped by key
+2. Only successful final-attempt runs completed inside the window count. The speed index's rule
+   is stricter than the rollup's, since a dropped sample only thins a key: a job is left out
+   when any later attempt of its run is known (a later job of the run, or the run row's
+   `run_attempt`), whatever the job's name. So a partial re-run's jobs that were not run again
+   are not speed samples, though the rollup counts them (#239). They are grouped by key
    and by (machine, runner size), the runner size being the placement's `cpu_millis`. A job's
    machine is its runner's newest `runners` row and that row's newest `workload_placements` row,
    as the hourly rollup reads it, so duplicate rows never count a job twice (#239).
