@@ -68,6 +68,5 @@ jobs:
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # DEFAULT reviewer: PR-Agent through the Claude Code CLI (pr-agent-cli-handlers).
-      # While this secret is absent the job uses the API-key secrets above instead.
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # No CLAUDE_CODE_OAUTH_TOKEN on purpose: with it the workflow runs the Claude Code CLI and
+      # ignores the GLM model in .agents/pr-review.yml. Add it back to return to the Claude reviewer.
