@@ -437,11 +437,46 @@ mod speed_index {
                 .ok_or_else(|| anyhow::anyhow!("no speed result for {host} at {cpu_millis}"))
         }
 
+        /// Closes the pool and removes the database, reporting a failure to
+        /// remove it. A harness dropped without `close` is cleaned up by
+        /// [`Drop`].
         async fn close(self) -> Result<()> {
             self.db.close().await;
-            std::fs::remove_dir_all(self.directory)?;
+            std::fs::remove_dir_all(&self.directory)?;
             Ok(())
         }
+    }
+
+    impl Drop for Harness {
+        /// The database goes whether the test passed or not: after `close`
+        /// there is nothing left to remove; after a failed assertion or an
+        /// early `?`, this removes it (best effort, as a drop cannot fail).
+        fn drop(&mut self) {
+            if self.directory.exists() {
+                let _ = std::fs::remove_dir_all(&self.directory);
+            }
+        }
+    }
+
+    /// A test that fails before `close` (an assertion, or an early `?`)
+    /// still removes its database: a mutation run fails tests by design,
+    /// and each failure must not leave a directory behind.
+    #[tokio::test]
+    async fn a_harness_dropped_without_close_removes_its_database() -> Result<()> {
+        let harness = Harness::new().await?;
+        let directory = harness.directory.clone();
+        assert!(
+            directory.exists(),
+            "the harness made {}",
+            directory.display()
+        );
+        drop(harness);
+        assert!(
+            !directory.exists(),
+            "{} is left behind",
+            directory.display()
+        );
+        Ok(())
     }
 
     /// A shard counter is digits over digits on both sides of the slash:
