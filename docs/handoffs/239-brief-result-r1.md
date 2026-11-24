@@ -4,35 +4,29 @@
 None.
 
 ### Needs-verification findings
-**[NV-1]** Claim that the scoring denominators divide by `window.millis()` while rows cover only whole hours (`score.rs` ~:481, ~:649, ~:653), and that all current tests use an on-the-hour `FIXTURE_NOW` — the exact lines of `score.rs` and the test fixtures would settle it.
-
-**[NV-2]** Claim that infra-failure share divides by `completed_count` (successes only) at ~:581/:590, and that the design doc defines the denominator as `job_count` — the shown text of `score.rs` at those lines plus the design doc's denominator definition would settle it.
-
-**[NV-3]** Claim that `(online_minutes > 0).then(...)` at ~:653 maps a machine offline all window to "not enough data" rather than 0, and that #200 writes `online_minutes = 0` rows deliberately — the `score.rs` line plus the #200 rollup writer's row-construction code would settle it.
-
-**[NV-4]** Claim that the speed index can list `ratio <= 1.0` keys in `topKeys` (~:180-190) and that duplicate `runners` rows on `github_runner_id` double-count jobs (~:220-221, unique index dropped in migration 0013) — the speed index query text and migration 0013's contents would settle it.
-
-**[NV-5]** Claim that a re-run with attempts in different hours is counted twice because hour H is never re-rolled, and that `workflow_jobs_run_status_idx` supports finding earlier attempts' `completed_at` hours — the rollup loop in `fleet_health_rollup.rs` and the index definition would settle it.
-
-**[NV-6]** Claim that the machine rollup consumes the shared `fleet_health_recompute` queue by deleting all listed hours (~:267-273), including hours that have not yet ended — the shown code of `fleet_host_rollup.rs` at those lines would settle it.
-
-**[NV-7]** Claim that #204's Python oracle would disagree with the current code, which is the stated reason this "must land before #204" — the oracle's spec/design doc and the current scoring code side by side would settle it; this sequencing dependency is asserted, not shown.
+**[NV-1]** Item 1's claim that the three denominators divide by `window.millis()` at score.rs ~:481/:649/:653 — an excerpt of those lines from `crates/gridops-core/src/fleet_health/score.rs` would settle it.
+**[NV-2]** Item 1's claim that every existing test uses an on-the-hour `FIXTURE_NOW` — the test files' fixture definitions (file:line) would settle it.
+**[NV-3]** Item 1's grace-hour contract ascribes behavior to #204's Python source ("computes live, bounded, every hour of `[ceil_hour(now − W), now)`", "detects an unwritten hour by time, not markers") — #204's oracle source file:line would settle it; this contract is written into a Done-when rule (a) and must be right before the oracle is trusted.
+**[NV-4]** Item 2's claim that ~:581/:590 divide by `completed_count` and that `completed_count` counts successes only — the shown source at those lines plus the rollup code that computes `completed_count` vs `job_count` would settle it; likewise the claim that e71dcf6 reversed this.
+**[NV-5]** Item 3's claim that ~:653 gates on `(online_minutes > 0)` and that #200 writes `online_minutes = 0` rows deliberately — the score.rs line and the #200 rollup write path (file:line) would settle it.
+**[NV-6]** Item 4's claim that "the design says" a CPU-budget-0 machine has no score — the relevant passage in `docs/design/fleet-health.md` (file:line) would settle it.
+**[NV-7]** Item 6's fix assumes `workflow_jobs_run_status_idx` can locate earlier attempts' `completed_at` — the index definition in `migrations/` and a query plan would settle it.
+**[NV-8]** Item 8's claims that the machine rollup deletes listed hours at fleet_host_rollup.rs ~:267-273 and rolls unended hours — the shown code at those lines would settle it, as would the existence of the #197 contract test by that exact name.
+**[NV-9]** Item 10's claim that topKeys include ratios ≤ 1.0 at speed.rs ~:180-190 — that excerpt would settle it.
+**[NV-10]** Item 11's claim that ~:220-221 joins on `github_runner_id` and that the unique index was dropped in migration 0013 — the speed.rs excerpt and `migrations/0013_*.sql` would settle it.
+**[NV-11]** The shared 15-minute grace constant referenced in item 1 as coming "from items 7 and 9" — items 7/9 *define* the fix here, so there is no pre-existing constant in this prompt; where that constant lives (a file:line after implementation, or #204's spec) must be pinned so scorer, job rollup, machine rollup and oracle agree on one value.
+**[NV-12]** Done-when rule (i) — "the fleet median includes the machine's own runs" — describes existing speed-index behavior with no fix item; the speed.rs median computation excerpt would settle whether this is a documentation-only statement or an unstated behavior change.
 
 ### WARN findings
-**[W-1]** Items 4 and 5 have no mutation-check requirement in "Done when" (only 1, 2, 3, and 6 do). If the mutation-check discipline is meant to be uniform for scoring changes, items 4 and 5 (both in `score.rs`) are an unexplained gap — either add them or state why they're excluded.
-
-**[W-2]** Item 1's fix ("use the covered time for every time denominator") interacts with #204's in-progress hour, which the brief mentions only parenthetically. The acceptance criteria don't pin down whether the in-progress hour is included in the denominator; a test with off-the-hour `now` could pass under either interpretation. State the intended covered-range formula explicitly so the diff gate can check it.
-
-**[W-3]** Item 8 offers two alternative fixes (consumer column vs. not reading the queue) without choosing. The brief gate should ideally select one, since the two options produce different test shapes (the #197 contract test rewrite differs). Not blocking, but resolve before implementation.
-
-**[W-4]** The "no write transaction over 50 ms" constraint is listed under Constraints but not in "Done when," so nothing requires demonstrating it. Either add it as an acceptance item (e.g., a measured timing in the handoff) or acknowledge it is a constraint verified only by convention.
-
-**[W-5]** Item 7's fix says "roll a catch-up hour only once `hour_end + 15 min <= now`," but item 7's test description covers only the late-insert case. There is no stated test that an hour is still rolled exactly once (the "each hour is still rolled once" claim), nor for the boundary condition at exactly `hour_end + 15 min`. Add those edge cases.
+**[W-1]** Item 6's fix (list earlier attempts' hours inside the same write transaction) interacts with item 8's decision that only the job rollup reads `fleet_health_recompute` — fine — but the ordering guarantee that the job rollup's recompute listing happens with the hour-write in one ≤50 ms transaction is asserted, not designed. Recommend the brief state the transaction boundary explicitly (one recompute listing per rolled hour, batched ≤500 rows).
+**[W-2]** Item 1's covered-time fix leaves unspecified what happens when an hour in the covered window is *neither rolled nor live-computable* (e.g., a hole the 15-minute grace has passed but #204 hasn't covered because it hasn't run). Recommend the design-doc rule (a) state whether holes in the covered window are scored as absent (deflating the denominator), or treated as missing data.
+**[W-3]** Item 5's suggested private `measure()` returns `(ScoreComponent, Option<f64>)`; the semantics of the `Option` (no-data components?) is unspecified while the public `combine(&[ScoreComponent])` signature is frozen. Recommend pinning whether a `None` raw value still produces a `ScoreComponent` with a "not enough data" band, so the public behavior is unchanged.
+**[W-4]** "SQLite discipline holds: no write transaction over 50 ms" has no stated measurement method. Recommend specifying how it is verified (e.g., log-based timing assertion in tests), otherwise the criterion is unauditable.
+**[W-5]** Scope check: the brief fixes wave-1 defects across five files and rewrites design-doc rules, and it gates #204. That is bounded, but item 8 also rewrites an existing #197 contract test and item 4 touches #197 fixture wording — call out in the PR which #197 behaviors are deliberately re-baselined so the diff gate can distinguish regression from intent.
 
 ### NIT findings
-**[NIT-1]** "Adjust #197's fixture wording if needed" (item 4) is vague; specify what the fixture currently says or defer the wording change to the diff gate.
-
-**[NIT-2]** Item 2 says "update the pinned test. This reverses PR-Agent's 'fix' e71dcf6" — the brief doesn't show what that pinned test asserts, so the test update is unbounded; name the test in the brief.
+**[NIT-1]** Item 2's "reverses PR-Agent's 'fix' e71dcf6" should cite the commit message or diff so the history claim is checkable.
+**[NIT-2]** Item 1's example percentages (97.9%, 50%) are derivable but would be clearer with the arithmetic shown once.
 
 ### Verdict
 PASS — no BLOCK findings; implementation may proceed.

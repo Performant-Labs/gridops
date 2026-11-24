@@ -46,3 +46,39 @@
     - `grep` for `fleet_health_recompute` writers and readers, `combine` callers, `ScoreComponent {` literals (25 in 6 files), and the newest-row subquery copies;
     - `gh pr list` (open: #237 on the backfill, and #121);
     - `git log` (HEAD 73de941, origin/master 20c22ad).
+
+## Phase 3 Architecture (A, up-front plan review, round 2) - 2026-11-24T02:33:05-08:00
+- **Decided:** PASS, with 0 block and 8 warn findings (`docs/handoffs/239/handoff-A.md`, which overwrites round 1's; round 1 is in git at 0b435f8).
+  - **Round-1 block 1 [completeness]: resolved.** Item 1 now states the grace-hour contract (#204 computes live, by time, with one shared constant) and its test.
+  - **Round-1 block 2 [completeness]: resolved.** The Done-when lists design-doc rules (a)-(i), and Constraints forbid editing `0050`.
+  - **New warns, binding on F:**
+    - The job rollup's listed-hours loop also waits for the grace (`fleet_health_rollup.rs:158-165`), so "written ⟺ past grace" holds. #190's `list_hours` (PR #237) can list the hour that just ended.
+    - Availability divides by whole covered minutes (an integer, the existing `/ 60_000` idiom), with the fleet path's `> 0` guard on both paths. The minute-granular numerator would otherwise deflate availability on 1h, and item 3 removes the host path's only zero guard (NaN rounds to `0u8`).
+    - `ROLLUP_GRACE_MILLIS` goes in `gridops_core::fleet_health`, because `gridops-api` can't import the reconciler.
+    - Rule (d) states item 6's interim double count for #204's oracle.
+  - **Carried over from round 1:** item 6's read-phase lookup and insert placement; both of item 11's subqueries; where the tests go; the #240 design-doc rebase.
+- **Assumed:**
+  - Agents sample about every 30 s, taken from the synthetic week (`fleet-health.md:402`). I didn't measure it on Mars.
+  - #204's live hour counts minutes the way the machine rollup's bitmask does.
+- **Hedged:**
+  - A minimum covered span for time shares (busy-share noise at the top of each hour on 1h) is a spec decision. I left it for O as a follow-up and didn't invent it here.
+  - Findings 1 and 2 are warns, not blocks. Each is resolvable inside the brief's own items following existing code idioms, and needs no human decision.
+- **Evidence:**
+  - **Files read:**
+    - the amended brief (blob f4a2e56), round-1 `handoff-A.md` and the brief gate's results;
+    - `fleet_health_rollup.rs` in full;
+    - `fleet_host_rollup.rs` (:1-341);
+    - `score.rs` (:20-120, :245-262, :476-512, :598-660);
+    - `speed.rs` (:120-240);
+    - `mod.rs` (`HealthWindow`, `HOUR_MILLIS`, the availability targets);
+    - `health_source.rs` (still #197's stub);
+    - `fleet_health_backfill.rs` (still a stub);
+    - `fleet_health_rollup_contract_tests.rs` (:30-45, :395-470) and `fleet_health_wiring_tests.rs` (:140-160);
+    - `main.rs` (the reconcile interval, `fleet_health_passes`);
+    - `gridops-api/Cargo.toml`;
+    - `fleet-health.md` (:112-224).
+  - **Commands run:**
+    - `gh issue view 204` and `gh issue view 240`;
+    - `gh pr diff 237` (`list_hours`, no rollup edits);
+    - `gh pr list`;
+    - `grep` for `fleet_health_recompute`, `window.millis()` and `host_samples`.
