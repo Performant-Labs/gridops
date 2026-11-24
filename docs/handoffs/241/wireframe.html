@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wireframe #241 - Fleet health wave-1 review fixes</title>
+<style>
+  :root { --bg:#f4f5f7; --panel:#fff; --border:#d5d9e0; --fg:#1b1f27; --muted:#5b6472; --faint:#8a93a2;
+    --danger:#d33f3f; --warning:#d8920b; --neutral:#8a93a2; --info:#3b7de0; --success:#2e9e5b; --track:#e6e9ef; }
+  * { box-sizing:border-box; }
+  body { font:13px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:24px; max-width:1100px; }
+  h1 { font-size:18px; margin:0 0 4px; } h2 { font-size:15px; margin:32px 0 4px; border-top:2px solid var(--fg); padding-top:10px; }
+  h3 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); margin:16px 0 6px; }
+  .lead { color:var(--muted); margin:0 0 8px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; }
+  .card > h4 { margin:0; padding:8px 14px; font-size:13px; border-bottom:1px solid var(--border); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+  .note { font-size:11.5px; color:#7a4b00; background:#fff6e0; border-left:3px solid var(--warning); padding:4px 8px; margin:6px 0; }
+  .ann { display:inline-block; font-size:10.5px; background:#1b1f27; color:#fff; border-radius:9px; padding:0 6px; margin-left:4px; vertical-align:middle; }
+  .state { font-size:11px; font-weight:600; color:var(--info); margin:10px 0 4px; }
+  ul.rows { list-style:none; margin:0; padding:0; } ul.rows > li { padding:8px 14px; border-top:1px solid var(--border); } ul.rows > li:first-child { border-top:0; }
+  .row { display:flex; gap:10px; align-items:flex-start; }
+  .sev { display:inline-flex; width:14px; height:14px; border-radius:50%; align-items:center; justify-content:center; font-size:9px; font-weight:700; color:#fff; flex:none; margin-top:3px; }
+  .sev.critical { background:var(--danger); } .sev.warning { background:#fff; border:1.5px solid var(--warning); color:var(--warning); } .sev.info { background:#fff; border:1.5px solid var(--neutral); color:var(--neutral); }
+  .sr { outline:1px dashed var(--info); color:var(--info); font-size:10.5px; padding:0 3px; margin-right:4px; }
+  .title { font-weight:600; } .since { margin-left:auto; color:var(--faint); font-size:11px; } .detail { color:var(--muted); font-size:11.5px; }
+  .bar { height:7px; background:var(--track); border-radius:4px; overflow:hidden; margin:4px 0; } .bar > i { display:block; height:100%; }
+  .comp { padding:8px 14px; } .comp .top { display:flex; justify-content:space-between; font-weight:600; } .comp .w { font-weight:400; color:var(--faint); font-size:11px; }
+  .comp.dim { opacity:.6; cursor:help; } .tip { display:inline-block; background:#1b1f27; color:#fff; font-size:11px; padding:4px 8px; border-radius:5px; margin:4px 14px; max-width:300px; }
+  .stack { display:flex; height:16px; border-radius:4px; overflow:hidden; background:var(--track); border:1px solid var(--border); }
+  .stack i { display:block; height:100%; }
+  .seg-used { background:var(--info); } .seg-res { background:#9dbdef; } .seg-over { background:repeating-linear-gradient(45deg,var(--warning),var(--warning) 4px,#f1c46a 4px,#f1c46a 8px); } .seg-free { background:var(--track); }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11px; color:var(--muted); margin-top:4px; } .legend b { display:inline-block; width:10px; height:10px; vertical-align:-1px; margin-right:4px; border-radius:2px; }
+  .livestrip { display:flex; gap:16px; align-items:center; padding:10px 14px; font-size:12px; }
+  .machine { padding:10px 14px; display:flex; gap:12px; align-items:center; } .machine.open { background:#eef4ff; border-bottom:1px solid var(--border); }
+  .dashed { border:1px dashed var(--faint); padding:8px 12px; color:var(--faint); font-size:12px; border-radius:8px; }
+  .flow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; } .arrow { color:var(--faint); font-size:18px; }
+  code { background:#eceff4; padding:0 4px; border-radius:3px; font-size:11.5px; }
+  table.ann-t { border-collapse:collapse; margin-top:8px; font-size:12px; width:100%; } .ann-t td, .ann-t th { border:1px solid var(--border); padding:4px 8px; text-align:left; vertical-align:top; background:#fff; }
+</style>
+</head>
+<body>
+<h1>#241 - Fleet health: wave-1 review fixes (low-fi wireframe)</h1>
+<p class="lead">Page: <code>/fleet/health</code>. Seven fixes; items 1, 3, 4, 5, 6, 7 change what is drawn, item 2 changes behaviour only. Everything else on the page is unchanged. Dashed-blue text = visually hidden (screen reader only) text. Black pills = behaviour notes. Icons are Unicode stand-ins: production reuses the glyph vocabulary in <code>src/components/status-icon.tsx</code>.</p>
+
+<!-- ============ ITEM 1 ============ -->
+<h2>1. Areas of concern: severity is not colour alone</h2>
+<p class="lead">Each row gets a distinct icon shape per severity (replaces the 8 px <code>StatusDot</code>) plus visually hidden severity text read before the title. Row layout, order, link behaviour and "since" are unchanged.</p>
+<div class="grid2">
+  <div>
+    <div class="state">STATE: many (one of each severity; first 5 shown, "Show all N" unchanged)</div>
+    <section class="card" aria-label="Areas of concern">
+      <h4>Areas of concern</h4>
+      <ul class="rows">
+        <li><div class="row"><span class="sev critical">✕</span><div style="flex:1"><div style="display:flex"><span class="title"><span class="sr">Critical</span>mac-mini-02 offline</span><span class="since">since 3:12 PM</span></div><div class="detail">No heartbeat for 14 min; 3 runners lost.</div></div></div></li>
+        <li><div class="row"><span class="sev warning">◷</span><div style="flex:1"><div style="display:flex"><span class="title"><span class="sr">Warning</span>Queue p90 above target</span><span class="since">since 2:40 PM</span></div><div class="detail">Queue p90 was 7 min 12 s against a 1 min target.</div></div></div></li>
+        <li><div class="row"><span class="sev info">⊘</span><div style="flex:1"><div style="display:flex"><span class="title"><span class="sr">Info</span>Capacity fit below target</span><span class="since">since Nov 23, 9:05 AM</span></div><div class="detail">Jobs waited while CPU was under 50% of budget.</div></div></div></li>
+      </ul>
+    </section>
+    <div class="note">Empty state unchanged: green check + "No areas of concern" (no severity, so no icon/hidden text).</div>
+  </div>
+  <div>
+    <table class="ann-t">
+      <tr><th>Severity</th><th>Icon (shape + colour)</th><th>Hidden text</th><th>status-icon.tsx source</th></tr>
+      <tr><td>critical</td><td><span class="sev critical">✕</span> filled red circle, cross</td><td>"Critical"</td><td><code>failure</code> glyph</td></tr>
+      <tr><td>warning</td><td><span class="sev warning">◷</span> amber outlined circle, clock hands</td><td>"Warning"</td><td><code>waiting</code> glyph</td></tr>
+      <tr><td>info</td><td><span class="sev info">⊘</span> grey outlined circle, slash</td><td>"Info"</td><td><code>skipped</code> (default) glyph</td></tr>
+    </table>
+    <div class="note">Shapes differ (filled-cross / clock / slash), so severity survives greyscale. Icon is <code>aria-hidden</code>; the hidden text is the accessible severity, inside the row link so it is part of the link's name: "Critical mac-mini-02 offline ...". Hidden text wording is exactly "Critical" / "Warning" / "Info" (capitalised, per issue).</div>
+    <div class="note">Implementation hint: a small <code>SeverityIcon</code> exported from <code>status-icon.tsx</code> reusing the existing glyph paths; no new SVG geometry.</div>
+  </div>
+</div>
+
+<!-- ============ ITEM 2 ============ -->
+<h2>2. Same-page concern link expands the machine row</h2>
+<p class="lead">No visual change. Behaviour: clicking a concern whose link is <code>/fleet/health#machine-&lt;host&gt;</code> while already on <code>/fleet/health</code> must open that machine's row, then scroll it to centre. Today the page scrolls to a collapsed row.</p>
+<div class="flow">
+  <div class="card" style="padding:8px 12px;width:290px"><span class="sev critical">✕</span> <span class="title"><span class="sr">Critical</span>mac-mini-02 offline</span> <span class="ann">click: same-route navigate, hash = #machine-mac-mini-02</span></div>
+  <span class="arrow">→</span>
+  <div class="card" style="width:400px">
+    <div class="machine" style="border-bottom:1px solid var(--border)"><span>▸</span><b>mac-mini-01</b> <span class="detail">collapsed (aria-expanded=false)</span></div>
+    <div class="machine open"><span>▾</span><b>mac-mini-02</b> <span class="detail">expanded (aria-expanded=true), scrolled to centre</span></div>
+    <div style="padding:8px 14px" class="detail">machine detail (NOW + window)</div>
+  </div>
+</div>
+<table class="ann-t">
+  <tr><th>Case</th><th>Behaviour</th></tr>
+  <tr><td>Hash changes on same route (concern link, or browser back/forward)</td><td>Subscribe to the router hash; in an effect, expand the matching machine and scroll it into view.</td></tr>
+  <tr><td>Hash names a machine not in the data</td><td>No-op: nothing expands, no error (as today).</td></tr>
+  <tr><td>Hash cleared or non-machine hash</td><td>Leave the current expansion alone (user may have opened rows by hand).</td></tr>
+  <tr><td>User then collapses the row by hand</td><td>Stays collapsed until the hash changes again.</td></tr>
+  <tr><td>Initial deep link on load</td><td>Unchanged: expanded on first render.</td></tr>
+</table>
+<div class="note">Test target (T): navigate through a real <code>RouterProvider</code> (extend #197's router mock), assert the row's <code>aria-expanded</code> flips without a manual re-render.</div>
+
+<!-- ============ ITEM 3 + 4 ============ -->
+<h2>3 + 4. Fleet score card: rounded weights, "—" when no data, API reason in the tooltip</h2>
+<div class="grid2">
+  <div>
+    <div class="state">STATE: many components, one with no score (weight 0 after redistribution)</div>
+    <section class="card" aria-label="Fleet score">
+      <h4>Fleet score</h4>
+      <div class="comp"><div class="top"><span>Queue time</span><span class="w">47% <span class="ann">Math.round(47.0588...)</span></span></div><div class="bar"><i style="width:62%;background:var(--warning)"></i></div><div class="detail">Queue p90 was 7 min 12 s against a 1 min target: −28.</div></div>
+      <div class="comp"><div class="top"><span>Availability</span><span class="w">35%</span></div><div class="bar"><i style="width:96%;background:var(--success)"></i></div><div class="detail">On target</div></div>
+      <div class="comp dim" tabindex="0"><div class="top"><span>Capacity fit</span><span class="w">— <span class="ann">score null: no weight shown</span></span></div><div class="bar"></div><div class="detail" style="color:var(--faint)">Not enough data: only 12 jobs in this window (needs 20).</div></div>
+      <div class="tip">Not enough data: only 12 jobs in this window (needs 20).</div>
+    </section>
+  </div>
+  <div>
+    <table class="ann-t">
+      <tr><th>Element</th><th>Rule</th></tr>
+      <tr><td>Weight, component has a score</td><td>Whole percent, <code>Math.round(weight)</code> + "%". 47.05882352941177 shows "47%".</td></tr>
+      <tr><td>Weight, component has no score</td><td>"—" (em dash, no "%").</td></tr>
+      <tr><td>Tooltip, score null, <code>deduction</code> present</td><td>Show <code>component.deduction</code> verbatim (the API's reason).</td></tr>
+      <tr><td>Tooltip, score null, <code>deduction</code> null</td><td>Fall back to the existing generic "Not enough data in this window: fewer than 20 jobs, or no samples."</td></tr>
+      <tr><td>Row sentence under the bar, score null</td><td>Same text as the tooltip, so the two never disagree.</td></tr>
+      <tr><td>Score present</td><td>Unchanged: deduction, or "On target" when null. No tooltip.</td></tr>
+    </table>
+    <div class="note">Rounded weights may not sum to exactly 100 (e.g. 47 + 35 + 18 = 100 but 33.3 x 3 = 99). Accepted; rounding is display-only.</div>
+  </div>
+</div>
+
+<!-- ============ ITEM 5 ============ -->
+<h2>5. Machine detail: CPU and memory as a Recharts stacked horizontal bar</h2>
+<p class="lead">Replaces the overlaid <code>ResourceBar</code> with a Recharts horizontal stacked <code>BarChart</code> (<code>layout="vertical"</code>, <code>stackId</code>), one per resource. The label line above (<code>"X reserved · Y used of Z"</code>) stays. Segments never overlap, so "reserved" is always visible.</p>
+<div class="grid2">
+  <div>
+    <div class="state">STATE: used below reservation (normal)</div>
+    <div class="card" style="padding:10px 14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><b>CPU</b><span class="detail">6.0 cores reserved · 2.5 cores used of 10 cores</span></div>
+      <div class="stack"><i class="seg-used" style="width:25%"></i><i class="seg-res" style="width:35%"></i><i class="seg-free" style="width:40%"></i></div>
+      <div class="legend"><span><b class="seg-used"></b>Used 2.5</span><span><b class="seg-res"></b>Reserved, not used 3.5</span><span><b class="seg-free" style="border:1px solid var(--border)"></b>Free budget 4</span></div>
+    </div>
+    <div class="state">STATE: used above reservation (the bug case: reserved used to vanish)</div>
+    <div class="card" style="padding:10px 14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><b>Memory</b><span class="detail">4.0 GiB reserved · 6.0 GiB used of 16 GiB</span></div>
+      <div class="stack"><i class="seg-used" style="width:25%"></i><i class="seg-over" style="width:12.5%"></i><i class="seg-free" style="width:62.5%"></i></div>
+      <div class="legend"><span><b class="seg-used"></b>Used, within reservation 4.0 GiB (= all of reserved)</span><span><b class="seg-over"></b>Used over reservation 2.0 GiB</span><span><b class="seg-free" style="border:1px solid var(--border)"></b>Free budget 10 GiB</span></div>
+    </div>
+  </div>
+  <div>
+    <div class="state">STATE: no used reading (<code>used === null</code>)</div>
+    <div class="card" style="padding:10px 14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><b>CPU</b><span class="detail">6.0 cores reserved of 10 cores</span></div>
+      <div class="stack"><i class="seg-res" style="width:60%"></i><i class="seg-free" style="width:40%"></i></div>
+      <div class="legend"><span><b class="seg-res"></b>Reserved 6.0</span><span><b class="seg-free" style="border:1px solid var(--border)"></b>Free budget 4</span></div>
+    </div>
+    <div class="state">STATE: demand above budget (reserved or used &gt; budget)</div>
+    <div class="card" style="padding:10px 14px">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><b>CPU</b><span class="detail">12.0 cores reserved · 11.0 cores used of 10 cores</span></div>
+      <div class="stack"><i class="seg-used" style="width:91.7%"></i><i class="seg-res" style="width:8.3%"></i></div>
+      <div class="legend"><span><b class="seg-used"></b>Used 11.0</span><span><b class="seg-res"></b>Reserved, not used 1.0</span><span>No free budget; axis scales to the larger of budget, reserved, used (as today).</span></div>
+    </div>
+    <table class="ann-t">
+      <tr><th>Segment</th><th>Value</th></tr>
+      <tr><td>Used (info colour)</td><td><code>min(used, reserved)</code></td></tr>
+      <tr><td>Used over reservation (warning hatch)</td><td><code>max(used - reserved, 0)</code></td></tr>
+      <tr><td>Reserved, not used (info, light)</td><td><code>max(reserved - used, 0)</code> (all of <code>reserved</code> when used is null)</td></tr>
+      <tr><td>Free budget (track grey)</td><td><code>max(budget - max(reserved, used), 0)</code></td></tr>
+    </table>
+    <div class="note">By construction used-within + reserved-not-used = reserved, so reserved is always readable as a width. Chart is decorative-plus-text: no axes, no tooltip needed; the label line and a legend carry the numbers (the chart gets <code>role="img"</code> with an <code>aria-label</code> summarising reserved / used / budget). Hatch is for colour-independence of the "over" segment.</div>
+  </div>
+</div>
+
+<!-- ============ ITEM 6 ============ -->
+<h2>6. Machine detail slot: no wrong placeholder</h2>
+<p class="lead">Today the standalone slot always says "Expand a machine above", even when a machine is already expanded (its detail renders inside the row). The table's own footer already says "Expand a machine for what it is doing now and what it ran in the window." Decision: hide the placeholder.</p>
+<div class="grid2">
+  <div>
+    <div class="state">BEFORE (wrong when a row is open)</div>
+    <div class="card"><div class="machine open"><span>▾</span><b>mac-mini-02</b> <span class="detail">expanded, detail shown inside</span></div><div style="padding:6px 14px" class="detail">NOW / window detail ...</div></div>
+    <div class="dashed" style="margin-top:8px"><b>Machine detail</b><br>Expand a machine above to see what it is doing now and what it ran in the window.</div>
+  </div>
+  <div>
+    <div class="state">AFTER (all states: none expanded, one expanded, no machines)</div>
+    <div class="card"><div class="machine open"><span>▾</span><b>mac-mini-02</b> <span class="detail">expanded, detail shown inside</span></div><div style="padding:6px 14px" class="detail">NOW / window detail ...</div></div>
+    <div style="margin-top:8px;padding:10px;border:1px dotted var(--faint);color:var(--faint);font-size:11px;text-align:center">(no placeholder card; slot <code>data-health-section="machine-detail"</code> stays in the DOM, empty)</div>
+    <div class="note">Keep the slot wrapper (design doc: slots keep their names and the page test checks composition) but render nothing in it. An empty slot still adds one flex gap; F may collapse it with <code>hidden</code> / <code>empty:hidden</code> so no stray 16 px gap shows. <code>MachineDetail</code> with no <code>host</code> returns <code>null</code>.</div>
+  </div>
+</div>
+
+<!-- ============ ITEM 7 ============ -->
+<h2>7. Live strip: oldest wait never understated</h2>
+<p class="lead">The wait shown is <code>max(oldest.waitMs, Date.now() - oldest.queuedAt)</code>, formatted by the existing <code>formatOldestWait</code>. Computed at render, so every page refresh or re-render brings it up to date; no new timer.</p>
+<div class="grid2">
+  <div>
+    <div class="state">STATE: fresh response (queuedAt 45 s ago, waitMs 45 s)</div>
+    <div class="card livestrip"><span>Queued <b>4</b></span><span style="margin-left:auto" class="detail">Oldest job waited <b style="color:var(--fg)">45 s</b> · acme/api · build ↗</span></div>
+    <div class="state">STATE: cached / stale response (waitMs 45 s fixed when built; queuedAt 8 min ago)</div>
+    <div class="card livestrip"><span>Queued <b>4</b></span><span style="margin-left:auto" class="detail">Oldest job waited <b style="color:var(--fg)">8 min</b> · acme/api · build ↗</span></div>
+    <div class="state">STATE: no queued jobs / queued but no oldest</div>
+    <div class="card livestrip"><span>Queued <b>0</b></span><span style="margin-left:auto;color:var(--faint)">Queue is clear</span></div>
+  </div>
+  <div>
+    <table class="ann-t">
+      <tr><th>Case</th><th>Shown</th></tr>
+      <tr><td>queuedAt is in the future (clock skew)</td><td><code>Date.now() - queuedAt</code> is negative, so <code>max</code> falls back to <code>waitMs</code>.</td></tr>
+      <tr><td>oldest is null, queued total 0</td><td>"Queue is clear" (unchanged).</td></tr>
+      <tr><td>oldest is null, queued total &gt; 0</td><td>Nothing (unchanged).</td></tr>
+      <tr><td>Link, truncation, repository and job name</td><td>Unchanged; still links to <code>/queued-jobs</code>.</td></tr>
+    </table>
+  </div>
+</div>
+<p class="lead" style="margin-top:28px">Unchanged on the page: window picker, refresh, live-refresh notice, stale callout, category legend, machine table columns, empty/error/loading/forbidden page states.</p>
+</body>
+</html>
