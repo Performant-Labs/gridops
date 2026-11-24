@@ -18,7 +18,6 @@ use serde_json::json;
 use super::process_workflow_job;
 
 #[tokio::test]
-#[ignore = "contract: #190"]
 async fn a_github_job_webhook_stores_the_expected_category() -> Result<()> {
     let _serial = testdata::CLASSIFIER_TEST_LOCK.lock().await;
     let directory =
