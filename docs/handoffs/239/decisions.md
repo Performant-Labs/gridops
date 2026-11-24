@@ -138,3 +138,9 @@
 - **Assumed:** F's reported timing flakes are load-related. They did not recur, and the diff does not touch the seed or the write path of those tests.
 - **Hedged:** none.
 - **Evidence:** suite counts 365 and 151 passed; mutation failures listed in `handoff-T-green.md`; clippy 1.98.1 clean.
+
+## A (Phase 7, anti-duplication gate)
+- **Decided:** PASS. Every item extends its owning object (`score.rs`, `speed.rs`, the two rollups, the design doc). The only new public object is the one `ROLLUP_GRACE_MILLIS` constant that the plan review required.
+- **Assumed:** the test-only `GRACE` constants in `#[cfg(test)]` code are independent expectations, not a second copy of the rule.
+- **Hedged:** none.
+- **Evidence:** `git diff 73de941..5368f69` over `crates` and the design doc; a grep for the grace value and constant across `crates`; the plan-review `handoff-A.md` and `handoff-F.md`.
