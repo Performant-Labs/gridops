@@ -119,13 +119,22 @@ nullable, and the writer fills them:
 
 The reconciler rolls each finished hour up once, so the page never reads raw jobs or samples
 over a window (#179's lock rules). Both rollups run every pass, log-and-continue, before the
-runner manager is asked (so an unavailable manager never stops them). Each pass rolls up every
-hour listed in `fleet_health_recompute` plus at most one catch-up hour, oldest first; on first
-start the catch-up covers the last 7 days. An hour is written with one `INSERT … ON CONFLICT DO
-UPDATE` per row in one short transaction, and taken off `fleet_health_recompute` in it, so a
-re-run gives identical rows. Reads happen outside the write transaction, bounded by the
+runner manager is asked (so an unavailable manager never stops them). Each pass of the job
+rollup rolls up every hour listed in `fleet_health_recompute` plus at most one catch-up hour,
+oldest first; the machine rollup rolls only its catch-up hour. On first start the catch-up
+covers the last 7 days. An hour is written with one `INSERT … ON CONFLICT DO UPDATE` per row in
+one short transaction (the job rollup also takes the hour off `fleet_health_recompute` in it), so
+a re-run gives identical rows. Reads happen outside the write transaction, bounded by the
 `completed_at` indexes (`workflow_jobs_completed_idx`, `gitlab_jobs_completed_idx`) or
 `host_samples_host_time_idx`.
+
+**The grace (#239).** No hour, listed or caught up, is rolled before `hour_end + 15 min`
+(`ROLLUP_GRACE_MILLIS` in `gridops_core::fleet_health`, the one copy of the rule, which #204's
+source uses too). A job finishing at 10:59:40 whose webhook was missed is recorded by the poll
+at about 11:00:40, and an agent can report samples late; both still count in their own hour,
+and the catch-up still rolls each hour once. So an hour has rows only once it is past its grace,
+and the hours of the window after that are computed live by the source (see
+[Scores](#scores)).
 
 **Histogram buckets** (queue wait and duration), lower bound inclusive, as
 `HISTOGRAM_LOWER_BOUNDS_MILLIS`: 0–10 s, 10–30 s, 30–60 s, 1–2 min, 2–5 min, 5–10 min,
@@ -150,7 +159,20 @@ One row per (hour, host, pool, category) of the final-attempt jobs **completed**
 | `duration_histogram` | Of the durations |
 | `computed_at` | When the row was written |
 
-Only the final attempt of a re-run counts (`workflow_job_sync.run_attempt`).
+Only the final attempt of a re-run counts, per job: a job counts unless a later attempt of its
+run ran a job of the same name: a higher `workflow_job_sync.run_attempt`, or the higher job id
+when either attempt is unknown and the run row knows a re-run (`run_attempt` above 1). A
+"re-run failed jobs" attempt runs only the failed jobs, so the run's other jobs keep their
+earlier attempt and still count, in their own hour (#239). When an hour is rolled, the other
+hours of the last 7 days in which its re-run jobs' earlier attempts (same run, same job name)
+completed
+(through `workflow_jobs_run_status_idx`; never the hour itself) are listed in
+`fleet_health_recompute` in its last write transaction, so they are rolled again without them
+and a re-run whose attempts fall in different hours counts once (#239). Until the later
+attempt's hour is rolled (at its end + 15 min, then one more pass for the listed hour), the
+earlier attempt still counts in its own hour, and a live hour can count the later one: an
+oracle computing final attempts from raw data has to model that interval, or avoid seeding a
+re-run that crosses into an unrolled hour.
 
 ### `fleet_host_hourly` (#200)
 
@@ -167,8 +189,10 @@ One row per (hour, machine), also for an hour with no samples (0 minutes, NULL p
 
 ### `fleet_health_recompute` and `fleet_health_snapshots`
 
-`fleet_health_recompute (hour, requested_at)` lists hours to roll up again (the backfill adds
-them on a rules change). `fleet_health_snapshots (recorded_at, "window", fleet_score,
+`fleet_health_recompute (hour, requested_at)` lists hours for the job rollup to roll up again:
+the backfill adds them on a rules change, and the job rollup adds a re-run's earlier-attempt
+hours. Only the job rollup reads it and takes hours off it; the machine rollup's rows don't
+depend on job categories, so it never reads it (#239). `fleet_health_snapshots (recorded_at, "window", fleet_score,
 host_scores_json)` records the fleet score and each machine's (`{"<host id>": score|null}`) once
 an hour per window for the page's trend (#204).
 
@@ -180,24 +204,59 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 1. A job key is `repository / workflow / job name` (`speed::job_key`), with a trailing shard
    counter stripped (` (n/m)`, ` [n/m]` or ` n/m`, then trimmed), so a suite's shards compare
    together.
-2. Only successful final-attempt runs completed inside the window count. They are grouped by key
-   and by (machine, runner size), the runner size being the placement's `cpu_millis`.
-3. For each key, the fleet median is the true median duration of its runs on every machine; each
-   (machine, size) has its own median.
+2. Only successful final-attempt runs completed inside the window count. The speed index's rule
+   is stricter than the rollup's, since a dropped sample only thins a key: a job is left out
+   when any later attempt of its run is known (a later job of the run, or the run row's
+   `run_attempt`), whatever the job's name. So a partial re-run's jobs that were not run again
+   are not speed samples, though the rollup counts them (#239). They are grouped by key
+   and by (machine, runner size), the runner size being the placement's `cpu_millis`. A job's
+   machine is its runner's newest `runners` row and that row's newest `workload_placements` row,
+   as the hourly rollup reads it, so duplicate rows never count a job twice (#239).
+3. For each key, the fleet median is the true median duration of its runs on every machine, the
+   machine's own runs included, so a machine running most of a key's jobs drifts toward 1.0 on
+   it; each (machine, size) has its own median.
 4. The index of a (machine, size) is the run-count-weighted geometric mean of (own median ÷ fleet
    median) over the keys with at least 5 runs on that machine at that size and at least 5 on the
    rest of the fleet. 1.0 is typical, 1.5 half again as slow.
 5. Fewer than 3 such keys gives `index: null` ("not enough data").
-6. `topKeys` are the 5 keys that push the index up most, with both medians and both run counts.
+6. `topKeys` are the keys that push the index up most, with both medians and both run counts:
+   only keys with a ratio above 1.0 (slower than the fleet), worst first, at most 5 (#239).
 
 ## Scores
 
 Pure functions over `FleetHealthInputs` (`score.rs`, #192; no `sqlx`, `tokio`, `reqwest` or
 `std::fs`, which `the_scoring_engine_does_no_io` checks). Each component is linear between its
-"100 at" and "0 at" values (`HealthTargets`, these are the defaults), clamped to 0–100, and
-rounded only at the end. A component with too little data (fewer than 20 jobs, or no samples) has
-`score: null` and the deduction "not enough data", and its weight is spread over the others in
-proportion (the weights still sum to 100). A score with no component left is `null`.
+"100 at" and "0 at" values (`HealthTargets`, these are the defaults) and clamped to 0–100. A
+component with too little data (fewer than 20 jobs, or no rows) has `score: null` and the
+deduction "not enough data", and its weight is spread over the others in proportion (the weights
+still sum to 100). A score with no component left is `null`.
+
+**Rounding (#239).** Components are combined from their unrounded scores, and only the final
+score is rounded. Each component on the wire carries its own rounded score. The busy-share gate
+(the fleet's queue-wait component under 100) and the concern bands read the rounded component
+score.
+
+**The covered time (#239).** The window's rows are whole hours, from `ceil_hour(now − W)` to
+`now`, the hour in progress included. Every time denominator is that covered time,
+`now − ceil_hour(now − W)`, which is the full window only on the hour (and always more than
+`W − 1 h`):
+- Availability, fleet and machine, divides by the whole covered minutes,
+  `floor(covered ms ÷ 60,000)`, the unit `online_minutes` counts in (minutes with at least one
+  sample). A machine online every whole minute is fully available while the minute in progress is
+  unsampled. No whole minute covered (the first 59 s of an hour on 1h) is not enough data, which
+  is not 0.
+- Busy share divides by the covered seconds.
+- Capacity fit counts the ended hours from `ceil_hour(now − W)` (the hour in progress is not yet
+  one of them), as before.
+
+**The grace-hour contract with #204.** The source reads `fleet_health_hourly` and
+`fleet_host_hourly` only for hours past their grace (`hour + 1 h + ROLLUP_GRACE_MILLIS <= now`).
+It computes live, bounded, every other hour of `[ceil_hour(now − W), now)`: the hour in progress,
+and the hour that just ended until `hour_end + 15 min`. It detects an unwritten hour by time, with
+the shared constant, not by the rollups' markers. A live hour has the same row shape as a rolled
+one, and counts online minutes the same way. A past-grace hour the rollups haven't written yet is
+covered time with nothing in it (its machines read offline, with no jobs): the pass lag, at most
+one reconcile interval (30 s by default), or the catch-up after downtime, one hour per pass.
 
 **Fleet:**
 
@@ -205,21 +264,24 @@ proportion (the weights still sum to 100). A score with no component left is `nu
 |---|---|---|---|---|---|
 | `queue-wait` | Queue wait | 40 | p90 wait of every job in the window, from the merged histograms | ≤ 1 min | ≥ 10 min |
 | `start-reliability` | Start reliability | 20 | successful starts ÷ start attempts (machine-fault failures only) | ≥ 99% | ≤ 80% |
-| `infra-failures` | Infrastructure failures | 15 | infrastructure-failed jobs ÷ completed jobs | 0% | ≥ 5% |
+| `infra-failures` | Infrastructure failures | 15 | infrastructure-failed jobs ÷ every completed final-attempt job (`job_count`: successes and failures alike, so an outage still scores) | 0% | ≥ 5% |
 | `capacity-fit` | Capacity fit | 15 | share of hours with jobs waiting over 1 min while the fleet's CPU used p50 was under 50% of budget | 0% | ≥ 25% |
-| `availability` | Availability | 10 | online minutes weighted by each machine's CPU budget | 100% | ≤ 80% |
+| `availability` | Availability | 10 | online minutes weighted by each machine's CPU budget ÷ covered minutes, each machine's online minutes capped at the covered minutes first (its sampled minute in progress can put it one over) | 100% | ≤ 80% |
 
 **Machine:**
 
 | Key | Label | Weight | Measures | 100 at | 0 at |
 |---|---|---|---|---|---|
-| `availability` | Availability | 25 | online minutes ÷ window minutes | 100% | ≤ 80% |
+| `availability` | Availability | 25 | online minutes ÷ covered minutes, read as 100% when the sampled minute in progress puts it over | 100% | ≤ 80% |
 | `start-reliability` | Start reliability | 25 | as above, this machine only | ≥ 99% | ≤ 80% |
 | `relative-speed` | Relative speed | 25 | the speed index (#193) | ≤ 1.0 | ≥ 2.0 |
 | `headroom` | Headroom | 15 | the lower of disk (minimum free against `disk::alarm_for`'s levels) and memory (p95 used ÷ budget: 100 under 80%, 0 at 100%) | | |
-| `busy-share` | Busy share | 10 | CPU-seconds reserved ÷ (CPU budget × window); deducts only while the fleet's queue-wait component is under 100 | ≥ 50% | 0% |
+| `busy-share` | Busy share | 10 | CPU-seconds reserved ÷ (CPU budget × covered time); deducts only while the fleet's queue-wait component is under 100 | ≥ 50% | 0% |
 
-A machine with a CPU budget of 0 has no score.
+Only a machine with no rows in the window has no availability data: rows with 0 online minutes,
+which the machine rollup writes on purpose for an hour without samples, score availability 0.
+A machine with a CPU budget of 0 has no score: every component is "not enough data" (saying it
+has no CPU budget where the component had data), and it raises no `host-score` concern (#239).
 
 **Percentile from a histogram:** find the bucket where the cumulative count crosses the
 percentile and interpolate linearly inside it; the 40+ min bucket counts as 40 min.

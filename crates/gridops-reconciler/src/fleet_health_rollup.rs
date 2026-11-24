@@ -7,23 +7,27 @@
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`):
 //! it rolls up every hour listed in `fleet_health_recompute` plus at most
-//! one catch-up hour. #197 fixes the signatures; #191 implements them.
+//! one catch-up hour. #197 fixes the signatures; #191 implements them. It is
+//! the only reader of `fleet_health_recompute` (#239).
 //!
 //! The reads of an hour run outside the write transaction, bounded by the
 //! `completed_at` indexes (`workflow_jobs_completed_idx`,
 //! `gitlab_jobs_completed_idx`); the hour's rows are then written in one
 //! short transaction (at most [`WRITE_BATCH`] rows per transaction), which
 //! also takes the hour off `fleet_health_recompute`, so re-running an hour
-//! gives the same rows. The catch-up walks the last 7 days one finished hour
-//! per pass, oldest first; where it got to is the `fleet_health.rollup_next`
-//! setting, absent until the first pass.
+//! gives the same rows. The same transaction lists the hours a re-run's
+//! earlier attempts completed in, so they are rolled again without them
+//! (#239). The catch-up walks the last 7 days one finished hour per pass,
+//! oldest first; where it got to is the `fleet_health.rollup_next` setting,
+//! absent until the first pass. No hour, listed or caught up, is rolled
+//! before its end plus [`ROLLUP_GRACE_MILLIS`].
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
 use gridops_core::fleet_health::{
-    HISTOGRAM_BUCKETS, HOUR_MILLIS, HealthWindow, Histogram, JobCategory, UNMANAGED,
-    histogram_bucket,
+    HISTOGRAM_BUCKETS, HOUR_MILLIS, HealthWindow, Histogram, JobCategory, ROLLUP_GRACE_MILLIS,
+    UNMANAGED, histogram_bucket,
 };
 use sqlx::{FromRow, SqlitePool};
 
@@ -35,11 +39,16 @@ const ROLLUP_NEXT_SETTING: &str = "fleet_health.rollup_next";
 const WRITE_BATCH: usize = 500;
 
 /// The hour's GitHub jobs (`workflow_jobs_completed_idx`), final attempts
-/// only: a job counts when its attempt (`workflow_job_sync.run_attempt`,
-/// unknown counts as 1) is the newest one known for its run, exactly the
-/// attempt `gridops_core::finish_earlier_attempts` finishes earlier jobs
-/// against. The runner and its newest `workload_placements` row give the
-/// machine, pool and CPU size; no runner row, or no placement, is unmanaged.
+/// only: a job counts unless a later attempt of its run ran a job of the
+/// same name. "Later" is a higher `workflow_job_sync.run_attempt`; when
+/// either attempt is unknown (GitHub didn't give one), the higher job id,
+/// since GitHub numbers a re-run's jobs after the attempt it re-runs, but
+/// only once the run row knows a re-run (`run_attempt` above 1): two
+/// same-named jobs of a run never re-run are both counted. A
+/// "re-run failed jobs" attempt runs only the failed jobs, and the run's
+/// other jobs keep their earlier attempt, so they still count. The runner
+/// and its newest `workload_placements` row give the machine, pool and CPU
+/// size; no runner row, or no placement, is unmanaged.
 const GITHUB_JOBS: &str = r#"
 SELECT wj.category,
        COALESCE(wj.conclusion='success',0) AS success,
@@ -57,11 +66,15 @@ SELECT wj.category,
           ORDER BY latest.generation DESC,latest.updated_at DESC,latest.id DESC LIMIT 1)
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE wj.completed_at>=? AND wj.completed_at<?
-   AND COALESCE(sync.run_attempt,1)=MAX(
-         COALESCE((SELECT run.run_attempt FROM workflow_runs run WHERE run.id=wj.run_id),1),
-         COALESCE((SELECT MAX(later.run_attempt) FROM workflow_job_sync later
-                     JOIN workflow_jobs later_job ON later_job.id=later.job_id
-                    WHERE later_job.run_id=wj.run_id),1))"#;
+   AND NOT EXISTS (SELECT 1 FROM workflow_jobs later_job
+          LEFT JOIN workflow_job_sync later ON later.job_id=later_job.id
+         WHERE later_job.run_id=wj.run_id AND later_job.name=wj.name
+           AND later_job.id<>wj.id
+           AND (later.run_attempt>sync.run_attempt
+                OR ((later.run_attempt IS NULL OR sync.run_attempt IS NULL)
+                    AND later_job.id>wj.id
+                    AND (SELECT run.run_attempt FROM workflow_runs run
+                          WHERE run.id=wj.run_id)>1)))"#;
 
 /// The hour's GitLab jobs (`gitlab_jobs_completed_idx`), joined to their
 /// machines through `runners.gitlab_runner_id` the same way. A GitLab job is
@@ -82,6 +95,29 @@ SELECT gj.category,
           ORDER BY latest.generation DESC,latest.updated_at DESC,latest.id DESC LIMIT 1)
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE gj.completed_at>=? AND gj.completed_at<?"#;
+
+/// The other hours in which the earlier attempts of the hour's re-run jobs
+/// (the same run and job name, earlier as [`GITHUB_JOBS`] orders them)
+/// completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
+/// rolled while its attempt was still the run's newest, so it counts there
+/// until the hour is rolled again (#239). The hour itself is left out; its own
+/// rows already read only final attempts.
+const EARLIER_ATTEMPT_HOURS: &str = r#"
+SELECT DISTINCT earlier.completed_at-(earlier.completed_at%3600000) AS hour
+  FROM workflow_jobs wj
+  LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
+  JOIN workflow_jobs earlier ON earlier.run_id=wj.run_id AND earlier.name=wj.name
+                            AND earlier.status='completed' AND earlier.id<>wj.id
+  LEFT JOIN workflow_job_sync earlier_sync ON earlier_sync.job_id=earlier.id
+ WHERE wj.completed_at>=? AND wj.completed_at<?
+   AND (earlier_sync.run_attempt<sync.run_attempt
+        OR ((earlier_sync.run_attempt IS NULL OR sync.run_attempt IS NULL)
+            AND earlier.id<wj.id
+            AND (SELECT run.run_attempt FROM workflow_runs run
+                  WHERE run.id=wj.run_id)>1))
+   AND earlier.completed_at>=?
+   AND (earlier.completed_at<? OR earlier.completed_at>=?)
+ ORDER BY hour"#;
 
 /// One counted job, as one of the hour's reads sees it.
 #[derive(Debug, FromRow)]
@@ -133,31 +169,40 @@ impl Default for HourTotals {
 type RowKey = (String, String, JobCategory);
 
 /// Writes the rows of the hour starting at `hour` (epoch ms, on a whole
-/// hour), replacing what is there, and takes the hour off
-/// `fleet_health_recompute`.
+/// hour), replacing what is there, takes the hour off
+/// `fleet_health_recompute`, and lists there the hours its re-runs' earlier
+/// attempts completed in.
 ///
 /// # Errors
 /// A database read or write failed.
 pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<()> {
     let hour = hour - hour.rem_euclid(HOUR_MILLIS);
     let facts = hour_facts(db, hour).await?;
+    let earlier = earlier_attempt_hours(db, hour, now).await?;
     let mut rows = BTreeMap::<RowKey, HourTotals>::new();
     for fact in &facts {
         add(&mut rows, fact);
     }
-    write_hour(db, hour, now, &rows.into_iter().collect::<Vec<_>>()).await
+    write_hour(
+        db,
+        hour,
+        now,
+        &rows.into_iter().collect::<Vec<_>>(),
+        &earlier,
+    )
+    .await
 }
 
 /// One reconciler pass of the rollup: every hour listed in
-/// `fleet_health_recompute` that has finished, oldest first, then at most
-/// one catch-up hour of the last 7 days.
+/// `fleet_health_recompute` that is past its grace, oldest first, then at
+/// most one catch-up hour of the last 7 days, once it is past its grace too.
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
     let listed: Vec<i64> =
         sqlx::query_scalar("SELECT hour FROM fleet_health_recompute WHERE hour<=? ORDER BY hour")
-            .bind(now - HOUR_MILLIS)
+            .bind(now - HOUR_MILLIS - ROLLUP_GRACE_MILLIS)
             .fetch_all(db)
             .await?;
     for hour in listed {
@@ -165,15 +210,16 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
     }
 
     // Catch-up: one finished hour per pass, oldest first, over the last 7
-    // days. The first pass starts at the window's oldest hour; one whose
-    // marker the sliding window has passed starts again at its oldest.
+    // days, each once its grace has passed so a late arrival still counts.
+    // The first pass starts at the window's oldest hour; one whose marker the
+    // sliding window has passed starts again at its oldest.
     let window_start = now - HealthWindow::Week.millis();
     let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
     let next = match next_hour(db).await? {
         Some(next) => next.max(window_start),
         None => window_start,
     };
-    if next + HOUR_MILLIS <= now {
+    if next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
         rollup_hour(db, next, now).await?;
         save_next_hour(db, next + HOUR_MILLIS, now).await?;
     }
@@ -202,6 +248,23 @@ async fn hour_facts(db: &SqlitePool, hour: i64) -> Result<Vec<JobFact>> {
     Ok(facts)
 }
 
+/// [`EARLIER_ATTEMPT_HOURS`] for the hour starting at `hour`, as of `now`.
+///
+/// # Errors
+/// The read failed.
+async fn earlier_attempt_hours(db: &SqlitePool, hour: i64, now: i64) -> Result<Vec<i64>> {
+    let end = hour + HOUR_MILLIS;
+    let oldest = now - HealthWindow::Week.millis();
+    Ok(sqlx::query_scalar::<_, i64>(EARLIER_ATTEMPT_HOURS)
+        .bind(hour)
+        .bind(end)
+        .bind(oldest - oldest.rem_euclid(HOUR_MILLIS))
+        .bind(hour)
+        .bind(end)
+        .fetch_all(db)
+        .await?)
+}
+
 /// Folds one job into the hour's rows: its machine from the placement (none
 /// is `unmanaged`, with no CPU-seconds), its category (NULL as `other`), its
 /// clamped duration and its two histogram buckets. A negative wait (clock
@@ -228,13 +291,15 @@ fn add(rows: &mut BTreeMap<RowKey, HourTotals>, fact: &JobFact) {
 
 /// Writes the hour's rows, replacing what is there and taking the hour off
 /// `fleet_health_recompute`: one short transaction per [`WRITE_BATCH`] rows,
-/// the first emptying the hour, the last also emptying its recompute entry
-/// (an hour with no jobs still gets both). An hour is one (host, pool,
-/// category) group per job that ran, so it is far below the batch size and
-/// one transaction writes it whole; the split only serves #179's rule that
-/// no transaction writes more than 500 rows, should a fleet ever grow that
-/// wide, and a failure between batches leaves the hour listed for a recompute
-/// that rewrites it from scratch.
+/// the first emptying the hour, the last also listing the `earlier` hours
+/// (its re-runs' earlier attempts, never the hour itself) and emptying the
+/// hour's own recompute entry (an hour with no jobs still gets both). An hour
+/// is one (host, pool, category) group per job that ran, so it is far below
+/// the batch size and one transaction writes it whole; the split only serves
+/// #179's rule that no transaction writes more than 500 rows, should a fleet
+/// ever grow that wide (the listings get a batch of their own when the last
+/// one has no room), and a failure between batches leaves the hour listed
+/// for a recompute that rewrites it from scratch.
 ///
 /// # Errors
 /// A write failed.
@@ -243,13 +308,15 @@ async fn write_hour(
     hour: i64,
     now: i64,
     rows: &[(RowKey, HourTotals)],
+    earlier: &[i64],
 ) -> Result<()> {
-    let batches = rows.chunks(WRITE_BATCH).collect::<Vec<_>>();
-    let batches = if batches.is_empty() {
-        vec![&[][..]]
-    } else {
-        batches
-    };
+    let mut batches = rows.chunks(WRITE_BATCH).collect::<Vec<_>>();
+    if batches
+        .last()
+        .is_none_or(|batch| batch.len() + earlier.len() > WRITE_BATCH)
+    {
+        batches.push(&[][..]);
+    }
     let last = batches.len() - 1;
     for (index, batch) in batches.into_iter().enumerate() {
         let mut tx = db.begin().await?;
@@ -288,6 +355,16 @@ async fn write_hour(
             .await?;
         }
         if index == last {
+            for listed in earlier {
+                sqlx::query(
+                    "INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)
+                     ON CONFLICT(hour) DO NOTHING",
+                )
+                .bind(listed)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
             sqlx::query("DELETE FROM fleet_health_recompute WHERE hour=?")
                 .bind(hour)
                 .execute(&mut *tx)
@@ -331,4 +408,264 @@ async fn save_next_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<()> {
     .execute(db)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! #239's rollup fixes: a re-run whose attempts complete in different
+    //! hours counts once (item 6), and no hour, listed or caught up, is
+    //! rolled before `hour_end + 15 min`, so a late arrival inside that grace
+    //! still counts (item 7 and the plan review's finding 1).
+
+    use super::*;
+    use gridops_core::{
+        connect_database_path,
+        fleet_health::testdata::{self, JobSeed, SeededFleet},
+    };
+
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 3_600_000;
+    /// The grace an ended hour waits before it is rolled (#239).
+    const GRACE: i64 = 15 * MINUTE;
+    /// A whole hour.
+    const NOW: i64 = 1_800_000_000_000;
+
+    struct Harness {
+        directory: std::path::PathBuf,
+        db: SqlitePool,
+        fleet: SeededFleet,
+    }
+
+    impl Harness {
+        async fn new() -> Result<Self> {
+            let directory = std::env::temp_dir()
+                .join(format!("gridops-job-rollup-own-{}", uuid::Uuid::new_v4()));
+            let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+            let fleet = testdata::seed_fleet(&db).await?;
+            Ok(Self {
+                directory,
+                db,
+                fleet,
+            })
+        }
+
+        /// A successful job on io completing at `completed`, part of run
+        /// `run_id` at `attempt`.
+        async fn job(&self, id: i64, run_id: i64, attempt: i64, completed: i64) -> Result<()> {
+            self.named_job(id, run_id, attempt, "unit tests", completed)
+                .await
+        }
+
+        /// [`Self::job`] with the job's `name`.
+        async fn named_job(
+            &self,
+            id: i64,
+            run_id: i64,
+            attempt: i64,
+            name: &str,
+            completed: i64,
+        ) -> Result<()> {
+            let io = self.fleet.host("io")?.id.clone();
+            let mut job = JobSeed::completed(
+                id,
+                name,
+                Some(&io),
+                completed - 3 * MINUTE,
+                completed - 2 * MINUTE,
+                completed,
+            );
+            job.run_id = run_id;
+            job.run_attempt = attempt;
+            testdata::insert_jobs(&self.db, &self.fleet, &[job]).await
+        }
+
+        /// The jobs `fleet_health_hourly` counts in `hour`.
+        async fn counted(&self, hour: i64) -> Result<i64> {
+            Ok(sqlx::query_scalar(
+                "SELECT COALESCE(SUM(job_count),0) FROM fleet_health_hourly WHERE hour=?",
+            )
+            .bind(hour)
+            .fetch_one(&self.db)
+            .await?)
+        }
+
+        async fn listed(&self) -> Result<Vec<i64>> {
+            Ok(
+                sqlx::query_scalar("SELECT hour FROM fleet_health_recompute ORDER BY hour")
+                    .fetch_all(&self.db)
+                    .await?,
+            )
+        }
+
+        async fn list(&self, hour: i64, at: i64) -> Result<()> {
+            sqlx::query("INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)")
+                .bind(hour)
+                .bind(at)
+                .execute(&self.db)
+                .await?;
+            Ok(())
+        }
+
+        async fn finish(self) -> Result<()> {
+            self.db.close().await;
+            std::fs::remove_dir_all(self.directory)?;
+            Ok(())
+        }
+    }
+
+    /// A "re-run failed jobs" attempt runs only the failed job: the run's
+    /// other attempt-1 jobs are not run again and still count, in their own
+    /// hour, whenever it is rolled. Only the re-run job's earlier attempt is
+    /// replaced, and only its hour is listed for a recompute.
+    #[tokio::test]
+    async fn a_partial_re_run_keeps_the_jobs_it_did_not_run_again() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b, c) = (NOW - 4 * HOUR, NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness
+            .named_job(1, 60, 1, "build", a + 10 * MINUTE)
+            .await?;
+        harness.named_job(2, 60, 1, "lint", b + 10 * MINUTE).await?;
+        harness.named_job(3, 60, 2, "lint", c + 10 * MINUTE).await?;
+        rollup_hour(&harness.db, c, NOW).await?;
+        assert_eq!(
+            harness.listed().await?,
+            [b],
+            "only the re-run job's earlier hour is listed"
+        );
+        rollup_hour(&harness.db, a, NOW).await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 1, "build was not run again");
+        assert_eq!(
+            harness.counted(b).await?,
+            0,
+            "lint's attempt 1 was replaced"
+        );
+        assert_eq!(harness.counted(c).await?, 1, "lint's attempt 2");
+        harness.finish().await
+    }
+
+    /// GitHub doesn't always give a job's attempt: a re-run job whose
+    /// attempt is unknown is later than the same-named job it re-runs by its
+    /// higher job id, so the run still counts once and the earlier hour is
+    /// listed. An unknown attempt never makes an earlier job id replace a
+    /// later one.
+    #[tokio::test]
+    async fn a_re_run_job_with_no_known_attempt_still_replaces_the_earlier_one() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b) = (NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 70, 1, a + 30 * MINUTE).await?;
+        harness.job(2, 70, 2, b + 10 * MINUTE).await?;
+        sqlx::query("UPDATE workflow_job_sync SET run_attempt=NULL WHERE job_id=2")
+            .execute(&harness.db)
+            .await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(b).await?, 1, "the re-run job counts");
+        assert_eq!(harness.listed().await?, [a], "the earlier hour is listed");
+        rollup_hour(&harness.db, a, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 0, "the earlier job was replaced");
+        harness.finish().await
+    }
+
+    /// Two jobs of one attempt may share a name. With an attempt unknown and
+    /// a run never re-run, neither replaces the other: both count, and no
+    /// hour is listed.
+    #[tokio::test]
+    async fn same_named_jobs_of_a_run_never_re_run_both_count() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b) = (NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 80, 1, a + 30 * MINUTE).await?;
+        harness.job(2, 80, 1, b + 10 * MINUTE).await?;
+        sqlx::query("UPDATE workflow_job_sync SET run_attempt=NULL WHERE job_id IN (1,2)")
+            .execute(&harness.db)
+            .await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(
+            harness.listed().await?,
+            Vec::<i64>::new(),
+            "no hour is listed"
+        );
+        rollup_hour(&harness.db, a, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 1, "the lower-id job counts");
+        assert_eq!(harness.counted(b).await?, 1, "the higher-id job counts");
+        harness.finish().await
+    }
+
+    /// Item 6: attempt 1 completes in hour A and is rolled there; the re-run
+    /// (attempt 2) completes in hour B. Rolling B lists A for a recompute (in
+    /// the same write transaction, and never B itself), and the next pass
+    /// re-rolls A, so the run counts once across the two hours.
+    #[tokio::test]
+    async fn a_re_run_whose_attempts_fall_in_different_hours_counts_once() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b) = (NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 50, 1, a + 30 * MINUTE).await?;
+        rollup_hour(&harness.db, a, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 1, "attempt 1, before the re-run");
+
+        harness.job(2, 50, 2, b + 10 * MINUTE).await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(b).await?, 1, "attempt 2 in its own hour");
+        assert_eq!(
+            harness.listed().await?,
+            [a],
+            "rolling B lists attempt 1's hour, and not B"
+        );
+
+        run_pass(&harness.db, NOW).await?;
+        assert_eq!(
+            harness.counted(a).await? + harness.counted(b).await?,
+            1,
+            "the run counts once over A and B"
+        );
+        assert!(
+            harness.listed().await?.is_empty(),
+            "A was taken off the list"
+        );
+        harness.finish().await
+    }
+
+    /// Item 7: the catch-up rolls an ended hour only once `hour_end + 15 min
+    /// <= now`. A job finishing at 10:59:40 whose webhook was missed is
+    /// recorded by the poll after 11:00; it is still in hour 10's row.
+    #[tokio::test]
+    async fn the_catch_up_waits_15_minutes_so_a_late_arrival_still_counts() -> Result<()> {
+        let harness = Harness::new().await?;
+        let hour = NOW - HOUR;
+        save_next_hour(&harness.db, hour, NOW - HOUR).await?;
+        harness.job(1, 1, 1, hour + 30 * MINUTE).await?;
+
+        // 11:14:59: the hour ended but is still in its grace, so not rolled.
+        run_pass(&harness.db, NOW + GRACE - 1_000).await?;
+        assert_eq!(harness.counted(hour).await?, 0, "rolled inside the grace");
+
+        // The late one: completed 10:59:40, stored after 11:00.
+        harness.job(2, 2, 1, NOW - 20_000).await?;
+        run_pass(&harness.db, NOW + GRACE).await?;
+        assert_eq!(
+            harness.counted(hour).await?,
+            2,
+            "rolled at 11:15 with the late arrival"
+        );
+        harness.finish().await
+    }
+
+    /// The plan review's finding 1: a listed hour waits for the same grace,
+    /// so "an hour has rows ⟺ it is past its grace" holds for #204's source,
+    /// which computes every hour not yet past it live.
+    #[tokio::test]
+    async fn a_listed_hour_also_waits_for_the_grace() -> Result<()> {
+        let harness = Harness::new().await?;
+        let hour = NOW - HOUR;
+        harness.job(1, 1, 1, hour + 30 * MINUTE).await?;
+        harness.list(hour, NOW + MINUTE).await?;
+
+        run_pass(&harness.db, NOW + 5 * MINUTE).await?;
+        assert_eq!(harness.counted(hour).await?, 0, "rolled inside the grace");
+        assert_eq!(harness.listed().await?, [hour], "still listed");
+
+        run_pass(&harness.db, NOW + GRACE).await?;
+        assert_eq!(harness.counted(hour).await?, 1);
+        assert!(harness.listed().await?.is_empty());
+        harness.finish().await
+    }
 }

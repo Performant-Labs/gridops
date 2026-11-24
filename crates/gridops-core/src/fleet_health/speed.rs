@@ -176,10 +176,12 @@ pub async fn speed_indexes(
         };
 
         // With no index there is nothing for keys to push up; with one, the
-        // worst ratios first (the slowest job keys, ties by key).
+        // keys slower than the fleet (a ratio above 1.0: only those push it
+        // up, #239 item 10), worst first, ties by key.
         let top_keys = if index.is_none() {
             Vec::new()
         } else {
+            qualifying.retain(|(ratio, _)| *ratio > 1.0);
             qualifying.sort_by(|(ratio, key), (other, other_key)| {
                 other
                     .total_cmp(ratio)
@@ -202,7 +204,9 @@ pub async fn speed_indexes(
 /// per (repository, workflow, job name, machine, runner size) with the
 /// group's durations comma-joined: the query stays a single pass over the
 /// join whatever the window's volume. The name is grouped as stored; the
-/// shard suffix is stripped in [`job_key`], in Rust.
+/// shard suffix is stripped in [`job_key`], in Rust. A job's machine is its
+/// runner's newest `runners` row and that row's newest placement, as #191's
+/// rollup reads it, so duplicate rows never count a job twice.
 ///
 /// # Errors
 /// The read failed.
@@ -217,8 +221,15 @@ async fn grouped_durations(
              FROM workflow_jobs job
              JOIN workflow_runs run ON run.id = job.run_id
              JOIN repositories repo ON repo.id = run.repository_id
-             JOIN runners r ON r.github_runner_id = job.runner_id
-             JOIN workload_placements p ON p.runner_id = r.id
+             JOIN runners r ON r.id = (
+                    SELECT cand.id FROM runners cand
+                     WHERE cand.github_runner_id = job.runner_id
+                     ORDER BY cand.created_at DESC, cand.id DESC LIMIT 1)
+             JOIN workload_placements p ON p.id = (
+                    SELECT latest.id FROM workload_placements latest
+                     WHERE latest.runner_id = r.id
+                     ORDER BY latest.generation DESC, latest.updated_at DESC, latest.id DESC
+                     LIMIT 1)
              LEFT JOIN workflow_job_sync sync ON sync.job_id = job.id
             WHERE job.status = 'completed'
               AND job.conclusion = 'success'
@@ -610,6 +621,178 @@ mod tests {
             (index - 2.0).abs() <= 0.01,
             "an earlier attempt ruled in, or an unknown one out: {index}"
         );
+        harness.close().await
+    }
+    /// Item 10: `topKeys` are the keys that push an index up, so only keys
+    /// slower than the fleet (a ratio above 1.0) are listed. Jupiter's index
+    /// comes from three keys at 1.2x, 1.0x and 0.8x; only the 1.2x one pushes
+    /// it up.
+    #[tokio::test]
+    async fn top_keys_hold_only_keys_slower_than_the_fleet() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        for (name, typical, factor) in [
+            ("unit", 120_000_i64, 1.2_f64),
+            ("lint", 60_000, 1.0),
+            ("clippy", 240_000, 0.8),
+        ] {
+            for host in ["io", "europa", "callisto"] {
+                harness.runs(host, 2_000, name, 6, typical).await?;
+            }
+            harness
+                .runs("Jupiter", 2_000, name, 6, (typical as f64 * factor) as i64)
+                .await?;
+        }
+        let results = harness.indexes().await?;
+        let jupiter = harness.result(&results, "Jupiter", 2_000)?;
+        assert!(jupiter.index.is_some(), "three keys give an index");
+        let top_keys: Vec<String> = jupiter.top_keys.iter().map(|key| key.key.clone()).collect();
+        assert_eq!(top_keys, [job_key("acme/app", "CI", "unit")]);
+        harness.close().await
+    }
+
+    /// Re-registers the runner of every `name` job on `host_id`: a second,
+    /// older `runners` row with the same `github_runner_id` (0013 dropped the
+    /// unique index), with its own placement on the same machine.
+    async fn older_runner_rows(db: &SqlitePool, host_id: &str, name: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO runners (id,pool_id,github_runner_id,name,status,busy,ephemeral,
+                                  registered_at,created_at,updated_at,ci_platform)
+             SELECT r.id||'-old',r.pool_id,r.github_runner_id,r.name,r.status,r.busy,r.ephemeral,
+                    r.registered_at,r.created_at-60000,r.updated_at,r.ci_platform
+               FROM runners r JOIN workload_placements p ON p.runner_id=r.id
+              WHERE p.host_id=? AND length(p.id)=36 AND p.runner_id IN (
+                    SELECT r.id FROM runners r
+                      JOIN workflow_jobs j ON j.runner_id=r.github_runner_id
+                     WHERE j.name=?)",
+        )
+        .bind(host_id)
+        .bind(name)
+        .execute(db)
+        .await?;
+        copy_placements(db, (host_id, name), "-old", "-old", 0, "-old").await
+    }
+
+    /// Gives the runner of every `name` job on `host_id` a second, newer
+    /// placement (generation 2) on the same machine:
+    /// `workload_placements_runner_idx` is not unique.
+    async fn newer_placements(db: &SqlitePool, host_id: &str, name: &str) -> Result<()> {
+        copy_placements(db, (host_id, name), "-g2", "", 1, "").await
+    }
+
+    /// Copies the placements of the `jobs` (machine id, job name), with their
+    /// operations and intents. Only seeded placements are copied (a seeded
+    /// id is 36 characters; a copy's carries a suffix): ids suffixed
+    /// `suffix`, the workload id
+    /// suffixed `workload`, the generation raised by `generation_step`, and
+    /// the runner id suffixed `runner`.
+    async fn copy_placements(
+        db: &SqlitePool,
+        jobs: (&str, &str),
+        suffix: &str,
+        workload: &str,
+        generation_step: i64,
+        runner: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO fleet_operations (id,kind,principal_kind,principal_scope,idempotency_key,
+                                           request_hash,status,created_at,updated_at)
+             SELECT o.id||?,o.kind,o.principal_kind,o.principal_scope,o.idempotency_key||?,
+                    o.request_hash,o.status,o.created_at,o.updated_at
+               FROM fleet_operations o JOIN workload_placements p ON p.intent_id=o.id
+              WHERE p.host_id=? AND length(p.id)=36 AND p.runner_id IN (
+                    SELECT r.id FROM runners r
+                      JOIN workflow_jobs j ON j.runner_id=r.github_runner_id
+                     WHERE j.name=?)",
+        )
+        .bind(suffix)
+        .bind(suffix)
+        .bind(jobs.0)
+        .bind(jobs.1)
+        .execute(db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO workload_intents (id,workload_id,generation,kind,pool_id,profile_id,
+                                           target_id,expected_profile_revision,status,
+                                           created_at,updated_at)
+             SELECT i.id||?,i.workload_id||?,i.generation+?,i.kind,i.pool_id,i.profile_id,
+                    i.target_id,i.expected_profile_revision,i.status,i.created_at,i.updated_at
+               FROM workload_intents i JOIN workload_placements p ON p.intent_id=i.id
+              WHERE p.host_id=? AND length(p.id)=36 AND p.runner_id IN (
+                    SELECT r.id FROM runners r
+                      JOIN workflow_jobs j ON j.runner_id=r.github_runner_id
+                     WHERE j.name=?)",
+        )
+        .bind(suffix)
+        .bind(workload)
+        .bind(generation_step)
+        .bind(jobs.0)
+        .bind(jobs.1)
+        .execute(db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO workload_placements (id,intent_id,workload_id,generation,host_id,
+                    backend_id,host_epoch,profile_revision,target_id,config_snapshot_json,
+                    cpu_millis,memory_mib,disk_bytes,state,runner_id,created_at,updated_at)
+             SELECT p.id||?,p.intent_id||?,p.workload_id||?,p.generation+?,p.host_id,
+                    p.backend_id,p.host_epoch,p.profile_revision,p.target_id,
+                    p.config_snapshot_json,p.cpu_millis,p.memory_mib,p.disk_bytes,p.state,
+                    p.runner_id||?,p.created_at,p.updated_at+1
+               FROM workload_placements p
+              WHERE p.host_id=? AND length(p.id)=36 AND p.runner_id IN (
+                    SELECT r.id FROM runners r
+                      JOIN workflow_jobs j ON j.runner_id=r.github_runner_id
+                     WHERE j.name=?)",
+        )
+        .bind(suffix)
+        .bind(suffix)
+        .bind(workload)
+        .bind(generation_step)
+        .bind(runner)
+        .bind(jobs.0)
+        .bind(jobs.1)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    /// Item 11: a job is counted once, on its newest runner row's newest
+    /// placement, as #191's rollup counts it. Jupiter's "unit" runners were
+    /// re-registered (two `runners` rows per runner id) and its "lint"
+    /// runners have two placements each; read naively, each of those jobs
+    /// counts twice, on the machine and in the fleet.
+    #[tokio::test]
+    async fn a_job_counts_once_whatever_duplicate_runner_or_placement_rows_it_has() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        for (name, duration) in [("unit", 120_000_i64), ("lint", 60_000), ("e2e", 600_000)] {
+            for host in ["io", "europa", "callisto"] {
+                harness.runs(host, 2_000, name, 6, duration).await?;
+            }
+            harness
+                .runs("Jupiter", 2_000, name, 6, 2 * duration)
+                .await?;
+        }
+        let jupiter = harness.fleet.host("Jupiter")?.id.clone();
+        older_runner_rows(&harness.db, &jupiter, "unit").await?;
+        newer_placements(&harness.db, &jupiter, "lint").await?;
+        let duplicated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workload_placements WHERE id LIKE '%-old' OR id LIKE '%-g2'",
+        )
+        .fetch_one(&harness.db)
+        .await?;
+        assert_eq!(duplicated, 12, "the seed made its duplicates");
+
+        let results = harness.indexes().await?;
+        let result = harness.result(&results, "Jupiter", 2_000)?;
+        let runs: Vec<(String, u32, u32)> = result
+            .top_keys
+            .iter()
+            .map(|key| (key.key.clone(), key.host_runs, key.fleet_runs))
+            .collect();
+        let expected: Vec<(String, u32, u32)> = ["e2e", "lint", "unit"]
+            .into_iter()
+            .map(|name| (job_key("acme/app", "CI", name), 6, 24))
+            .collect();
+        assert_eq!(runs, expected, "(key, machine runs, fleet runs)");
         harness.close().await
     }
 }
