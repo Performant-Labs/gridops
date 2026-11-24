@@ -5,21 +5,23 @@
 //! samples in the hour still gets a row (0 minutes, NULL percentiles).
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`),
-//! rolling up every hour listed in `fleet_health_recompute` plus at most one
-//! catch-up hour, oldest first; on first start the catch-up covers the last
-//! 7 days. The reads happen outside the write transaction, each bounded by an
-//! indexed time column (`host_samples_host_time_idx`,
+//! rolling up at most one catch-up hour, oldest first, once the hour is past
+//! its end plus `ROLLUP_GRACE_MILLIS`; on first start the catch-up covers the
+//! last 7 days. It does not read `fleet_health_recompute`: that list belongs
+//! to the job rollup, and a machine's rows do not depend on job categories
+//! (#239). The reads happen outside the write transaction, each bounded by
+//! an indexed time column (`host_samples_host_time_idx`,
 //! `fleet_events_host_kind_time_idx`, `host_commands_host_kind_issued_idx`,
 //! `workload_placements_state_idx`); the rows of an hour are written in one
-//! short transaction (#179), one `INSERT … ON CONFLICT DO UPDATE` per row,
-//! with the hour taken off `fleet_health_recompute` in it, so re-running an
-//! hour gives identical rows.
+//! short transaction (#179), one `INSERT … ON CONFLICT DO UPDATE` per row, so
+//! re-running an hour gives identical rows.
 
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 use gridops_core::fleet::start_health::is_start_failure;
 use gridops_core::fleet::{PlacementFailureReason, failure::PLACEMENT_FAILED_EVENT};
+use gridops_core::fleet_health::ROLLUP_GRACE_MILLIS;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
@@ -188,10 +190,8 @@ async fn uncertain_counts(db: &SqlitePool, hour: i64) -> Result<BTreeMap<String,
     Ok(counts.into_iter().collect())
 }
 
-/// Writes the hour's rows, replacing what is there, and takes the hour off
-/// `fleet_health_recompute` in the same transaction, so a re-run gives
-/// identical rows. At most [`WRITE_BATCH`] rows per transaction (#179); the
-/// recompute row goes with the last of them.
+/// Writes the hour's rows, replacing what is there, so a re-run gives
+/// identical rows. At most [`WRITE_BATCH`] rows per transaction (#179).
 async fn write_host_hours(db: &SqlitePool, hour: i64, now: i64, hours: &[HostHour]) -> Result<()> {
     let mut tx = db.begin().await?;
     for (index, host_hour) in hours.iter().enumerate() {
@@ -229,10 +229,6 @@ async fn write_host_hours(db: &SqlitePool, hour: i64, now: i64, hours: &[HostHou
             tx = db.begin().await?;
         }
     }
-    sqlx::query("DELETE FROM fleet_health_recompute WHERE hour=?")
-        .bind(hour)
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -254,25 +250,20 @@ pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<
     write_host_hours(db, hour, now, &hours).await
 }
 
-/// One reconciler pass of the per-machine rollup: every hour listed in
-/// `fleet_health_recompute`, then at most one catch-up hour, oldest first.
-/// The catch-up walk remembers the last hour it rolled up in
+/// One reconciler pass of the per-machine rollup: at most one catch-up hour,
+/// oldest first. The catch-up walk remembers the last hour it rolled up in
 /// `settings` ([`LAST_ROLLED_KEY`]); on first start, and again after falling
-/// more than [`CATCH_UP_MILLIS`] behind, it covers the last 7 days. It never
-/// rolls an hour that has not finished.
+/// more than [`CATCH_UP_MILLIS`] behind, it covers the last 7 days. It rolls
+/// an hour only once `hour_end + ROLLUP_GRACE_MILLIS <= now`, so samples an
+/// agent reports late still count in their hour, and each hour is rolled
+/// once.
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
-    let listed: Vec<i64> =
-        sqlx::query_scalar("SELECT hour FROM fleet_health_recompute ORDER BY hour")
-            .fetch_all(db)
-            .await?;
-    for hour in listed {
-        rollup_hour(db, hour, now).await?;
-    }
-
-    let now_hour = floor_hour(now);
+    // The hour starting here is the first not yet past its grace: every hour
+    // before it has `hour_end + ROLLUP_GRACE_MILLIS <= now`.
+    let open_hour = floor_hour(now - ROLLUP_GRACE_MILLIS);
     let oldest = ceil_hour(now) - CATCH_UP_MILLIS;
     let rolled = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key=?")
         .bind(LAST_ROLLED_KEY)
@@ -284,7 +275,7 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
         Some(rolled) if rolled + HOUR >= oldest => rolled + HOUR,
         _ => oldest,
     };
-    if next < now_hour {
+    if next < open_hour {
         rollup_hour(db, next, now).await?;
         sqlx::query(
             "INSERT INTO settings (key,value,updated_at) VALUES (?,?,?)

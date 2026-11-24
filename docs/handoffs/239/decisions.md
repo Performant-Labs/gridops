@@ -110,3 +110,25 @@
   - The `gridops-core` integration suites are green.
   - `cargo fmt --check` is clean.
   - `cargo +1.98.1 clippy --all-targets -D warnings` is clean on both crates.
+
+## Phase 6 Implement (F) - 2026-11-24T03:22:15-08:00
+- **Decided:** done (`docs/handoffs/239/handoff-F.md`). Items 1-11 are implemented in their owning modules, and the design doc states rules (a)-(i). Every RED test is now GREEN.
+  - **Item 5.** A private `Measured { component, raw }`, with private `measure_*` functions and `combine_measured`. The public functions, `combine`, `ScoreComponent` and the wire are unchanged.
+  - **Item 4.** A budget-0 machine says "the machine has no CPU budget" only on components that had data, so the fixture's MacBookPro wording doesn't change and `fake.rs`, `fixture.json` and the OpenAPI example aren't edited.
+  - **Item 6.** The lookup is bounded to the job rollup's 7-day reach. The listings ride the last write batch, or one of their own when that batch has no room under 500 rows.
+  - **Item 9.** `floor_hour(now − ROLLUP_GRACE_MILLIS)`, equivalent to `next + 1 h + grace <= now`, so `floor_hour` and its existing test stay.
+  - **`ROLLUP_GRACE_MILLIS`** lives in `gridops_core::fleet_health`, the one copy of the rule.
+- **Assumed:**
+  - #204's live hours count online minutes as whole sampled minutes, like the rollup's bitmask. This is carried over from A.
+  - The two timing failures under load average 22+ are load, not this diff:
+    - the job-rollup week check, whose seed has no re-runs, so the listing path never runs there;
+    - the synthetic-week seed check, which runs only unchanged `testdata`.
+    - Both passed on rerun.
+- **Hedged:** I didn't run the mutation checks for items 1, 2, 3 and 6. T-red assigns them to T's GREEN phase.
+- **Evidence:**
+  - `cargo test -p gridops-core --features test-support --lib`: 365 passed.
+  - `cargo test -p gridops-reconciler`: 151 passed.
+  - The core integration suites and the `gridops-api` `health` tests are green.
+  - `cargo fmt --check` and `clippy +1.98.1 -D warnings` are clean.
+  - EXPLAIN QUERY PLAN for the new SQL shows `workflow_jobs_completed_idx`, `workflow_jobs_run_status_idx`, `runners_github_id_idx` and `workload_placements_runner_idx`.
+  - Source facts are in `docs/handoffs/239/evidence.md`.

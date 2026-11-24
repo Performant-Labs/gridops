@@ -176,10 +176,12 @@ pub async fn speed_indexes(
         };
 
         // With no index there is nothing for keys to push up; with one, the
-        // worst ratios first (the slowest job keys, ties by key).
+        // keys slower than the fleet (a ratio above 1.0: only those push it
+        // up, #239 item 10), worst first, ties by key.
         let top_keys = if index.is_none() {
             Vec::new()
         } else {
+            qualifying.retain(|(ratio, _)| *ratio > 1.0);
             qualifying.sort_by(|(ratio, key), (other, other_key)| {
                 other
                     .total_cmp(ratio)
@@ -202,7 +204,9 @@ pub async fn speed_indexes(
 /// per (repository, workflow, job name, machine, runner size) with the
 /// group's durations comma-joined: the query stays a single pass over the
 /// join whatever the window's volume. The name is grouped as stored; the
-/// shard suffix is stripped in [`job_key`], in Rust.
+/// shard suffix is stripped in [`job_key`], in Rust. A job's machine is its
+/// runner's newest `runners` row and that row's newest placement, as #191's
+/// rollup reads it, so duplicate rows never count a job twice.
 ///
 /// # Errors
 /// The read failed.
@@ -217,8 +221,15 @@ async fn grouped_durations(
              FROM workflow_jobs job
              JOIN workflow_runs run ON run.id = job.run_id
              JOIN repositories repo ON repo.id = run.repository_id
-             JOIN runners r ON r.github_runner_id = job.runner_id
-             JOIN workload_placements p ON p.runner_id = r.id
+             JOIN runners r ON r.id = (
+                    SELECT cand.id FROM runners cand
+                     WHERE cand.github_runner_id = job.runner_id
+                     ORDER BY cand.created_at DESC, cand.id DESC LIMIT 1)
+             JOIN workload_placements p ON p.id = (
+                    SELECT latest.id FROM workload_placements latest
+                     WHERE latest.runner_id = r.id
+                     ORDER BY latest.generation DESC, latest.updated_at DESC, latest.id DESC
+                     LIMIT 1)
              LEFT JOIN workflow_job_sync sync ON sync.job_id = job.id
             WHERE job.status = 'completed'
               AND job.conclusion = 'success'

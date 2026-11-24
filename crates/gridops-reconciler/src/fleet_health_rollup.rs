@@ -7,23 +7,27 @@
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`):
 //! it rolls up every hour listed in `fleet_health_recompute` plus at most
-//! one catch-up hour. #197 fixes the signatures; #191 implements them.
+//! one catch-up hour. #197 fixes the signatures; #191 implements them. It is
+//! the only reader of `fleet_health_recompute` (#239).
 //!
 //! The reads of an hour run outside the write transaction, bounded by the
 //! `completed_at` indexes (`workflow_jobs_completed_idx`,
 //! `gitlab_jobs_completed_idx`); the hour's rows are then written in one
 //! short transaction (at most [`WRITE_BATCH`] rows per transaction), which
 //! also takes the hour off `fleet_health_recompute`, so re-running an hour
-//! gives the same rows. The catch-up walks the last 7 days one finished hour
-//! per pass, oldest first; where it got to is the `fleet_health.rollup_next`
-//! setting, absent until the first pass.
+//! gives the same rows. The same transaction lists the hours a re-run's
+//! earlier attempts completed in, so they are rolled again without them
+//! (#239). The catch-up walks the last 7 days one finished hour per pass,
+//! oldest first; where it got to is the `fleet_health.rollup_next` setting,
+//! absent until the first pass. No hour, listed or caught up, is rolled
+//! before its end plus [`ROLLUP_GRACE_MILLIS`].
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
 use gridops_core::fleet_health::{
-    HISTOGRAM_BUCKETS, HOUR_MILLIS, HealthWindow, Histogram, JobCategory, UNMANAGED,
-    histogram_bucket,
+    HISTOGRAM_BUCKETS, HOUR_MILLIS, HealthWindow, Histogram, JobCategory, ROLLUP_GRACE_MILLIS,
+    UNMANAGED, histogram_bucket,
 };
 use sqlx::{FromRow, SqlitePool};
 
@@ -83,6 +87,24 @@ SELECT gj.category,
   LEFT JOIN workload_intents intent ON intent.id=p.intent_id
  WHERE gj.completed_at>=? AND gj.completed_at<?"#;
 
+/// The other hours in which the earlier attempts of the hour's re-runs
+/// completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
+/// rolled while its attempt was still the run's newest, so it counts there
+/// until the hour is rolled again (#239). The hour itself is left out; its own
+/// rows already read only final attempts.
+const EARLIER_ATTEMPT_HOURS: &str = r#"
+SELECT DISTINCT earlier.completed_at-(earlier.completed_at%3600000) AS hour
+  FROM workflow_jobs wj
+  JOIN workflow_job_sync sync ON sync.job_id=wj.id
+  JOIN workflow_jobs earlier ON earlier.run_id=wj.run_id AND earlier.status='completed'
+  LEFT JOIN workflow_job_sync earlier_sync ON earlier_sync.job_id=earlier.id
+ WHERE wj.completed_at>=? AND wj.completed_at<?
+   AND sync.run_attempt>1
+   AND COALESCE(earlier_sync.run_attempt,1)<sync.run_attempt
+   AND earlier.completed_at>=?
+   AND (earlier.completed_at<? OR earlier.completed_at>=?)
+ ORDER BY hour"#;
+
 /// One counted job, as one of the hour's reads sees it.
 #[derive(Debug, FromRow)]
 struct JobFact {
@@ -133,31 +155,40 @@ impl Default for HourTotals {
 type RowKey = (String, String, JobCategory);
 
 /// Writes the rows of the hour starting at `hour` (epoch ms, on a whole
-/// hour), replacing what is there, and takes the hour off
-/// `fleet_health_recompute`.
+/// hour), replacing what is there, takes the hour off
+/// `fleet_health_recompute`, and lists there the hours its re-runs' earlier
+/// attempts completed in.
 ///
 /// # Errors
 /// A database read or write failed.
 pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<()> {
     let hour = hour - hour.rem_euclid(HOUR_MILLIS);
     let facts = hour_facts(db, hour).await?;
+    let earlier = earlier_attempt_hours(db, hour, now).await?;
     let mut rows = BTreeMap::<RowKey, HourTotals>::new();
     for fact in &facts {
         add(&mut rows, fact);
     }
-    write_hour(db, hour, now, &rows.into_iter().collect::<Vec<_>>()).await
+    write_hour(
+        db,
+        hour,
+        now,
+        &rows.into_iter().collect::<Vec<_>>(),
+        &earlier,
+    )
+    .await
 }
 
 /// One reconciler pass of the rollup: every hour listed in
-/// `fleet_health_recompute` that has finished, oldest first, then at most
-/// one catch-up hour of the last 7 days.
+/// `fleet_health_recompute` that is past its grace, oldest first, then at
+/// most one catch-up hour of the last 7 days, once it is past its grace too.
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
     let listed: Vec<i64> =
         sqlx::query_scalar("SELECT hour FROM fleet_health_recompute WHERE hour<=? ORDER BY hour")
-            .bind(now - HOUR_MILLIS)
+            .bind(now - HOUR_MILLIS - ROLLUP_GRACE_MILLIS)
             .fetch_all(db)
             .await?;
     for hour in listed {
@@ -165,15 +196,16 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
     }
 
     // Catch-up: one finished hour per pass, oldest first, over the last 7
-    // days. The first pass starts at the window's oldest hour; one whose
-    // marker the sliding window has passed starts again at its oldest.
+    // days, each once its grace has passed so a late arrival still counts.
+    // The first pass starts at the window's oldest hour; one whose marker the
+    // sliding window has passed starts again at its oldest.
     let window_start = now - HealthWindow::Week.millis();
     let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
     let next = match next_hour(db).await? {
         Some(next) => next.max(window_start),
         None => window_start,
     };
-    if next + HOUR_MILLIS <= now {
+    if next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
         rollup_hour(db, next, now).await?;
         save_next_hour(db, next + HOUR_MILLIS, now).await?;
     }
@@ -202,6 +234,23 @@ async fn hour_facts(db: &SqlitePool, hour: i64) -> Result<Vec<JobFact>> {
     Ok(facts)
 }
 
+/// [`EARLIER_ATTEMPT_HOURS`] for the hour starting at `hour`, as of `now`.
+///
+/// # Errors
+/// The read failed.
+async fn earlier_attempt_hours(db: &SqlitePool, hour: i64, now: i64) -> Result<Vec<i64>> {
+    let end = hour + HOUR_MILLIS;
+    let oldest = now - HealthWindow::Week.millis();
+    Ok(sqlx::query_scalar::<_, i64>(EARLIER_ATTEMPT_HOURS)
+        .bind(hour)
+        .bind(end)
+        .bind(oldest - oldest.rem_euclid(HOUR_MILLIS))
+        .bind(hour)
+        .bind(end)
+        .fetch_all(db)
+        .await?)
+}
+
 /// Folds one job into the hour's rows: its machine from the placement (none
 /// is `unmanaged`, with no CPU-seconds), its category (NULL as `other`), its
 /// clamped duration and its two histogram buckets. A negative wait (clock
@@ -228,13 +277,15 @@ fn add(rows: &mut BTreeMap<RowKey, HourTotals>, fact: &JobFact) {
 
 /// Writes the hour's rows, replacing what is there and taking the hour off
 /// `fleet_health_recompute`: one short transaction per [`WRITE_BATCH`] rows,
-/// the first emptying the hour, the last also emptying its recompute entry
-/// (an hour with no jobs still gets both). An hour is one (host, pool,
-/// category) group per job that ran, so it is far below the batch size and
-/// one transaction writes it whole; the split only serves #179's rule that
-/// no transaction writes more than 500 rows, should a fleet ever grow that
-/// wide, and a failure between batches leaves the hour listed for a recompute
-/// that rewrites it from scratch.
+/// the first emptying the hour, the last also listing the `earlier` hours
+/// (its re-runs' earlier attempts, never the hour itself) and emptying the
+/// hour's own recompute entry (an hour with no jobs still gets both). An hour
+/// is one (host, pool, category) group per job that ran, so it is far below
+/// the batch size and one transaction writes it whole; the split only serves
+/// #179's rule that no transaction writes more than 500 rows, should a fleet
+/// ever grow that wide (the listings get a batch of their own when the last
+/// one has no room), and a failure between batches leaves the hour listed
+/// for a recompute that rewrites it from scratch.
 ///
 /// # Errors
 /// A write failed.
@@ -243,13 +294,15 @@ async fn write_hour(
     hour: i64,
     now: i64,
     rows: &[(RowKey, HourTotals)],
+    earlier: &[i64],
 ) -> Result<()> {
-    let batches = rows.chunks(WRITE_BATCH).collect::<Vec<_>>();
-    let batches = if batches.is_empty() {
-        vec![&[][..]]
-    } else {
-        batches
-    };
+    let mut batches = rows.chunks(WRITE_BATCH).collect::<Vec<_>>();
+    if batches
+        .last()
+        .is_none_or(|batch| batch.len() + earlier.len() > WRITE_BATCH)
+    {
+        batches.push(&[][..]);
+    }
     let last = batches.len() - 1;
     for (index, batch) in batches.into_iter().enumerate() {
         let mut tx = db.begin().await?;
@@ -288,6 +341,16 @@ async fn write_hour(
             .await?;
         }
         if index == last {
+            for listed in earlier {
+                sqlx::query(
+                    "INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)
+                     ON CONFLICT(hour) DO NOTHING",
+                )
+                .bind(listed)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
             sqlx::query("DELETE FROM fleet_health_recompute WHERE hour=?")
                 .bind(hour)
                 .execute(&mut *tx)

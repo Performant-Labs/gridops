@@ -51,6 +51,14 @@ pub const UNMANAGED: &str = "unmanaged";
 /// Milliseconds in an hour; every rollup hour is a multiple of it.
 pub const HOUR_MILLIS: i64 = 3_600_000;
 
+/// How long an ended hour waits before the rollups write it: no hour, listed
+/// or caught up, is rolled before `hour_end + ROLLUP_GRACE_MILLIS` (#239), so
+/// a job or sample recorded late (a missed webhook the poll finds, an agent
+/// that reports late) still counts in its own hour. The one copy of the rule:
+/// #204's source reads the hourly tables only for hours past it and computes
+/// every later hour of the window live.
+pub const ROLLUP_GRACE_MILLIS: i64 = 15 * 60_000;
+
 /// The number of fixed histogram buckets (`fleet_health_hourly`).
 pub const HISTOGRAM_BUCKETS: usize = 9;
 
