@@ -332,3 +332,173 @@ async fn save_next_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<()> {
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! #239's rollup fixes: a re-run whose attempts complete in different
+    //! hours counts once (item 6), and no hour, listed or caught up, is
+    //! rolled before `hour_end + 15 min`, so a late arrival inside that grace
+    //! still counts (item 7 and the plan review's finding 1).
+
+    use super::*;
+    use gridops_core::{
+        connect_database_path,
+        fleet_health::testdata::{self, JobSeed, SeededFleet},
+    };
+
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 3_600_000;
+    /// The grace an ended hour waits before it is rolled (#239).
+    const GRACE: i64 = 15 * MINUTE;
+    /// A whole hour.
+    const NOW: i64 = 1_800_000_000_000;
+
+    struct Harness {
+        directory: std::path::PathBuf,
+        db: SqlitePool,
+        fleet: SeededFleet,
+    }
+
+    impl Harness {
+        async fn new() -> Result<Self> {
+            let directory = std::env::temp_dir()
+                .join(format!("gridops-job-rollup-own-{}", uuid::Uuid::new_v4()));
+            let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+            let fleet = testdata::seed_fleet(&db).await?;
+            Ok(Self {
+                directory,
+                db,
+                fleet,
+            })
+        }
+
+        /// A successful job on io completing at `completed`, part of run
+        /// `run_id` at `attempt`.
+        async fn job(&self, id: i64, run_id: i64, attempt: i64, completed: i64) -> Result<()> {
+            let io = self.fleet.host("io")?.id.clone();
+            let mut job = JobSeed::completed(
+                id,
+                "unit tests",
+                Some(&io),
+                completed - 3 * MINUTE,
+                completed - 2 * MINUTE,
+                completed,
+            );
+            job.run_id = run_id;
+            job.run_attempt = attempt;
+            testdata::insert_jobs(&self.db, &self.fleet, &[job]).await
+        }
+
+        /// The jobs `fleet_health_hourly` counts in `hour`.
+        async fn counted(&self, hour: i64) -> Result<i64> {
+            Ok(sqlx::query_scalar(
+                "SELECT COALESCE(SUM(job_count),0) FROM fleet_health_hourly WHERE hour=?",
+            )
+            .bind(hour)
+            .fetch_one(&self.db)
+            .await?)
+        }
+
+        async fn listed(&self) -> Result<Vec<i64>> {
+            Ok(
+                sqlx::query_scalar("SELECT hour FROM fleet_health_recompute ORDER BY hour")
+                    .fetch_all(&self.db)
+                    .await?,
+            )
+        }
+
+        async fn list(&self, hour: i64, at: i64) -> Result<()> {
+            sqlx::query("INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)")
+                .bind(hour)
+                .bind(at)
+                .execute(&self.db)
+                .await?;
+            Ok(())
+        }
+
+        async fn finish(self) -> Result<()> {
+            self.db.close().await;
+            std::fs::remove_dir_all(self.directory)?;
+            Ok(())
+        }
+    }
+
+    /// Item 6: attempt 1 completes in hour A and is rolled there; the re-run
+    /// (attempt 2) completes in hour B. Rolling B lists A for a recompute (in
+    /// the same write transaction, and never B itself), and the next pass
+    /// re-rolls A, so the run counts once across the two hours.
+    #[tokio::test]
+    async fn a_re_run_whose_attempts_fall_in_different_hours_counts_once() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (a, b) = (NOW - 3 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 50, 1, a + 30 * MINUTE).await?;
+        rollup_hour(&harness.db, a, NOW).await?;
+        assert_eq!(harness.counted(a).await?, 1, "attempt 1, before the re-run");
+
+        harness.job(2, 50, 2, b + 10 * MINUTE).await?;
+        rollup_hour(&harness.db, b, NOW).await?;
+        assert_eq!(harness.counted(b).await?, 1, "attempt 2 in its own hour");
+        assert_eq!(
+            harness.listed().await?,
+            [a],
+            "rolling B lists attempt 1's hour, and not B"
+        );
+
+        run_pass(&harness.db, NOW).await?;
+        assert_eq!(
+            harness.counted(a).await? + harness.counted(b).await?,
+            1,
+            "the run counts once over A and B"
+        );
+        assert!(
+            harness.listed().await?.is_empty(),
+            "A was taken off the list"
+        );
+        harness.finish().await
+    }
+
+    /// Item 7: the catch-up rolls an ended hour only once `hour_end + 15 min
+    /// <= now`. A job finishing at 10:59:40 whose webhook was missed is
+    /// recorded by the poll after 11:00; it is still in hour 10's row.
+    #[tokio::test]
+    async fn the_catch_up_waits_15_minutes_so_a_late_arrival_still_counts() -> Result<()> {
+        let harness = Harness::new().await?;
+        let hour = NOW - HOUR;
+        save_next_hour(&harness.db, hour, NOW - HOUR).await?;
+        harness.job(1, 1, 1, hour + 30 * MINUTE).await?;
+
+        // 11:14:59: the hour ended but is still in its grace, so not rolled.
+        run_pass(&harness.db, NOW + GRACE - 1_000).await?;
+        assert_eq!(harness.counted(hour).await?, 0, "rolled inside the grace");
+
+        // The late one: completed 10:59:40, stored after 11:00.
+        harness.job(2, 2, 1, NOW - 20_000).await?;
+        run_pass(&harness.db, NOW + GRACE).await?;
+        assert_eq!(
+            harness.counted(hour).await?,
+            2,
+            "rolled at 11:15 with the late arrival"
+        );
+        harness.finish().await
+    }
+
+    /// The plan review's finding 1: a listed hour waits for the same grace,
+    /// so "an hour has rows ⟺ it is past its grace" holds for #204's source,
+    /// which computes every hour not yet past it live.
+    #[tokio::test]
+    async fn a_listed_hour_also_waits_for_the_grace() -> Result<()> {
+        let harness = Harness::new().await?;
+        let hour = NOW - HOUR;
+        harness.job(1, 1, 1, hour + 30 * MINUTE).await?;
+        harness.list(hour, NOW + MINUTE).await?;
+
+        run_pass(&harness.db, NOW + 5 * MINUTE).await?;
+        assert_eq!(harness.counted(hour).await?, 0, "rolled inside the grace");
+        assert_eq!(harness.listed().await?, [hour], "still listed");
+
+        run_pass(&harness.db, NOW + GRACE).await?;
+        assert_eq!(harness.counted(hour).await?, 1);
+        assert!(harness.listed().await?.is_empty());
+        harness.finish().await
+    }
+}

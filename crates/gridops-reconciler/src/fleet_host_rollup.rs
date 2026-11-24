@@ -338,4 +338,66 @@ mod tests {
     fn the_catch_up_reach_is_seven_whole_days() {
         assert_eq!(CATCH_UP_MILLIS, 7 * 24 * HOUR);
     }
+    /// Item 9: the catch-up rolls an ended hour only once `hour_end + 15 min
+    /// <= now`, as the job rollup does, so samples of the hour's last
+    /// minutes that land after it ends still count.
+    #[tokio::test]
+    async fn the_catch_up_waits_15_minutes_so_late_samples_still_count() -> Result<()> {
+        use gridops_core::{
+            connect_database_path,
+            fleet_health::testdata::{self, SampleSeed},
+        };
+        const NOW: i64 = 1_800_000_000_000;
+        const GRACE: i64 = 15 * MINUTE;
+        let directory =
+            std::env::temp_dir().join(format!("gridops-host-rollup-own-{}", uuid::Uuid::new_v4()));
+        let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let fleet = testdata::seed_fleet(&db).await?;
+        let io = fleet.host("io")?;
+        let hour = NOW - HOUR;
+        // The catch-up's next hour is the one that just ended.
+        sqlx::query("INSERT INTO settings (key,value,updated_at) VALUES (?,?,?)")
+            .bind(LAST_ROLLED_KEY)
+            .bind((hour - HOUR).to_string())
+            .bind(hour)
+            .execute(&db)
+            .await?;
+        let every_30_s = |from: i64, count: i64| -> Vec<SampleSeed> {
+            (0..count)
+                .map(|index| SampleSeed::at(from + index * 30_000))
+                .collect()
+        };
+        let online = || {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(online_minutes),0) FROM fleet_host_hourly
+                  WHERE hour=? AND host_id=?",
+            )
+            .bind(hour)
+            .bind(&io.id)
+            .fetch_one(&db)
+        };
+        let rows = || {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fleet_host_hourly WHERE hour=?")
+                .bind(hour)
+                .fetch_one(&db)
+        };
+
+        // The first 50 minutes arrive on time.
+        testdata::insert_samples(&db, io, &every_30_s(hour, 100)).await?;
+        run_pass(&db, NOW + GRACE - 1_000).await?;
+        assert_eq!(rows().await?, 0, "rolled inside the grace");
+
+        // The last 10 minutes arrive late, after the hour ended.
+        testdata::insert_samples(&db, io, &every_30_s(hour + 50 * MINUTE, 20)).await?;
+        run_pass(&db, NOW + GRACE).await?;
+        assert_eq!(
+            online().await?,
+            60,
+            "rolled at hour end + 15 min with every minute"
+        );
+
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
 }

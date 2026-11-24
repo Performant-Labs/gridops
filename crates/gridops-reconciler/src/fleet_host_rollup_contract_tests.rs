@@ -314,18 +314,37 @@ async fn rolling_a_machine_hour_up_again_gives_the_same_row() -> Result<()> {
     harness.finish().await
 }
 
+/// #239 item 8: `fleet_health_recompute` is the job rollup's (#191): a
+/// machine row does not depend on job categories, so the machine rollup
+/// neither reads nor clears the list. Were it to clear it, the hours #190
+/// listed would be lost whenever the job rollup's pass failed first. And it
+/// never rolls an hour that has not ended, listed or not.
 #[tokio::test]
-async fn a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list() -> Result<()> {
+async fn a_pass_leaves_the_recompute_list_to_the_job_rollup() -> Result<()> {
     let harness = Harness::new().await?;
     harness.samples("io", H, 120, |_, _| {}).await?;
-    sqlx::query("INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)")
-        .bind(H)
-        .bind(NOW - MINUTE)
-        .execute(&harness.db)
-        .await?;
-    fleet_host_rollup::run_pass(&harness.db, NOW).await?;
-    let rows = rows(&harness.db, H).await?;
-    assert_eq!(row_for(&rows, &harness.id("io")?)?.online_minutes, 60);
+    harness.samples("io", NOW, 60, |_, _| {}).await?;
+    for hour in [H, NOW] {
+        sqlx::query("INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)")
+            .bind(hour)
+            .bind(NOW - MINUTE)
+            .execute(&harness.db)
+            .await?;
+    }
+    fleet_host_rollup::run_pass(&harness.db, NOW + 30 * MINUTE).await?;
+    let listed: Vec<i64> =
+        sqlx::query_scalar("SELECT hour FROM fleet_health_recompute ORDER BY hour")
+            .fetch_all(&harness.db)
+            .await?;
+    assert_eq!(
+        listed,
+        [H, NOW],
+        "both hours still listed for the job rollup"
+    );
+    assert!(
+        rows(&harness.db, NOW).await?.is_empty(),
+        "the hour in progress was rolled"
+    );
     harness.finish().await
 }
 

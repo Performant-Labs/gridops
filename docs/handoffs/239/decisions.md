@@ -82,3 +82,31 @@
     - `gh pr diff 237` (`list_hours`, no rollup edits);
     - `gh pr list`;
     - `grep` for `fleet_health_recompute`, `window.millis()` and `host_samples`.
+
+## Phase 4 Tester (T, author / RED) - 2026-11-24T02:58:07-08:00
+- **Decided:** RED is valid (`docs/handoffs/239/handoff-T-red.md`). 18 tests are new or updated. 17 fail on their feature assertion; 1 is a preservation guard that passes by design.
+  - **`score.rs`, items 1-5:**
+    - 4 covered-time tests: 1h at :30, 24h at H+10 min, whole minutes at H+5:29 and H+0:29, and busy share.
+    - An outage test for item 2.
+    - Tests for item 3 (0 online minutes) and item 4 (CPU budget 0).
+    - An unrounded-combine test for item 5.
+    - 2 pinned values updated: the fleet infra score 77 becomes 80 (item 2), and host `a` 56 becomes 55 (item 5). Raw start reliability 52.63 makes host `a` 55.41, not 55.5.
+    - A guard that the busy-share gate reads the rounded queue score (rule (h)).
+  - **`speed.rs`, items 10-11:** `topKeys` holds only ratios above 1.0, and a job counts once despite a duplicate older runner row or a gen-2 placement.
+  - **`fleet_health_rollup.rs` (new `mod tests`):** item 6 (a cross-hour re-run lists the earlier hour and counts once), item 7 (catch-up grace with a late arrival), and A warn 1 (a listed hour waits for the grace).
+  - **`fleet_host_rollup.rs`:** item 9 (catch-up grace with late samples).
+  - **`fleet_host_rollup_contract_tests.rs`:** item 8. It replaces `a_pass_rolls_up_a_listed_hour_and_takes_it_off_the_list` with `a_pass_leaves_the_recompute_list_to_the_job_rollup`, the one contract change in scope.
+  - The tests spell the grace as the literal `15 * MINUTE` rather than `ROLLUP_GRACE_MILLIS`, so they compile before the constant exists.
+- **Assumed:**
+  - #204's live hours use the same `HourlyHostRow` and `HourlyJobRow` shapes as rolled ones, so "the ended hour supplied as the source would supply it" is a plain row in `host_hourly`.
+  - A duplicate runner row is older (`created_at` lower) than the live one, which is the re-registration case 0013 allows.
+- **Hedged:**
+  - The fixture concern guard (`on_the_fixture_…`) wasn't recomputed by hand under all five scoring fixes. It stays a guard, and if it fails F adjusts `fake.rs` data, not the test.
+  - Item 6's test also asserts that the earlier hour is listed in `fleet_health_recompute`, because the brief and rule (d) make that listing the contract. It isn't only the end count.
+- **Evidence:**
+  - `cargo test -p gridops-core --features test-support --lib`: 353 passed, 12 failed.
+  - `cargo test -p gridops-reconciler`: 146 passed, 5 failed.
+  - In both crates the only failures are the new or updated tests.
+  - The `gridops-core` integration suites are green.
+  - `cargo fmt --check` is clean.
+  - `cargo +1.98.1 clippy --all-targets -D warnings` is clean on both crates.
