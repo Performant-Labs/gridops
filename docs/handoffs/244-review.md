@@ -27,6 +27,8 @@ Also added: a test that a miss on one window does not wait on another window's c
 | 8 | `job_categories.updated` audit with before and after, same transaction | Done | `job_categories.rs` :263-291 (`DELETE … RETURNING` for "before", `audit_in` on the save's transaction); `crates/gridops-api/src/auth.rs` :457 |
 | 9 | Compile message only for a 422, on its row; `AbortController` | Done | `job-categories-section.tsx` :113-150 |
 
+Done-when: the OpenAPI spec is updated for the new 422 details. Done: `docs/openapi/gridops-v1.json` (changed by #244) states the 200-rule and 1 KiB limits on the request body (`maxItems` 200, pattern `maxLength` 1024), the 422 for an empty or oversized pattern, the 422 with empty `details` for a list over 200 rules, the `job_categories.updated` audit event, and the 2 s timeout and 30 s retry rule on the health endpoint's 503.
+
 Notes, not defects:
 
 - Item 1: a request for a window whose response has expired, while that window's own computation is running, waits for it (at most the 2 s timeout). That is the existing "one computation shared by the concurrent misses" rule, not a hit.
