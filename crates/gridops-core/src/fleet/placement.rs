@@ -41,21 +41,79 @@ pub struct Placement {
     pub updated_at: i64,
 }
 
+/// What [`placements`] and [`ended_placements_to_finish`] read of a
+/// placement, followed by `$filter` (its `WHERE` and `ORDER BY`).
+macro_rules! select_placements {
+    ($filter:literal) => {
+        concat!(
+            "SELECT p.id,p.workload_id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
+                    pr.runtime_kind,pr.mode,pr.labels_json
+               FROM workload_placements p
+               JOIN workload_intents i ON i.id=p.intent_id
+               JOIN pool_execution_profiles pr ON pr.id=i.profile_id
+             ",
+            $filter
+        )
+    };
+}
+
 /// Placements in any of `states`, oldest first.
 pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placement>, FleetError> {
     let states = serde_json::to_string(states).map_err(|_| FleetError::Invariant("states"))?;
-    let rows = sqlx::query(
-        "SELECT p.id,p.workload_id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
-                pr.runtime_kind,pr.mode,pr.labels_json
-           FROM workload_placements p
-           JOIN workload_intents i ON i.id=p.intent_id
-           JOIN pool_execution_profiles pr ON pr.id=i.profile_id
-          WHERE p.state IN (SELECT value FROM json_each(?))
-          ORDER BY p.created_at,p.id",
-    )
+    let rows = sqlx::query(select_placements!(
+        "WHERE p.state IN (SELECT value FROM json_each(?))
+          ORDER BY p.created_at,p.id"
+    ))
     .bind(states)
     .fetch_all(pool)
     .await?;
+    to_placements(rows)
+}
+
+/// Ended placements (`failed`, `cleaned` or `uncertain`) the reconciler still
+/// has something to do for, oldest first (#259):
+///
+/// - every `uncertain` placement, which is cleaned up until it is `cleaned`;
+/// - one whose runner row is still in service (not `deleted` or `failed`),
+///   which the reconciler retires, or replaces after a failed start;
+/// - a `failed` one that was never started and still holds capacity or has
+///   no recorded absence, which [`abandon_unstarted`] releases and records.
+///
+/// A placement that ended and was settled is never read again. These are
+/// almost every placement ever made, and reading and finishing them all on
+/// every pass made each pass's work, and the reconciler's memory, grow with
+/// the fleet's history until the reconciler was killed at its memory limit.
+pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placement>, FleetError> {
+    // Each branch is read through an index, so the read costs what is left
+    // to do, not the history: in-service runners are found from
+    // `runners(pool_id,status)` (the `CROSS JOIN` keeps that order), not by
+    // visiting every cleaned placement.
+    let rows = sqlx::query(select_placements!(
+        "WHERE p.id IN (
+            SELECT id FROM workload_placements WHERE state='uncertain'
+            UNION
+            SELECT ended.id FROM runners r CROSS JOIN workload_placements ended
+                ON ended.workload_id=r.id
+             WHERE r.pool_id IN (SELECT id FROM runner_pools)
+               AND r.status NOT IN ('deleted','failed')
+               AND ended.state IN ('failed','cleaned')
+            UNION
+            SELECT failed.id FROM workload_placements failed
+             WHERE failed.state='failed'
+               AND NOT EXISTS (SELECT 1 FROM host_commands c
+                                WHERE c.placement_id=failed.id AND c.kind='start_runner')
+               AND (failed.local_absence_proven_at IS NULL
+                    OR failed.delayed_starts_excluded_at IS NULL
+                    OR EXISTS (SELECT 1 FROM capacity_allocations a
+                                WHERE a.placement_id=failed.id AND a.state!='released')))
+          ORDER BY p.created_at,p.id"
+    ))
+    .fetch_all(pool)
+    .await?;
+    to_placements(rows)
+}
+
+fn to_placements(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<Placement>, FleetError> {
     rows.into_iter()
         .map(|row| {
             Ok(Placement {

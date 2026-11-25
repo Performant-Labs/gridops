@@ -31,6 +31,15 @@ Known problems in the current release are in the README's
   `category` column, and the reconciler keeps 90 days of fleet health
   rollups. See [Fleet health](docs/design/fleet-health.md). (#197)
 
+### Fixed
+
+- **The reconciler no longer runs out of memory as the fleet's history
+  grows.** Every pass read and finished every fleet placement that had ever
+  ended, nearly every placement ever made, so each pass's work and the
+  reconciler's memory grew with the history until the kernel killed it at its
+  512 MiB limit, every 15 to 60 minutes. A pass now reads only the ended
+  placements with something left to do. (#259)
+
 ## 0.2.0 - 2026-11-22
 
 The version was set to 0.2.0 on 2026-11-04 (#120), but that tag was never

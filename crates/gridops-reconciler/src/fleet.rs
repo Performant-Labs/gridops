@@ -291,9 +291,9 @@ pub(super) async fn tick(app: &Reconciler) -> Result<()> {
         }
     }
     let mut retried = false;
-    for placement in
-        placement::placements(&app.database, &["failed", "cleaned", "uncertain"]).await?
-    {
+    // Only the ended placements with something left to do: the settled ones
+    // are nearly every placement ever made (#259).
+    for placement in placement::ended_placements_to_finish(&app.database).await? {
         retried |= finish(app, &placement).await?;
     }
     if retried {
