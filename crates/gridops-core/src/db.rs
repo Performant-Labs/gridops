@@ -344,7 +344,11 @@ mod tests {
         .fetch_one(&pool)
         .await?
         .get::<i64, _>("count");
-        assert_eq!(tables, 79);
+        assert_eq!(tables, 81);
+        // #259: the fleet placements still to finish, and the sweep that
+        // queues those that ended before the queue existed.
+        assert!(table_exists(&pool, "placement_finish_queue").await?);
+        assert!(table_exists(&pool, "placement_finish_sweep").await?);
         assert!(table_exists(&pool, "workflow_job_sync").await?);
         assert!(table_exists(&pool, "runner_pool_waits").await?);
         assert!(table_exists(&pool, "runner_pool_exclusive_labels").await?);

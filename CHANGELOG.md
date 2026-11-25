@@ -19,11 +19,13 @@ Known problems in the current release are in the README's
   job tables' `completed_at`. Existing jobs keep their rows and stay
   unclassified; nothing is rebuilt. Timed on a copy of a 3 GB production
   database: under a second. (#197)
-- Migration `0052` adds two small partial indexes: failed fleet placements
-  whose absence is not yet recorded, and capacity allocations not yet
-  released. The reconciler reads through them to find what it still has to
-  settle (#259). Timed on a synthetic database with 60,000 placements:
-  under 10 ms.
+- Migration `0052` adds the fleet placement finish queue: the ended
+  placements the reconciler still has to finish, queued by triggers when a
+  placement ends (#259). It writes nothing to the existing placements, so it
+  takes the same time on any database: 1 ms on a synthetic one with 60,000
+  placements. After the upgrade the reconciler queues the placements that
+  ended earlier and still have work left, 500 rowids per short write
+  transaction (about 4 ms each), at most 40 batches a pass.
 
 ### Added
 
