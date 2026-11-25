@@ -103,7 +103,10 @@ pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placeme
 /// Takes `placement` off the finish queue: a pass finished it in `state`, a
 /// failed or cleaned one, and nothing is left to do for it. Answers whether
 /// it was taken off. A placement that has since moved on to another state
-/// stays queued, so it is finished in that state too.
+/// stays queued, so it is finished in that state too; so does one whose
+/// runner row came back into service after `finish` retired it (a late job
+/// event), which the queue's trigger on `runners` could not queue again while
+/// it was still queued: the next pass retires the runner again.
 ///
 /// Nothing is left once `finish` has run for a failed or cleaned placement:
 /// its runner row is retired (or replaced through a retried start), and an
@@ -119,7 +122,9 @@ pub async fn finished(
     Ok(sqlx::query(
         "DELETE FROM placement_finish_queue
           WHERE placement_id=?1 AND ?2 IN ('failed','cleaned')
-            AND EXISTS (SELECT 1 FROM workload_placements WHERE id=?1 AND state=?2)",
+            AND EXISTS (SELECT 1 FROM workload_placements p WHERE p.id=?1 AND p.state=?2
+                         AND NOT EXISTS (SELECT 1 FROM runners r WHERE r.id=p.workload_id
+                                          AND r.status NOT IN ('deleted','failed')))",
     )
     .bind(placement.to_string())
     .bind(state)

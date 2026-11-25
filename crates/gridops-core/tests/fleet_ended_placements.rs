@@ -328,7 +328,14 @@ async fn every_placement_that_ends_is_finished_once_oldest_first() -> Result<()>
     );
 
     // A placement read in one state that has since ended in another is not
-    // taken off: it has not been finished in its new state.
+    // taken off: it has not been finished in its new state. (Its runner is
+    // retired first, as `finish` does.)
+    sqlx::query(
+        "UPDATE runners SET status='failed' WHERE id=(SELECT workload_id FROM workload_placements WHERE id=?)",
+    )
+    .bind(&running)
+    .execute(&d.db)
+    .await?;
     assert!(!placement::finished(&d.db, running.parse()?, "cleaned").await?);
     assert!(placement::finished(&d.db, running.parse()?, "failed").await?);
     assert_eq!(
@@ -356,6 +363,12 @@ async fn a_finished_placement_whose_runner_comes_back_is_finished_again() -> Res
         .bind(&runner)
         .execute(&d.db)
         .await?;
+    assert_eq!(ids(&d.db).await?, std::slice::from_ref(&placement));
+
+    // Revived again after the pass retired it but before the pass took the
+    // placement off: the placement stays queued, so the next pass retires
+    // the runner again.
+    assert!(!placement::finished(&d.db, placement.parse()?, "failed").await?);
     assert_eq!(ids(&d.db).await?, std::slice::from_ref(&placement));
 
     // Retired and finished again, it leaves; a runner that only changes
