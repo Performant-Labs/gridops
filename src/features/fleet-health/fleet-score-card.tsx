@@ -24,7 +24,8 @@ const trendTick = (value: number, window: HealthWindow) =>
 /**
  * The fleet score card (#195): the score in its band (`ScoreGauge` from
  * `~/components/charts/score-gauge`, which carries `data-band`) with the trend from snapshots
- * under it as a small `LineChart`, and one row per component (`data-component-key`) beside it:
+ * under it as a small `LineChart`, and one row per component (`data-component-key`, anchored as
+ * `#fleet-component-<key>` for its concern's link) beside it:
  * its score as a bar in its band's colour, its weight, and its deduction sentence. A component
  * without a score (`data-insufficient="true"`) is greyed out with a tooltip saying why.
  */
@@ -121,8 +122,10 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
   const reason = component.deduction || INSUFFICIENT_REASON;
   const row = (
     <li
-      className={cn("min-w-0", insufficient && "cursor-help opacity-60")}
+      className={cn("min-w-0 scroll-mt-4", insufficient && "cursor-help opacity-60")}
       data-component-key={component.key}
+      // The anchor a `fleet-component:<key>` concern links to (#253).
+      id={`fleet-component-${component.key}`}
       // The reason rides in a tooltip, so the row itself takes focus for keyboard and touch.
       tabIndex={insufficient ? 0 : undefined}
       {...(insufficient ? { "data-insufficient": "true" as const } : {})}

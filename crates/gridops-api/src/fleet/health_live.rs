@@ -11,21 +11,29 @@
 //! every installation, with the queued jobs by category) and
 //! `crate::resources::fleet_root_disks` (the Overview's disk alarm read: the
 //! observed root disk of each machine with a recent heartbeat, #240). The
-//! only queries here are the ones those two can't answer, each
-//! a bounded index read (#179): a machine's newest sample (per host, on
-//! `host_samples`' `(host_id, observed_at, id)` index), the categories of the
-//! jobs its runners are running now (per host, on `workload_placements`'
-//! `(host_id, state)` index), the oldest waiting job's name and repository
+//! only queries here are the ones those can't answer, each a bounded index
+//! read (#179): a machine's newest sample (per host, on `host_samples`'
+//! `(host_id, observed_at, id)` index), the categories of the jobs its
+//! runners are running now (per host, on `workload_placements`'
+//! `(host_id, state)` index; a GitLab runner's job on the partial index of
+//! active GitLab jobs), its start failures and starts in the last hour (per
+//! host, on `fleet_events_host_kind_time_idx` and
+//! `host_commands_host_kind_issued_idx`), the GitLab jobs waiting for a
+//! runner (`gridops_core::autoscaling::waiting_gitlab_jobs`, on the partial index of
+//! active GitLab jobs, #253), the oldest waiting job's name and repository
 //! (by id), and the pool names (a table of a few rows).
 
 use std::collections::{BTreeMap, HashMap};
 
 use gridops_core::disk;
+use gridops_core::fleet::failure::{PLACEMENT_FAILED_EVENT, PlacementFailureReason};
 use gridops_core::fleet::registry::host_live_reads;
+use gridops_core::fleet::start_health::is_start_failure;
 use gridops_core::fleet_health::{
     Concern, ConcernSubject, FleetLiveStats, HostLiveStats, JobCategory, OldestQueued, PoolQueue,
     Severity,
 };
+use serde_json::Value;
 use sqlx::{Row as _, SqlitePool};
 
 /// A machine is online while it has a sample this recent.
@@ -33,6 +41,15 @@ const ONLINE_WINDOW_MILLIS: i64 = 5 * 60_000;
 /// The oldest waiting job warns past this wait and is critical past twice it.
 const QUEUED_WARN_MILLIS: i64 = 5 * 60_000;
 const QUEUED_CRITICAL_MILLIS: i64 = 10 * 60_000;
+/// How far back a machine's start failures and starts count.
+const START_FAILURE_WINDOW_MILLIS: i64 = 3_600_000;
+/// The `start-failures` concern needs at least this many start failures in
+/// the hour, so one unlucky start on a quiet machine raises nothing.
+const START_FAILURES_MIN: u32 = 3;
+/// ... and at least this share of the hour's starts failing (warning), or
+/// this one (critical), in percent.
+const START_FAILURE_WARN_PERCENT: u32 = 25;
+const START_FAILURE_CRITICAL_PERCENT: u32 = 50;
 
 /// The fleet's and every machine's live stats at `now`, and the live
 /// concerns.
@@ -46,6 +63,7 @@ pub(crate) async fn collect_live(
 ) -> anyhow::Result<(FleetLiveStats, Vec<HostLiveStats>, Vec<Concern>)> {
     let reads = host_live_reads(db, now).await?;
     let queue = crate::resources::fleet_queue_breakdown(db, now).await?;
+    let gitlab_waiting = gridops_core::autoscaling::waiting_gitlab_jobs(db).await?;
     let disks: HashMap<String, crate::resources::FleetRootDisk> =
         crate::resources::fleet_root_disks(db, now)
             .await?
@@ -89,21 +107,34 @@ pub(crate) async fn collect_live(
         // GitHub's `associate_runner_with_job` sets `current_job_id`; a
         // GitLab runner is only ever marked busy (`set_gitlab_runner_busy`:
         // `status='busy'`, `busy=1`), and so is a GitHub runner GitHub says
-        // is running a job GridOps never matched. A job is categorised from
-        // its `workflow_jobs` row only for a GitHub runner (another
-        // platform's job ids are not `workflow_jobs` ids); with no row it is
-        // `other`, like a NULL category. Runs on `workload_placements`'
-        // `(host_id, state)` index; running fix placements (a category no
-        // job row has) come from the counts.
+        // is running a job GridOps never matched. A GitHub runner's job is
+        // its `workflow_jobs` row by `current_job_id`; a GitLab runner's is
+        // the `gitlab_jobs` row running on it (#253): its `gitlab_runner_id`
+        // on the runner's GitLab instance (runner ids are unique per
+        // instance), status `running`, newest first, read on the partial
+        // index of active jobs. Another platform's job ids are neither. No
+        // job row, or a NULL category, is `other`. Runs on
+        // `workload_placements`' `(host_id, state)` index; running fix
+        // placements (a category no job row has) come from the counts.
         let running: Vec<(Option<String>, i64)> = sqlx::query_as(
-            "SELECT wj.category,COUNT(*) FROM workload_placements p
+            "SELECT COALESCE(wj.category,gj.category),COUNT(*) FROM workload_placements p
                JOIN workload_intents i ON i.id=p.intent_id
                JOIN runners r ON r.id=p.runner_id
                LEFT JOIN workflow_jobs wj
                  ON wj.id=r.current_job_id AND r.ci_platform='github'
+               LEFT JOIN gitlab_jobs gj ON r.ci_platform='gitlab' AND gj.id=(
+                    SELECT job.id FROM gitlab_jobs job
+                      JOIN gitlab_connections job_connection ON job_connection.id=job.connection_id
+                     WHERE job.status IN ('created','waiting_for_resource','preparing','pending','running')
+                       AND job.status='running'
+                       AND job.gitlab_runner_id=r.gitlab_runner_id
+                       AND job_connection.base_url=(
+                             SELECT runner_connection.base_url FROM gitlab_connections runner_connection
+                              WHERE runner_connection.id=r.gitlab_connection_id)
+                     ORDER BY job.status_changed_at DESC,job.id DESC LIMIT 1)
               WHERE p.host_id=? AND p.state='running' AND i.kind='ci_runner'
                 AND (r.current_job_id IS NOT NULL OR (r.status='busy' AND r.busy=1))
-              GROUP BY wj.category",
+              GROUP BY COALESCE(wj.category,gj.category)",
         )
         .bind(&id)
         .fetch_all(db)
@@ -123,6 +154,14 @@ pub(crate) async fn collect_live(
         for (category, jobs) in &running_by_category {
             *fleet_running.entry(*category).or_insert(0) += *jobs;
         }
+
+        // Its start failures in the last hour, as the start gate and the
+        // machine rollup count them (`is_start_failure`): not every
+        // `placement_failed` event, which `failed_placements_last_hour`
+        // counts for `/fleet/hosts` (#253).
+        let failures =
+            start_failures_since(db, &id, now - START_FAILURE_WINDOW_MILLIS, now).await?;
+        let start_failures = u32::try_from(failures.len())?;
 
         let measurement = read.latest_root_measurement.as_ref();
         let narrow = |value: Option<u64>| -> anyhow::Result<Option<u32>> {
@@ -148,8 +187,50 @@ pub(crate) async fn collect_live(
             running_by_category,
             cpu_reserved_millis: u32::try_from(read.physical_allocation.charged.cpu_millis.get())?,
             memory_reserved_mib: u32::try_from(read.physical_allocation.charged.memory_mib.get())?,
-            start_failures_last_hour: u32::try_from(read.failed_placements_last_hour.get())?,
+            start_failures_last_hour: start_failures,
         });
+
+        // `start-failures`: at least 3 start failures in the hour that are
+        // at least a quarter of its starts (critical from half). A start is a
+        // placement whose `start_runner` command was issued in the hour, as
+        // the machine rollup counts `start_attempts`; a failure of a start
+        // issued before the hour counts as one of them, so the share is never
+        // over 100 %.
+        if start_failures >= START_FAILURES_MIN {
+            let starts: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT placement_id) FROM host_commands
+                  WHERE host_id=? AND kind='start_runner' AND issued_at>=? AND issued_at<=?",
+            )
+            .bind(&id)
+            .bind(now - START_FAILURE_WINDOW_MILLIS)
+            .bind(now)
+            .fetch_one(db)
+            .await?;
+            let starts = u32::try_from(starts)?.max(start_failures);
+            let percent = start_failures * 100 / starts;
+            let severity = if start_failures * 100 >= START_FAILURE_CRITICAL_PERCENT * starts {
+                Some(Severity::Critical)
+            } else if start_failures * 100 >= START_FAILURE_WARN_PERCENT * starts {
+                Some(Severity::Warning)
+            } else {
+                None
+            };
+            if let Some(severity) = severity {
+                concerns.push(Concern {
+                    key: format!("start-failures:{id}"),
+                    severity,
+                    title: format!(
+                        "{name} failed {start_failures} of {starts} runner starts in the last hour"
+                    ),
+                    detail: format!(
+                        "{percent}% of the runner starts on {name} in the last hour failed on the machine; an operator's release or a runner removed before it started does not count."
+                    ),
+                    subject: ConcernSubject::Host(id.clone()),
+                    link: Some(format!("/fleet/health#machine-{id}")),
+                    since: failures.iter().copied().min(),
+                });
+            }
+        }
 
         // `host-offline`: a budgeted machine with no sample in five minutes.
         if read.physical_budget.cpu_millis.get() > 0 && recent.is_none() {
@@ -244,18 +325,63 @@ pub(crate) async fn collect_live(
         }
     }
 
+    // The GitLab jobs waiting for a runner (#253): the Overview's split is
+    // GitHub's, so they are added to it here, each under the pool the same
+    // ownership rule gives it, or unmatched. The oldest one an autoscaling
+    // pool will start a runner for is a candidate for the oldest waiting
+    // job, as a GitHub job is.
+    let mut gitlab_by_pool: HashMap<String, i64> = HashMap::new();
+    let mut gitlab_by_category: BTreeMap<JobCategory, i64> = BTreeMap::new();
+    let mut gitlab_unmatched = 0_i64;
+    let mut gitlab_oldest: Option<&gridops_core::autoscaling::WaitingGitlabJob> = None;
+    for job in &gitlab_waiting {
+        *gitlab_by_category
+            .entry(JobCategory::from_column(job.category.as_deref()))
+            .or_default() += 1;
+        match &job.owner {
+            Some(owner) => {
+                *gitlab_by_pool.entry(owner.pool_id.clone()).or_default() += 1;
+                if !owner.manual
+                    && gitlab_oldest.is_none_or(|oldest| job.queued_at < oldest.queued_at)
+                {
+                    gitlab_oldest = Some(job);
+                }
+            }
+            None => gitlab_unmatched += 1,
+        }
+    }
+    let gitlab_oldest_wait = gitlab_oldest.map(|job| now.saturating_sub(job.queued_at));
+
     // The oldest job waiting for capacity, with its name and repository for
     // the concern's sentence (a lookup by id; the breakdown only counts). The
     // breakdown's job clause already requires the run and repository rows, so
     // the lookup only misses if the job left the queue between the two reads;
-    // the concern below still fires then, unnamed.
+    // the concern below still fires then, unnamed. A GitLab job that has
+    // waited longer is the oldest instead, named by its job name and project
+    // path (or its id, for a row written before they were recorded).
     let mut oldest_queued = None;
     let mut oldest_unnamed = None;
-    if let Some((job_id, wait_ms)) = queue
+    let github_oldest = queue
         .queue
         .oldest_waiting_job
-        .zip(queue.queue.oldest_waiting_millis)
+        .zip(queue.queue.oldest_waiting_millis);
+    if let Some(job) =
+        gitlab_oldest.filter(|_| gitlab_oldest_wait > github_oldest.map(|(_, wait_ms)| wait_ms))
     {
+        oldest_queued = Some(OldestQueued {
+            job_id: job.job_id,
+            job_name: job
+                .job_name
+                .clone()
+                .unwrap_or_else(|| format!("GitLab job {}", job.job_id)),
+            repository: job
+                .project_path
+                .clone()
+                .unwrap_or_else(|| job.base_url.clone()),
+            queued_at: job.queued_at,
+            wait_ms: now.saturating_sub(job.queued_at),
+        });
+    } else if let Some((job_id, wait_ms)) = github_oldest {
         let job = sqlx::query(
             "SELECT wj.name AS name,wj.created_at AS queued_at,repo.full_name AS repository
                FROM workflow_jobs wj
@@ -281,25 +407,28 @@ pub(crate) async fn collect_live(
     }
 
     // `unmatched-jobs`: queued jobs no pool can run, as the Overview splits
-    // them.
-    if queue.queue.unmatched > 0 {
-        let unmatched = queue.queue.unmatched;
+    // them, and the GitLab jobs no pool will run. Why a GitLab job has no
+    // pool is not split out, so with any of them the sentence is the
+    // general one.
+    let unmatched = queue.queue.unmatched + gitlab_unmatched;
+    if unmatched > 0 {
         let one = unmatched == 1;
         let job = if one { "job" } else { "jobs" };
         let asks = if one { "asks" } else { "ask" };
         let matches_ = if one { "matches" } else { "match" };
-        let detail = if queue.queue.unavailable == 0 {
+        let detail = if gitlab_unmatched == 0 && queue.queue.unavailable == 0 {
             format!(
                 "{unmatched} queued {job} {asks} for labels no runner pool offers; {} will wait until one does.",
                 if one { "it" } else { "they" }
             )
-        } else if queue
-            .queue
-            .missing_labels
-            .iter()
-            .map(|missing| missing.jobs)
-            .sum::<i64>()
-            == 0
+        } else if gitlab_unmatched == 0
+            && queue
+                .queue
+                .missing_labels
+                .iter()
+                .map(|missing| missing.jobs)
+                .sum::<i64>()
+                == 0
         {
             format!(
                 "{unmatched} queued {job} {asks} for a pool that is paused, tripped or on another platform; nothing will start for {}.",
@@ -361,9 +490,11 @@ pub(crate) async fn collect_live(
             .await?
             .into_iter()
             .collect();
-    let mut queued_by_pool = queue
-        .queue
-        .by_pool
+    let mut by_pool = queue.queue.by_pool.clone();
+    for (pool_id, jobs) in gitlab_by_pool {
+        *by_pool.entry(pool_id).or_default() += jobs;
+    }
+    let mut queued_by_pool = by_pool
         .iter()
         .filter(|(_, jobs)| **jobs > 0)
         .map(|(pool_id, queued)| -> anyhow::Result<PoolQueue> {
@@ -384,20 +515,58 @@ pub(crate) async fn collect_live(
             .then_with(|| left.pool_id.cmp(&right.pool_id))
     });
 
+    let mut queued_by_category = queue.by_category.clone();
+    for (category, jobs) in gitlab_by_category {
+        *queued_by_category.entry(category).or_default() += jobs;
+    }
     let fleet = FleetLiveStats {
-        queued_total: u32::try_from(queue.queue.total())?,
-        queued_by_category: queue
-            .by_category
+        queued_total: u32::try_from(queue.queue.total())? + u32::try_from(gitlab_waiting.len())?,
+        queued_by_category: queued_by_category
             .iter()
             .map(|(category, jobs)| Ok((*category, u32::try_from(*jobs)?)))
             .collect::<anyhow::Result<BTreeMap<_, _>>>()?,
         queued_by_pool,
-        queued_unmatched: u32::try_from(queue.queue.unmatched)?,
+        queued_unmatched: u32::try_from(unmatched)?,
         oldest_queued,
         running_total: fleet_running.values().sum(),
         running_by_category: fleet_running,
     };
     Ok((fleet, hosts, concerns))
+}
+
+/// The times of `host_id`'s start failures in `[from, to]`: its
+/// `placement_failed` events that `start_health::is_start_failure` puts on
+/// the machine, read and judged as `start_gate` and the machine rollup read
+/// them. One bounded read on `fleet_events_host_kind_time_idx`.
+async fn start_failures_since(
+    db: &SqlitePool,
+    host_id: &str,
+    from: i64,
+    to: i64,
+) -> anyhow::Result<Vec<i64>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT created_at,detail_json FROM fleet_events
+          WHERE host_id=? AND kind=? AND created_at>=? AND created_at<=?",
+    )
+    .bind(host_id)
+    .bind(PLACEMENT_FAILED_EVENT)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, detail_json)| {
+            let detail: Value = serde_json::from_str(detail_json).unwrap_or_default();
+            is_start_failure(
+                PlacementFailureReason::from_code(
+                    detail.get("reason").and_then(Value::as_str).unwrap_or(""),
+                ),
+                detail.get("agent_code").and_then(Value::as_str),
+            )
+        })
+        .map(|(created_at, _)| created_at)
+        .collect())
 }
 
 /// A wait as a person reads it: `42 s`, `7 min`, `10 min 1 s`.
@@ -708,8 +877,11 @@ mod tests {
 
     /// Item 6: a GitLab runner is running a job while it is busy
     /// (`status='busy'`, `busy=1`), which is all `set_gitlab_runner_busy`
-    /// writes: it never sets `current_job_id`. It counts once, as `other`
-    /// (its job is no `workflow_jobs` row), and not while it is online.
+    /// writes: it never sets `current_job_id`. It counts once, and not while
+    /// it is online. #253 item 4: it counts under the category of the
+    /// `gitlab_jobs` row running on it (by `gitlab_runner_id` on the
+    /// runner's GitLab instance), never as `other` because its job is not a
+    /// `workflow_jobs` row.
     #[tokio::test]
     async fn a_busy_gitlab_runner_counts_as_running_once_and_an_online_one_does_not() -> Result<()>
     {
@@ -726,6 +898,7 @@ mod tests {
         let mut gitlab =
             JobSeed::running(2, "rspec", Some(&io), NOW - 3 * MINUTE, NOW - 2 * MINUTE);
         gitlab.gitlab = true;
+        gitlab.category = Some(JobCategory::Build);
         testdata::insert_jobs(&seeded.db, &seeded.fleet, &[github, gitlab]).await?;
         let set_gitlab = |busy: bool, current_job_id: Option<i64>| {
             sqlx::query(
@@ -741,8 +914,8 @@ mod tests {
         set_gitlab(true, None).await?;
         assert_eq!(
             seeded.running("io").await?,
-            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
-            "the GitHub job, and the busy GitLab runner's"
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Build, 1)]),
+            "the GitHub job, and the busy GitLab runner's job by its own category"
         );
 
         set_gitlab(false, None).await?;
@@ -757,9 +930,568 @@ mod tests {
         set_gitlab(true, Some(1)).await?;
         assert_eq!(
             seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Build, 1)]),
+        );
+
+        // A job row with no category yet (the backfill hasn't run) is
+        // `other`, as a GitHub job's is.
+        sqlx::query("UPDATE gitlab_jobs SET category=NULL")
+            .execute(&seeded.db)
+            .await?;
+        assert_eq!(
+            seeded.running("io").await?,
             BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
         );
+
+        // A busy runner whose job is not running there (finished, or a job
+        // with the same runner id on another GitLab instance) is `other`.
+        sqlx::query("UPDATE gitlab_jobs SET category='build',status='success'")
+            .execute(&seeded.db)
+            .await?;
+        assert_eq!(
+            seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
+            "a finished GitLab job is not what the runner runs now"
+        );
+        sqlx::query("UPDATE gitlab_jobs SET status='running'")
+            .execute(&seeded.db)
+            .await?;
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('other-instance','other','https://gitlab.other','project',1,'acme/app','other.token','other.webhook',1,1)",
+        )
+        .execute(&seeded.db)
+        .await?;
+        sqlx::query("UPDATE gitlab_jobs SET connection_id='other-instance'")
+            .execute(&seeded.db)
+            .await?;
+        assert_eq!(
+            seeded.running("io").await?,
+            BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
+            "a job on another GitLab instance is not this runner's"
+        );
         seeded.close().await
+    }
+
+    /// The live stats of the machine `name`.
+    async fn host_stats(seeded: &Seeded, name: &str) -> Result<HostLiveStats> {
+        let id = seeded.id(name)?;
+        let (_, hosts, _) = collect_live(&seeded.db, NOW).await?;
+        hosts
+            .into_iter()
+            .find(|stats| stats.host_id == id)
+            .ok_or_else(|| anyhow::anyhow!("no live stats for {name}"))
+    }
+
+    /// #253 item 1: a machine's start failures in the last hour are the
+    /// `placement_failed` events the start gate and the machine rollup count
+    /// (`start_health::is_start_failure`): an operator's release, a runner
+    /// removed before its start, a registration timeout or a cancelled
+    /// command are not the machine's start failures.
+    #[tokio::test]
+    async fn start_failures_count_only_what_the_start_gate_counts() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let seeded = Seeded::new().await?;
+        let io = seeded.fleet.host("io")?.clone();
+        for (at, reason, agent_code) in [
+            (NOW - 10 * MINUTE, Reason::AgentSessionLost, None),
+            (NOW - 9 * MINUTE, Reason::OperatorReleased, None),
+            (NOW - 8 * MINUTE, Reason::RunnerRemovedBeforeStart, None),
+            (NOW - 7 * MINUTE, Reason::RegistrationTimedOut, None),
+            (NOW - 6 * MINUTE, Reason::AgentReported, Some("cancelled")),
+            // A real one, but over an hour ago.
+            (NOW - 61 * MINUTE, Reason::StartDeadlineExpired, None),
+        ] {
+            testdata::insert_placement_failure(&seeded.db, &io, at, reason, agent_code).await?;
+        }
+        assert_eq!(host_stats(&seeded, "io").await?.start_failures_last_hour, 1);
+        seeded.close().await
+    }
+
+    /// `n` runner starts on `name` in the last hour, `failed` of them failing
+    /// on the machine (a `placement_failed` event each, at the start).
+    async fn starts(seeded: &Seeded, name: &str, n: i64, failed: i64) -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+        use gridops_core::fleet_health::testdata::PlacementEnd;
+
+        let host = seeded.fleet.host(name)?.clone();
+        for index in 0..n {
+            let at = NOW - 50 * MINUTE + index * MINUTE;
+            let fails = index < failed;
+            let end = if fails {
+                PlacementEnd::Failed
+            } else {
+                PlacementEnd::Stopped
+            };
+            testdata::insert_start_attempt(&seeded.db, &seeded.fleet, &host, at, end).await?;
+            if fails {
+                testdata::insert_placement_failure(
+                    &seeded.db,
+                    &host,
+                    at + SECOND,
+                    Reason::StartDeadlineExpired,
+                    None,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// #253 item 2: a machine with at least 3 start failures that are at
+    /// least 25 % of its runner starts in the last hour raises
+    /// `start-failures:<host>`, a warning, critical from 50 %, worded as the
+    /// epic words it and linking to the machine's row.
+    #[tokio::test]
+    async fn a_machine_failing_a_share_of_its_starts_raises_a_start_failure_concern() -> Result<()>
+    {
+        let seeded = Seeded::new().await?;
+        starts(&seeded, "io", 12, 3).await?;
+        starts(&seeded, "Jupiter", 6, 3).await?;
+        starts(&seeded, "callisto", 13, 3).await?;
+        starts(&seeded, "europa", 2, 2).await?;
+        // Operator releases are not start failures, so they raise nothing
+        // however many there are.
+        let macbook = seeded.fleet.host("MacBookPro")?.clone();
+        for minute in 1..=5 {
+            testdata::insert_placement_failure(
+                &seeded.db,
+                &macbook,
+                NOW - minute * MINUTE,
+                gridops_core::fleet::failure::PlacementFailureReason::OperatorReleased,
+                None,
+            )
+            .await?;
+        }
+        let (_, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        let concern = |name: &str| -> Result<Option<Concern>> {
+            let key = format!("start-failures:{}", seeded.id(name)?);
+            Ok(concerns.iter().find(|concern| concern.key == key).cloned())
+        };
+
+        let io = concern("io")?.ok_or_else(|| anyhow::anyhow!("io: {concerns:?}"))?;
+        assert_eq!(io.severity, Severity::Warning, "3 of 12 is 25 %");
+        assert_eq!(io.title, "io failed 3 of 12 runner starts in the last hour");
+        assert_eq!(
+            io.link.as_deref(),
+            Some(format!("/fleet/health#machine-{}", seeded.id("io")?).as_str())
+        );
+        assert_eq!(io.subject, ConcernSubject::Host(seeded.id("io")?));
+        assert_eq!(
+            io.since,
+            Some(NOW - 50 * MINUTE + SECOND),
+            "the oldest failure"
+        );
+        assert!(io.detail.contains("25%"), "{}", io.detail);
+
+        let jupiter = concern("Jupiter")?.ok_or_else(|| anyhow::anyhow!("{concerns:?}"))?;
+        assert_eq!(jupiter.severity, Severity::Critical, "3 of 6 is 50 %");
+        assert_eq!(
+            jupiter.title,
+            "Jupiter failed 3 of 6 runner starts in the last hour"
+        );
+
+        assert!(concern("callisto")?.is_none(), "3 of 13 is under 25 %");
+        assert!(concern("europa")?.is_none(), "2 failures are under 3");
+        assert!(
+            concern("MacBookPro")?.is_none(),
+            "releases are not failures"
+        );
+        seeded.close().await
+    }
+
+    /// #253 item 3: a GitLab job waiting for a runner (`pending`) is queued
+    /// like a GitHub one: in the total, by its category, under the pool that
+    /// will run it (by the same rule the Overview's GitHub jobs are split
+    /// by), as unmatched when no pool will, and as the oldest queued job. A
+    /// job recorded under two connections of one GitLab instance counts once;
+    /// a `created` job (waiting for earlier stages) or a running one is not
+    /// queued.
+    #[tokio::test]
+    async fn pending_gitlab_jobs_are_queued_like_github_jobs() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        let mut github = JobSeed::queued(1, "unit tests", NOW - 2 * MINUTE);
+        github.category = Some(JobCategory::Test);
+        let mut served = JobSeed::queued(2, "compile", NOW - 8 * MINUTE);
+        served.gitlab = true;
+        served.category = Some(JobCategory::Build);
+        let mut unmatched = JobSeed::queued(3, "train", NOW - MINUTE);
+        unmatched.gitlab = true;
+        unmatched.labels = vec!["gpu".to_owned()];
+        unmatched.category = None;
+        let mut created = JobSeed::queued(4, "later stage", NOW - 30 * MINUTE);
+        created.gitlab = true;
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[github, served, unmatched, created],
+        )
+        .await?;
+        sqlx::query("UPDATE gitlab_jobs SET status='created' WHERE job_id=4")
+            .execute(&seeded.db)
+            .await?;
+        sqlx::query(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,'testdata-gitlab',1)",
+        )
+        .bind(&seeded.fleet.pool_id)
+        .execute(&seeded.db)
+        .await?;
+        // The same pending job seen through the project's group connection.
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('group-connection','group','https://gitlab.test','group',2,'acme','group.token','group.webhook',1,1)",
+        )
+        .execute(&seeded.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path)
+             SELECT 'group-copy',  'group-connection',project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at+1000,updated_at,category,job_name,project_path
+               FROM gitlab_jobs WHERE job_id=2",
+        )
+        .execute(&seeded.db)
+        .await?;
+
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!(fleet.queued_total, 3, "{fleet:?}");
+        assert_eq!(
+            fleet.queued_by_category,
+            BTreeMap::from([
+                (JobCategory::Test, 1),
+                (JobCategory::Build, 1),
+                (JobCategory::Other, 1)
+            ])
+        );
+        assert_eq!(fleet.queued_unmatched, 1);
+        assert_eq!(
+            fleet
+                .queued_by_pool
+                .iter()
+                .map(|pool| (pool.pool_id.as_str(), pool.queued))
+                .collect::<Vec<_>>(),
+            vec![(seeded.fleet.pool_id.as_str(), 2)]
+        );
+        let oldest = fleet
+            .oldest_queued
+            .ok_or_else(|| anyhow::anyhow!("no oldest queued job"))?;
+        assert_eq!(
+            (
+                oldest.job_name.as_str(),
+                oldest.repository.as_str(),
+                oldest.wait_ms
+            ),
+            ("compile", seeded.fleet.repository.as_str(), 8 * MINUTE)
+        );
+        let oldest_concern = concerns
+            .iter()
+            .find(|concern| concern.key == "oldest-queued")
+            .ok_or_else(|| anyhow::anyhow!("no oldest-queued concern: {concerns:?}"))?;
+        assert_eq!(oldest_concern.severity, Severity::Warning);
+        assert!(
+            oldest_concern.detail.starts_with("compile in "),
+            "{}",
+            oldest_concern.detail
+        );
+        let unmatched_concern = concerns
+            .iter()
+            .find(|concern| concern.key == "unmatched-jobs")
+            .ok_or_else(|| anyhow::anyhow!("no unmatched-jobs concern: {concerns:?}"))?;
+        assert_eq!(unmatched_concern.title, "1 queued job matches no pool");
+        seeded.close().await
+    }
+
+    /// Links the seeded pool to the testdata GitLab connection, so it runs
+    /// that connection's jobs tagged `self-hosted`, `gridops`.
+    async fn link_gitlab_pool(seeded: &Seeded) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,'testdata-gitlab',1)",
+        )
+        .bind(&seeded.fleet.pool_id)
+        .execute(&seeded.db)
+        .await?;
+        Ok(())
+    }
+
+    /// A GitLab job waiting for a runner, created at `created_at`.
+    fn pending_gitlab(id: i64, name: &str, created_at: i64) -> JobSeed {
+        let mut job = JobSeed::queued(id, name, created_at);
+        job.gitlab = true;
+        job
+    }
+
+    /// #253 review: a GitLab job is queued only while `pending` is the
+    /// furthest along of its rows: one pending on one connection but already
+    /// running on another (the project's and its group's) has its runner.
+    #[tokio::test]
+    async fn a_gitlab_job_running_on_another_connection_is_not_queued() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[pending_gitlab(2, "compile", NOW - 8 * MINUTE)],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('group-connection','group','https://gitlab.test','group',2,'acme','group.token','group.webhook',1,1)",
+        )
+        .execute(&seeded.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path)
+             SELECT 'group-copy','group-connection',project_id,job_id,pipeline_id,'running',tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path
+               FROM gitlab_jobs WHERE job_id=2",
+        )
+        .execute(&seeded.db)
+        .await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!(fleet.queued_total, 0, "{fleet:?}");
+        assert!(fleet.queued_by_pool.is_empty(), "{fleet:?}");
+        assert_eq!(fleet.oldest_queued, None);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "oldest-queued"),
+            "{concerns:?}"
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a GitLab job only a manual-mode pool can run is under
+    /// that pool and not unmatched, and, as a GitHub job on a manual pool,
+    /// is not the oldest job waiting for capacity (nothing starts a runner
+    /// for it).
+    #[tokio::test]
+    async fn a_gitlab_job_only_a_manual_pool_runs_is_under_it_and_not_the_oldest() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[pending_gitlab(2, "compile", NOW - 20 * MINUTE)],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        sqlx::query("UPDATE runner_pools SET autoscaling_enabled=0 WHERE id=?")
+            .bind(&seeded.fleet.pool_id)
+            .execute(&seeded.db)
+            .await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!((fleet.queued_total, fleet.queued_unmatched), (1, 0));
+        assert_eq!(
+            fleet
+                .queued_by_pool
+                .iter()
+                .map(|pool| (pool.pool_id.as_str(), pool.queued))
+                .collect::<Vec<_>>(),
+            vec![(seeded.fleet.pool_id.as_str(), 1)]
+        );
+        assert_eq!(fleet.oldest_queued, None);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "oldest-queued" && concern.key != "unmatched-jobs"),
+            "{concerns:?}"
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a GitHub job that has waited longer than every GitLab
+    /// job is the oldest queued job, named from its `workflow_jobs` row.
+    #[tokio::test]
+    async fn a_github_job_older_than_every_gitlab_job_is_the_oldest() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        let mut github = JobSeed::queued(1, "unit tests", NOW - 12 * MINUTE);
+        github.category = Some(JobCategory::Test);
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[
+                github,
+                pending_gitlab(2, "compile", NOW - 8 * MINUTE),
+                pending_gitlab(3, "package", NOW - 11 * MINUTE),
+            ],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!(fleet.queued_total, 3);
+        let oldest = fleet
+            .oldest_queued
+            .ok_or_else(|| anyhow::anyhow!("no oldest queued job"))?;
+        assert_eq!(
+            (oldest.job_id, oldest.job_name.as_str(), oldest.wait_ms),
+            (1, "unit tests", 12 * MINUTE)
+        );
+        let concern = concerns
+            .iter()
+            .find(|concern| concern.key == "oldest-queued")
+            .ok_or_else(|| anyhow::anyhow!("{concerns:?}"))?;
+        assert_eq!(concern.severity, Severity::Critical, "12 min is over 10");
+        assert!(
+            concern.detail.starts_with("unit tests in "),
+            "{}",
+            concern.detail
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a failure of a start issued before the hour, or of a
+    /// placement that never got a `start_runner` command (a prepare that
+    /// ran out of time), is a start failure but not one of the hour's
+    /// starts; the share's denominator is never less than the failures, so
+    /// 4 failures and 1 start read "4 of 4", critical.
+    #[tokio::test]
+    async fn more_start_failures_than_starts_reads_as_every_start_failing() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let seeded = Seeded::new().await?;
+        starts(&seeded, "io", 1, 1).await?;
+        let io = seeded.fleet.host("io")?.clone();
+        for minute in [5, 6, 7] {
+            testdata::insert_placement_failure(
+                &seeded.db,
+                &io,
+                NOW - minute * MINUTE,
+                Reason::PrepareDeadlineExpired,
+                None,
+            )
+            .await?;
+        }
+        let (_, hosts, concerns) = collect_live(&seeded.db, NOW).await?;
+        let io_id = seeded.id("io")?;
+        assert_eq!(
+            hosts
+                .iter()
+                .find(|stats| stats.host_id == io_id)
+                .map(|stats| stats.start_failures_last_hour),
+            Some(4)
+        );
+        let concern = concerns
+            .iter()
+            .find(|concern| concern.key == format!("start-failures:{io_id}"))
+            .ok_or_else(|| anyhow::anyhow!("{concerns:?}"))?;
+        assert_eq!(concern.severity, Severity::Critical);
+        assert_eq!(
+            concern.title,
+            "io failed 4 of 4 runner starts in the last hour"
+        );
+        assert!(concern.detail.starts_with("100% "), "{}", concern.detail);
+        seeded.close().await
+    }
+
+    /// #253 review: an agent-reported failure counts unless its code says
+    /// the request was at fault (`cancelled`, `configuration`,
+    /// `unsupported`): `dependency` is the machine's.
+    #[tokio::test]
+    async fn an_agent_reported_failure_with_a_machine_code_counts() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let seeded = Seeded::new().await?;
+        let io = seeded.fleet.host("io")?.clone();
+        for (minute, code) in [
+            (5, Some("dependency")),
+            (6, None),
+            (7, Some("configuration")),
+            (8, Some("unsupported")),
+        ] {
+            testdata::insert_placement_failure(
+                &seeded.db,
+                &io,
+                NOW - minute * MINUTE,
+                Reason::AgentReported,
+                code,
+            )
+            .await?;
+        }
+        assert_eq!(host_stats(&seeded, "io").await?.start_failures_last_hour, 2);
+        seeded.close().await
+    }
+
+    /// 5,000 more finished GitLab jobs on io (each with its runner and
+    /// placement), completed 20 days before `NOW`, and 5,000 more
+    /// `placement_failed` events on io between 23 and 21.6 hours before it,
+    /// numbered from `first`.
+    async fn old_history(db: &SqlitePool, fleet: &SeededFleet, first: i64) -> Result<()> {
+        let io = fleet.host("io")?.id.clone();
+        let history: Vec<JobSeed> = (first..first + 5_000)
+            .map(|index| {
+                let created = NOW - 20 * DAY + index * SECOND;
+                let mut job = JobSeed::completed(
+                    100 + index,
+                    "old job",
+                    Some(&io),
+                    created,
+                    created + SECOND,
+                    created + 30 * SECOND,
+                );
+                job.gitlab = true;
+                job
+            })
+            .collect();
+        testdata::insert_jobs(db, fleet, &history).await?;
+        let mut tx = db.begin().await?;
+        for index in first..first + 5_000 {
+            sqlx::query(
+                "INSERT INTO fleet_events (id,host_id,kind,detail_json,created_at) VALUES (?,?,'placement_failed','{\"reason\":\"agent_session_lost\"}',?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&io)
+            .bind(NOW - 23 * 60 * MINUTE + index / 2)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// #253 items 1 and 3: the live path's reads stay bounded: its work is
+    /// the same with 10,000 finished GitLab jobs and 10,000 `placement_failed`
+    /// events older than an hour as with 5,000 of each (the first 5,000 make
+    /// the indexes as deep as they get here, so only a read that walks the
+    /// history shows). Before #253 `host_live_reads` read the machine's whole
+    /// last day of failures to count its last hour.
+    #[tokio::test]
+    async fn the_live_path_does_not_read_gitlab_history_or_old_failures() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let directory =
+            std::env::temp_dir().join(format!("gridops-live-253-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("db.sqlite");
+        let db = gridops_core::connect_database_path(&path).await?;
+        let fleet = testdata::seed_fleet(&db).await?;
+        let mut pending = JobSeed::queued(1, "compile", NOW - MINUTE);
+        pending.gitlab = true;
+        testdata::insert_jobs(&db, &fleet, &[pending]).await?;
+        testdata::insert_placement_failure(
+            &db,
+            fleet.host("io")?,
+            NOW - MINUTE,
+            Reason::AgentSessionLost,
+            None,
+        )
+        .await?;
+        old_history(&db, &fleet, 0).await?;
+        let (_, before) = vm_steps(&path, |db| async move { collect_live(&db, NOW).await }).await?;
+        old_history(&db, &fleet, 5_000).await?;
+        let (_, after) = vm_steps(&path, |db| async move { collect_live(&db, NOW).await }).await?;
+        assert!(
+            after <= before + before / 20,
+            "collect_live: {before} VM steps, {after} with 5,000 more old GitLab jobs and failures"
+        );
+        let (fleet_stats, hosts, _) = collect_live(&db, NOW).await?;
+        assert_eq!(fleet_stats.queued_total, 1, "the pending GitLab job");
+        let io = fleet.host("io")?.id.clone();
+        assert_eq!(
+            hosts
+                .iter()
+                .find(|stats| stats.host_id == io)
+                .map(|stats| stats.start_failures_last_hour),
+            Some(1)
+        );
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     /// #245: the live path's timings on the synthetic week, for the record in

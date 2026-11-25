@@ -379,7 +379,10 @@ pub struct HostLiveStats {
     pub cpu_used_millis: Option<u32>,
     pub memory_used_mib: Option<u32>,
     pub disk_free_bytes: Option<u64>,
-    /// `placement_failed` events in the last hour.
+    /// Start failures in the last hour: the machine's `placement_failed`
+    /// events that `start_health::is_start_failure` puts on it, as the start
+    /// gate and the machine rollup count them (not an operator's release or
+    /// a runner removed before its start, #253).
     pub start_failures_last_hour: u32,
 }
 
@@ -396,8 +399,11 @@ pub struct PoolQueue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OldestQueued {
+    /// The platform's own job id: a GitHub workflow job id or a GitLab job
+    /// id (#253), so not unique across platforms.
     pub job_id: i64,
     pub job_name: String,
+    /// The GitHub repository, or the GitLab project path.
     pub repository: String,
     pub queued_at: i64,
     pub wait_ms: i64,

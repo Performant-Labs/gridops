@@ -1830,14 +1830,16 @@ fn event_kind(value: &str) -> HostEventKindV1 {
     }
 }
 
-/// The host's recorded placement failures: how many placements failed in the
-/// last hour, and the last day's failures grouped by reason, newest first.
-/// Codes this build does not know read as `unknown` and group together.
-async fn placement_failures(
+/// How many of the host's placements failed in the last hour: every
+/// `placement_failed` event, whatever its reason (an operator's release
+/// included), as `/fleet/hosts` shows it. Not the machine's start failures:
+/// fleet health counts those itself with `start_health::is_start_failure`
+/// (#253). A count on `fleet_events_host_kind_time_idx`.
+async fn failed_placements_last_hour(
     tx: &mut Transaction<'_, Sqlite>,
     host_id: HostId,
     now: i64,
-) -> Result<(BrowserUint53, Vec<PlacementFailureReadV1>), QueryError> {
+) -> Result<BrowserUint53, QueryError> {
     let last_hour: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM fleet_events
           WHERE host_id=? AND kind=? AND created_at>=?",
@@ -1847,6 +1849,21 @@ async fn placement_failures(
     .bind(now - 3_600_000)
     .fetch_one(&mut **tx)
     .await?;
+    Ok(BrowserUint53::new(
+        u64::try_from(last_hour).map_err(|_| QueryError::MalformedData)?,
+    )?)
+}
+
+/// The host's recorded placement failures: how many placements failed in the
+/// last hour ([`failed_placements_last_hour`]), and the last day's failures
+/// grouped by reason, newest first. Codes this build does not know read as
+/// `unknown` and group together.
+async fn placement_failures(
+    tx: &mut Transaction<'_, Sqlite>,
+    host_id: HostId,
+    now: i64,
+) -> Result<(BrowserUint53, Vec<PlacementFailureReadV1>), QueryError> {
+    let last_hour = failed_placements_last_hour(tx, host_id, now).await?;
     let rows = sqlx::query(
         "SELECT e.placement_id,e.created_at,e.cursor,
                 json_extract(e.detail_json,'$.reason') AS reason,
@@ -1888,10 +1905,7 @@ async fn placement_failures(
         });
     }
     groups.truncate(10);
-    Ok((
-        BrowserUint53::new(u64::try_from(last_hour).map_err(|_| QueryError::MalformedData)?)?,
-        groups,
-    ))
+    Ok((last_hour, groups))
 }
 
 /// The machine's start gate, if it is set aside from new placements.
@@ -2399,6 +2413,10 @@ pub struct HostLiveRead {
     /// Charged allocations on the root domain.
     pub physical_allocation: AllocationReadV1,
     pub latest_root_measurement: Option<MeasurementReadV1>,
+    /// Every `placement_failed` event of the last hour, as `/fleet/hosts`
+    /// shows it. Not the machine's start failures: an operator's release or
+    /// a runner removed before its start counts here, so fleet health counts
+    /// start failures itself, as the start gate does (#253).
     pub failed_placements_last_hour: BrowserUint53,
     pub start_gate: Option<StartGateReadV1>,
 }
@@ -2447,7 +2465,10 @@ pub async fn host_live_reads(
         .ok_or(QueryError::MalformedData)?;
         let root_id = parse_domain_id(&root_id)?;
         let counts = live_counts(&mut tx, host_id).await?;
-        let (failed_placements_last_hour, _) = placement_failures(&mut tx, host_id, now).await?;
+        // The count only: the last day's failures `placement_failures` also
+        // reads are not part of the live view (#253).
+        let failed_placements_last_hour =
+            failed_placements_last_hour(&mut tx, host_id, now).await?;
         reads.push(HostLiveRead {
             id: host_id,
             name: checked_text(name)?,

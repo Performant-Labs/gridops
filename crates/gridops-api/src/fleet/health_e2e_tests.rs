@@ -21,7 +21,12 @@
 //! minutes (europa); a nearly full root disk with a fresh heartbeat
 //! (callisto, critical) and a low one with a stale heartbeat (Jupiter, no
 //! alarm); a busy GitLab runner with no job row; stored category rules on the
-//! workflow name and the labels; and seeded snapshots for the trend.
+//! workflow name and the labels; and seeded snapshots for the trend. Since
+//! #253: GitLab jobs on three machines (a GitLab speed key), a busy GitLab
+//! runner whose running job has its row, machine-fault start failures in the
+//! last hour (a `start-failures` concern) beside an operator's release that
+//! doesn't count, a revoked machine's starts, and the capacity admission
+//! charges (reserved CPU and memory).
 //!
 //! The evaluation runs at two moments: `NOW_A`, ten minutes into hour `T`
 //! (the hour that just ended is in its grace and computed live), and
@@ -67,6 +72,7 @@ const QUEUED_JOB: i64 = 960_003;
 const UNMATCHED_JOB: i64 = 960_004;
 const BUSY_GITLAB_JOB: i64 = 960_001;
 const RUNNING_JOB: i64 = 960_002;
+const RUNNING_GITLAB_JOB: i64 = 960_005;
 
 /// One of the regular jobs: (name, typical duration in seconds).
 const JOBS: [(&str, i64); 6] = [
@@ -274,13 +280,16 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
         t + 5 * MINUTE,
     ));
 
-    // GitLab jobs on io, on the project-scoped connection (path known).
-    for index in 0..6_i64 {
-        let completed = t - 20 * HOUR + index * 2 * HOUR;
+    // GitLab jobs on io, Jupiter and callisto, on the project-scoped
+    // connection (path known): six each, so their key qualifies for the
+    // speed index (#253).
+    for index in 0..18_i64 {
+        let completed = t - 20 * HOUR + index * HOUR;
+        let host = [io.as_str(), jupiter.as_str(), callisto.as_str()][usize::try_from(index % 3)?];
         let mut job = JobSeed::completed(
             700 + index,
             "rspec",
-            Some(io.as_str()),
+            Some(host),
             completed - 5 * MINUTE,
             completed - 4 * MINUTE,
             completed,
@@ -307,6 +316,17 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     );
     busy.gitlab = true;
     jobs.push(busy);
+    // A busy GitLab runner whose running job has its row: it counts under
+    // the job's category (#253).
+    let mut running_gitlab = JobSeed::running(
+        RUNNING_GITLAB_JOB,
+        "rspec",
+        Some(callisto.as_str()),
+        now_a - 4 * MINUTE,
+        now_a - 3 * MINUTE,
+    );
+    running_gitlab.gitlab = true;
+    jobs.push(running_gitlab);
 
     // Waiting: one the pool runs, queued 7 minutes before `now_a`, and one
     // asking for a label no pool offers.
@@ -429,6 +449,44 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
         )
         .await?;
     }
+    // callisto failed 4 of 6 runner starts in the hour before `t`, all over
+    // 15 minutes before `now_a` (no start gate); an operator's release in
+    // the same hour is not a start failure (#253).
+    let callisto_host = scenario.host("callisto")?;
+    for index in 0..6_i64 {
+        let at = t - 40 * MINUTE + index * 3 * MINUTE;
+        let failed = index < 4;
+        testdata::insert_start_attempt(
+            db,
+            &scenario.fleet,
+            callisto_host,
+            at,
+            if failed {
+                PlacementEnd::Failed
+            } else {
+                PlacementEnd::Stopped
+            },
+        )
+        .await?;
+        if failed {
+            testdata::insert_placement_failure(
+                db,
+                callisto_host,
+                at,
+                PlacementFailureReason::StartDeadlineExpired,
+                None,
+            )
+            .await?;
+        }
+    }
+    testdata::insert_placement_failure(
+        db,
+        callisto_host,
+        t - 35 * MINUTE,
+        PlacementFailureReason::OperatorReleased,
+        None,
+    )
+    .await?;
     let io_host = scenario.host("io")?;
     for index in 0..20_i64 {
         testdata::insert_start_attempt(
@@ -838,6 +896,7 @@ fn compare(window: &str, at: &'static str, api: &Value, oracle: &Value) -> Resul
             "diskFreeBytes",
             "cpuReservedMillis",
             "memoryReservedMib",
+            "startFailuresLastHour",
         ] {
             diff.eq(
                 &format!("{name}.live.{field}"),
@@ -985,6 +1044,15 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         misclassified(oracle_a),
         [(format!("gitlab:{PATHLESS}"), Value::Null, "test".to_owned())]
     );
+    // callisto's 4 machine-fault failures of 6 starts in the hour: critical;
+    // the operator's release is not counted.
+    let (day_a, _) = &at_a["24h"];
+    let failures = array(&day_a["concerns"])
+        .iter()
+        .find(|concern| concern["key"] == format!("start-failures:{callisto}"))
+        .context("no start-failures concern for callisto")?;
+    assert_eq!(failures["severity"], "critical");
+    assert_eq!(host(day_a, &callisto)?["live"]["startFailuresLastHour"], 4);
     assert_eq!(
         jobs_by_category(hour_a),
         BTreeMap::from([("check".to_owned(), 1), ("other".to_owned(), 1)])
@@ -1053,8 +1121,9 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         BTreeMap::from([("check".to_owned(), 1), ("test".to_owned(), 1)]),
         "the backfill moved the pathless GitLab job from other to test"
     );
-    // 48 starts in the day: 6 failing on Jupiter and 4 on the revoked
-    // machine, so 38/48 = 79.2% succeeded, under the 80% floor: 0.
+    // 54 starts in the day: 6 failing on Jupiter, 4 on callisto and 4 on
+    // the revoked machine, so 40/54 = 74.1% succeeded, under the 80% floor:
+    // 0.
     assert_eq!(day["fleet"]["components"][1]["key"], "start-reliability");
     assert_eq!(day["fleet"]["components"][1]["score"], 0);
     assert_eq!(

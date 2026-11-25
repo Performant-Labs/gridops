@@ -380,6 +380,15 @@ class Oracle:
     # -- The speed index -------------------------------------------------
 
     @staticmethod
+    def gitlab_key(base_url, project_path, name):
+        """A GitLab job's key: `gitlab:<instance>/<project path> / <job name>`,
+        the instance its connection's URL without the scheme or a trailing
+        slash, the name's shard counter stripped as a GitHub job's (#253)."""
+        instance = base_url.split("://", 1)[1] if "://" in base_url else base_url
+        github = Oracle.job_key("", "", name)
+        return f"gitlab:{instance.rstrip('/')}/{project_path} / {github[len(' /  / '):]}"
+
+    @staticmethod
     def job_key(repository, workflow, name):
         trimmed = name.strip()
         stripped = trimmed
@@ -438,6 +447,41 @@ class Oracle:
             if placement is None:
                 continue
             key = self.job_key(job["repository"], job["workflow_name"], job["name"])
+            duration = job["completed_at"] - job["started_at"]
+            machines.setdefault((placement["host_id"], placement["cpu_millis"]), {}).setdefault(key, []).append(duration)
+            fleet.setdefault(key, []).append(duration)
+        # GitLab jobs (#253): each its own only attempt; one with no name,
+        # path or start has no key; a job recorded under several connections
+        # of one instance counts once (its lowest row id); its machine is the
+        # newest runner with its runner id on the same instance.
+        for job in self.q(
+            """SELECT gj.id,gj.job_id,gj.job_name,gj.project_path,gj.gitlab_runner_id,
+                      gj.started_at,gj.completed_at,c.base_url
+                 FROM gitlab_jobs gj JOIN gitlab_connections c ON c.id=gj.connection_id
+                WHERE gj.status='success' AND gj.completed_at>=? AND gj.completed_at<?
+                  AND gj.started_at IS NOT NULL AND gj.job_name IS NOT NULL AND gj.project_path IS NOT NULL""",
+            start,
+            self.now,
+        ):
+            twin = self.q(
+                """SELECT 1 FROM gitlab_jobs other JOIN gitlab_connections oc ON oc.id=other.connection_id
+                    WHERE other.job_id=? AND oc.base_url=? AND other.id<?""",
+                job["job_id"],
+                job["base_url"],
+                job["id"],
+            )
+            if twin:
+                continue
+            runner = self.q(
+                """SELECT r.id FROM runners r JOIN gitlab_connections rc ON rc.id=r.gitlab_connection_id
+                    WHERE r.gitlab_runner_id=? AND rc.base_url=? ORDER BY r.created_at DESC,r.id DESC LIMIT 1""",
+                job["gitlab_runner_id"],
+                job["base_url"],
+            )
+            placement = self.placement_of_runner(runner[0]["id"] if runner else None)
+            if placement is None:
+                continue
+            key = self.gitlab_key(job["base_url"], job["project_path"], job["job_name"])
             duration = job["completed_at"] - job["started_at"]
             machines.setdefault((placement["host_id"], placement["cpu_millis"]), {}).setdefault(key, []).append(duration)
             fleet.setdefault(key, []).append(duration)
@@ -793,7 +837,8 @@ class Oracle:
                 last_seen = self.q("SELECT MAX(observed_at) AS at FROM host_samples WHERE host_id=?", host["id"])[0]["at"]
             running = {}
             for row in self.q(
-                """SELECT r.current_job_id,r.ci_platform,r.status,r.busy FROM workload_placements p
+                """SELECT r.current_job_id,r.ci_platform,r.status,r.busy,r.gitlab_runner_id,r.gitlab_connection_id
+                     FROM workload_placements p
                      JOIN workload_intents i ON i.id=p.intent_id
                      JOIN runners r ON r.id=p.runner_id
                     WHERE p.host_id=? AND p.state='running' AND i.kind='ci_runner'""",
@@ -804,6 +849,19 @@ class Oracle:
                 category = "other"
                 if row["ci_platform"] == "github" and row["current_job_id"] is not None:
                     job = self.q("SELECT category FROM workflow_jobs WHERE id=?", row["current_job_id"])
+                    if job and job[0]["category"] in CATEGORIES:
+                        category = job[0]["category"]
+                if row["ci_platform"] == "gitlab":
+                    # The GitLab job running on it (#253): its runner id on
+                    # the runner's instance, newest first.
+                    job = self.q(
+                        """SELECT gj.category FROM gitlab_jobs gj JOIN gitlab_connections c ON c.id=gj.connection_id
+                            WHERE gj.status='running' AND gj.gitlab_runner_id=?
+                              AND c.base_url=(SELECT base_url FROM gitlab_connections WHERE id=?)
+                            ORDER BY gj.status_changed_at DESC,gj.id DESC LIMIT 1""",
+                        row["gitlab_runner_id"],
+                        row["gitlab_connection_id"],
+                    )
                     if job and job[0]["category"] in CATEGORIES:
                         category = job[0]["category"]
                 running[category] = running.get(category, 0) + 1
@@ -823,9 +881,21 @@ class Oracle:
                       AND a.state IN ('reserved','committed','releasing','uncertain')""",
                 host["id"],
             )[0]
+            failures = sorted(
+                row["created_at"]
+                for row in self.q(
+                    """SELECT created_at,detail_json FROM fleet_events
+                        WHERE host_id=? AND kind='placement_failed' AND created_at>=? AND created_at<=?""",
+                    host["id"],
+                    now - HOUR,
+                    now,
+                )
+                if is_start_failure(row["detail_json"])
+            )
             host_live.append(
                 {
                     "hostId": host["id"],
+                    "startFailuresLastHour": len(failures),
                     "cpuReservedMillis": reserved["cpu"],
                     "memoryReservedMib": reserved["memory"],
                     "online": recent is not None,
@@ -836,6 +906,22 @@ class Oracle:
                     "diskFreeBytes": newest[0]["disk_free_bytes"] if newest else None,
                 }
             )
+            # start-failures (#253): 3 or more in the hour, at least a quarter
+            # of its starts (the placements issued a start command in it,
+            # never fewer than the failures), critical from a half.
+            if len(failures) >= 3:
+                starts = self.q(
+                    """SELECT COUNT(DISTINCT placement_id) AS n FROM host_commands
+                        WHERE host_id=? AND kind='start_runner' AND issued_at>=? AND issued_at<=?""",
+                    host["id"],
+                    now - HOUR,
+                    now,
+                )[0]["n"]
+                starts = max(starts, len(failures))
+                share = len(failures) * 100
+                severity = "critical" if share >= 50 * starts else "warning" if share >= 25 * starts else None
+                if severity:
+                    concerns.append({"key": f"start-failures:{host['id']}", "severity": severity, "since": failures[0]})
             if host["cpu"] > 0 and recent is None:
                 concerns.append({"key": f"host-offline:{host['id']}", "severity": "critical", "since": last_seen})
             gate = self.start_gate(host["id"])
