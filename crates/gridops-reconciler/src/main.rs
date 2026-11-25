@@ -3,6 +3,7 @@ mod builtin_host;
 mod fleet;
 // #197: the fleet health passes (#190, #191, #200, #204).
 mod fleet_health_backfill;
+mod fleet_health_passes;
 mod fleet_health_rollup;
 mod fleet_health_snapshot;
 mod fleet_host_rollup;
@@ -622,24 +623,15 @@ async fn record_pass(database: &SqlitePool, started_at: i64, elapsed: Duration) 
     Ok(())
 }
 
-/// The fleet health passes (#197), in order: classify new jobs (#190), roll
-/// up the hours (#191, #200), then snapshot the scores (#204). Each failure
-/// is logged and the pass goes on; they run before the manager is asked, so
-/// an unavailable manager never stops them.
+/// The fleet health passes (#197), in `fleet_health_passes`' order: classify
+/// new jobs (#190), roll up the hours (#191, #200), then snapshot the scores
+/// (#204). Each failure is logged and the pass goes on; they run before the
+/// manager is asked, so an unavailable manager never stops them.
 async fn fleet_health_passes(database: &SqlitePool) {
-    let now = now_millis();
-    if let Err(error) = fleet_health_backfill::run_pass(database, now).await {
-        tracing::warn!(error = ?error, "fleet health job category backfill failed");
-    }
-    if let Err(error) = fleet_health_rollup::run_pass(database, now).await {
-        tracing::warn!(error = ?error, "fleet health hourly rollup failed");
-    }
-    if let Err(error) = fleet_host_rollup::run_pass(database, now).await {
-        tracing::warn!(error = ?error, "fleet health machine rollup failed");
-    }
-    if let Err(error) = fleet_health_snapshot::run_pass(database, now).await {
-        tracing::warn!(error = ?error, "fleet health snapshot failed");
-    }
+    fleet_health_passes::run(database, now_millis(), |what, error| {
+        tracing::warn!(error = ?error, "fleet health {what} failed");
+    })
+    .await;
 }
 
 async fn reconcile(app: &Reconciler) -> Result<()> {

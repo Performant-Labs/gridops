@@ -6,98 +6,39 @@
 //! under `host_id = pool_id = 'unmanaged'` with 0 CPU-seconds.
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`):
-//! it rolls up every hour listed in `fleet_health_recompute` plus at most
-//! one catch-up hour. #197 fixes the signatures; #191 implements them. It is
+//! it rolls up every hour listed in `fleet_health_recompute`, then catches
+//! up as many finished hours as fit in [`CATCH_UP_BUDGET`] (one at least). #197 fixes the signatures; #191 implements them. It is
 //! the only reader of `fleet_health_recompute` (#239).
 //!
-//! The reads of an hour run outside the write transaction, bounded by the
-//! `completed_at` indexes (`workflow_jobs_completed_idx`,
-//! `gitlab_jobs_completed_idx`); the hour's rows are then written in one
+//! The reads of an hour (`gridops_core::fleet_health::hour::job_hour`, the
+//! one copy the database source also computes live hours with, #204) run
+//! outside the write transaction, bounded by the `completed_at` indexes
+//! (`workflow_jobs_completed_idx`, `gitlab_jobs_completed_idx`); the hour's rows are then written in one
 //! short transaction (at most [`WRITE_BATCH`] rows per transaction), which
 //! also takes the hour off `fleet_health_recompute`, so re-running an hour
 //! gives the same rows. The same transaction lists the hours a re-run's
 //! earlier attempts completed in, so they are rolled again without them
-//! (#239). The catch-up walks the last 7 days one finished hour per pass,
-//! oldest first; where it got to is the `fleet_health.rollup_next` setting,
+//! (#239). The catch-up walks the last 7 days oldest first, under a time
+//! budget per pass, one write transaction per hour; where it got to is the `fleet_health.rollup_next` setting,
 //! absent until the first pass. No hour, listed or caught up, is rolled
 //! before its end plus [`ROLLUP_GRACE_MILLIS`].
 
-use std::collections::BTreeMap;
-
 use anyhow::{Context as _, Result};
 use gridops_core::fleet_health::{
-    HISTOGRAM_BUCKETS, HOUR_MILLIS, HealthWindow, Histogram, JobCategory, ROLLUP_GRACE_MILLIS,
-    UNMANAGED, histogram_bucket,
+    HOUR_MILLIS, HealthWindow, ROLLUP_GRACE_MILLIS,
+    hour::{self, JobRowKey, JobTotals},
 };
-use sqlx::{FromRow, SqlitePool};
+use sqlx::SqlitePool;
 
 /// The settings key holding the next hour the catch-up rolls up.
-const ROLLUP_NEXT_SETTING: &str = "fleet_health.rollup_next";
+pub(crate) const ROLLUP_NEXT_SETTING: &str = "fleet_health.rollup_next";
 
 /// How many `fleet_health_hourly` rows one write transaction writes at most
 /// (#179's SQLite discipline).
 const WRITE_BATCH: usize = 500;
 
-/// The hour's GitHub jobs (`workflow_jobs_completed_idx`), final attempts
-/// only: a job counts unless a later attempt of its run ran a job of the
-/// same name. "Later" is a higher `workflow_job_sync.run_attempt`; when
-/// either attempt is unknown (GitHub didn't give one), the higher job id,
-/// since GitHub numbers a re-run's jobs after the attempt it re-runs, but
-/// only once the run row knows a re-run (`run_attempt` above 1): two
-/// same-named jobs of a run never re-run are both counted. A
-/// "re-run failed jobs" attempt runs only the failed jobs, and the run's
-/// other jobs keep their earlier attempt, so they still count. The runner
-/// and its newest `workload_placements` row give the machine, pool and CPU
-/// size; no runner row, or no placement, is unmanaged.
-const GITHUB_JOBS: &str = r#"
-SELECT wj.category,
-       COALESCE(wj.conclusion='success',0) AS success,
-       COALESCE(p.state IN ('failed','uncertain'),0) AS infra_failure,
-       p.host_id,intent.pool_id,p.cpu_millis,
-       wj.created_at,wj.started_at,wj.completed_at
-  FROM workflow_jobs wj
-  LEFT JOIN workflow_job_sync sync ON sync.job_id=wj.id
-  LEFT JOIN runners r ON r.id=(SELECT cand.id FROM runners cand
-          WHERE cand.github_runner_id=wj.runner_id
-          ORDER BY cand.created_at DESC,cand.id DESC LIMIT 1)
-  LEFT JOIN workload_placements p ON p.id=(
-         SELECT latest.id FROM workload_placements latest
-          WHERE latest.runner_id=r.id
-          ORDER BY latest.generation DESC,latest.updated_at DESC,latest.id DESC LIMIT 1)
-  LEFT JOIN workload_intents intent ON intent.id=p.intent_id
- WHERE wj.completed_at>=? AND wj.completed_at<?
-   AND NOT EXISTS (SELECT 1 FROM workflow_jobs later_job
-          LEFT JOIN workflow_job_sync later ON later.job_id=later_job.id
-         WHERE later_job.run_id=wj.run_id AND later_job.name=wj.name
-           AND later_job.id<>wj.id
-           AND (later.run_attempt>sync.run_attempt
-                OR ((later.run_attempt IS NULL OR sync.run_attempt IS NULL)
-                    AND later_job.id>wj.id
-                    AND (SELECT run.run_attempt FROM workflow_runs run
-                          WHERE run.id=wj.run_id)>1)))"#;
-
-/// The hour's GitLab jobs (`gitlab_jobs_completed_idx`), joined to their
-/// machines through `runners.gitlab_runner_id` the same way. A GitLab job is
-/// its own only attempt; `status='success'` is its completion.
-const GITLAB_JOBS: &str = r#"
-SELECT gj.category,
-       COALESCE(gj.status='success',0) AS success,
-       COALESCE(p.state IN ('failed','uncertain'),0) AS infra_failure,
-       p.host_id,intent.pool_id,p.cpu_millis,
-       gj.created_at,gj.started_at,gj.completed_at
-  FROM gitlab_jobs gj
-  LEFT JOIN runners r ON r.id=(SELECT cand.id FROM runners cand
-          WHERE cand.gitlab_runner_id=gj.gitlab_runner_id
-          ORDER BY cand.created_at DESC,cand.id DESC LIMIT 1)
-  LEFT JOIN workload_placements p ON p.id=(
-         SELECT latest.id FROM workload_placements latest
-          WHERE latest.runner_id=r.id
-          ORDER BY latest.generation DESC,latest.updated_at DESC,latest.id DESC LIMIT 1)
-  LEFT JOIN workload_intents intent ON intent.id=p.intent_id
- WHERE gj.completed_at>=? AND gj.completed_at<?"#;
-
 /// The other hours in which the earlier attempts of the hour's re-run jobs
-/// (the same run and job name, earlier as [`GITHUB_JOBS`] orders them)
+/// (the same run and job name, earlier as `hour::GITHUB_JOBS` orders them)
 /// completed (`workflow_jobs_run_status_idx`), over the last 7 days: each was
 /// rolled while its attempt was still the run's newest, so it counts there
 /// until the hour is rolled again (#239). The hour itself is left out; its own
@@ -119,55 +60,6 @@ SELECT DISTINCT earlier.completed_at-(earlier.completed_at%3600000) AS hour
    AND (earlier.completed_at<? OR earlier.completed_at>=?)
  ORDER BY hour"#;
 
-/// One counted job, as one of the hour's reads sees it.
-#[derive(Debug, FromRow)]
-struct JobFact {
-    category: Option<String>,
-    /// GitHub conclusion `success`, GitLab status `success`.
-    success: bool,
-    /// The job's placement ended `failed` or `uncertain`.
-    infra_failure: bool,
-    /// The placement's machine and pool; no placement is unmanaged.
-    host_id: Option<String>,
-    pool_id: Option<String>,
-    cpu_millis: Option<i64>,
-    created_at: i64,
-    started_at: Option<i64>,
-    completed_at: i64,
-}
-
-/// One `fleet_health_hourly` row being summed: (host, pool, category) and
-/// its counts, with both histograms.
-#[derive(Debug)]
-struct HourTotals {
-    job_count: i64,
-    completed_count: i64,
-    infra_failure_count: i64,
-    duration_ms_sum: i64,
-    /// CPU-millis × duration-millis, exact while summing; divided by a
-    /// million when written, so `cpu_seconds_sum` loses nothing to rounding.
-    cpu_milli_seconds: i64,
-    wait: Histogram,
-    duration: Histogram,
-}
-
-impl Default for HourTotals {
-    fn default() -> Self {
-        Self {
-            job_count: 0,
-            completed_count: 0,
-            infra_failure_count: 0,
-            duration_ms_sum: 0,
-            cpu_milli_seconds: 0,
-            wait: [0; HISTOGRAM_BUCKETS],
-            duration: [0; HISTOGRAM_BUCKETS],
-        }
-    }
-}
-
-/// One row of `fleet_health_hourly`: (host, pool, category).
-type RowKey = (String, String, JobCategory);
-
 /// Writes the rows of the hour starting at `hour` (epoch ms, on a whole
 /// hour), replacing what is there, takes the hour off
 /// `fleet_health_recompute`, and lists there the hours its re-runs' earlier
@@ -177,12 +69,8 @@ type RowKey = (String, String, JobCategory);
 /// A database read or write failed.
 pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<()> {
     let hour = hour - hour.rem_euclid(HOUR_MILLIS);
-    let facts = hour_facts(db, hour).await?;
+    let rows = hour::job_hour(db, hour, hour + HOUR_MILLIS).await?;
     let earlier = earlier_attempt_hours(db, hour, now).await?;
-    let mut rows = BTreeMap::<RowKey, HourTotals>::new();
-    for fact in &facts {
-        add(&mut rows, fact);
-    }
     write_hour(
         db,
         hour,
@@ -193,13 +81,59 @@ pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<
     .await
 }
 
-/// One reconciler pass of the rollup: every hour listed in
-/// `fleet_health_recompute` that is past its grace, oldest first, then at
-/// most one catch-up hour of the last 7 days, once it is past its grace too.
+/// How much of a pass the catch-up may spend rolling hours (#204): enough
+/// for a first start's 7 days to take a few passes instead of 168 (84
+/// minutes at one per 30 s pass), while each hour is still its own short
+/// write transaction (#179).
+pub(crate) const CATCH_UP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One reconciler pass of the rollup: the catch-up's hours of the last 7
+/// days that are past their grace, oldest first, for as long as
+/// [`CATCH_UP_BUDGET`] lasts (at least one), then every hour listed in
+/// `fleet_health_recompute` that is past its grace, oldest first (those the
+/// catch-up just listed included).
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
+    run_pass_within(db, now, CATCH_UP_BUDGET).await
+}
+
+/// [`run_pass`] with the catch-up's time `budget`, counted from the start of
+/// the pass: the catch-up rolls one hour at least, then more while the pass
+/// is under its budget.
+///
+/// # Errors
+/// A database read or write failed.
+pub(crate) async fn run_pass_within(
+    db: &SqlitePool,
+    now: i64,
+    budget: std::time::Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    // Catch-up: finished hours oldest first, over the last 7 days, each once
+    // its grace has passed so a late arrival still counts, and each with its
+    // marker saved after it, so a failure or the end of the budget resumes
+    // there. The first pass starts at the window's oldest hour; one whose
+    // marker the sliding window has passed starts again at its oldest.
+    let window_start = now - HealthWindow::Week.millis();
+    let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
+    let mut next = match next_hour(db).await? {
+        Some(next) => next.max(window_start),
+        None => window_start,
+    };
+    while next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
+        rollup_hour(db, next, now).await?;
+        next += HOUR_MILLIS;
+        save_next_hour(db, next, now).await?;
+        if started.elapsed() >= budget {
+            break;
+        }
+    }
+
+    // Then the listed hours, so an earlier attempt's hour the catch-up has
+    // just listed (rolling a re-run's later hour) is rolled again in the
+    // same pass.
     let listed: Vec<i64> =
         sqlx::query_scalar("SELECT hour FROM fleet_health_recompute WHERE hour<=? ORDER BY hour")
             .bind(now - HOUR_MILLIS - ROLLUP_GRACE_MILLIS)
@@ -208,44 +142,7 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
     for hour in listed {
         rollup_hour(db, hour, now).await?;
     }
-
-    // Catch-up: one finished hour per pass, oldest first, over the last 7
-    // days, each once its grace has passed so a late arrival still counts.
-    // The first pass starts at the window's oldest hour; one whose marker the
-    // sliding window has passed starts again at its oldest.
-    let window_start = now - HealthWindow::Week.millis();
-    let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
-    let next = match next_hour(db).await? {
-        Some(next) => next.max(window_start),
-        None => window_start,
-    };
-    if next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
-        rollup_hour(db, next, now).await?;
-        save_next_hour(db, next + HOUR_MILLIS, now).await?;
-    }
     Ok(())
-}
-
-/// The hour's jobs: GitHub and GitLab, bounded by their `completed_at`
-/// indexes.
-///
-/// # Errors
-/// A read failed.
-async fn hour_facts(db: &SqlitePool, hour: i64) -> Result<Vec<JobFact>> {
-    let end = hour + HOUR_MILLIS;
-    let mut facts = sqlx::query_as::<_, JobFact>(GITHUB_JOBS)
-        .bind(hour)
-        .bind(end)
-        .fetch_all(db)
-        .await?;
-    facts.extend(
-        sqlx::query_as::<_, JobFact>(GITLAB_JOBS)
-            .bind(hour)
-            .bind(end)
-            .fetch_all(db)
-            .await?,
-    );
-    Ok(facts)
 }
 
 /// [`EARLIER_ATTEMPT_HOURS`] for the hour starting at `hour`, as of `now`.
@@ -263,30 +160,6 @@ async fn earlier_attempt_hours(db: &SqlitePool, hour: i64, now: i64) -> Result<V
         .bind(end)
         .fetch_all(db)
         .await?)
-}
-
-/// Folds one job into the hour's rows: its machine from the placement (none
-/// is `unmanaged`, with no CPU-seconds), its category (NULL as `other`), its
-/// clamped duration and its two histogram buckets. A negative wait (clock
-/// skew: `created_at` is when `GridOps` first saw the job) is no wait, the
-/// bucket `histogram_bucket` gives a negative value; the duration is clamped
-/// because its sum is stored non-negative.
-fn add(rows: &mut BTreeMap<RowKey, HourTotals>, fact: &JobFact) {
-    let category = JobCategory::from_column(fact.category.as_deref());
-    let (host, pool, cpu_millis) = match (fact.host_id.as_ref(), fact.pool_id.as_ref()) {
-        (Some(host), Some(pool)) => (host.clone(), pool.clone(), fact.cpu_millis),
-        _ => (UNMANAGED.to_owned(), UNMANAGED.to_owned(), None),
-    };
-    let started = fact.started_at.unwrap_or(fact.completed_at);
-    let duration = (fact.completed_at - started).max(0);
-    let totals = rows.entry((host, pool, category)).or_default();
-    totals.job_count += 1;
-    totals.completed_count += i64::from(fact.success);
-    totals.infra_failure_count += i64::from(fact.infra_failure);
-    totals.duration_ms_sum += duration;
-    totals.cpu_milli_seconds += duration * cpu_millis.unwrap_or(0);
-    totals.wait[histogram_bucket(started - fact.created_at)] += 1;
-    totals.duration[histogram_bucket(duration)] += 1;
 }
 
 /// Writes the hour's rows, replacing what is there and taking the hour off
@@ -307,7 +180,7 @@ async fn write_hour(
     db: &SqlitePool,
     hour: i64,
     now: i64,
-    rows: &[(RowKey, HourTotals)],
+    rows: &[(JobRowKey, JobTotals)],
     earlier: &[i64],
 ) -> Result<()> {
     let mut batches = rows.chunks(WRITE_BATCH).collect::<Vec<_>>();
@@ -347,7 +220,7 @@ async fn write_hour(
             .bind(totals.completed_count)
             .bind(totals.infra_failure_count)
             .bind(totals.duration_ms_sum)
-            .bind(totals.cpu_milli_seconds as f64 / 1_000_000.0)
+            .bind(totals.cpu_seconds())
             .bind(serde_json::to_string(&totals.wait)?)
             .bind(serde_json::to_string(&totals.duration)?)
             .bind(now)
@@ -667,5 +540,72 @@ mod tests {
         assert_eq!(harness.counted(hour).await?, 1);
         assert!(harness.listed().await?.is_empty());
         harness.finish().await
+    }
+
+    /// #204: a pass catches up as many past-grace hours as fit in its time
+    /// budget, oldest first, each in its own short write transaction, so a
+    /// first start's 7 days take a few passes instead of 168 (84 minutes at
+    /// one per 30 s pass). Every past-grace hour is rolled once in one pass
+    /// here, and the marker ends at the hour still in its grace.
+    #[tokio::test]
+    async fn one_pass_catches_up_every_hour_its_budget_allows() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (old, recent) = (NOW - 3 * 24 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 1, 1, old + 10 * MINUTE).await?;
+        harness.job(2, 2, 1, recent + 10 * MINUTE).await?;
+        run_pass(&harness.db, NOW).await?;
+        assert_eq!(harness.counted(old).await?, 1, "three days ago, rolled");
+        assert_eq!(harness.counted(recent).await?, 1, "two hours ago, rolled");
+        assert_eq!(
+            next_hour(&harness.db).await?,
+            Some(NOW - HOUR),
+            "caught up to the hour in its grace"
+        );
+        harness.finish().await
+    }
+
+    /// The budget bounds a pass, but a pass always makes progress: with no
+    /// time to spare it still rolls one hour, as before.
+    #[tokio::test]
+    async fn a_pass_with_no_budget_left_still_rolls_one_hour() -> Result<()> {
+        let harness = Harness::new().await?;
+        run_pass_within(&harness.db, NOW, std::time::Duration::ZERO).await?;
+        let start = NOW - 7 * 24 * HOUR;
+        assert_eq!(next_hour(&harness.db).await?, Some(start + HOUR));
+        harness.finish().await
+    }
+
+    /// The whole synthetic week (about 50,000 jobs) catches up in a few
+    /// passes with no statement over 100 ms and no write transaction over
+    /// 50 ms (#179).
+    #[tokio::test]
+    async fn the_synthetic_week_catches_up_in_a_few_passes() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-job-rollup-catch-up-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let week = testdata::build_week(&db, NOW).await?;
+        let passes = gridops_core::fleet_health::speed_check::check(&db, async {
+            let mut passes = 0;
+            while next_hour(&db).await? != Some(NOW - HOUR) {
+                run_pass(&db, NOW).await?;
+                passes += 1;
+                anyhow::ensure!(passes < 168, "no faster than one hour a pass");
+            }
+            Ok(passes)
+        })
+        .await?;
+        println!("the synthetic week caught up in {passes} passes");
+        assert!(passes <= 24, "{passes} passes");
+        let counted: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(job_count),0) FROM fleet_health_hourly")
+                .fetch_one(&db)
+                .await?;
+        // The week ends at NOW; its last hour is still in its grace.
+        assert!(counted > 0 && counted <= i64::try_from(week.jobs)?);
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 }

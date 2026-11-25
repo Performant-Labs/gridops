@@ -1,8 +1,10 @@
 //! `GET /api/v1/fleet/health` (#194): the fleet health page's one read.
 //!
-//! The handler reads the whole response from one [`FleetHealthSource`]
-//! ([`fake::FakeFleetHealthSource`] until #204 plugs in its database source
-//! through [`FleetHealthState::new`]), caches it per window for 30 seconds
+//! The handler reads the whole response from one [`FleetHealthSource`]: the
+//! database source (`health_source::DbFleetHealthSource`, #204), which
+//! [`FleetHealthState::new`] selects in production; tests inject
+//! `fleet_health::fake`'s through `AppState::with_fleet_health_source`. It
+//! caches the response per window for 30 seconds
 //! (`CACHE_TTL_MILLIS`), and shares one computation among the concurrent
 //! requests that find the window expired. When the source fails, the last
 //! good response is served with `stale: true` while it is under 10 minutes
@@ -41,15 +43,17 @@ use gridops_core::{
         registry::{RegistryClock, system_clock},
     },
     fleet_health::{
-        FleetHealth, FleetHealthSource, HealthWindow, LiveHealth, UnknownValue, assemble, fake,
+        FleetHealth, FleetHealthSource, HealthWindow, LiveHealth, UnknownValue, assemble,
     },
 };
 use serde::Deserialize;
+use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
 use super::{
     boundary::{FleetUser, Read},
     error::{FleetApiError, RequestContext},
+    health_source::DbFleetHealthSource,
     profiles::require_admin,
     query_boundary::FleetQuery,
 };
@@ -219,24 +223,48 @@ pub(crate) struct FleetHealthState {
     source: Arc<dyn FleetHealthSource>,
     clock: Arc<dyn RegistryClock>,
     cache: Arc<HealthCache>,
+    /// The database source, while it is the one served, for its refresher.
+    database: Option<DbFleetHealthSource>,
 }
 
 impl FleetHealthState {
-    /// The production state: the source the page is served from, the system
-    /// clock, and an empty cache.
-    pub(crate) fn new() -> Self {
+    /// The production state: the database source over `db` (#204), the
+    /// system clock, and an empty cache.
+    pub(crate) fn new(db: SqlitePool) -> Self {
+        let database = DbFleetHealthSource::new(db);
         Self {
-            // #204: the database source replaces the fake here.
-            source: Arc::new(fake::FakeFleetHealthSource::default()),
+            source: Arc::new(database.clone()),
             clock: system_clock(),
             cache: Arc::new(HealthCache::default()),
+            database: Some(database),
         }
+    }
+
+    /// Starts the database source's speed refresher
+    /// (`DbFleetHealthSource::start_refresher`, every
+    /// `SPEED_REFRESH_EVERY` on this state's clock), so no page waits on the
+    /// speed indexes once its first round has run. `main` calls it once; a
+    /// state serving another source has none to start.
+    pub(crate) fn start_speed_refresher(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.database.as_ref().map(|database| {
+            database.start_refresher(
+                Arc::clone(&self.clock),
+                super::health_source::SPEED_REFRESH_EVERY,
+            )
+        })
+    }
+
+    /// The database source, for a test that drives its speed cache.
+    #[cfg(test)]
+    pub(crate) fn database_source(&self) -> Option<&DbFleetHealthSource> {
+        self.database.as_ref()
     }
 
     /// Replaces the source; tests inject `FakeFleetHealthSource`.
     #[must_use]
     pub(crate) fn with_source(mut self, source: Arc<dyn FleetHealthSource>) -> Self {
         self.source = source;
+        self.database = None;
         self
     }
 
@@ -370,9 +398,81 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::super::health_test_support::{HEALTH, Harness, error_code};
+    use super::super::health_test_support::{HEALTH, Harness, error_code, fixture};
 
     const SECOND: i64 = 1_000;
+
+    /// #204: production's state serves the database, not the fixture: the
+    /// seeded machines, by id and name, at the clock's time. Nothing of the
+    /// response comes from `fleet_health::fake`, which release builds no
+    /// longer compile.
+    #[tokio::test]
+    async fn production_serves_the_database_not_the_fixture() -> Result<()> {
+        let harness = Harness::with_database_source().await?;
+        let fleet = gridops_core::fleet_health::testdata::seed_fleet(&harness.database).await?;
+        let (status, body) = harness.admin_get(&uri("24h")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_ne!(body, fixture()?, "not the fake's fixture");
+        let hosts: Vec<(String, String)> = body["hosts"]
+            .as_array()
+            .map(|hosts| {
+                hosts
+                    .iter()
+                    .map(|host| {
+                        (
+                            host["id"].as_str().unwrap_or_default().to_owned(),
+                            host["name"].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut seeded: Vec<(String, String)> = fleet
+            .hosts
+            .iter()
+            .map(|host| (host.id.clone(), host.name.clone()))
+            .collect();
+        seeded.sort();
+        assert_eq!(hosts, seeded, "the seeded machines, in id order");
+        assert_eq!(
+            body.get("generatedAt").and_then(Value::as_i64),
+            Some(gridops_core::fleet_health::fake::FIXTURE_NOW)
+        );
+        assert_eq!(body["fleet"]["trend"], json!([]), "no snapshot yet");
+        assert_eq!(harness.source.windowed_calls(), 0, "the fake is not called");
+        Ok(())
+    }
+
+    /// #204: the production state's refresher reads every window's speed
+    /// indexes; a state serving another source has no refresher.
+    #[tokio::test]
+    async fn the_production_state_starts_its_speed_refresher() -> Result<()> {
+        let harness = Harness::new().await?;
+        let state = super::FleetHealthState::new(harness.database.clone());
+        let refresher = state
+            .start_speed_refresher()
+            .ok_or_else(|| anyhow::anyhow!("production serves the database source"))?;
+        let database = state
+            .database_source()
+            .ok_or_else(|| anyhow::anyhow!("production serves the database source"))?;
+        for _ in 0..1_000 {
+            if gridops_core::fleet_health::HealthWindow::ALL
+                .iter()
+                .all(|window| database.cached_speed_at(*window).is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for window in gridops_core::fleet_health::HealthWindow::ALL {
+            assert!(database.cached_speed_at(window).is_some(), "{window}");
+        }
+        refresher.abort();
+        let replaced = super::FleetHealthState::new(harness.database.clone())
+            .with_source(Arc::new(harness.source.clone()));
+        assert!(replaced.start_speed_refresher().is_none());
+        Ok(())
+    }
 
     fn uri(window: &str) -> String {
         format!("{HEALTH}?window={window}")

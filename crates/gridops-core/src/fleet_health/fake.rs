@@ -1,4 +1,5 @@
-//! The fixture fleet and the fake source the endpoint serves until #204.
+//! The fixture fleet and the fake source tests inject. Behind `test-support`:
+//! a release build never compiles it (#204).
 //!
 //! [`fixture`] is `src/features/fleet-health/fixture.json` (the UI's
 //! fixture and the `OpenAPI` 200 example are generated from it, and
@@ -750,7 +751,9 @@ fn windowed_concerns() -> Vec<Concern> {
         title: title.to_owned(),
         detail: detail.to_owned(),
         subject: ConcernSubject::Fleet,
-        link: Some("/fleet/health".to_owned()),
+        // The component's row on the fleet score card, as the engine links it
+        // (#253).
+        link: Some(format!("/fleet/health#fleet-component-{key}")),
         since: None,
     };
     vec![
@@ -1047,7 +1050,7 @@ struct State {
     held: watch::Sender<bool>,
 }
 
-/// The source the endpoint serves until #204: the fixture's halves, with
+/// The source tests inject: the fixture's halves, with
 /// call counts, failure on demand, and calls held until released.
 #[derive(Clone)]
 pub struct FakeFleetHealthSource {
@@ -1131,5 +1134,60 @@ impl FleetHealthSource for FakeFleetHealthSource {
         self.state.live_calls.fetch_add(1, Ordering::SeqCst);
         self.pass().await?;
         Ok(live_part())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The fixture agrees with the engine where the engine decides the
+    //! wording (PR-Agent 9d29dd7ab80f on #253's PR).
+
+    use super::{HealthWindow, windowed_part};
+    use crate::fleet_health::{ScoreComponent, concerns};
+
+    /// Each fleet-component concern links to its component's row on the
+    /// fleet score card, as `concerns::fleet_component` links it (#253).
+    #[test]
+    fn the_fleet_component_concerns_link_to_their_rows() {
+        for concern in windowed_part(HealthWindow::Day)
+            .concerns
+            .iter()
+            .filter(|concern| concern.key.starts_with("fleet-component:"))
+        {
+            let key = concern
+                .key
+                .trim_start_matches("fleet-component:")
+                .to_owned();
+            let engine = concerns::fleet_component(&ScoreComponent {
+                key: key.clone(),
+                label: key.clone(),
+                weight: 20.0,
+                score: Some(60),
+                deduction: None,
+            });
+            assert_eq!(
+                concern.link,
+                engine.and_then(|engine| engine.link),
+                "{}",
+                concern.key
+            );
+        }
+    }
+
+    /// `src/features/fleet-health/fixture.json` from the fake: run with
+    /// `GRIDOPS_REGENERATE_FLEET_HEALTH_FIXTURE=1` after changing it (the
+    /// contract tests then check the file, and the `OpenAPI` example, against
+    /// it).
+    #[test]
+    #[ignore = "writes src/features/fleet-health/fixture.json"]
+    fn regenerate_the_fixture() -> anyhow::Result<()> {
+        if std::env::var_os("GRIDOPS_REGENERATE_FLEET_HEALTH_FIXTURE").is_none() {
+            return Ok(());
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/features/fleet-health/fixture.json");
+        let json = serde_json::to_string_pretty(&super::fixture(HealthWindow::Day))?;
+        std::fs::write(path, json + "\n")?;
+        Ok(())
     }
 }

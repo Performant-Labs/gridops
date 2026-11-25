@@ -62,6 +62,8 @@ impl RegistryClock for TestClock {
 
 pub(super) struct Harness {
     pub(super) router: Router,
+    /// The health state the router serves (its caches shared).
+    pub(super) fleet_health: crate::fleet::FleetHealthState,
     pub(super) database: SqlitePool,
     pub(super) source: FakeFleetHealthSource,
     pub(super) clock: Arc<TestClock>,
@@ -81,6 +83,16 @@ impl Drop for Harness {
 
 impl Harness {
     pub(super) async fn new() -> Result<Self> {
+        Self::build(true).await
+    }
+
+    /// #204: the production source, the database (`FleetHealthState::new`),
+    /// with only the clock replaced. `source` is then a fake nothing calls.
+    pub(super) async fn with_database_source() -> Result<Self> {
+        Self::build(false).await
+    }
+
+    async fn build(fake_source: bool) -> Result<Self> {
         let path =
             std::env::temp_dir().join(format!("gridops-health-{}.sqlite", uuid::Uuid::new_v4()));
         let database = gridops_core::connect_database_path(&path).await?;
@@ -90,21 +102,25 @@ impl Harness {
         let vault = Vault::new([9_u8; 32], b"health-test-session-secret".to_vec());
         let source = FakeFleetHealthSource::default();
         let clock = Arc::new(TestClock(AtomicI64::new(fake::FIXTURE_NOW)));
-        let state = AppState::new(
+        let mut state = AppState::new(
             config.clone(),
             database.clone(),
             vault.clone(),
             GitHubClient::new(config)?,
             BitbucketClient::new()?,
         )?
-        .with_fleet_health_source(Arc::new(source.clone()))
         .with_fleet_health_clock(clock.clone());
+        if fake_source {
+            state = state.with_fleet_health_source(Arc::new(source.clone()));
+        }
+        let fleet_health = state.fleet_health.clone();
         let router = super::router()
             .merge(crate::session_routes())
             .merge(crate::token_routes())
             .with_state(state);
         let mut harness = Self {
             router,
+            fleet_health,
             database,
             source,
             clock,
@@ -116,6 +132,22 @@ impl Harness {
         harness.admin = harness.sign_in("admin-1", 1, "admin").await?;
         harness.member = harness.sign_in("member-1", 2, "member").await?;
         Ok(harness)
+    }
+
+    /// One round of the database source's speed refresher at `now`, as the
+    /// API's refresher would have run it by then (#204).
+    pub(super) async fn refresh_speed(&self, now: i64) -> Result<()> {
+        self.fleet_health
+            .database_source()
+            .context("the harness serves the fake source")?
+            .refresh_all(now)
+            .await;
+        Ok(())
+    }
+
+    /// The database file, for a reader outside the pool (#204's oracle).
+    pub(super) fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     /// Seeds a user with a session; returns the session cookie.

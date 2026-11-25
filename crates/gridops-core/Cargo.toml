@@ -35,7 +35,7 @@ uuid.workspace = true
 gridops-core = { path = ".", features = ["test-support"] }
 
 [features]
-# Exposes `gitlab::fake::FakeGitLab`, `fleet_health::testdata` and
+# Exposes `gitlab::fake::FakeGitLab`, `fleet_health::fake`, `fleet_health::testdata` and
 # `fleet_health::speed_check` to other crates' tests.
 test-support = []
 

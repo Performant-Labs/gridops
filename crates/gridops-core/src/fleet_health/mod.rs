@@ -12,7 +12,11 @@
 //! - [`score`] and [`concerns`]: the scoring engine and the windowed concerns,
 //!   pure (#192);
 //! - [`speed`]: the relative speed index (#193);
-//! - [`fake`]: the fixture source the endpoint serves until #204;
+//! - [`hour`], [`usage`] and [`window`]: one hour of jobs and machines as
+//!   the rollups store it, the window's usage by category, and the windowed
+//!   half the database source serves and the snapshots record (#204);
+//! - `fake` (behind `test-support`): the fixture source tests inject; it is
+//!   not compiled into the release binaries;
 //! - `testdata` and `speed_check` (behind `test-support`): the seeded fleet,
 //!   the synthetic week and the database speed check the contract tests use.
 //!
@@ -21,13 +25,17 @@
 pub mod category;
 pub mod classifier_cache;
 pub mod concerns;
+#[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod hour;
 pub mod score;
 pub mod speed;
 #[cfg(any(test, feature = "test-support"))]
 pub mod speed_check;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testdata;
+pub mod usage;
+pub mod window;
 
 // The wave-1 contract tests in this crate. They are #197's whatever issue
 // fills them in (D-3(e)): a wave-1 agent removes its markers and edits
@@ -476,8 +484,8 @@ pub struct LiveHealth {
 
 /// Where the endpoint gets its data. The windowed part is the slow, cached
 /// part; the live part is a bounded read of now. #194's handler holds an
-/// `Arc<dyn FleetHealthSource>`: [`fake::FakeFleetHealthSource`] until #204
-/// plugs in the database source.
+/// `Arc<dyn FleetHealthSource>`: the API's database source (#204) in
+/// production, `fake::FakeFleetHealthSource` in tests.
 #[async_trait]
 pub trait FleetHealthSource: Send + Sync {
     async fn windowed(&self, window: HealthWindow, now: i64) -> anyhow::Result<WindowedHealth>;

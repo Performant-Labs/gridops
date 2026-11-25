@@ -2629,7 +2629,7 @@
                       "subject": {
                         "kind": "fleet"
                       },
-                      "link": "/fleet/health",
+                      "link": "/fleet/health#fleet-component-queue-wait",
                       "since": null
                     },
                     {
@@ -2640,7 +2640,7 @@
                       "subject": {
                         "kind": "fleet"
                       },
-                      "link": "/fleet/health",
+                      "link": "/fleet/health#fleet-component-start-reliability",
                       "since": null
                     },
                     {

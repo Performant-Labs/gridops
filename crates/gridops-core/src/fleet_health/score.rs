@@ -86,6 +86,17 @@ const NO_BUDGET: &str = "the machine has no CPU budget";
 struct Measured {
     component: ScoreComponent,
     raw: Option<f64>,
+    /// The deduction sentence before its points (`None` at 100 or without a
+    /// score): [`combine_measured`] adds the points lost from the weight
+    /// after reweighting (#257).
+    body: Option<String>,
+}
+
+/// A deduction sentence: `body` and the points lost, `round(weight × (100 −
+/// raw) / 100)` from the unrounded score.
+fn deduction(body: &str, weight: f64, raw: f64) -> String {
+    let lost = (weight * (100.0 - raw) / 100.0).round() as i64;
+    format!("{body}: \u{2212}{lost}.")
 }
 
 /// One component: `measured` scored through `scored` (linear, clamped),
@@ -113,20 +124,22 @@ fn measure<T: Copy>(
                 deduction: Some(format!("Not enough data: {no_data}.")),
             },
             raw: None,
+            body: None,
         };
     };
     let raw = scored(value);
     let score = raw.round() as u8;
-    let lost = (weight * (100.0 - raw) / 100.0).round() as i64;
+    let body = (score < 100).then(|| body(value));
     Measured {
         component: ScoreComponent {
             key: key.to_owned(),
             label: label.to_owned(),
             weight,
             score: Some(score),
-            deduction: (score < 100).then(|| format!("{}: \u{2212}{lost}.", body(value))),
+            deduction: body.as_deref().map(|body| deduction(body, weight, raw)),
         },
         raw: Some(raw),
+        body,
     }
 }
 
@@ -146,6 +159,7 @@ fn unbudgeted(part: Measured) -> Measured {
             ..part.component
         },
         raw: None,
+        body: None,
     }
 }
 
@@ -494,6 +508,7 @@ pub fn combine(components: &[ScoreComponent]) -> CombinedScore {
         .map(|component| Measured {
             component: component.clone(),
             raw: component.score.map(f64::from),
+            body: None,
         })
         .collect();
     combine_measured(&parts)
@@ -501,7 +516,8 @@ pub fn combine(components: &[ScoreComponent]) -> CombinedScore {
 
 /// [`combine`] over the unrounded scores: the weighted sum is rounded once,
 /// at the end (#239 item 5). The components keep their rounded scores, with
-/// the weights rescaled.
+/// the weights rescaled, and each deduction counts the points lost from the
+/// rescaled weight (#257).
 fn combine_measured(parts: &[Measured]) -> CombinedScore {
     let scored_weight: f64 = parts
         .iter()
@@ -523,9 +539,19 @@ fn combine_measured(parts: &[Measured]) -> CombinedScore {
         score,
         components: parts
             .iter()
-            .map(|part| ScoreComponent {
-                weight: scaled(part),
-                ..part.component.clone()
+            .map(|part| {
+                let weight = scaled(part);
+                // The points lost from the weight after reweighting, so the
+                // deductions add up to what the score lost (#257).
+                let deduction = match (&part.body, part.raw) {
+                    (Some(body), Some(raw)) => Some(deduction(body, weight, raw)),
+                    _ => part.component.deduction.clone(),
+                };
+                ScoreComponent {
+                    weight,
+                    deduction,
+                    ..part.component.clone()
+                }
             })
             .collect(),
     }
@@ -1129,13 +1155,16 @@ mod tests {
         );
         assert_eq!(hosts["b"].score, Some(50));
         assert_eq!(hosts["b"].busy_share, Some(0.25));
+        // Relative speed has no data, so availability's 25 is 33.3 of the
+        // other 75: it loses 33 points, not 25 (#257).
         assert_eq!(
             hosts["b"].components[0].deduction.as_deref(),
-            Some("Online 50.0% of the window against a 100% target: \u{2212}25.")
+            Some("Online 50.0% of the window against a 100% target: \u{2212}33.")
         );
         assert_eq!(
             hosts["b"].components[3].deduction.as_deref(),
-            Some("Memory p95 was 90% of budget against a 80% target: \u{2212}8.")
+            // Its 15 is 20 of the reweighted 100 (#257).
+            Some("Memory p95 was 90% of budget against a 80% target: \u{2212}10.")
         );
         // The missing speed index takes no weight; the others still sum to 100.
         assert!(hosts["b"].components[2].weight < 1e-9);
@@ -1273,6 +1302,49 @@ mod tests {
                 .all(|concern| concern.key != "fleet-component:availability"),
             "a fully online fleet raised {concerns:?}"
         );
+    }
+
+    /// #257: a deduction's points are lost from the component's weight
+    /// after reweighting, so a score's deductions add up to what it lost. On
+    /// 1h with too few jobs only availability has data: it carries all 100,
+    /// and online 27 of 30 minutes (90%, scoring 50) loses 50 points, not the
+    /// 5 its own weight of 10 would say. A machine's components likewise.
+    #[test]
+    fn deductions_count_the_points_lost_after_reweighting() {
+        let inputs = window_inputs(
+            HealthWindow::Hour,
+            T + 30 * MINUTE,
+            vec![info("a", 4_000, 1_000, None)],
+            Vec::new(),
+            vec![host_row(T, "a", 27, Some(1_000), None, None)],
+        );
+        let scored = score_fleet(&inputs);
+        assert_eq!(scored.score, Some(50));
+        let availability = scored
+            .components
+            .iter()
+            .find(|component| component.key == "availability");
+        assert_eq!(
+            availability.and_then(|component| component.deduction.as_deref()),
+            Some(
+                "The fleet's CPU budget was online 90.0% of the window against a 100% target: \u{2212}50."
+            )
+        );
+        for host in &scored.hosts {
+            let lost: i64 = host
+                .components
+                .iter()
+                .filter_map(|component| component.deduction.as_deref())
+                .filter_map(|sentence| sentence.rsplit_once('\u{2212}'))
+                .filter_map(|(_, points)| points.trim_end_matches('.').parse::<i64>().ok())
+                .sum();
+            let score = host.score.map_or(100, i64::from);
+            assert!(
+                (lost - (100 - score)).abs() <= 1,
+                "{}: deductions {lost} for a score of {score}",
+                host.host_id
+            );
+        }
     }
 
     /// Item 1's grace-hour contract: at H + 10 min on 24h the source supplies
@@ -1468,7 +1540,9 @@ mod tests {
         assert_eq!(part(&offline.components, "availability"), Ok(Some(0)));
         assert_eq!(
             offline.components[0].deduction.as_deref(),
-            Some("Online 0.0% of the window against a 100% target: \u{2212}25.")
+            // Only availability and busy share have data: 25 of 35 is 71.4
+            // of the score, all of it lost (#257).
+            Some("Online 0.0% of the window against a 100% target: \u{2212}71.")
         );
         // No rows at all is still not enough data.
         let silent = &scored.hosts[1];
