@@ -174,6 +174,7 @@ fn each_concern_threshold_holds_one_unit_either_side() {
         cpu_budget_millis: 4_000,
         memory_budget_mib: 1_000,
         disk_total_bytes: None,
+        created_at: None,
     };
     let slow = |index: f64| SpeedResult {
         host_id: "h".to_owned(),
@@ -280,6 +281,7 @@ fn concern_inputs(now: i64, hourly: Vec<HourlyJobRow>) -> FleetHealthInputs {
         window: HealthWindow::Day,
         now,
         hosts: Vec::new(),
+        retired_hosts: Vec::new(),
         hourly,
         host_hourly: Vec::new(),
         speed: Vec::new(),
@@ -676,6 +678,7 @@ fn host_info(id: &str, cpu: u32, memory: u32, disk: Option<u64>) -> HostInfo {
         cpu_budget_millis: cpu,
         memory_budget_mib: memory,
         disk_total_bytes: disk,
+        created_at: None,
     }
 }
 
@@ -710,6 +713,7 @@ fn day_inputs(
         window: HealthWindow::Day,
         now: T,
         hosts,
+        retired_hosts: Vec::new(),
         hourly,
         host_hourly,
         speed: Vec::new(),

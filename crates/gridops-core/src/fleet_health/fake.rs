@@ -79,6 +79,7 @@ fn hosts() -> Vec<HostInfo> {
         cpu_budget_millis: cpu,
         memory_budget_mib: memory,
         disk_total_bytes: Some(disk),
+        created_at: None,
     })
     .collect()
 }
@@ -596,6 +597,7 @@ pub fn fixture_inputs() -> FleetHealthInputs {
         window: HealthWindow::Day,
         now: FIXTURE_NOW,
         hosts: hosts(),
+        retired_hosts: Vec::new(),
         hourly: hourly(),
         host_hourly: host_hourly(),
         speed: speed(),

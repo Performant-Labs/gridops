@@ -11,6 +11,8 @@
 
 use crate::disk::{DiskAlarm, alarm_for};
 
+use super::machines::Life;
+
 use super::{
     CombinedScore, DiskHeadroom, FleetHealthInputs, HISTOGRAM_BUCKETS,
     HISTOGRAM_LOWER_BOUNDS_MILLIS, HOUR_MILLIS, HealthTargets, Histogram, HourlyHostRow,
@@ -596,45 +598,78 @@ fn first_hour(inputs: &FleetHealthInputs) -> i64 {
     ceil_div(inputs.now - inputs.window.millis(), HOUR_MILLIS) * HOUR_MILLIS
 }
 
-/// The time the window's rows cover, in milliseconds: `now − ceil_hour(now −
-/// W)`, the denominator of every time share (#239 item 1). It is the full
-/// window only on the hour, and always over `W − 1 h`, so above 0.
+/// The covered time of a machine that lived `life`, the denominator of its time shares (#239
+/// item 1): the time the window's rows cover, `[ceil_hour(now − W), now)`
+/// (the full window only on the hour, and always over `W − 1 h`), cut to the
+/// part the machine existed in (#262, [`Life::span`]). As
+/// `(whole minutes, milliseconds)`: the minutes are the unit `online_minutes`
+/// counts in, from the one the span starts in to the one it ends in, that
+/// one excluded, so a machine online every whole minute is fully available
+/// while the minute in progress is still unsampled. `(0, 0)` when it did not
+/// exist in it.
 ///
 /// Under the grace-hour contract with #204, the source supplies every hour of
 /// it: the hours past their rollup grace from the hourly tables, and the rest
 /// (the hour in progress, and the hour that just ended until its grace
 /// passes) computed live.
-fn covered_millis(inputs: &FleetHealthInputs) -> i64 {
-    inputs.now - first_hour(inputs)
+fn host_covered(inputs: &FleetHealthInputs, life: Life) -> (i64, i64) {
+    let (start, end) = life.span(first_hour(inputs), inputs.now);
+    if start >= end {
+        return (0, 0);
+    }
+    (
+        end.div_euclid(60_000) - start.div_euclid(60_000),
+        end - start,
+    )
 }
 
-/// The whole minutes of [`covered_millis`]: the unit `online_minutes` counts
-/// in, so a machine online every whole minute is fully available while the
-/// minute in progress is still unsampled.
-fn covered_minutes(inputs: &FleetHealthInputs) -> i64 {
-    covered_millis(inputs) / 60_000
+/// `rows` of machine `id`, which lived `life`, in the hours its life reaches
+/// (#262).
+fn host_rows<'a>(id: &str, life: Life, rows: &[&'a HourlyHostRow]) -> Vec<&'a HourlyHostRow> {
+    rows.iter()
+        .copied()
+        .filter(|row| row.host_id == id && life.counts_hour(row.hour))
+        .collect()
 }
 
-/// The fleet's budget-weighted share of machine-minutes online over the
-/// covered minutes. A machine with no rows in the window counts as offline,
-/// at its full budget. `None` with no budget or no whole minute covered.
+/// Every machine the fleet's availability and capacity fit count, as (id,
+/// CPU budget, life): the page's, and those retired during the window, which
+/// are off the page but count for their time before `retired_at` (#262).
+fn fleet_machines(inputs: &FleetHealthInputs) -> Vec<(&str, u32, Life)> {
+    inputs
+        .hosts
+        .iter()
+        .map(|host| (host.id.as_str(), host.cpu_budget_millis, host.life()))
+        .chain(
+            inputs
+                .retired_hosts
+                .iter()
+                .map(|host| (host.id.as_str(), host.cpu_budget_millis, host.life())),
+        )
+        .collect()
+}
+
+/// The fleet's budget-weighted share of machine-minutes online: each
+/// machine's online minutes over its own covered minutes (#262), weighted by
+/// its CPU budget, the machines retired during the window included. A
+/// machine with no rows in the window counts as offline, at its full budget.
+/// `None` with no budget or no whole minute covered.
 fn fleet_online_share(inputs: &FleetHealthInputs, rows: &[&HourlyHostRow]) -> Option<f64> {
-    let covered = covered_minutes(inputs);
     let mut online = 0.0_f64;
     let mut budget = 0.0_f64;
-    for host in &inputs.hosts {
-        let minutes: u32 = rows
+    for (id, cpu_budget_millis, life) in fleet_machines(inputs) {
+        let (covered, _) = host_covered(inputs, life);
+        let minutes: u32 = host_rows(id, life, rows)
             .iter()
-            .filter(|row| row.host_id == host.id)
             .map(|row| row.online_minutes)
             .sum();
         // The sampled minute in progress can put a machine one past the
         // covered minutes; capped, it never offsets another's downtime.
         let minutes = i64::from(minutes).min(covered);
-        online += minutes as f64 * f64::from(host.cpu_budget_millis);
-        budget += f64::from(host.cpu_budget_millis);
+        online += minutes as f64 * f64::from(cpu_budget_millis);
+        budget += covered as f64 * f64::from(cpu_budget_millis);
     }
-    (budget > 0.0 && covered > 0).then(|| online / (budget * covered as f64))
+    (budget > 0.0).then(|| online / budget)
 }
 
 /// `value` divided by `by`, rounded up (both positive or negative).
@@ -643,7 +678,9 @@ fn ceil_div(value: i64, by: i64) -> i64 {
 }
 
 /// The share of the window's hours in which jobs waited over a minute while
-/// the fleet's sampled machines sat under half their sampled CPU budget.
+/// the fleet's sampled machines sat under half their sampled CPU budget: the
+/// page's machines and those retired during the window, each only in the
+/// hours its life reaches (#262).
 fn capacity_misfit(
     inputs: &FleetHealthInputs,
     jobs: &[&HourlyJobRow],
@@ -651,6 +688,7 @@ fn capacity_misfit(
 ) -> Option<f64> {
     let first = first_hour(inputs);
     let hours = (inputs.now - first) / HOUR_MILLIS;
+    let machines = fleet_machines(inputs);
     let mut misfit = 0_u32;
     let mut counted = 0_u32;
     for index in 0..hours {
@@ -677,11 +715,14 @@ fn capacity_misfit(
             let Some(p50) = row.cpu_used_p50_millis else {
                 continue;
             };
-            let Some(host) = inputs.hosts.iter().find(|host| host.id == row.host_id) else {
+            let Some(&(_, cpu_budget_millis, _)) = machines
+                .iter()
+                .find(|(id, _, life)| *id == row.host_id && life.counts_hour(hour))
+            else {
                 continue;
             };
             used += f64::from(p50);
-            budget += f64::from(host.cpu_budget_millis);
+            budget += f64::from(cpu_budget_millis);
         }
         if budget > 0.0 && used < budget / 2.0 {
             misfit += 1;
@@ -747,21 +788,19 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
         measure_fleet_availability(fleet_online_share(inputs, &hosts), targets),
     ];
 
-    let covered_minutes = covered_minutes(inputs);
-    let covered_seconds = covered_millis(inputs) as f64 / 1000.0;
     let scored_hosts = inputs
         .hosts
         .iter()
         .map(|host| {
-            let rows: Vec<&HourlyHostRow> = hosts
-                .iter()
-                .copied()
-                .filter(|row| row.host_id == host.id)
-                .collect();
+            // Its own covered time and rows: the part of the window it
+            // existed in (#262).
+            let (covered_minutes, covered_millis) = host_covered(inputs, host.life());
+            let covered_seconds = covered_millis as f64 / 1000.0;
+            let rows = host_rows(&host.id, host.life(), &hosts);
             let job_rows: Vec<&HourlyJobRow> = jobs
                 .iter()
                 .copied()
-                .filter(|row| row.host.as_str() == host.id)
+                .filter(|row| row.host.as_str() == host.id && host.life().counts_hour(row.hour))
                 .collect();
             let online_minutes: u32 = rows.iter().map(|row| row.online_minutes).sum();
             let attempts: u32 = rows.iter().map(|row| row.start_attempts).sum();
@@ -792,7 +831,7 @@ pub fn score_fleet(inputs: &FleetHealthInputs) -> ScoredFleet {
                 .filter(|_| host.memory_budget_mib > 0)
                 .map(|p95| f64::from(p95) / f64::from(host.memory_budget_mib));
             let budgeted = host.cpu_budget_millis > 0;
-            let busy = budgeted.then(|| {
+            let busy = (budgeted && covered_millis > 0).then(|| {
                 let cpu_seconds: f64 = job_rows.iter().map(|row| row.cpu_seconds_sum).sum();
                 cpu_seconds / (f64::from(host.cpu_budget_millis) / 1000.0 * covered_seconds)
             });
@@ -835,7 +874,7 @@ mod tests {
 
     use crate::fleet_health::{
         FleetHealthInputs, FleetLiveStats, HealthWindow, Histogram, HostInfo, HourlyHostRow,
-        HourlyJobRow, JobCategory, RollupHost, SpeedResult,
+        HourlyJobRow, JobCategory, RetiredHost, RollupHost, SpeedResult,
     };
 
     use super::*;
@@ -931,6 +970,7 @@ mod tests {
             cpu_budget_millis: cpu,
             memory_budget_mib: memory,
             disk_total_bytes: disk,
+            created_at: None,
         }
     }
 
@@ -984,6 +1024,7 @@ mod tests {
                 info("c", 0, 500, None),
                 info("d", 5_000, 500, Some(100 * GIB)),
             ],
+            retired_hosts: Vec::new(),
             hourly: vec![
                 job_row(hour(0), "a", JobCategory::Test, (150, 80, 2), 43_200.0, b4),
                 job_row(
@@ -1252,6 +1293,7 @@ mod tests {
             window,
             now,
             hosts,
+            retired_hosts: Vec::new(),
             hourly,
             host_hourly,
             speed: Vec::new(),
@@ -1689,5 +1731,162 @@ mod tests {
             part(&scored.hosts[0].components, "busy-share"),
             Ok(Some(100))
         );
+    }
+
+    // #262: a page machine counts only from its `created_at`; a machine
+    // retired during the window is off the page but counts for the fleet's
+    // availability and capacity fit until its `retired_at`: every time
+    // denominator is a machine's own span, and its rows outside it (the
+    // 0-minute rows the machine rollup wrote for a retired machine before
+    // #262) never count.
+
+    fn retired(id: &str, cpu: u32, retired_at: i64) -> RetiredHost {
+        RetiredHost {
+            id: id.to_owned(),
+            cpu_budget_millis: cpu,
+            created_at: None,
+            retired_at,
+        }
+    }
+
+    /// `old` (2 CPUs) was retired at T − 5 h, when `new` (4 CPUs) replaced
+    /// it. `old` was offline one hour before its retirement, and its rows
+    /// after it are the 0-minute rows a rollup wrote before #262. Only `new`
+    /// is scored, but the fleet's availability counts `old`'s 19 hours:
+    /// (1,080 × 2,000 + 300 × 4,000) ÷ (1,140 × 2,000 + 300 × 4,000) =
+    /// 96.6%, which scores 83 (100 without `old`, lower with its rows after
+    /// its retirement).
+    #[test]
+    fn a_retired_machine_is_off_the_page_but_counts_for_the_fleet_until_it_retired() {
+        let mut new = info("new", 4_000, 1_000, None);
+        new.created_at = Some(T - 5 * HOUR_MILLIS);
+        let mut rows: Vec<HourlyHostRow> = (6..=24)
+            .map(|back| {
+                let online = if back == 10 { 0 } else { 60 };
+                host_row(
+                    T - back * HOUR_MILLIS,
+                    "old",
+                    online,
+                    Some(1_500),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        rows.extend(
+            (1..=5).map(|back| host_row(T - back * HOUR_MILLIS, "old", 0, None, None, None)),
+        );
+        rows.extend(
+            (1..=5)
+                .map(|back| host_row(T - back * HOUR_MILLIS, "new", 60, Some(3_000), None, None)),
+        );
+        let mut inputs = window_inputs(HealthWindow::Day, T, vec![new], Vec::new(), rows);
+        inputs.retired_hosts = vec![retired("old", 2_000, T - 5 * HOUR_MILLIS)];
+        let scored = score_fleet(&inputs);
+        assert_eq!(
+            part(&scored.components, "availability"),
+            Ok(Some(83)),
+            "fleet"
+        );
+        let on_page: Vec<&str> = scored
+            .hosts
+            .iter()
+            .map(|host| host.host_id.as_str())
+            .collect();
+        assert_eq!(on_page, ["new"]);
+        assert_eq!(
+            part(&scored.hosts[0].components, "availability"),
+            Ok(Some(100))
+        );
+        let concerns = crate::fleet_health::concerns::windowed(&inputs, &scored);
+        assert!(
+            concerns.iter().all(|concern| !concern.key.contains("old")),
+            "a concern on the retired machine: {concerns:?}"
+        );
+    }
+
+    /// A machine created at T − 2 h 40 min and online every minute since is
+    /// fully available on the day: the hours before it existed are not
+    /// offline, even with a 0-minute row for one of them.
+    #[test]
+    fn a_machine_created_in_the_window_counts_only_from_its_creation() {
+        let mut new = info("new", 4_000, 1_000, None);
+        new.created_at = Some(T - 2 * HOUR_MILLIS - 40 * MINUTE);
+        let scored = score_fleet(&window_inputs(
+            HealthWindow::Day,
+            T,
+            vec![new],
+            vec![job_row(
+                T - HOUR_MILLIS,
+                "new",
+                JobCategory::Test,
+                (5, 5, 0),
+                // 160 min × 4 CPUs, a quarter of the time.
+                160.0 * 60.0,
+                [0; HISTOGRAM_BUCKETS],
+            )],
+            vec![
+                host_row(T - 10 * HOUR_MILLIS, "new", 0, None, None, None),
+                host_row(T - 3 * HOUR_MILLIS, "new", 40, Some(1_000), None, None),
+                host_row(T - 2 * HOUR_MILLIS, "new", 60, Some(1_000), None, None),
+                host_row(T - HOUR_MILLIS, "new", 60, Some(1_000), None, None),
+            ],
+        ));
+        assert_eq!(
+            part(&scored.hosts[0].components, "availability"),
+            Ok(Some(100)),
+            "machine"
+        );
+        assert_eq!(
+            part(&scored.components, "availability"),
+            Ok(Some(100)),
+            "fleet"
+        );
+        let busy = scored.hosts[0].busy_share;
+        assert!(
+            busy.is_some_and(|busy| (busy - 0.25).abs() < 1e-9),
+            "busy share {busy:?}"
+        );
+    }
+
+    /// Capacity fit counts a retired machine's rows before its retirement
+    /// and never after. At T − 8 h only `old` was sampled, 500 of its 2,000:
+    /// a misfit. At T − 2 h `new` runs at 2,900 of 4,000, no misfit; `old`'s
+    /// row after its retirement (p50 0) would make it one (2,900 under half
+    /// of 6,000). So 1 of 24 hours: 4.2%, which scores 83 (100 without
+    /// `old`, 67 with its row after its retirement).
+    #[test]
+    fn capacity_fit_counts_a_retired_machine_only_before_it_retired() {
+        let mut new = info("new", 4_000, 1_000, None);
+        new.created_at = Some(T - 5 * HOUR_MILLIS);
+        let mut rows: Vec<HourlyHostRow> = (6..=24)
+            .map(|back| host_row(T - back * HOUR_MILLIS, "old", 60, Some(500), None, None))
+            .collect();
+        rows.push(host_row(T - 2 * HOUR_MILLIS, "old", 0, Some(0), None, None));
+        rows.extend((1..=5).map(|back| {
+            let p50 = if back == 2 { 2_900 } else { 3_000 };
+            host_row(T - back * HOUR_MILLIS, "new", 60, Some(p50), None, None)
+        }));
+        let mut waits = [0; HISTOGRAM_BUCKETS];
+        waits[3] = 20;
+        let jobs = [8, 2]
+            .into_iter()
+            .map(|back| {
+                let host = if back == 8 { "old" } else { "new" };
+                job_row(
+                    T - back * HOUR_MILLIS,
+                    host,
+                    JobCategory::Test,
+                    (20, 20, 0),
+                    0.0,
+                    waits,
+                )
+            })
+            .collect();
+        let mut inputs = window_inputs(HealthWindow::Day, T, vec![new], jobs, rows);
+        inputs.retired_hosts = vec![retired("old", 2_000, T - 5 * HOUR_MILLIS)];
+        let scored = score_fleet(&inputs);
+        assert_eq!(part(&scored.components, "capacity-fit"), Ok(Some(83)));
+        assert_eq!(part(&scored.components, "availability"), Ok(Some(100)));
     }
 }
