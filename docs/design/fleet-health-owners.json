@@ -102,10 +102,11 @@
         "src/features/fleet-health/machine-detail-window.tsx",
         "src/features/fleet-health/fleet-score-card.tsx",
         "tests/fleet-health-253-*.test.ts",
-        "docs/design/fleet-health.md"
+        "docs/design/fleet-health.md",
+        "docs/openapi/gridops-v1.json"
       ],
       "addOnly": [],
-      "$comment": "queries.rs: the failed-placement read only; autoscaling.rs: the waiting (queued) read only; mod.rs: the start_failures_last_hour comment only; fleet-health.md: the sections describing these rules."
+      "$comment": "queries.rs: the failed-placement read only; autoscaling.rs: the waiting (queued) read only; mod.rs: the start_failures_last_hour and OldestQueued comments only; fleet-health.md: the sections describing these rules; docs/openapi/gridops-v1.json: the fleet health description's oldestQueued.jobId sentence only (review of PR 254)."
     }
   }
 }

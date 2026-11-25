@@ -1200,6 +1200,214 @@ mod tests {
         seeded.close().await
     }
 
+    /// Links the seeded pool to the testdata GitLab connection, so it runs
+    /// that connection's jobs tagged `self-hosted`, `gridops`.
+    async fn link_gitlab_pool(seeded: &Seeded) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at) VALUES (?,'testdata-gitlab',1)",
+        )
+        .bind(&seeded.fleet.pool_id)
+        .execute(&seeded.db)
+        .await?;
+        Ok(())
+    }
+
+    /// A GitLab job waiting for a runner, created at `created_at`.
+    fn pending_gitlab(id: i64, name: &str, created_at: i64) -> JobSeed {
+        let mut job = JobSeed::queued(id, name, created_at);
+        job.gitlab = true;
+        job
+    }
+
+    /// #253 review: a GitLab job is queued only while `pending` is the
+    /// furthest along of its rows: one pending on one connection but already
+    /// running on another (the project's and its group's) has its runner.
+    #[tokio::test]
+    async fn a_gitlab_job_running_on_another_connection_is_not_queued() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[pending_gitlab(2, "compile", NOW - 8 * MINUTE)],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('group-connection','group','https://gitlab.test','group',2,'acme','group.token','group.webhook',1,1)",
+        )
+        .execute(&seeded.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path)
+             SELECT 'group-copy','group-connection',project_id,job_id,pipeline_id,'running',tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path
+               FROM gitlab_jobs WHERE job_id=2",
+        )
+        .execute(&seeded.db)
+        .await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!(fleet.queued_total, 0, "{fleet:?}");
+        assert!(fleet.queued_by_pool.is_empty(), "{fleet:?}");
+        assert_eq!(fleet.oldest_queued, None);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "oldest-queued"),
+            "{concerns:?}"
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a GitLab job only a manual-mode pool can run is under
+    /// that pool and not unmatched, and, as a GitHub job on a manual pool,
+    /// is not the oldest job waiting for capacity (nothing starts a runner
+    /// for it).
+    #[tokio::test]
+    async fn a_gitlab_job_only_a_manual_pool_runs_is_under_it_and_not_the_oldest() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[pending_gitlab(2, "compile", NOW - 20 * MINUTE)],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        sqlx::query("UPDATE runner_pools SET autoscaling_enabled=0 WHERE id=?")
+            .bind(&seeded.fleet.pool_id)
+            .execute(&seeded.db)
+            .await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!((fleet.queued_total, fleet.queued_unmatched), (1, 0));
+        assert_eq!(
+            fleet
+                .queued_by_pool
+                .iter()
+                .map(|pool| (pool.pool_id.as_str(), pool.queued))
+                .collect::<Vec<_>>(),
+            vec![(seeded.fleet.pool_id.as_str(), 1)]
+        );
+        assert_eq!(fleet.oldest_queued, None);
+        assert!(
+            concerns
+                .iter()
+                .all(|concern| concern.key != "oldest-queued" && concern.key != "unmatched-jobs"),
+            "{concerns:?}"
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a GitHub job that has waited longer than every GitLab
+    /// job is the oldest queued job, named from its `workflow_jobs` row.
+    #[tokio::test]
+    async fn a_github_job_older_than_every_gitlab_job_is_the_oldest() -> Result<()> {
+        let seeded = Seeded::new().await?;
+        let mut github = JobSeed::queued(1, "unit tests", NOW - 12 * MINUTE);
+        github.category = Some(JobCategory::Test);
+        testdata::insert_jobs(
+            &seeded.db,
+            &seeded.fleet,
+            &[
+                github,
+                pending_gitlab(2, "compile", NOW - 8 * MINUTE),
+                pending_gitlab(3, "package", NOW - 11 * MINUTE),
+            ],
+        )
+        .await?;
+        link_gitlab_pool(&seeded).await?;
+        let (fleet, _, concerns) = collect_live(&seeded.db, NOW).await?;
+        assert_eq!(fleet.queued_total, 3);
+        let oldest = fleet
+            .oldest_queued
+            .ok_or_else(|| anyhow::anyhow!("no oldest queued job"))?;
+        assert_eq!(
+            (oldest.job_id, oldest.job_name.as_str(), oldest.wait_ms),
+            (1, "unit tests", 12 * MINUTE)
+        );
+        let concern = concerns
+            .iter()
+            .find(|concern| concern.key == "oldest-queued")
+            .ok_or_else(|| anyhow::anyhow!("{concerns:?}"))?;
+        assert_eq!(concern.severity, Severity::Critical, "12 min is over 10");
+        assert!(
+            concern.detail.starts_with("unit tests in "),
+            "{}",
+            concern.detail
+        );
+        seeded.close().await
+    }
+
+    /// #253 review: a failure of a start issued before the hour, or of a
+    /// placement that never got a `start_runner` command (a prepare that
+    /// ran out of time), is a start failure but not one of the hour's
+    /// starts; the share's denominator is never less than the failures, so
+    /// 4 failures and 1 start read "4 of 4", critical.
+    #[tokio::test]
+    async fn more_start_failures_than_starts_reads_as_every_start_failing() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let seeded = Seeded::new().await?;
+        starts(&seeded, "io", 1, 1).await?;
+        let io = seeded.fleet.host("io")?.clone();
+        for minute in [5, 6, 7] {
+            testdata::insert_placement_failure(
+                &seeded.db,
+                &io,
+                NOW - minute * MINUTE,
+                Reason::PrepareDeadlineExpired,
+                None,
+            )
+            .await?;
+        }
+        let (_, hosts, concerns) = collect_live(&seeded.db, NOW).await?;
+        let io_id = seeded.id("io")?;
+        assert_eq!(
+            hosts
+                .iter()
+                .find(|stats| stats.host_id == io_id)
+                .map(|stats| stats.start_failures_last_hour),
+            Some(4)
+        );
+        let concern = concerns
+            .iter()
+            .find(|concern| concern.key == format!("start-failures:{io_id}"))
+            .ok_or_else(|| anyhow::anyhow!("{concerns:?}"))?;
+        assert_eq!(concern.severity, Severity::Critical);
+        assert_eq!(
+            concern.title,
+            "io failed 4 of 4 runner starts in the last hour"
+        );
+        assert!(concern.detail.starts_with("100% "), "{}", concern.detail);
+        seeded.close().await
+    }
+
+    /// #253 review: an agent-reported failure counts unless its code says
+    /// the request was at fault (`cancelled`, `configuration`,
+    /// `unsupported`): `dependency` is the machine's.
+    #[tokio::test]
+    async fn an_agent_reported_failure_with_a_machine_code_counts() -> Result<()> {
+        use gridops_core::fleet::failure::PlacementFailureReason as Reason;
+
+        let seeded = Seeded::new().await?;
+        let io = seeded.fleet.host("io")?.clone();
+        for (minute, code) in [
+            (5, Some("dependency")),
+            (6, None),
+            (7, Some("configuration")),
+            (8, Some("unsupported")),
+        ] {
+            testdata::insert_placement_failure(
+                &seeded.db,
+                &io,
+                NOW - minute * MINUTE,
+                Reason::AgentReported,
+                code,
+            )
+            .await?;
+        }
+        assert_eq!(host_stats(&seeded, "io").await?.start_failures_last_hour, 2);
+        seeded.close().await
+    }
+
     /// 5,000 more finished GitLab jobs on io (each with its runner and
     /// placement), completed 20 days before `NOW`, and 5,000 more
     /// `placement_failed` events on io between 23 and 21.6 hours before it,

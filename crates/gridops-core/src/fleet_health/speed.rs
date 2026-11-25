@@ -4,7 +4,7 @@
 //!
 //! The rules (`docs/design/fleet-health.md`): a job key is repository +
 //! workflow name + job name with a trailing shard counter stripped (a GitLab
-//! job's, project path + job name, #253); only
+//! job's, `gitlab:` + instance + project path + job name, #253); only
 //! successful final-attempt runs completed inside the window count; the
 //! index is the run-count-weighted geometric mean of (own median ÷ fleet
 //! median) over keys with at least 5 runs on the machine at that size and 5
@@ -39,14 +39,23 @@ pub fn job_key(repository: &str, workflow: &str, job_name: &str) -> String {
     format!("{repository} / {workflow} / {name}")
 }
 
-/// The key a GitLab job's runs are compared under (#253): project path and
-/// job name, the shard counter stripped as in [`job_key`] (GitLab names a
-/// `parallel` job's copies `name 1/4`, `name 2/4`, …). A GitLab job has no
-/// workflow, so its key has two parts and never equals a GitHub job's.
+/// The key a GitLab job's runs are compared under (#253):
+/// `gitlab:<instance>/<project path> / <job name>`, the shard counter
+/// stripped as in [`job_key`] (GitLab names a `parallel` job's copies
+/// `name 1/4`, `name 2/4`, …). The instance is the connection's `base_url`
+/// without its scheme or trailing `/`. The `gitlab:` prefix keeps it from
+/// ever equalling a GitHub key, whose repository (`owner/name`) holds no
+/// `:`, though a GitLab job name may hold ` / ` (`deploy / prod` against
+/// GitHub workflow `deploy`, job `prod`); the instance keeps two GitLab
+/// instances' projects of the same path apart.
 #[must_use]
-pub fn gitlab_job_key(project_path: &str, job_name: &str) -> String {
+pub fn gitlab_job_key(base_url: &str, project_path: &str, job_name: &str) -> String {
+    let instance = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .trim_end_matches('/');
     let name = strip_shard_suffix(job_name);
-    format!("{project_path} / {name}")
+    format!("gitlab:{instance}/{project_path} / {name}")
 }
 
 /// A job name trimmed, without its trailing shard counter if it has one.
@@ -129,14 +138,16 @@ pub async fn speed_indexes(
         let gitlab = grouped_gitlab_durations(db, slice_start, slice_end)
             .await?
             .into_iter()
-            .map(|(project_path, name, host_id, cpu_millis, durations)| {
-                (
-                    gitlab_job_key(&project_path, &name),
-                    host_id,
-                    cpu_millis,
-                    durations,
-                )
-            });
+            .map(
+                |(base_url, project_path, name, host_id, cpu_millis, durations)| {
+                    (
+                        gitlab_job_key(&base_url, &project_path, &name),
+                        host_id,
+                        cpu_millis,
+                        durations,
+                    )
+                },
+            );
         for (key, host_id, cpu_millis, durations) in github.chain(gitlab) {
             let cpu_millis = u32::try_from(cpu_millis)
                 .context("a placement's cpu_millis is not a runner size")?;
@@ -286,8 +297,9 @@ async fn grouped_durations(
 }
 
 /// The successful GitLab jobs completed in `[from, to)` (#253), grouped as
-/// [`grouped_durations`] groups GitHub's, by (project path, job name,
-/// machine, runner size), through `gitlab_jobs_completed_idx`. A GitLab job
+/// [`grouped_durations`] groups GitHub's, by (instance `base_url`, project
+/// path, job name, machine, runner size), through
+/// `gitlab_jobs_completed_idx`. A GitLab job
 /// is its own only attempt (as #191's rollup reads it); `status='success'`
 /// is its success. A job without a name, a path or a start (a row written
 /// before migration 0050) has no key or duration and is left out. A job
@@ -303,9 +315,9 @@ async fn grouped_gitlab_durations(
     db: &SqlitePool,
     from: i64,
     to: i64,
-) -> anyhow::Result<Vec<(String, String, String, i64, String)>> {
-    let rows = sqlx::query_as::<_, (String, String, String, i64, String)>(
-        r#"SELECT job.project_path, job.job_name, p.host_id, p.cpu_millis,
+) -> anyhow::Result<Vec<(String, String, String, String, i64, String)>> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64, String)>(
+        r#"SELECT connection.base_url, job.project_path, job.job_name, p.host_id, p.cpu_millis,
                   GROUP_CONCAT(job.completed_at - job.started_at) AS durations
              FROM gitlab_jobs job
              JOIN gitlab_connections connection ON connection.id = job.connection_id
@@ -334,7 +346,8 @@ async fn grouped_gitlab_durations(
                        AND other.job_id = job.job_id
                      WHERE other_connection.base_url = connection.base_url
                        AND other.id < job.id)
-            GROUP BY job.project_path, job.job_name, p.host_id, p.cpu_millis"#,
+            GROUP BY connection.base_url, job.project_path, job.job_name, p.host_id,
+                     p.cpu_millis"#,
     )
     .bind(from)
     .bind(to)
@@ -379,7 +392,7 @@ mod tests {
     use anyhow::Result;
     use sqlx::SqlitePool;
 
-    use super::{HealthWindow, SpeedResult, job_key, median, speed_indexes};
+    use super::{HealthWindow, SpeedResult, gitlab_job_key, job_key, median, speed_indexes};
     use crate::connect_database_path;
     use crate::fleet_health::testdata::{self, JobSeed, SeededFleet};
 
@@ -980,12 +993,182 @@ mod tests {
             .collect();
         let mut expected: Vec<(String, u32, u32)> = ["build", "lint", "rspec"]
             .into_iter()
-            .map(|name| (format!("acme/app / {name}"), 5, 15))
+            .map(|name| {
+                (
+                    gitlab_job_key("https://gitlab.test", "acme/app", name),
+                    5,
+                    15,
+                )
+            })
             .collect();
         expected.sort();
         assert_eq!(keys, expected, "(key, machine runs, fleet runs)");
         let io = harness.result(&results, "io", 2_000)?;
         assert_eq!(io.index, Some(1.0), "io runs at the fleet median: {io:?}");
+        harness.close().await
+    }
+
+    /// Adds a second GitLab instance, `https://gitlab.other`, with a project
+    /// connection, and moves `host`'s GitLab runners to it (with
+    /// `move_jobs`, their jobs too).
+    async fn other_instance(harness: &Harness, host: &str, move_jobs: bool) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('other-instance','other','https://gitlab.other','project',1,'acme/app','other.token','other.webhook',1,1)",
+        )
+        .execute(&harness.db)
+        .await?;
+        let host_id = harness.fleet.host(host)?.id.clone();
+        if move_jobs {
+            sqlx::query(
+                "UPDATE gitlab_jobs SET connection_id='other-instance'
+                  WHERE gitlab_runner_id IN (SELECT gitlab_runner_id FROM runners WHERE id IN (
+                        SELECT runner_id FROM workload_placements WHERE host_id=?))",
+            )
+            .bind(&host_id)
+            .execute(&harness.db)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE runners SET gitlab_connection_id='other-instance' WHERE id IN (
+                    SELECT runner_id FROM workload_placements WHERE host_id=?)",
+        )
+        .bind(&host_id)
+        .execute(&harness.db)
+        .await?;
+        Ok(())
+    }
+
+    /// `runs` successful GitLab runs of each of `names` on `host` at 2
+    /// CPUs, each lasting `duration` ms.
+    async fn gitlab_runs(
+        harness: &mut Harness,
+        host: &str,
+        names: &[&str],
+        runs: i64,
+        duration: i64,
+    ) -> Result<()> {
+        let host_id = harness.fleet.host(host)?.id.clone();
+        let mut jobs = Vec::new();
+        for name in names {
+            for run in 0..runs {
+                let id = harness.next_id;
+                harness.next_id += 1;
+                let completed = NOW - 2 * HOUR - run * 60_000;
+                let mut job = JobSeed::completed(
+                    id,
+                    name,
+                    Some(&host_id),
+                    completed - duration - 5_000,
+                    completed - duration,
+                    completed,
+                );
+                job.gitlab = true;
+                jobs.push(job);
+            }
+        }
+        testdata::insert_jobs(&harness.db, &harness.fleet, &jobs).await
+    }
+
+    #[test]
+    fn gitlab_keys_name_their_instance_and_never_equal_a_github_key() {
+        assert_eq!(
+            gitlab_job_key("https://gitlab.test/", "acme/app", "rspec 2/4"),
+            "gitlab:gitlab.test/acme/app / rspec"
+        );
+        assert_ne!(
+            gitlab_job_key("https://gitlab.test", "acme/app", "deploy / prod"),
+            job_key("acme/app", "deploy", "prod")
+        );
+        assert_ne!(
+            gitlab_job_key("https://gitlab.test", "acme/app", "unit"),
+            gitlab_job_key("https://gitlab.other", "acme/app", "unit")
+        );
+        assert_eq!(
+            gitlab_job_key("https://gitlab.test", "acme/app", "unit"),
+            gitlab_job_key("http://gitlab.test", "acme/app", "unit"),
+            "one instance whatever its scheme"
+        );
+    }
+
+    /// #253 review: a GitLab key never equals a GitHub key, though a GitLab
+    /// job name may hold " / ": GitLab project `acme/app`'s job `k1 / x` is
+    /// not GitHub repository `acme/app`'s workflow `k1` job `x`. callisto
+    /// runs only the GitLab jobs, the rest of the fleet only the GitHub ones,
+    /// so callisto shares no key with the fleet and has no index.
+    #[tokio::test]
+    async fn a_gitlab_key_never_equals_a_github_key() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        let names = ["k1 / x", "k2 / x", "k3 / x"];
+        gitlab_runs(&mut harness, "callisto", &names, 5, 240_000).await?;
+        for host in ["io", "europa"] {
+            let host_id = harness.fleet.host(host)?.id.clone();
+            let mut jobs = Vec::new();
+            for workflow in ["k1", "k2", "k3"] {
+                for _ in 0..5 {
+                    let id = harness.next_id;
+                    harness.next_id += 1;
+                    let completed = NOW - 2 * HOUR;
+                    let mut job = JobSeed::completed(
+                        id,
+                        "x",
+                        Some(&host_id),
+                        completed - 125_000,
+                        completed - 120_000,
+                        completed,
+                    );
+                    job.workflow = workflow.to_owned();
+                    jobs.push(job);
+                }
+            }
+            testdata::insert_jobs(&harness.db, &harness.fleet, &jobs).await?;
+        }
+        let results = harness.indexes().await?;
+        let callisto = harness.result(&results, "callisto", 2_000)?;
+        assert_eq!(
+            callisto.index, None,
+            "no key shared with GitHub: {callisto:?}"
+        );
+        harness.close().await
+    }
+
+    /// #253 review: two GitLab instances never share a key, though their
+    /// projects have the same path: callisto runs `acme/app`'s jobs on
+    /// another instance than the rest of the fleet, so it has no index.
+    #[tokio::test]
+    async fn gitlab_instances_never_share_a_key() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        let names = ["unit", "lint", "build"];
+        gitlab_runs(&mut harness, "callisto", &names, 5, 240_000).await?;
+        gitlab_runs(&mut harness, "io", &names, 5, 120_000).await?;
+        gitlab_runs(&mut harness, "europa", &names, 5, 120_000).await?;
+        other_instance(&harness, "callisto", true).await?;
+        let results = harness.indexes().await?;
+        let callisto = harness.result(&results, "callisto", 2_000)?;
+        assert_eq!(
+            callisto.index, None,
+            "another instance's keys: {callisto:?}"
+        );
+        let io = harness.result(&results, "io", 2_000)?;
+        assert_eq!(io.index, Some(1.0), "io's fleet is europa alone: {io:?}");
+        harness.close().await
+    }
+
+    /// #253 review: a GitLab job's runner is the one with its
+    /// `gitlab_runner_id` on the job's own instance: callisto's runners are
+    /// registered on another instance than its jobs', so its jobs have no
+    /// machine and are not speed samples.
+    #[tokio::test]
+    async fn a_gitlab_job_runs_on_a_runner_of_its_own_instance() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        let names = ["unit", "lint", "build"];
+        for (host, duration) in [("callisto", 240_000), ("io", 120_000), ("europa", 120_000)] {
+            gitlab_runs(&mut harness, host, &names, 5, duration).await?;
+        }
+        other_instance(&harness, "callisto", false).await?;
+        let results = harness.indexes().await?;
+        let callisto = harness.result(&results, "callisto", 2_000);
+        assert!(callisto.is_err(), "callisto ran nothing: {results:?}");
         harness.close().await
     }
 }

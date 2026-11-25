@@ -203,9 +203,14 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 
 1. A job key is `repository / workflow / job name` (`speed::job_key`), with a trailing shard
    counter stripped (` (n/m)`, ` [n/m]` or ` n/m`, then trimmed), so a suite's shards compare
-   together. A GitLab job's key is `project path / job name` (`speed::gitlab_job_key`, the same
-   stripping: GitLab names a `parallel` job's copies `name 1/4`, …), so a machine running only
-   GitLab jobs has an index too (#253); it has two parts and never equals a GitHub key.
+   together. A GitLab job's key is `gitlab:<instance>/<project path> / <job name>`
+   (`speed::gitlab_job_key`, the same stripping: GitLab names a `parallel` job's copies
+   `name 1/4`, …), the instance being its connection's `base_url` without the scheme or a
+   trailing `/`, so a machine running only GitLab jobs has an index too (#253). A GitLab job name
+   may hold ` / `, so without the prefix GitLab project `acme/app`'s job `deploy / prod` would be
+   GitHub repository `acme/app`'s workflow `deploy`, job `prod`; the `gitlab:` prefix (a GitHub
+   repository name holds no `:`) means no GitLab key ever equals a GitHub key, and the instance
+   means two GitLab instances' projects of the same path never share one.
 2. Only successful final-attempt runs completed inside the window count. The speed index's rule
    is stricter than the rollup's, since a dropped sample only thins a key: a job is left out
    when any later attempt of its run is known (a later job of the run, or the run row's
@@ -336,7 +341,7 @@ enough data never raises one.
 |---|---|---|
 | `host-offline:<host>` | critical | a machine with a CPU budget above 0 has no `host_samples` row in the last 5 minutes; `since` is its last sample |
 | `start-gate:<host>` | warning | `start_health::start_gate` sets the machine aside from new placements |
-| `start-failures:<host>` | warning from 25 %, critical from 50 % | at least 3 start failures in the last hour (as the machine's live stats count them, below) that are at least 25 % of its starts in the hour: placements whose `start_runner` command was issued in the hour (`host_commands_host_kind_issued_idx`, as the machine rollup counts `start_attempts`), at least the failures, so the share is at most 100 %. Title "Jupiter failed 9 of 24 runner starts in the last hour"; links to the machine's row (`/fleet/health#machine-<host>`); `since` is the oldest of those failures (#253) |
+| `start-failures:<host>` | warning from 25 %, critical from 50 % | at least 3 start failures in the last hour (as the machine's live stats count them, below) that are at least 25 % of its starts in the hour. The denominator counts only the placements issued a `start_runner` command in the hour (`host_commands_host_kind_issued_idx`, as the machine rollup counts `start_attempts`): a failure before any start command (`prepare_deadline_expired`), or of a start issued before the hour, adds to the failures and not to the starts. So the starts are clamped to at least the failures, and the share is at most 100 % ("io failed 4 of 4 runner starts" for 4 such failures and 1 start). Title "Jupiter failed 9 of 24 runner starts in the last hour"; links to the machine's row (`/fleet/health#machine-<host>`); `since` is the oldest of those failures (#253) |
 | `disk:<host>` | critical or warning | the Overview's disk alarm, from the same read (`crate::resources::fleet_root_disks`, #240): `disk::alarm_for` on the newest sample's free space against the root disk's observed size (`fleet_observed_domains`, not the admin-set budget), only for a machine whose heartbeat is at most 120 s old |
 | `unmatched-jobs` | critical | queued jobs no pool can run (the Overview's split, `fleet_queue_breakdown`, plus the waiting GitLab jobs no pool will run, #253) |
 | `oldest-queued` | critical over 10 min, warning over 5 min | the oldest queued job's wait, GitHub or GitLab; `detail` names the job and the repository (a GitLab job's project path) |
@@ -399,7 +404,7 @@ the production database.
 { window, generatedAt, stale,
   fleet: { score, components[], trend[{at, score}], categories[CategoryUsage] },
   live: { queuedTotal, queuedByCategory, queuedByPool[{poolId, poolName, queued}], queuedUnmatched,
-          oldestQueued{jobId, jobName, repository, queuedAt, waitMs} | null,
+          oldestQueued{jobId, jobName, repository, queuedAt, waitMs} | null,   // see below
           runningTotal, runningByCategory },
   hosts[{ id, name, cpuBudgetMillis, memoryBudgetMib, diskTotalBytes, score, components[],
           speed[{cpuMillis, index, topKeys[{key, hostMedianMs, fleetMedianMs, hostRuns, fleetRuns}]}],
@@ -409,6 +414,10 @@ the production database.
 ```
 
 Every object refuses unknown fields on both sides (`deny_unknown_fields`, `z.strictObject`).
+`live.oldestQueued.jobId` is the platform's own job id: a GitHub workflow job id, or a GitLab job
+id (#253; `repository` is then the GitLab project path), so it is not unique across platforms and
+is only shown, never looked up. The response does not carry the platform: adding it means changing
+the fixture, the fake and #204's oracle with it, so it waits for a change that needs it.
 Machines are in id order on the wire; the page sorts them worst score first.
 
 - **Who:** system administrators only (D-4), like `GET /api/v1/fleet/workload`: `FleetUser<Read>`

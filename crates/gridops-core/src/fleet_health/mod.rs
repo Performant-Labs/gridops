@@ -391,8 +391,11 @@ pub struct PoolQueue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OldestQueued {
+    /// The platform's own job id: a GitHub workflow job id or a GitLab job
+    /// id (#253), so not unique across platforms.
     pub job_id: i64,
     pub job_name: String,
+    /// The GitHub repository, or the GitLab project path.
     pub repository: String,
     pub queued_at: i64,
     pub wait_ms: i64,
