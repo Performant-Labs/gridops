@@ -1,4 +1,5 @@
-//! The fixture fleet and the fake source the endpoint serves until #204.
+//! The fixture fleet and the fake source tests inject. Behind `test-support`:
+//! a release build never compiles it (#204).
 //!
 //! [`fixture`] is `src/features/fleet-health/fixture.json` (the UI's
 //! fixture and the `OpenAPI` 200 example are generated from it, and
@@ -1047,7 +1048,7 @@ struct State {
     held: watch::Sender<bool>,
 }
 
-/// The source the endpoint serves until #204: the fixture's halves, with
+/// The source tests inject: the fixture's halves, with
 /// call counts, failure on demand, and calls held until released.
 #[derive(Clone)]
 pub struct FakeFleetHealthSource {

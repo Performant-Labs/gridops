@@ -1077,6 +1077,7 @@ dependencies = [
  "gridops-agent",
  "gridops-core",
  "gridops-host-agent",
+ "gridops-reconciler",
  "hex",
  "hmac 0.12.1",
  "rand 0.10.2",

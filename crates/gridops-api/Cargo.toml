@@ -37,6 +37,8 @@ uuid.workspace = true
 [dev-dependencies]
 gridops-core = { path = "../gridops-core", features = ["test-support"] }
 gridops-host-agent = { path = "../gridops-host-agent" }
+# #204: the fleet health end-to-end test runs the reconciler's own passes.
+gridops-reconciler = { path = "../gridops-reconciler" }
 rsa = { version = "0.9", features = ["getrandom"] }
 
 [lints]

@@ -39,7 +39,9 @@ correction.
 | The scores and the windowed concerns (pure, no I/O) | `crates/gridops-core/src/fleet_health/score.rs`, `concerns.rs` | #192 |
 | The live stats and the live concerns | `crates/gridops-api/src/fleet/health_live.rs` (`collect_live`) | #201 |
 | The endpoint: window check, cache, stale rules | `crates/gridops-api/src/fleet/health.rs` | #194 |
-| The database source and the score snapshots | `crates/gridops-api/src/fleet/health_source.rs`, `crates/gridops-reconciler/src/fleet_health_snapshot.rs` | #204 (wave 2) |
+| One hour of jobs and machines, shared by the rollups and the source | `crates/gridops-core/src/fleet_health/hour.rs` | #204 |
+| The windowed half from the database, the usage by category | `crates/gridops-core/src/fleet_health/window.rs`, `usage.rs` | #204 |
+| The database source and the score snapshots | `crates/gridops-api/src/fleet/health_source.rs`, `crates/gridops-reconciler/src/fleet_health_snapshot.rs` | #204 |
 | The job category settings | `crates/gridops-api/src/fleet/job_categories.rs`, `src/features/settings/job-categories-section.tsx` | #199 |
 | The page frame, Areas of concern, the fleet score card | `src/features/fleet-health/page.tsx`, `areas-of-concern.tsx`, `fleet-score-card.tsx` | #195 |
 | The machine table and detail | `src/features/fleet-health/machine-score-table.tsx`, `machine-detail.tsx` | #202 |
@@ -55,9 +57,12 @@ The endpoint gets its data from a `FleetHealthSource` (`#[async_trait]`, held as
 `Arc<dyn FleetHealthSource>` on the health state): `windowed(window, now)` (scores, speed, usage,
 windowed concerns; the slow, cached part) and `live(now)` (a bounded read of now). `assemble`
 joins them: each machine gets its live stats by id, and the concerns are merged by
-`merge_concerns`. Until #204 plugs in the database source, the endpoint serves
-`fleet_health::fake::FakeFleetHealthSource`, which is compiled in production for that reason;
-#204 puts it behind `test-support`.
+`merge_concerns`. Production serves the database source (`DbFleetHealthSource`, #204), which
+`FleetHealthState::new(db)` selects: its windowed half is `fleet_health::window::windowed_health`
+with the speed indexes cached 5 minutes per window, and its live half is `collect_live`. No field
+of a production response comes from `fleet_health::fake`: the fake (`FakeFleetHealthSource`, the
+fixture) is behind `test-support` and compiled only into tests, which inject it with
+`AppState::with_fleet_health_source`.
 
 ## Job categories
 
@@ -126,7 +131,10 @@ covers the last 7 days. An hour is written with one `INSERT … ON CONFLICT DO U
 one short transaction (the job rollup also takes the hour off `fleet_health_recompute` in it), so
 a re-run gives identical rows. Reads happen outside the write transaction, bounded by the
 `completed_at` indexes (`workflow_jobs_completed_idx`, `gitlab_jobs_completed_idx`) or
-`host_samples_host_time_idx`.
+`host_samples_host_time_idx`. The reads of an hour are one copy, in `gridops-core`
+(`fleet_health::hour::job_hour` and `host_hours`, #204): the rollups write a finished hour from
+them, and the source computes its live hours with them, so a live hour and a rolled one can't
+differ in how they are computed.
 
 **The grace (#239).** No hour, listed or caught up, is rolled before `hour_end + 15 min`
 (`ROLLUP_GRACE_MILLIS` in `gridops_core::fleet_health`, the one copy of the rule, which #204's
@@ -194,7 +202,15 @@ the backfill adds them on a rules change, and the job rollup adds a re-run's ear
 hours. Only the job rollup reads it and takes hours off it; the machine rollup's rows don't
 depend on job categories, so it never reads it (#239). `fleet_health_snapshots (recorded_at, "window", fleet_score,
 host_scores_json)` records the fleet score and each machine's (`{"<host id>": score|null}`) once
-an hour per window for the page's trend (#204).
+an hour per window (1 h, 24 h and 7 d) for the page's trend (#204,
+`crates/gridops-reconciler/src/fleet_health_snapshot.rs`). The snapshot pass runs after the
+rollups every reconciler pass and writes a window's row at `recorded_at = now` when that window
+has none yet in the current clock hour and the rollups have the hour that just ended: it is past
+its grace, the job rollup's catch-up has gone past it, the machine rollup's has reached it, and no
+hour up to it is listed in `fleet_health_recompute`. So the first snapshots of an hour come at
+about a quarter past, never while the catch-up after downtime is still filling the window, and
+past hours are never backfilled. The scores are the page's: `window::inputs` and `score_fleet` at
+`now`, with the speed indexes read fresh.
 
 ## The relative speed index
 
@@ -204,11 +220,13 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 1. A job key is `repository / workflow / job name` (`speed::job_key`), with a trailing shard
    counter stripped (` (n/m)`, ` [n/m]` or ` n/m`, then trimmed), so a suite's shards compare
    together.
-2. Only successful final-attempt runs completed inside the window count. The speed index's rule
-   is stricter than the rollup's, since a dropped sample only thins a key: a job is left out
-   when any later attempt of its run is known (a later job of the run, or the run row's
-   `run_attempt`), whatever the job's name. So a partial re-run's jobs that were not run again
-   are not speed samples, though the rollup counts them (#239). They are grouped by key
+2. Only successful final-attempt GitHub runs completed inside the window (`[now − W, now)`) with
+   a start time count. The speed index's rule is stricter than the rollup's, since a dropped
+   sample only thins a key: a job whose attempt is known is left out when any later attempt of
+   its run is known (another job of the run with a higher known attempt, or the run row's
+   `run_attempt` above the job's), whatever the job's name. So a partial re-run's jobs that were
+   not run again are not speed samples, though the rollup counts them (#239). A job whose own
+   attempt is unknown is kept. They are grouped by key
    and by (machine, runner size), the runner size being the placement's `cpu_millis`. A job's
    machine is its runner's newest `runners` row and that row's newest `workload_placements` row,
    as the hourly rollup reads it, so duplicate rows never count a job twice (#239).
@@ -218,6 +236,8 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 4. The index of a (machine, size) is the run-count-weighted geometric mean of (own median ÷ fleet
    median) over the keys with at least 5 runs on that machine at that size and at least 5 on the
    rest of the fleet. 1.0 is typical, 1.5 half again as slow.
+   A key whose median on the machine or on the fleet is 0 or less (sub-second jobs at GitHub's
+   second granularity) is left out.
 5. Fewer than 3 such keys gives `index: null` ("not enough data").
 6. `topKeys` are the keys that push the index up most, with both medians and both run counts:
    only keys with a ratio above 1.0 (slower than the fleet), worst first, at most 5 (#239).
@@ -247,12 +267,16 @@ score.
   is not 0.
 - Busy share divides by the covered seconds.
 - Capacity fit counts the ended hours from `ceil_hour(now − W)` (the hour in progress is not yet
-  one of them), as before.
+  one of them), as before. An hour is a misfit when one of its jobs waited at least 1 min (the
+  1–2 min bucket and up) while the CPU used p50 of the machines with a sample that hour, summed,
+  was under half of those same machines' CPU budgets; an hour with no sampled machine is not a
+  misfit.
 
 **The grace-hour contract with #204.** The source reads `fleet_health_hourly` and
 `fleet_host_hourly` only for hours past their grace (`hour + 1 h + ROLLUP_GRACE_MILLIS <= now`).
 It computes live, bounded, every other hour of `[ceil_hour(now − W), now)`: the hour in progress,
-and the hour that just ended until `hour_end + 15 min`. It detects an unwritten hour by time, with
+and the hour that just ended until `hour_end + 15 min` (`hour::live_hours`), each over
+`[hour, min(hour + 1 h, now))` by the rollups' own `hour::job_hour` and `host_hours`. It detects an unwritten hour by time, with
 the shared constant, not by the rollups' markers. A live hour has the same row shape as a rolled
 one, and counts online minutes the same way. A past-grace hour the rollups haven't written yet is
 covered time with nothing in it (its machines read offline, with no jobs): the pass lag, at most
@@ -276,7 +300,7 @@ one reconcile interval (30 s by default), or the catch-up after downtime, one ho
 | `start-reliability` | Start reliability | 25 | as above, this machine only | ≥ 99% | ≤ 80% |
 | `relative-speed` | Relative speed | 25 | the speed index (#193) | ≤ 1.0 | ≥ 2.0 |
 | `headroom` | Headroom | 15 | the lower of disk (minimum free against `disk::alarm_for`'s levels) and memory (p95 used ÷ budget: 100 under 80%, 0 at 100%) | | |
-| `busy-share` | Busy share | 10 | CPU-seconds reserved ÷ (CPU budget × covered time); deducts only while the fleet's queue-wait component is under 100 | ≥ 50% | 0% |
+| `busy-share` | Busy share | 10 | CPU-seconds reserved ÷ (CPU budget × covered time); deducts only while the fleet's queue-wait component has a score under 100 (without one, or at 100, it scores 100) | ≥ 50% | 0% |
 
 Only a machine with no rows in the window has no availability data: rows with 0 online minutes,
 which the machine rollup writes on purpose for an hour without samples, score availability 0.
@@ -314,7 +338,7 @@ enough data never raises one.
 | Key | Severity | When |
 |---|---|---|
 | `fleet-component:<component key>` | critical under 50, warning under 70 | a fleet component scores below that |
-| `host-score:<host>` | critical under 50, warning under 70 | a machine scores below that; `detail` names its worst component |
+| `host-score:<host>` | critical under 50, warning under 70 | a machine scores below that; `detail` names its worst scored component |
 | `host-slow:<host>:<cpu millis>` | warning | a speed index ≥ 1.3 at one runner size, naming the slowest job key |
 | `host-idle-while-queued:<host>` | warning | busy share under 30% while the fleet's queue-wait component is under 70 |
 | `category-other` | info | more than 20% of the window's jobs are `other` |
@@ -325,7 +349,7 @@ enough data never raises one.
 |---|---|---|
 | `host-offline:<host>` | critical | a machine with a CPU budget above 0 has no `host_samples` row in the last 5 minutes; `since` is its last sample |
 | `start-gate:<host>` | warning | `start_health::start_gate` sets the machine aside from new placements |
-| `disk:<host>` | critical or warning | the Overview's disk alarm, from the same read (`crate::resources::fleet_root_disks`, #240): `disk::alarm_for` on the newest sample's free space against the root disk's observed size (`fleet_observed_domains`, not the admin-set budget), only for a machine whose heartbeat is at most 120 s old |
+| `disk:<host>` | critical or warning | the Overview's disk alarm, from the same read (`crate::resources::fleet_root_disks`, #240): `disk::alarm_for` on the newest sample's free space against the root disk's observed size (`fleet_observed_domains`, not the admin-set budget), only for an approved machine that is not retired and whose heartbeat (`last_heartbeat_at`) is at most 120 s old |
 | `unmatched-jobs` | critical | queued jobs no pool can run (the Overview's split, `fleet_queue_breakdown`) |
 | `oldest-queued` | critical over 10 min, warning over 5 min | the oldest queued job's wait; `detail` names the job and the repository |
 | `uncertain:<host>` | warning | the machine has placements in state `uncertain` |
@@ -384,6 +408,24 @@ the production database.
 Every object refuses unknown fields on both sides (`deny_unknown_fields`, `z.strictObject`).
 Machines are in id order on the wire; the page sorts them worst score first.
 
+What the database source (#204) puts in the windowed fields:
+- **`hosts`:** every approved, non-deleted machine (the machines `host_live_reads` reads), with
+  `cpuBudgetMillis` and `memoryBudgetMib` from its root budget (`host_resource_domains`, 0 without
+  one) and `diskTotalBytes` the size of its root disk as its agent observed it
+  (`fleet_observed_domains`, the size the disk alarm and the headroom score read; `null` before
+  any observation), not the admin-set budget disk, which is a share of it.
+- **`speed`:** one entry per runner size the machine ran successful jobs at in the window,
+  smallest first.
+- **`categories`** (fleet and machine): per category with jobs, in category order, the window's
+  final-attempt jobs, CPU-hours (`cpu_seconds_sum ÷ 3600`), the median duration (p50 of the merged
+  duration histograms) and the p90 queue wait (of the merged wait histograms), both interpolated as
+  the queue-wait score is and rounded to the millisecond (`fleet_health::usage`). The fleet's
+  folds every row, unmanaged runners' included; a machine's folds its own.
+- **`usage`:** the machine's CPU-hours by category per hour, oldest first, one entry per hour with
+  any CPU-hours and in it each category with some.
+- **`trend`:** the window's snapshots recorded in `[now − W, now]`, oldest first; none yet is an
+  empty list ("No trend yet"). Past snapshots are never made up.
+
 - **Who:** system administrators only (D-4), like `GET /api/v1/fleet/workload`: `FleetUser<Read>`
   plus `require_admin`. A member gets `403 forbidden`; no session, `401` as `/fleet/hosts` gives
   it. An administrator's `fleet:read` API token is accepted (`TOKEN_SCOPED_ROUTES`,
@@ -401,8 +443,6 @@ Machines are in id order on the wire; the page sorts them worst score first.
   read once per computation; computations of several windows in flight at once share one live
   reading, and nothing of it is kept once it is read (no cache across requests).
 
-Until #194 lands, the handler ignores `window`, has no cache, and answers the 24-hour response.
-
 **Job category settings** (#199), session-only and administrators only (registered in
 `session_routes()`, under `refuse_bearer`; a token gets `403 token_not_accepted`):
 
@@ -413,8 +453,7 @@ Until #194 lands, the handler ignores `window`, has no cache, and answers the 24
 | `POST /api/v1/settings/job-categories/preview` | the proposed list | `{"rules": [{position, matches}], "other": [{name, jobs}]}`: jobs completed in the last 7 days each rule would classify (first match wins), and the 20 commonest names left in `other` |
 
 The 422 is `ApiError::Invalid { code, message, details }`; no other error body changed. The page checks the same limits before it sends anything, shows each 422 message on its row (from a save or a preview), and calls the preview unavailable, not invalid, on a server or network failure; a newer edit aborts the preview in flight (#240). The
-browser's `ApiError` (`src/lib/api.ts`) keeps the body's `code` and `details`. Until #199 lands,
-the three routes check the caller and answer 501.
+browser's `ApiError` (`src/lib/api.ts`) keeps the body's `code` and `details`.
 
 ## The page
 
@@ -431,13 +470,13 @@ and detail (#202). The machine table and detail also share the expanded machine,
 owns (#241): the frame reads the router's hash (`useRouterState`), opens the machine a
 `#machine-<host>` hash names on load and whenever the hash changes, and passes `expanded`,
 `onExpandedChange` and `hash` to the table and `expandedId` to the detail, so the detail slot
-shows the machine expanded in the table. Without those props the table keeps its own expansion. Until its issue lands, each renders a placeholder card ("Coming in #N").
+shows the machine expanded in the table. Without those props the table keeps its own expansion.
 Each section sits in its own slot, an element carrying `data-health-section`: `live-strip`,
 `areas-of-concern`, `fleet-score`, `category-legend`, `machine-table` and `machine-detail`, six
 in all (the stale warning is not a slot). The slots are part of the composition: wave 1 fills a
 slot's content and may move the slot, but keeps the attribute. No slot renders while loading, on
 a 403 or on a failure. #197's page test (`tests/fleet-health-page.test.ts`) asserts the
-composition slots, not the placeholder text.
+composition slots.
 
 - **Areas of concern:** the first five concerns in the API's order, then all on "Show all N";
   "No areas of concern" when empty; rows keyed by `key` (`data-concern-key`), so a refresh keeps
@@ -542,6 +581,24 @@ machines with their budgets, one installation, repository `acme/app` and a pool 
 50,000 GitHub jobs on the four budgeted machines and a sample every 30 s for all five, in about
 8 s, so the whole speed-check set stays under 60 s in CI.
 
+**The end-to-end test and the oracle (#204).** `crates/gridops-api/src/fleet/health_e2e_tests.rs`
+seeds two days of the five fixture machines (jobs, a re-run across an hour boundary, a job in the
+hour still in its grace, a pathless GitLab job on a group-scoped connection, a machine with no
+budget and one never online, a nearly full disk with a fresh heartbeat and a low one with a stale
+heartbeat, a busy GitLab runner with no job row, start attempts and failures, stored rules on the
+workflow name and the labels, and snapshots), runs the reconciler's own passes
+(`gridops_reconciler::fleet_health_pass`, the reconciler's library target) until they have caught
+up, and reads the endpoint for every window through the production source, at two moments (the
+ended hour in its grace, then rolled). `scripts/fleet-health-oracle.py` (Python standard library
+only, no GridOps code) computes the same page from the raw tables by this document; the test
+requires the two to agree: scores and components to the integer, weights, CPU-hours and usage to
+1e-6, speed indexes to 0.01 with their keys exactly, the trend, the live counts, and the concerns
+by key, severity, `since` and order. The oracle also classifies every job by the stored rules and
+reports each job whose stored category differs: before the backfill can classify it the pathless
+GitLab job is stored NULL and counts as `other` on the page and in the oracle alike, and after it
+both count it as `test`. With `GRIDOPS_FLEET_HEALTH_E2E_KEEP=<dir>` the test keeps the seeded
+database and the responses.
+
 The wave-1 contract tests are written already (`*_contract_tests.rs` and
 `tests/fleet-health-*.contract.test.ts`), marked `#[ignore = "contract: #N"]` or
 `it.skip("[contract: #N] …")`. Each issue removes its own markers and makes them pass.
@@ -555,9 +612,11 @@ files stay #197's whatever glob matches them. The `Fleet health guard` CI job
 checks every pull request whose description closes (`Closes`, `Fixes` or `Resolves #N`, any
 case) a wave-1 issue: each changed file must be the issue's own, an add-only change to one of its
 shared files, or the removal of its own markers from a contract test. A pull request closing no
-wave-1 issue passes; one closing two fails. #204 is wave 2 and not checked: it owns
-`health_source.rs`, `fleet_health_snapshot.rs` and the source selection in `health.rs`
-(`FleetHealthState::new`), after #194.
+wave-1 issue passes; one closing two fails. #204 is wave 2 and not checked; its files are listed
+under `wave2` for the record: `health_source.rs`, `fleet_health_snapshot.rs`, the source selection
+in `health.rs` and `state.rs` (`FleetHealthState::new(db)`), the shared hour module and the code
+moved out of the rollups, `usage.rs` and `window.rs`, the reconciler's library target, the
+end-to-end test, the oracle and the UI walkthrough report.
 
 Rust issues add their own tests inside the module they own (`#[cfg(test)] mod tests`), because
 every `mod` line is in a #197 file; frontend issues add theirs as
@@ -569,7 +628,8 @@ every `mod` line is in a #197 file; frontend issues add theirs as
   seam #190 owns (`category_for_insert`), on the caller's connection, in `VALUES` only.
 - **D-2, frontend tests in `tests/`.** Vitest collects `tests/**/*.test.ts` only.
 - **D-3, every hook here.** The health state on `AppState` (its type and default source in
-  `fleet/health.rs`, so #194 and #204 never edit `state.rs` or `main.rs`); the fleet-wide queue
+  `fleet/health.rs`, so #194 never edits `state.rs` or `main.rs`; #204 passes the pool to
+  `FleetHealthState::new` in `state.rs`, since the database source needs it); the fleet-wide queue
   breakdown and host read for #201; `metricTiles`' second parameter and `useFleetHealth("24h")` on
   the Overview; the 422 `ApiError::Invalid`; every contract test's `mod` line in a #197 file.
 - **D-4, administrators only,** with `fleet:read` tokens accepted, as the workload chart.

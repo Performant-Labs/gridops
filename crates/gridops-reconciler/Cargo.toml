@@ -5,6 +5,19 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# #204: the fleet health passes as a library (`src/lib.rs`), so
+# `gridops-api`'s end-to-end test runs the passes the reconciler runs. The
+# binary compiles the same modules as its own and tests them there, so the
+# library's copy is not tested twice.
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[[bin]]
+name = "gridops-reconciler"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

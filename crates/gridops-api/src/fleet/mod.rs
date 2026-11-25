@@ -25,6 +25,9 @@ mod query_boundary;
 // here.
 #[cfg(test)]
 mod health_contract_tests;
+// #204: the end-to-end test against the Python oracle.
+#[cfg(test)]
+mod health_e2e_tests;
 #[cfg(test)]
 mod health_live_contract_tests;
 #[cfg(test)]

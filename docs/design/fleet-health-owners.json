@@ -80,12 +80,34 @@
   },
   "wave2": {
     "204": {
+      "$comment": "The 2026-11-25 gap audit's list. `addOnly` records the shared files #204 also touches: the module lines, the reconciler's library target and the end-to-end test's dev-dependency, `fake` behind `test-support`, and the test harness's database-source constructor. Not checked by the guard (wave 2).",
       "owns": [
         "crates/gridops-api/src/fleet/health_source.rs",
         "crates/gridops-reconciler/src/fleet_health_snapshot.rs",
-        "crates/gridops-api/src/fleet/health.rs"
+        "crates/gridops-api/src/fleet/health.rs",
+        "crates/gridops-api/src/state.rs",
+        "crates/gridops-core/src/fleet_health/hour.rs",
+        "crates/gridops-core/src/fleet_health/usage.rs",
+        "crates/gridops-core/src/fleet_health/window.rs",
+        "crates/gridops-reconciler/src/fleet_health_rollup.rs",
+        "crates/gridops-reconciler/src/fleet_host_rollup.rs",
+        "crates/gridops-reconciler/src/lib.rs",
+        "crates/gridops-api/src/fleet/health_e2e_tests.rs",
+        "scripts/fleet-health-oracle.py",
+        "docs/handoffs/204-ui-walkthrough/**",
+        "docs/design/fleet-health.md",
+        "src/features/fleet-health/placeholder-card.tsx"
       ],
-      "addOnly": []
+      "addOnly": [
+        "crates/gridops-core/src/fleet_health/mod.rs",
+        "crates/gridops-core/src/fleet_health/fake.rs",
+        "crates/gridops-api/src/fleet/mod.rs",
+        "crates/gridops-api/src/fleet/health_test_support.rs",
+        "crates/gridops-api/Cargo.toml",
+        "crates/gridops-reconciler/Cargo.toml",
+        "crates/gridops-core/Cargo.toml",
+        "Cargo.lock"
+      ]
     }
   }
 }

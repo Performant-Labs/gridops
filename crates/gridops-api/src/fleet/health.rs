@@ -1,8 +1,10 @@
 //! `GET /api/v1/fleet/health` (#194): the fleet health page's one read.
 //!
-//! The handler reads the whole response from one [`FleetHealthSource`]
-//! ([`fake::FakeFleetHealthSource`] until #204 plugs in its database source
-//! through [`FleetHealthState::new`]), caches it per window for 30 seconds
+//! The handler reads the whole response from one [`FleetHealthSource`]: the
+//! database source (`health_source::DbFleetHealthSource`, #204), which
+//! [`FleetHealthState::new`] selects in production; tests inject
+//! `fleet_health::fake`'s through `AppState::with_fleet_health_source`. It
+//! caches the response per window for 30 seconds
 //! (`CACHE_TTL_MILLIS`), and shares one computation among the concurrent
 //! requests that find the window expired. When the source fails, the last
 //! good response is served with `stale: true` while it is under 10 minutes
@@ -41,15 +43,17 @@ use gridops_core::{
         registry::{RegistryClock, system_clock},
     },
     fleet_health::{
-        FleetHealth, FleetHealthSource, HealthWindow, LiveHealth, UnknownValue, assemble, fake,
+        FleetHealth, FleetHealthSource, HealthWindow, LiveHealth, UnknownValue, assemble,
     },
 };
 use serde::Deserialize;
+use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
 use super::{
     boundary::{FleetUser, Read},
     error::{FleetApiError, RequestContext},
+    health_source::DbFleetHealthSource,
     profiles::require_admin,
     query_boundary::FleetQuery,
 };
@@ -222,12 +226,11 @@ pub(crate) struct FleetHealthState {
 }
 
 impl FleetHealthState {
-    /// The production state: the source the page is served from, the system
-    /// clock, and an empty cache.
-    pub(crate) fn new() -> Self {
+    /// The production state: the database source over `db` (#204), the
+    /// system clock, and an empty cache.
+    pub(crate) fn new(db: SqlitePool) -> Self {
         Self {
-            // #204: the database source replaces the fake here.
-            source: Arc::new(fake::FakeFleetHealthSource::default()),
+            source: Arc::new(DbFleetHealthSource::new(db)),
             clock: system_clock(),
             cache: Arc::new(HealthCache::default()),
         }
@@ -370,9 +373,50 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::super::health_test_support::{HEALTH, Harness, error_code};
+    use super::super::health_test_support::{HEALTH, Harness, error_code, fixture};
 
     const SECOND: i64 = 1_000;
+
+    /// #204: production's state serves the database, not the fixture: the
+    /// seeded machines, by id and name, at the clock's time. Nothing of the
+    /// response comes from `fleet_health::fake`, which release builds no
+    /// longer compile.
+    #[tokio::test]
+    async fn production_serves_the_database_not_the_fixture() -> Result<()> {
+        let harness = Harness::with_database_source().await?;
+        let fleet = gridops_core::fleet_health::testdata::seed_fleet(&harness.database).await?;
+        let (status, body) = harness.admin_get(&uri("24h")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_ne!(body, fixture()?, "not the fake's fixture");
+        let hosts: Vec<(String, String)> = body["hosts"]
+            .as_array()
+            .map(|hosts| {
+                hosts
+                    .iter()
+                    .map(|host| {
+                        (
+                            host["id"].as_str().unwrap_or_default().to_owned(),
+                            host["name"].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut seeded: Vec<(String, String)> = fleet
+            .hosts
+            .iter()
+            .map(|host| (host.id.clone(), host.name.clone()))
+            .collect();
+        seeded.sort();
+        assert_eq!(hosts, seeded, "the seeded machines, in id order");
+        assert_eq!(
+            body.get("generatedAt").and_then(Value::as_i64),
+            Some(gridops_core::fleet_health::fake::FIXTURE_NOW)
+        );
+        assert_eq!(body["fleet"]["trend"], json!([]), "no snapshot yet");
+        assert_eq!(harness.source.windowed_calls(), 0, "the fake is not called");
+        Ok(())
+    }
 
     fn uri(window: &str) -> String {
         format!("{HEALTH}?window={window}")

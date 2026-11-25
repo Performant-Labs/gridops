@@ -134,6 +134,8 @@ impl AppState {
         github: GitHubClient,
         bitbucket: BitbucketClient,
     ) -> Result<Self> {
+        // #204: production serves the fleet health page from the database.
+        let fleet_health = crate::fleet::FleetHealthState::new(database.clone());
         Ok(Self {
             config,
             database,
@@ -144,7 +146,7 @@ impl AppState {
             http: reqwest::Client::builder()
                 .user_agent("GridOps/0.1")
                 .build()?,
-            fleet_health: crate::fleet::FleetHealthState::new(),
+            fleet_health,
         })
     }
 
