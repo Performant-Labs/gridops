@@ -205,7 +205,7 @@ describe("job category rules: limits (#240 item 7)", () => {
 
     const last = rows()[200];
     if (!last) throw new Error("no 201st rule");
-    await click(button("Delete rule", last));
+    await click(button("Delete rule 201", last));
     await debounce();
     expect(text()).not.toContain("At most 200 rules");
     expect(previews(calls)).toHaveLength(1);

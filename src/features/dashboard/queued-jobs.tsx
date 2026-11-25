@@ -128,8 +128,8 @@ function QueuedJobRow({ job }: { job: QueuedJob }) {
         )}
       </td>
       <td className="whitespace-nowrap px-4 py-2.5 text-right">
-        <span className={cn("tabular block font-medium", job.ageSeconds >= 300 ? "text-warning" : "text-foreground")}>{formatWait(job.ageSeconds)}</span>
-        <span className={cn("block text-2xs", reason.tone === "danger" ? "text-danger" : reason.tone === "warning" ? "text-warning" : "text-faint")} title={reason.hint}>{reason.label}</span>
+        <span className={cn("tabular block font-medium", job.ageSeconds >= 300 ? "text-warning-text" : "text-foreground")}>{formatWait(job.ageSeconds)}</span>
+        <span className={cn("block text-2xs", reason.tone === "danger" ? "text-danger" : reason.tone === "warning" ? "text-warning-text" : "text-faint")} title={reason.hint}>{reason.label}</span>
       </td>
     </tr>
   );

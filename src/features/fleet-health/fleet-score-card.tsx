@@ -3,7 +3,7 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTo
 import { ScoreGauge } from "~/components/charts/score-gauge";
 import { Tooltip, TooltipProvider } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
-import { TRACK_COLOR, bandColor, scoreBand, type ScoreBand } from "./chart-theme";
+import { TRACK_COLOR, bandColor, bandTextColor, scoreBand, type ScoreBand } from "./chart-theme";
 import type { FleetHealth, FleetHealthViewProps, HealthWindow, ScoreComponent } from "./types";
 
 /** The word under the gauge: which band the score is in. */
@@ -27,7 +27,9 @@ const trendTick = (value: number, window: HealthWindow) =>
  * under it as a small `LineChart`, and one row per component (`data-component-key`, anchored as
  * `#fleet-component-<key>` for its concern's link) beside it:
  * its score as a bar in its band's colour, its weight, and its deduction sentence. A component
- * without a score (`data-insufficient="true"`) is greyed out with a tooltip saying why.
+ * without a score (`data-insufficient="true"`) is greyed out with a tooltip saying why: its name in
+ * the muted colour and an empty bar, never faded with opacity, which took its text below 4.5:1
+ * (#256).
  */
 export function FleetScoreCard({ data, window }: FleetHealthViewProps) {
   const fleet = data.fleet;
@@ -38,7 +40,7 @@ export function FleetScoreCard({ data, window }: FleetHealthViewProps) {
       <div className="flex flex-col gap-4 p-4 sm:flex-row sm:gap-5">
         <div className="flex w-full shrink-0 flex-col items-center gap-1 sm:w-44">
           <ScoreGauge label="Fleet score" score={fleet.score} size={132} />
-          <span className="text-xs font-medium" style={{ color: bandColor(band) }}>{BAND_LABELS[band]}</span>
+          <span className="text-xs font-medium" style={{ color: bandTextColor(band) }}>{BAND_LABELS[band]}</span>
           <TrendChart score={fleet.score} trend={fleet.trend} window={window} />
         </div>
         <TooltipProvider delayDuration={200}>
@@ -59,7 +61,8 @@ function TrendChart({ score, trend, window }: { score: number | null; trend: Fle
   return (
     <div className="h-24 w-full pt-2" data-testid="fleet-score-trend">
       <ResponsiveContainer height="100%" width="100%">
-        <LineChart data={trend} margin={{ bottom: 0, left: 0, right: 8, top: 4 }}>
+        {/* The right margin holds half the last time label, which the SVG would otherwise clip (#258). */}
+        <LineChart data={trend} margin={{ bottom: 0, left: 0, right: 24, top: 4 }}>
           <CartesianGrid stroke="var(--border)" vertical={false} />
           <XAxis
             axisLine={false}
@@ -122,7 +125,7 @@ function ComponentRow({ component }: { component: ScoreComponent }) {
   const reason = component.deduction || INSUFFICIENT_REASON;
   const row = (
     <li
-      className={cn("min-w-0 scroll-mt-4", insufficient && "cursor-help opacity-60")}
+      className={cn("min-w-0 scroll-mt-4", insufficient && "cursor-help")}
       data-component-key={component.key}
       // The anchor a `fleet-component:<key>` concern links to (#253).
       id={`fleet-component-${component.key}`}

@@ -38,12 +38,12 @@ export function AgentRunRow({ run }: { run: AgentRunListItem }) {
           <span className="block truncate font-medium text-foreground">{run.title ?? `Fix ${run.jobName}`}</span>
           <span className="block truncate text-2xs text-muted-foreground">
             {run.workflowName ? `${run.workflowName} · ` : ""}{run.jobName}
-            {!terminal && run.stage ? <span className="text-progress"> · {run.stage}</span> : null}
+            {!terminal && run.stage ? <span className="text-progress-text"> · {run.stage}</span> : null}
             {run.status === "failed" && run.error ? <span className="text-danger"> · {run.error}</span> : null}
           </span>
         </span>
         {run.pullRequestUrl ? (
-          <a className="relative hidden shrink-0 items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-2xs font-medium text-success hover:bg-success/15 md:inline-flex" href={run.pullRequestUrl} rel="noreferrer" target="_blank">
+          <a className="relative hidden shrink-0 items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-2xs font-medium text-success-text hover:bg-success/15 md:inline-flex" href={run.pullRequestUrl} rel="noreferrer" target="_blank">
             <GitPullRequestArrow className="size-3" />{run.pullRequestNumber ? `#${run.pullRequestNumber}` : "Pull request"}
           </a>
         ) : terminal ? <Badge className="hidden md:inline-flex" variant="outline">{label}</Badge> : null}

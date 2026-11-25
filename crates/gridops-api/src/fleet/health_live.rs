@@ -569,17 +569,28 @@ async fn start_failures_since(
         .collect())
 }
 
-/// A wait as a person reads it: `42 s`, `7 min`, `10 min 1 s`.
+/// A wait as a person reads it, rounded down to its two largest units:
+/// `42 s`, `7 min`, `10 min 1 s` under an hour, then `1 h 8 min` and
+/// `3 d 1 h`, as the live strip's "Oldest job waited 1 h 8 min" reads
+/// (#258); `1 h` and `2 d` when the smaller unit is zero.
 fn span_text(millis: i64) -> String {
-    let seconds = millis / 1_000;
-    if seconds >= 60 {
-        let minutes = seconds / 60;
-        let seconds = seconds % 60;
-        if seconds == 0 {
-            format!("{minutes} min")
+    let seconds = millis.max(0) / 1_000;
+    let (minutes, seconds) = (seconds / 60, seconds % 60);
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    let (days, hours) = (hours / 24, hours % 24);
+    let pair = |large: i64, large_unit: &str, small: i64, small_unit: &str| {
+        if small == 0 {
+            format!("{large} {large_unit}")
         } else {
-            format!("{minutes} min {seconds} s")
+            format!("{large} {large_unit} {small} {small_unit}")
         }
+    };
+    if days > 0 {
+        pair(days, "d", hours, "h")
+    } else if hours > 0 {
+        pair(hours, "h", minutes, "min")
+    } else if minutes > 0 {
+        pair(minutes, "min", seconds, "s")
     } else {
         format!("{seconds} s")
     }
@@ -1567,5 +1578,29 @@ mod tests {
         summary("GET /fleet/health, cold (fake source)", cold);
         summary("GET /fleet/health, cached", cached);
         Ok(())
+    }
+
+    /// #258 item 1: a long wait in a concern's text reads in hours and days,
+    /// as the live strip's "Oldest job waited 1 h 8 min" does, not as
+    /// thousands of minutes; under an hour it keeps its seconds.
+    #[test]
+    fn span_text_rolls_long_waits_up_into_hours_and_days() {
+        const HOUR: i64 = 60 * MINUTE;
+        assert_eq!(span_text(0), "0 s");
+        assert_eq!(span_text(42 * SECOND + 999), "42 s");
+        assert_eq!(span_text(7 * MINUTE), "7 min");
+        assert_eq!(span_text(10 * MINUTE + SECOND), "10 min 1 s");
+        assert_eq!(span_text(59 * MINUTE + 59 * SECOND), "59 min 59 s");
+        assert_eq!(span_text(HOUR), "1 h");
+        // The walkthrough's "68 min 27 s" and "4391 min 27 s".
+        assert_eq!(span_text(68 * MINUTE + 27 * SECOND), "1 h 8 min");
+        assert_eq!(span_text(4391 * MINUTE + 27 * SECOND), "3 d 1 h");
+        assert_eq!(
+            span_text(23 * HOUR + 59 * MINUTE + 59 * SECOND),
+            "23 h 59 min"
+        );
+        assert_eq!(span_text(DAY), "1 d");
+        assert_eq!(span_text(2 * DAY + 59 * MINUTE), "2 d");
+        assert_eq!(span_text(-5 * SECOND), "0 s");
     }
 }

@@ -9,6 +9,12 @@
 /*
  * Linear-style surfaces: the canvas holds the sidebar, and each view sits on an
  * inset panel. Text steps down through foreground → secondary → muted → faint.
+ *
+ * Every text colour reads at 4.5:1 or more (WCAG 1.4.3) on the surfaces text sits on: the panel,
+ * the subtle panel, the canvas and a hovered row (#256; `tests/theme-contrast.test.ts` checks it).
+ * The status colours (`--success`, `--warning`, `--progress`, `--info`) are for dots, bars and
+ * charts; text in a status colour uses its `-text` variant, darker in the light theme; `--danger`
+ * reads as text as it is. `--destructive` is a fill under white text (destructive buttons).
  */
 :root {
   color-scheme: light;
@@ -19,8 +25,8 @@
   --panel-subtle: #f7f7f9;
   --foreground: #1b1c1f;
   --secondary-foreground: #3c4149;
-  --muted-foreground: #6b6f76;
-  --faint: #9b9ea4;
+  --muted-foreground: #5f636a;
+  --faint: #696d74;
   --border: #e7e7ea;
   --border-strong: #d9d9dd;
   --hover: #efeff2;
@@ -31,12 +37,16 @@
   --primary-hover: #6c77d9;
   --primary-foreground: #ffffff;
   --ring: #5e6ad2;
-  --destructive: #e5484d;
+  --destructive: #c4282d;
   --success: #3da873;
   --warning: #d99a18;
   --progress: #e2a700;
-  --danger: #e5484d;
+  --danger: #c4282d;
   --info: #3b8fe8;
+  --success-text: #1e7a4c;
+  --warning-text: #8f5e00;
+  --progress-text: #806000;
+  --info-text: #256bc2;
   --neutral: #95a2b3;
   --panel-shadow: 0 0 0 1px rgb(0 0 0 / 0.02), 0 1px 3px rgb(0 0 0 / 0.04);
   --popover-shadow: 0 0 0 1px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.06);
@@ -58,7 +68,7 @@
   --foreground: #f7f8f8;
   --secondary-foreground: #d0d6e0;
   --muted-foreground: #8a8f98;
-  --faint: #62666d;
+  --faint: #82868e;
   --border: #1d1e21;
   --border-strong: #2a2b30;
   --hover: #17181a;
@@ -69,12 +79,16 @@
   --primary-hover: #6c78e0;
   --primary-foreground: #ffffff;
   --ring: #7c86e4;
-  --destructive: #eb5757;
+  --destructive: #cf3338;
   --success: #4cb782;
   --warning: #f2994a;
   --progress: #f2c94c;
   --danger: #eb5757;
   --info: #4ea7fc;
+  --success-text: #4cb782;
+  --warning-text: #f2994a;
+  --progress-text: #f2c94c;
+  --info-text: #4ea7fc;
   --neutral: #8a95a5;
   --panel-shadow: 0 0 0 1px rgb(255 255 255 / 0.015), 0 2px 8px rgb(0 0 0 / 0.3);
   --popover-shadow: 0 0 0 1px rgb(255 255 255 / 0.06), 0 12px 32px rgb(0 0 0 / 0.5), 0 2px 6px rgb(0 0 0 / 0.3);
@@ -138,6 +152,10 @@
   --color-progress: var(--progress);
   --color-danger: var(--danger);
   --color-info: var(--info);
+  --color-success-text: var(--success-text);
+  --color-warning-text: var(--warning-text);
+  --color-progress-text: var(--progress-text);
+  --color-info-text: var(--info-text);
   --color-neutral: var(--neutral);
 
   /* Strong ease-out for UI entering or responding; iOS-like curve for drawers. */

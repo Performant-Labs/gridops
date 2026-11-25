@@ -15,7 +15,7 @@ export function FixWithAgentButton({
   onStart: () => void;
 }) {
   const button = (
-    <Button aria-label="Fix with agent" disabled={state.disabled || pending} onClick={onStart} size="sm" variant="outline">
+    <Button aria-label={pending ? "Starting…" : "Fix with agent"} disabled={state.disabled || pending} onClick={onStart} size="sm" variant="outline">
       {pending ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
       <span className="hidden sm:inline">{pending ? "Starting…" : "Fix with agent"}</span>
     </Button>
