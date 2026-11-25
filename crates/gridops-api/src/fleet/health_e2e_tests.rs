@@ -329,6 +329,7 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     )
     .execute(db)
     .await?;
+    charge_capacity(db, now_a).await?;
 
     // The pathless GitLab job: a group-scoped connection, no path, and no
     // other row of its project, so the backfill leaves it NULL for an hour.
@@ -467,6 +468,64 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     Ok(scenario)
 }
 
+/// The capacity admission charges, which the seed's placements otherwise
+/// lack (the walkthrough showed "0 cores reserved" beside running jobs for
+/// that reason alone): a committed allocation on the root domain for each
+/// running placement, an uncertain one for the uncertain placement (it
+/// still holds its capacity), and a released one for a finished placement,
+/// which no longer counts.
+async fn charge_capacity(db: &SqlitePool, at: i64) -> Result<()> {
+    let placements: Vec<(String, String, String, i64, i64, String)> = sqlx::query_as(
+        "SELECT p.id,p.host_id,p.backend_id,p.cpu_millis,p.memory_mib,p.state FROM workload_placements p
+          WHERE p.state IN ('running','uncertain')
+             OR p.id=(SELECT id FROM workload_placements WHERE state='stopped' ORDER BY id LIMIT 1)",
+    )
+    .fetch_all(db)
+    .await?;
+    ensure!(
+        placements.len() >= 3,
+        "running, uncertain and stopped placements"
+    );
+    for (id, host, backend, cpu, memory, state) in placements {
+        let allocation = match state.as_str() {
+            "running" => "committed",
+            "uncertain" => "uncertain",
+            _ => "released",
+        };
+        if allocation == "released" {
+            // Released only once its runner is proven gone, as the
+            // reconciler releases it.
+            sqlx::query(
+                "UPDATE workload_placements SET local_absence_proven_at=?,delayed_starts_excluded_at=? WHERE id=?",
+            )
+            .bind(at)
+            .bind(at)
+            .bind(&id)
+            .execute(db)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO capacity_allocations (id,placement_id,host_id,backend_id,host_epoch,domain_id,policy_revision,cpu_millis,memory_mib,disk_bytes,state,created_at,updated_at,released_at)
+             SELECT ?,?,?,?,1,d.id,1,?,?,0,?,?,?,? FROM host_resource_domains d
+              WHERE d.host_id=? AND d.parent_domain_id IS NULL",
+        )
+        .bind(format!("e2e-allocation-{id}"))
+        .bind(&id)
+        .bind(&host)
+        .bind(&backend)
+        .bind(cpu)
+        .bind(memory)
+        .bind(allocation)
+        .bind(at - 6 * MINUTE)
+        .bind(at)
+        .bind((allocation == "released").then_some(at))
+        .bind(&host)
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Runs the reconciler's fleet health passes at `now` until the catch-up
 /// has nothing left (one catch-up hour per pass over 7 days).
 async fn run_passes(db: &SqlitePool, now: i64, passes: usize) -> Result<()> {
@@ -547,6 +606,11 @@ impl Diff {
                 &format!("{what}.{key}.score"),
                 &left["score"],
                 &right["score"],
+            );
+            self.eq(
+                &format!("{what}.{key}.deduction"),
+                &left["deduction"],
+                &right["deduction"],
             );
             self.close(
                 &format!("{what}.{key}.weight"),
@@ -772,6 +836,8 @@ fn compare(window: &str, at: &'static str, api: &Value, oracle: &Value) -> Resul
             "cpuUsedMillis",
             "memoryUsedMib",
             "diskFreeBytes",
+            "cpuReservedMillis",
+            "memoryReservedMib",
         ] {
             diff.eq(
                 &format!("{name}.live.{field}"),
@@ -928,6 +994,9 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
     insert_samples(&db, &scenario, NOW_A - 30_000, NOW_B - 30_000).await?;
     run_passes(&db, NOW_B, 3).await?;
     harness.clock.set(NOW_B);
+    // The API's speed refresher has read every window by now (every 4
+    // minutes); the indexes cached at NOW_A are 21 minutes old.
+    harness.refresh_speed(NOW_B).await?;
     let mut at_b = BTreeMap::new();
     for window in ["1h", "24h", "7d"] {
         let (status, api) = harness
@@ -936,6 +1005,38 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{api}");
         let expected = oracle(&path, window, NOW_B)?;
         compare(window, "NOW_B", &api, &expected)?;
+        // The snapshot the pass recorded at NOW_B holds the scores the
+        // oracle computes at NOW_B: the fleet's on the trend, and every
+        // machine's in the row.
+        let recorded = array(&api["fleet"]["trend"])
+            .iter()
+            .find(|point| point["at"] == NOW_B)
+            .with_context(|| format!("{window}: no trend point at NOW_B"))?;
+        assert_eq!(
+            recorded["score"], expected["fleet"]["score"],
+            "{window}: the recorded fleet score"
+        );
+        let machines: String = sqlx::query_scalar(
+            r#"SELECT host_scores_json FROM fleet_health_snapshots WHERE recorded_at=? AND "window"=?"#,
+        )
+        .bind(NOW_B)
+        .bind(window)
+        .fetch_one(&db)
+        .await?;
+        let machines: BTreeMap<String, Value> = serde_json::from_str(&machines)?;
+        let expected_machines: BTreeMap<String, Value> = array(&expected["hosts"])
+            .iter()
+            .map(|host| {
+                (
+                    host["id"].as_str().unwrap_or_default().to_owned(),
+                    host["score"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            machines, expected_machines,
+            "{window}: the recorded machine scores"
+        );
         assert!(
             misclassified(&expected).is_empty(),
             "every job has the rules' category: {:?}",

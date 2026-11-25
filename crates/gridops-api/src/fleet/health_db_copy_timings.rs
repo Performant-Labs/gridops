@@ -209,13 +209,18 @@ async fn admin_cookie(db: &SqlitePool, vault: &Vault, now: i64) -> Result<String
 }
 
 /// The router over `db` with a new health state (empty caches) at `now`,
-/// warmed as `main` warms it when `warm`, and the clock it reads.
+/// with its speed refresher started as `main` starts it when `refresher`,
+/// and the clock it reads.
 fn router(
     db: &SqlitePool,
     vault: &Vault,
     now: i64,
-    warm: bool,
-) -> Result<(axum::Router, Arc<FixedClock>)> {
+    refresher: bool,
+) -> Result<(
+    axum::Router,
+    Arc<FixedClock>,
+    Option<tokio::task::JoinHandle<()>>,
+)> {
     let config = Config::from_env()?
         .with_base_url(Url::parse("https://gridops.example")?)
         .with_manager(
@@ -231,14 +236,17 @@ fn router(
         BitbucketClient::new()?,
     )?
     .with_fleet_health_clock(clock.clone());
-    if warm {
-        state.fleet_health.warm();
-    }
+    let refresher = if refresher {
+        state.fleet_health.start_speed_refresher()
+    } else {
+        None
+    };
     Ok((
         super::router()
             .merge(crate::session_routes())
             .with_state(state),
         clock,
+        refresher,
     ))
 }
 
@@ -268,6 +276,30 @@ async fn db_copy_timings() -> Result<()> {
         std::env::var_os("GRIDOPS_FLEET_HEALTH_DB_COPY")
             .context("GRIDOPS_FLEET_HEALTH_DB_COPY names the copy")?,
     );
+    timings(path).await
+}
+
+/// The same timings on the synthetic week (`testdata::build_week`: about
+/// 50,000 jobs and a sample every 30 s on five machines), in a new database
+/// under the temporary directory, when no production copy is at hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "by hand: the timings on the synthetic week"]
+async fn synthetic_week_timings() -> Result<()> {
+    let directory =
+        std::env::temp_dir().join(format!("gridops-fh-timings-{}", uuid::Uuid::new_v4()));
+    let path = directory.join("gridops.sqlite");
+    {
+        let db = gridops_core::connect_database_path(&path).await?;
+        let end = gridops_core::fleet_health::hour::floor_hour(gridops_core::now_millis());
+        gridops_core::fleet_health::testdata::build_week(&db, end).await?;
+        db.close().await;
+    }
+    let outcome = timings(path).await;
+    std::fs::remove_dir_all(directory)?;
+    outcome
+}
+
+async fn timings(path: PathBuf) -> Result<()> {
     let observed = Arc::new(Observed::default());
     tracing_subscriber::registry()
         .with(
@@ -384,34 +416,34 @@ async fn db_copy_timings() -> Result<()> {
     let vault = Vault::new([7_u8; 32], b"fleet-health-timings-secret".to_vec());
     let cookie = admin_cookie(&db, &vault, now).await?;
     for window in HealthWindow::ALL {
-        // A new health state, no cache at all: the API's first page before
-        // its warm-up has read the speed indexes.
+        // A new health state whose refresher hasn't finished a round: the
+        // only cold case, the first page within a moment of the API's start.
         observed.reset();
         let mut cold = Vec::new();
         for _ in 0..20 {
-            let (router, _) = router(&db, &vault, now, false)?;
+            let (router, _, _) = router(&db, &vault, now, false)?;
             cold.push(get(&router, window, &cookie).await?);
         }
         let cold_line = observed.line();
-        // A new health state once its warm-up has read the speed indexes:
-        // a response-cache miss on a running API.
+        // The refresher running, the window asked for once every 11 minutes
+        // (each request past the old 10-minute cut-off): a response-cache
+        // miss served the last speed indexes.
         observed.reset();
-        let mut warm = Vec::new();
+        let (unasked, clock, refresher) = router(&db, &vault, now, true)?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let mut late = Vec::new();
         for _ in 0..20 {
-            let (router, _) = router(&db, &vault, now, true)?;
-            tokio::time::sleep(Duration::from_millis(1_500)).await;
-            warm.push(get(&router, window, &cookie).await?);
+            clock.0.fetch_add(11 * 60_000, Ordering::SeqCst);
+            late.push(get(&unasked, window, &cookie).await?);
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let warm_line = observed.line();
-        // A page left open: a miss every 31 s for 10 minutes, the speed
-        // indexes refreshed behind the calls.
+        let late_line = observed.line();
+        // A page left open: a miss every 31 s.
         observed.reset();
-        let (refreshing, clock) = router(&db, &vault, now, true)?;
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
         let mut misses = Vec::new();
         for _ in 0..20 {
             clock.0.fetch_add(31_000, Ordering::SeqCst);
-            misses.push(get(&refreshing, window, &cookie).await?);
+            misses.push(get(&unasked, window, &cookie).await?);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let miss_line = observed.line();
@@ -419,9 +451,12 @@ async fn db_copy_timings() -> Result<()> {
         observed.reset();
         let mut cached = Vec::new();
         for _ in 0..200 {
-            cached.push(get(&refreshing, window, &cookie).await?);
+            cached.push(get(&unasked, window, &cookie).await?);
         }
         let cached_line = observed.line();
+        if let Some(refresher) = refresher {
+            refresher.abort();
+        }
         let mut speed = Vec::new();
         for _ in 0..10 {
             let started = Instant::now();
@@ -429,9 +464,9 @@ async fn db_copy_timings() -> Result<()> {
             speed.push(started.elapsed());
         }
         println!(
-            "GET {window}:\n  cold, no cache at all     {}; {cold_line}\n  cold, speed warmed        {}; {warm_line}\n  page refresh every 31 s   {}; {miss_line}\n  cached                    {}; {cached_line}\n  speed index alone         {}",
+            "GET {window}:\n  cold, before the refresher's first round  {}; {cold_line}\n  unasked 11 min between requests         {}; {late_line}\n  page refresh every 31 s                  {}; {miss_line}\n  cached                                   {}; {cached_line}\n  speed index alone                        {}",
             percentiles(cold),
-            percentiles(warm),
+            percentiles(late),
             percentiles(misses),
             percentiles(cached),
             percentiles(speed),

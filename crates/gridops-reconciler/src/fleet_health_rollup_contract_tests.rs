@@ -17,7 +17,8 @@
 //!   histograms in #197's buckets;
 //! - `rollup_hour(db, hour, now)` writes one hour (idempotently, and takes
 //!   the hour off `fleet_health_recompute`); `run_pass(db, now)` rolls up
-//!   listed hours and catches up the last 7 days one hour per pass.
+//!   listed hours and catches up the last 7 days (one hour per pass at
+//!   least; several under a time budget since #204).
 //!
 //! Mounted from `main.rs` (#197-owned). Jobs are seeded with #197's
 //! `testdata`.
@@ -404,6 +405,19 @@ async fn rolling_an_hour_up_again_gives_identical_rows() -> Result<()> {
 async fn a_pass_rolls_up_a_listed_hour_and_catches_up_the_last_7_days() -> Result<()> {
     let harness = Harness::new().await?;
     let expected = seed(&harness).await?;
+    // A job of three days ago, which only the catch-up reaches.
+    let old_hour = NOW - 3 * 24 * HOUR;
+    let io = harness.id("io")?;
+    let mut old = JobSeed::completed(
+        100,
+        "unit tests",
+        Some(&io),
+        old_hour + MINUTE,
+        old_hour + 2 * MINUTE,
+        old_hour + 3 * MINUTE,
+    );
+    old.category = Some(JobCategory::Test);
+    testdata::insert_jobs(&harness.db, &harness.fleet, &[old]).await?;
     // A listed hour is rolled up and taken off the list.
     sqlx::query("INSERT INTO fleet_health_recompute (hour,requested_at) VALUES (?,?)")
         .bind(H)
@@ -417,20 +431,9 @@ async fn a_pass_rolls_up_a_listed_hour_and_catches_up_the_last_7_days() -> Resul
         .await?;
     assert_eq!(listed, 0);
 
-    // Catch-up, one hour per pass: within 7 days' worth of passes a job of
-    // three days ago is rolled up too.
-    let old_hour = NOW - 3 * 24 * HOUR;
-    let io = harness.id("io")?;
-    let mut old = JobSeed::completed(
-        100,
-        "unit tests",
-        Some(&io),
-        old_hour + MINUTE,
-        old_hour + 2 * MINUTE,
-        old_hour + 3 * MINUTE,
-    );
-    old.category = Some(JobCategory::Test);
-    testdata::insert_jobs(&harness.db, &harness.fleet, &[old]).await?;
+    // Catch-up (several hours a pass under its time budget since #204, one
+    // at least): within 7 days' worth of passes the job of three days ago is
+    // rolled up too.
     for _ in 0..(7 * 24 + 2) {
         fleet_health_rollup::run_pass(&harness.db, NOW).await?;
     }

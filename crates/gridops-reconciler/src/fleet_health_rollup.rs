@@ -6,8 +6,8 @@
 //! under `host_id = pool_id = 'unmanaged'` with 0 CPU-seconds.
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`):
-//! it rolls up every hour listed in `fleet_health_recompute` plus at most
-//! one catch-up hour. #197 fixes the signatures; #191 implements them. It is
+//! it rolls up every hour listed in `fleet_health_recompute`, then catches
+//! up as many finished hours as fit in [`CATCH_UP_BUDGET`] (one at least). #197 fixes the signatures; #191 implements them. It is
 //! the only reader of `fleet_health_recompute` (#239).
 //!
 //! The reads of an hour (`gridops_core::fleet_health::hour::job_hour`, the
@@ -18,8 +18,8 @@
 //! also takes the hour off `fleet_health_recompute`, so re-running an hour
 //! gives the same rows. The same transaction lists the hours a re-run's
 //! earlier attempts completed in, so they are rolled again without them
-//! (#239). The catch-up walks the last 7 days one finished hour per pass,
-//! oldest first; where it got to is the `fleet_health.rollup_next` setting,
+//! (#239). The catch-up walks the last 7 days oldest first, under a time
+//! budget per pass, one write transaction per hour; where it got to is the `fleet_health.rollup_next` setting,
 //! absent until the first pass. No hour, listed or caught up, is rolled
 //! before its end plus [`ROLLUP_GRACE_MILLIS`].
 
@@ -81,13 +81,59 @@ pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<
     .await
 }
 
-/// One reconciler pass of the rollup: every hour listed in
-/// `fleet_health_recompute` that is past its grace, oldest first, then at
-/// most one catch-up hour of the last 7 days, once it is past its grace too.
+/// How much of a pass the catch-up may spend rolling hours (#204): enough
+/// for a first start's 7 days to take a few passes instead of 168 (84
+/// minutes at one per 30 s pass), while each hour is still its own short
+/// write transaction (#179).
+pub(crate) const CATCH_UP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One reconciler pass of the rollup: the catch-up's hours of the last 7
+/// days that are past their grace, oldest first, for as long as
+/// [`CATCH_UP_BUDGET`] lasts (at least one), then every hour listed in
+/// `fleet_health_recompute` that is past its grace, oldest first (those the
+/// catch-up just listed included).
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
+    run_pass_within(db, now, CATCH_UP_BUDGET).await
+}
+
+/// [`run_pass`] with the catch-up's time `budget`, counted from the start of
+/// the pass: the catch-up rolls one hour at least, then more while the pass
+/// is under its budget.
+///
+/// # Errors
+/// A database read or write failed.
+pub(crate) async fn run_pass_within(
+    db: &SqlitePool,
+    now: i64,
+    budget: std::time::Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    // Catch-up: finished hours oldest first, over the last 7 days, each once
+    // its grace has passed so a late arrival still counts, and each with its
+    // marker saved after it, so a failure or the end of the budget resumes
+    // there. The first pass starts at the window's oldest hour; one whose
+    // marker the sliding window has passed starts again at its oldest.
+    let window_start = now - HealthWindow::Week.millis();
+    let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
+    let mut next = match next_hour(db).await? {
+        Some(next) => next.max(window_start),
+        None => window_start,
+    };
+    while next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
+        rollup_hour(db, next, now).await?;
+        next += HOUR_MILLIS;
+        save_next_hour(db, next, now).await?;
+        if started.elapsed() >= budget {
+            break;
+        }
+    }
+
+    // Then the listed hours, so an earlier attempt's hour the catch-up has
+    // just listed (rolling a re-run's later hour) is rolled again in the
+    // same pass.
     let listed: Vec<i64> =
         sqlx::query_scalar("SELECT hour FROM fleet_health_recompute WHERE hour<=? ORDER BY hour")
             .bind(now - HOUR_MILLIS - ROLLUP_GRACE_MILLIS)
@@ -95,21 +141,6 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
             .await?;
     for hour in listed {
         rollup_hour(db, hour, now).await?;
-    }
-
-    // Catch-up: one finished hour per pass, oldest first, over the last 7
-    // days, each once its grace has passed so a late arrival still counts.
-    // The first pass starts at the window's oldest hour; one whose marker the
-    // sliding window has passed starts again at its oldest.
-    let window_start = now - HealthWindow::Week.millis();
-    let window_start = window_start - window_start.rem_euclid(HOUR_MILLIS);
-    let next = match next_hour(db).await? {
-        Some(next) => next.max(window_start),
-        None => window_start,
-    };
-    if next + HOUR_MILLIS + ROLLUP_GRACE_MILLIS <= now {
-        rollup_hour(db, next, now).await?;
-        save_next_hour(db, next + HOUR_MILLIS, now).await?;
     }
     Ok(())
 }
@@ -509,5 +540,72 @@ mod tests {
         assert_eq!(harness.counted(hour).await?, 1);
         assert!(harness.listed().await?.is_empty());
         harness.finish().await
+    }
+
+    /// #204: a pass catches up as many past-grace hours as fit in its time
+    /// budget, oldest first, each in its own short write transaction, so a
+    /// first start's 7 days take a few passes instead of 168 (84 minutes at
+    /// one per 30 s pass). Every past-grace hour is rolled once in one pass
+    /// here, and the marker ends at the hour still in its grace.
+    #[tokio::test]
+    async fn one_pass_catches_up_every_hour_its_budget_allows() -> Result<()> {
+        let harness = Harness::new().await?;
+        let (old, recent) = (NOW - 3 * 24 * HOUR, NOW - 2 * HOUR);
+        harness.job(1, 1, 1, old + 10 * MINUTE).await?;
+        harness.job(2, 2, 1, recent + 10 * MINUTE).await?;
+        run_pass(&harness.db, NOW).await?;
+        assert_eq!(harness.counted(old).await?, 1, "three days ago, rolled");
+        assert_eq!(harness.counted(recent).await?, 1, "two hours ago, rolled");
+        assert_eq!(
+            next_hour(&harness.db).await?,
+            Some(NOW - HOUR),
+            "caught up to the hour in its grace"
+        );
+        harness.finish().await
+    }
+
+    /// The budget bounds a pass, but a pass always makes progress: with no
+    /// time to spare it still rolls one hour, as before.
+    #[tokio::test]
+    async fn a_pass_with_no_budget_left_still_rolls_one_hour() -> Result<()> {
+        let harness = Harness::new().await?;
+        run_pass_within(&harness.db, NOW, std::time::Duration::ZERO).await?;
+        let start = NOW - 7 * 24 * HOUR;
+        assert_eq!(next_hour(&harness.db).await?, Some(start + HOUR));
+        harness.finish().await
+    }
+
+    /// The whole synthetic week (about 50,000 jobs) catches up in a few
+    /// passes with no statement over 100 ms and no write transaction over
+    /// 50 ms (#179).
+    #[tokio::test]
+    async fn the_synthetic_week_catches_up_in_a_few_passes() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-job-rollup-catch-up-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let week = testdata::build_week(&db, NOW).await?;
+        let passes = gridops_core::fleet_health::speed_check::check(&db, async {
+            let mut passes = 0;
+            while next_hour(&db).await? != Some(NOW - HOUR) {
+                run_pass(&db, NOW).await?;
+                passes += 1;
+                anyhow::ensure!(passes < 168, "no faster than one hour a pass");
+            }
+            Ok(passes)
+        })
+        .await?;
+        println!("the synthetic week caught up in {passes} passes");
+        assert!(passes <= 24, "{passes} passes");
+        let counted: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(job_count),0) FROM fleet_health_hourly")
+                .fetch_one(&db)
+                .await?;
+        // The week ends at NOW; its last hour is still in its grace.
+        assert!(counted > 0 && counted <= i64::try_from(week.jobs)?);
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 }

@@ -24,7 +24,6 @@ Simplifications, each one the seeded test data stays inside:
   that covers its repository offers all its labels (the pool's labels and its
   name); GitLab jobs, platform labels, pool capacity and pausing are not
   modelled.
-- A machine's reserved CPU and memory are not computed.
 """
 
 import argparse
@@ -59,6 +58,35 @@ MACHINE_FAULT_REASONS = {
 def rnd(value):
     """Rounds half away from zero, as Rust's f64::round does."""
     return int(math.floor(value + 0.5)) if value >= 0 else -int(math.floor(-value + 0.5))
+
+
+def duration_text(ms):
+    """A duration as the sentences read it: 45 s, 1 min, 7 min 12 s, 1 h 5 min."""
+    total = rnd(max(ms, 0.0) / 1000.0)
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours == 0 and minutes == 0:
+        return f"{seconds} s"
+    if hours == 0:
+        return f"{minutes} min" if seconds == 0 else f"{minutes} min {seconds} s"
+    return f"{hours} h" if minutes == 0 else f"{hours} h {minutes} min"
+
+
+def percent(share):
+    """A share to one decimal: 97.4%."""
+    return f"{share * 100.0:.1f}%"
+
+
+def whole_percent(share):
+    """A share without a trailing .0: 45%, 29.9%."""
+    value = share * 100.0
+    return f"{rnd(value)}%" if abs(value - round(value)) < 1e-9 else f"{value:.1f}%"
+
+
+def gib_text(size):
+    """A byte count in GiB: 15 GiB, 10.3 GiB."""
+    value = size / GIB
+    return f"{value:.0f} GiB" if abs(value - round(value)) < 0.05 else f"{value:.1f} GiB"
 
 
 def floor_hour(ms):
@@ -454,10 +482,12 @@ class Oracle:
         return self.now - self.first
 
     @staticmethod
-    def component(key, weight, value, score_of):
+    def component(key, weight, value, score_of, sentence, no_data):
+        """One component: its unrounded score, the sentence that explains a
+        deduction (before its points), and what "not enough data" says."""
         if value is None:
-            return {"key": key, "weight": weight, "raw": None}
-        return {"key": key, "weight": weight, "raw": score_of(value)}
+            return {"key": key, "weight": weight, "raw": None, "body": None, "no_data": no_data}
+        return {"key": key, "weight": weight, "raw": score_of(value), "body": sentence(value), "no_data": no_data}
 
     @staticmethod
     def combine(parts):
@@ -470,12 +500,22 @@ class Oracle:
                 weight = part["weight"]
             else:
                 weight = 0.0
+            # The deduction: what "not enough data" says without a score,
+            # none at 100, else the sentence and the points lost from the
+            # weight after reweighting.
+            if part["raw"] is None:
+                deduction = f"Not enough data: {part['no_data']}."
+            elif rnd(part["raw"]) >= 100:
+                deduction = None
+            else:
+                deduction = f"{part['body']}: \u2212{rnd(weight * (100.0 - part['raw']) / 100.0)}."
             out.append(
                 {
                     "key": part["key"],
                     "weight": weight,
                     "score": None if part["raw"] is None else rnd(part["raw"]),
                     "raw": part["raw"],
+                    "deduction": deduction,
                 }
             )
         total = None
@@ -531,17 +571,56 @@ class Oracle:
             budget += host["cpu"]
         availability = online / (budget * covered_minutes) if budget > 0 and covered_minutes > 0 else None
 
+        few_jobs = "fewer than 20 jobs completed in the window"
+        few_starts = "fewer than 20 runner starts in the window"
         p90 = percentile(wait, 0.9) if enough else None
-        queue_part = self.component("queue-wait", 40.0, p90, lambda v: linear_lower(v, 60_000.0, 600_000.0))
+        queue_part = self.component(
+            "queue-wait",
+            40.0,
+            p90,
+            lambda v: linear_lower(v, 60_000.0, 600_000.0),
+            lambda v: f"Queue p90 was {duration_text(v)} against a 1 min target",
+            few_jobs,
+        )
         fleet_queue = None if queue_part["raw"] is None else rnd(queue_part["raw"])
+
+        def starts_sentence(share):
+            return f"{percent(share)} of runner starts succeeded against a 99% target"
+
         fleet_parts = [
             queue_part,
-            self.component("start-reliability", 20.0, starts(attempts, failures), lambda v: linear_higher(v, 0.99, 0.80)),
             self.component(
-                "infra-failures", 15.0, infra / total_jobs if enough and total_jobs > 0 else None, lambda v: linear_lower(v, 0.0, 0.05)
+                "start-reliability",
+                20.0,
+                starts(attempts, failures),
+                lambda v: linear_higher(v, 0.99, 0.80),
+                starts_sentence,
+                few_starts,
             ),
-            self.component("capacity-fit", 15.0, misfit, lambda v: linear_lower(v, 0.0, 0.25)),
-            self.component("availability", 10.0, availability, lambda v: linear_higher(v, 1.0, 0.80)),
+            self.component(
+                "infra-failures",
+                15.0,
+                infra / total_jobs if enough and total_jobs > 0 else None,
+                lambda v: linear_lower(v, 0.0, 0.05),
+                lambda v: f"{percent(v)} of completed jobs failed on the infrastructure against a 0% target",
+                few_jobs,
+            ),
+            self.component(
+                "capacity-fit",
+                15.0,
+                misfit,
+                lambda v: linear_lower(v, 0.0, 0.25),
+                lambda v: f"{percent(v)} of the window's hours waited over a minute while the fleet sat under half its CPU budget, against a 0% target",
+                few_jobs,
+            ),
+            self.component(
+                "availability",
+                10.0,
+                availability,
+                lambda v: linear_higher(v, 1.0, 0.80),
+                lambda v: f"The fleet's CPU budget was online {percent(v)} of the window against a 100% target",
+                "no machine samples in the window",
+            ),
         ]
         fleet_score, fleet_components = self.combine(fleet_parts)
 
@@ -562,14 +641,22 @@ class Oracle:
                 critical = max(5 * GIB, total // 20)
                 # The floors are the frees that clear each alarm: a free at or
                 # above `warn` raises none, under `critical` the critical one.
-                disk = linear_higher(float(min(disks)), float(warn), float(critical))
+                disk = (
+                    linear_higher(float(min(disks)), float(warn), float(critical)),
+                    f"The least free disk was {gib_text(min(disks))}, between the {gib_text(warn)} warning and {gib_text(critical)} critical floors",
+                )
             memories = [row["memory_p95"] for row in rows if row["memory_p95"] is not None]
             memory = None
             if memories and host["memory"] > 0:
-                memory = linear_lower(max(memories) / host["memory"], 0.80, 1.0)
+                used = max(memories) / host["memory"]
+                memory = (
+                    linear_lower(used, 0.80, 1.0),
+                    f"Memory p95 was {whole_percent(used)} of budget against a 80% target",
+                )
+            # The lower of the two, the disk on a tie.
             headroom = None
             if disk is not None and memory is not None:
-                headroom = min(disk, memory)
+                headroom = memory if memory[0] < disk[0] else disk
             elif disk is not None:
                 headroom = disk
             elif memory is not None:
@@ -582,14 +669,57 @@ class Oracle:
             avail = minutes / covered_minutes if rows and covered_minutes > 0 else None
             deducts = fleet_queue is not None and fleet_queue < 100
             parts = [
-                self.component("availability", 25.0, avail, lambda v: linear_higher(v, 1.0, 0.80)),
-                self.component("start-reliability", 25.0, starts(h_attempts, h_failures), lambda v: linear_higher(v, 0.99, 0.80)),
-                self.component("relative-speed", 25.0, index, lambda v: linear_lower(v, 1.0, 2.0)),
-                self.component("headroom", 15.0, headroom, lambda v: v),
-                self.component("busy-share", 10.0, busy, lambda v: linear_higher(v, 0.50, 0.0) if deducts else 100.0),
+                self.component(
+                    "availability",
+                    25.0,
+                    avail,
+                    lambda v: linear_higher(v, 1.0, 0.80),
+                    lambda v: f"Online {percent(v)} of the window against a 100% target",
+                    "no samples from this machine in the window",
+                ),
+                self.component(
+                    "start-reliability",
+                    25.0,
+                    starts(h_attempts, h_failures),
+                    lambda v: linear_higher(v, 0.99, 0.80),
+                    starts_sentence,
+                    few_starts,
+                ),
+                self.component(
+                    "relative-speed",
+                    25.0,
+                    index,
+                    lambda v: linear_lower(v, 1.0, 2.0),
+                    lambda v: f"Speed index {v:.2f} against a 1.00 target",
+                    "fewer than 3 job keys qualify",
+                ),
+                self.component(
+                    "headroom",
+                    15.0,
+                    headroom,
+                    lambda v: v[0],
+                    lambda v: v[1],
+                    "no disk or memory samples in the window",
+                ),
+                self.component(
+                    "busy-share",
+                    10.0,
+                    busy,
+                    lambda v: linear_higher(v, 0.50, 0.0) if deducts else 100.0,
+                    lambda v: f"Busy {whole_percent(v)} of its CPU budget against a 50% target while jobs waited",
+                    "the machine has no CPU budget",
+                ),
             ]
             if not budgeted:
-                parts = [dict(part, raw=None) for part in parts]
+                # No CPU budget, no score: a component that had data says so.
+                parts = [
+                    dict(
+                        part,
+                        raw=None,
+                        no_data="the machine has no CPU budget" if part["raw"] is not None else part["no_data"],
+                    )
+                    for part in parts
+                ]
             total, components = self.combine(parts)
             scored_hosts.append(
                 {"id": host["id"], "name": host["name"], "score": total, "components": components, "busy": busy}
@@ -683,9 +813,21 @@ class Oracle:
                 "SELECT cpu_used_millis,memory_used_mib,disk_free_bytes FROM host_samples WHERE host_id=? ORDER BY id DESC LIMIT 1",
                 host["id"],
             )
+            # Reserved: the capacity charged on the machine's root domain,
+            # every allocation not yet released.
+            reserved = self.q(
+                """SELECT COALESCE(SUM(a.cpu_millis),0) AS cpu,COALESCE(SUM(a.memory_mib),0) AS memory
+                     FROM capacity_allocations a
+                     JOIN host_resource_domains d ON d.id=a.domain_id AND d.host_id=a.host_id
+                    WHERE a.host_id=? AND d.parent_domain_id IS NULL
+                      AND a.state IN ('reserved','committed','releasing','uncertain')""",
+                host["id"],
+            )[0]
             host_live.append(
                 {
                     "hostId": host["id"],
+                    "cpuReservedMillis": reserved["cpu"],
+                    "memoryReservedMib": reserved["memory"],
                     "online": recent is not None,
                     "lastSeenAt": last_seen,
                     "runningByCategory": running,
@@ -910,7 +1052,7 @@ class Oracle:
                     "diskTotalBytes": host["disk"],
                     "score": scored["score"],
                     "components": [
-                        {"key": c["key"], "weight": c["weight"], "score": c["score"]} for c in scored["components"]
+                        {"key": c["key"], "weight": c["weight"], "score": c["score"], "deduction": c["deduction"]} for c in scored["components"]
                     ],
                     "speed": [
                         {"cpuMillis": entry["cpuMillis"], "index": entry["index"], "topKeys": entry["topKeys"]}
@@ -927,7 +1069,7 @@ class Oracle:
             "now": self.now,
             "fleet": {
                 "score": fleet_score,
-                "components": [{"key": c["key"], "weight": c["weight"], "score": c["score"]} for c in fleet_components],
+                "components": [{"key": c["key"], "weight": c["weight"], "score": c["score"], "deduction": c["deduction"]} for c in fleet_components],
                 "trend": self.trend(),
                 "categories": self.categories(jobs),
             },

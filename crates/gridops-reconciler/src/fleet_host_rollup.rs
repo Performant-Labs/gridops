@@ -5,7 +5,7 @@
 //! samples in the hour still gets a row (0 minutes, NULL percentiles).
 //!
 //! [`run_pass`] runs every reconciler pass, log-and-continue (`reconcile()`),
-//! rolling up at most one catch-up hour, oldest first, once the hour is past
+//! rolling up as many catch-up hours as fit in its time budget, oldest first, once the hour is past
 //! its end plus `ROLLUP_GRACE_MILLIS`; on first start the catch-up covers the
 //! last 7 days. It does not read `fleet_health_recompute`: that list belongs
 //! to the job rollup, and a machine's rows do not depend on job categories
@@ -90,17 +90,35 @@ pub(crate) async fn rollup_hour(db: &SqlitePool, hour: i64, now: i64) -> Result<
     write_host_hours(db, hour, now, &hours).await
 }
 
-/// One reconciler pass of the per-machine rollup: at most one catch-up hour,
-/// oldest first. The catch-up walk remembers the last hour it rolled up in
-/// `settings` ([`LAST_ROLLED_KEY`]); on first start, and again after falling
-/// more than [`CATCH_UP_MILLIS`] behind, it covers the last 7 days. It rolls
-/// an hour only once `hour_end + ROLLUP_GRACE_MILLIS <= now`, so samples an
-/// agent reports late still count in their hour, and each hour is rolled
-/// once.
+/// How much of a pass the catch-up may spend rolling hours (#204), as the
+/// job rollup's: each hour is still its own short write transaction.
+const CATCH_UP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One reconciler pass of the per-machine rollup: the catch-up's hours,
+/// oldest first, for as long as [`CATCH_UP_BUDGET`] lasts (at least one).
+/// The catch-up walk remembers the last hour it rolled up in `settings`
+/// ([`LAST_ROLLED_KEY`]); on first start, and again after falling more than
+/// [`CATCH_UP_MILLIS`] behind, it covers the last 7 days. It rolls an hour
+/// only once `hour_end + ROLLUP_GRACE_MILLIS <= now`, so samples an agent
+/// reports late still count in their hour, and each hour is rolled once.
 ///
 /// # Errors
 /// A database read or write failed; `reconcile()` logs it and goes on.
 pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
+    run_pass_within(db, now, CATCH_UP_BUDGET).await
+}
+
+/// [`run_pass`] with the catch-up's time `budget`: one hour at least, then
+/// more while the pass is under it.
+///
+/// # Errors
+/// A database read or write failed.
+pub(crate) async fn run_pass_within(
+    db: &SqlitePool,
+    now: i64,
+    budget: std::time::Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
     // The hour starting here is the first not yet past its grace: every hour
     // before it has `hour_end + ROLLUP_GRACE_MILLIS <= now`.
     let open_hour = floor_hour(now - ROLLUP_GRACE_MILLIS);
@@ -111,11 +129,11 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
         .await?
         .and_then(|value| serde_json::from_str::<i64>(&value).ok());
     // The hour after the last one rolled up, never older than the 7-day reach.
-    let next = match rolled {
+    let mut next = match rolled {
         Some(rolled) if rolled + HOUR >= oldest => rolled + HOUR,
         _ => oldest,
     };
-    if next < open_hour {
+    while next < open_hour {
         rollup_hour(db, next, now).await?;
         sqlx::query(
             "INSERT INTO settings (key,value,updated_at) VALUES (?,?,?)
@@ -126,6 +144,10 @@ pub(crate) async fn run_pass(db: &SqlitePool, now: i64) -> Result<()> {
         .bind(now)
         .execute(db)
         .await?;
+        next += HOUR;
+        if started.elapsed() >= budget {
+            break;
+        }
     }
     Ok(())
 }
@@ -227,6 +249,66 @@ mod tests {
             "rolled at hour end + 15 min with every minute"
         );
 
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// #204: a pass catches up every past-grace hour its time budget allows,
+    /// oldest first, each in its own short write transaction; with no
+    /// budget left it still rolls one.
+    #[tokio::test]
+    async fn one_pass_catches_up_every_hour_its_budget_allows() -> Result<()> {
+        use gridops_core::{
+            connect_database_path,
+            fleet_health::testdata::{self, SampleSeed},
+        };
+        const NOW: i64 = 1_800_000_000_000;
+        let directory = std::env::temp_dir().join(format!(
+            "gridops-host-rollup-budget-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let db = connect_database_path(&directory.join("gridops.sqlite")).await?;
+        let fleet = testdata::seed_fleet(&db).await?;
+        let io = fleet.host("io")?;
+        let (old, recent) = (NOW - 3 * 24 * HOUR, NOW - 2 * HOUR);
+        testdata::insert_samples(
+            &db,
+            io,
+            &[
+                SampleSeed::at(old + MINUTE),
+                SampleSeed::at(recent + MINUTE),
+            ],
+        )
+        .await?;
+        let online = |hour: i64| {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(online_minutes),0) FROM fleet_host_hourly WHERE hour=? AND host_id=?",
+            )
+            .bind(hour)
+            .bind(&io.id)
+            .fetch_one(&db)
+        };
+        let last = || {
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key=?")
+                .bind(LAST_ROLLED_KEY)
+                .fetch_optional(&db)
+        };
+
+        run_pass_within(&db, NOW, std::time::Duration::ZERO).await?;
+        assert_eq!(
+            last().await?,
+            Some((ceil_hour(NOW) - CATCH_UP_MILLIS).to_string()),
+            "no budget: one hour"
+        );
+        run_pass(&db, NOW).await?;
+        assert_eq!(online(old).await?, 1);
+        assert_eq!(online(recent).await?, 1);
+        assert_eq!(
+            last().await?,
+            Some((NOW - 2 * HOUR).to_string()),
+            "caught up to the hour before the one in its grace"
+        );
         db.close().await;
         std::fs::remove_dir_all(directory)?;
         Ok(())

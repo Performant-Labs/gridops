@@ -62,6 +62,8 @@ impl RegistryClock for TestClock {
 
 pub(super) struct Harness {
     pub(super) router: Router,
+    /// The health state the router serves (its caches shared).
+    pub(super) fleet_health: crate::fleet::FleetHealthState,
     pub(super) database: SqlitePool,
     pub(super) source: FakeFleetHealthSource,
     pub(super) clock: Arc<TestClock>,
@@ -111,12 +113,14 @@ impl Harness {
         if fake_source {
             state = state.with_fleet_health_source(Arc::new(source.clone()));
         }
+        let fleet_health = state.fleet_health.clone();
         let router = super::router()
             .merge(crate::session_routes())
             .merge(crate::token_routes())
             .with_state(state);
         let mut harness = Self {
             router,
+            fleet_health,
             database,
             source,
             clock,
@@ -128,6 +132,17 @@ impl Harness {
         harness.admin = harness.sign_in("admin-1", 1, "admin").await?;
         harness.member = harness.sign_in("member-1", 2, "member").await?;
         Ok(harness)
+    }
+
+    /// One round of the database source's speed refresher at `now`, as the
+    /// API's refresher would have run it by then (#204).
+    pub(super) async fn refresh_speed(&self, now: i64) -> Result<()> {
+        self.fleet_health
+            .database_source()
+            .context("the harness serves the fake source")?
+            .refresh_all(now)
+            .await;
+        Ok(())
     }
 
     /// The database file, for a reader outside the pool (#204's oracle).

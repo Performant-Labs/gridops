@@ -92,6 +92,7 @@
         "crates/gridops-reconciler/src/fleet_health_rollup.rs",
         "crates/gridops-reconciler/src/fleet_host_rollup.rs",
         "crates/gridops-reconciler/src/lib.rs",
+        "crates/gridops-reconciler/src/fleet_health_passes.rs",
         "crates/gridops-api/src/fleet/health_e2e_tests.rs",
         "crates/gridops-api/src/fleet/health_db_copy_timings.rs",
         "scripts/fleet-health-oracle.py",
@@ -102,6 +103,9 @@
       "addOnly": [
         "crates/gridops-core/src/fleet_health/mod.rs",
         "crates/gridops-core/src/fleet_health/fake.rs",
+        "crates/gridops-core/src/fleet_health/score.rs",
+        "crates/gridops-reconciler/src/main.rs",
+        "crates/gridops-reconciler/src/fleet_health_rollup_contract_tests.rs",
         "crates/gridops-api/src/fleet/mod.rs",
         "crates/gridops-api/src/fleet/health_test_support.rs",
         "crates/gridops-api/src/main.rs",

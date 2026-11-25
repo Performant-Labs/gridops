@@ -59,7 +59,13 @@ windowed concerns; the slow, cached part) and `live(now)` (a bounded read of now
 joins them: each machine gets its live stats by id, and the concerns are merged by
 `merge_concerns`. Production serves the database source (`DbFleetHealthSource`, #204), which
 `FleetHealthState::new(db)` selects: its windowed half is `fleet_health::window::windowed_health`
-with the speed indexes cached 5 minutes per window, and its live half is `collect_live`. No field
+with the speed indexes from its cache, and its live half is `collect_live`. The speed index reads
+raw jobs (the 7 d one about 0.4 s on production's data, against the page's 300 ms), so it is kept
+off the request path: a refresher the API starts reads every window's indexes every 4 minutes,
+one window at a time, and a request is served the window's last indexes whatever their age
+(refreshing them behind the call when they are over 5 minutes old). A request reads them itself
+only when its window has never been read, the first page before the refresher's first round. A
+refresh that fails or panics skips only its window until the next round. No field
 of a production response comes from `fleet_health::fake`: the fake (`FakeFleetHealthSource`, the
 fixture) is behind `test-support` and compiled only into tests, which inject it with
 `AppState::with_fleet_health_source`.
@@ -125,9 +131,11 @@ nullable, and the writer fills them:
 The reconciler rolls each finished hour up once, so the page never reads raw jobs or samples
 over a window (#179's lock rules). Both rollups run every pass, log-and-continue, before the
 runner manager is asked (so an unavailable manager never stops them). Each pass of the job
-rollup rolls up every hour listed in `fleet_health_recompute` plus at most one catch-up hour,
-oldest first; the machine rollup rolls only its catch-up hour. On first start the catch-up
-covers the last 7 days. An hour is written with one `INSERT … ON CONFLICT DO UPDATE` per row in
+rollup catches up its finished hours oldest first, as many as fit in 1 s of the pass (one at
+least), then rolls up every hour listed in `fleet_health_recompute` (those the catch-up just
+listed included, so a re-run across two hours settles in one pass); the machine rollup catches
+up the same way (#204). On first start the catch-up covers the last 7 days, which takes a few
+passes, not 168. An hour is written with one `INSERT … ON CONFLICT DO UPDATE` per row in
 one short transaction (the job rollup also takes the hour off `fleet_health_recompute` in it), so
 a re-run gives identical rows. Reads happen outside the write transaction, bounded by the
 `completed_at` indexes (`workflow_jobs_completed_idx`, `gitlab_jobs_completed_idx`) or
@@ -280,7 +288,7 @@ and the hour that just ended until `hour_end + 15 min` (`hour::live_hours`), eac
 the shared constant, not by the rollups' markers. A live hour has the same row shape as a rolled
 one, and counts online minutes the same way. A past-grace hour the rollups haven't written yet is
 covered time with nothing in it (its machines read offline, with no jobs): the pass lag, at most
-one reconcile interval (30 s by default), or the catch-up after downtime, one hour per pass.
+one reconcile interval (30 s by default), or the catch-up after downtime, a few passes.
 
 **Fleet:**
 
@@ -316,8 +324,10 @@ band has one status tone (`bandTone`: good `success`, fair `warning`, poor `dang
 `neutral`), shared by the gauge, the cards, the machine table and the Overview tile.
 
 **Deduction sentences:** one sentence with the measured value, the target and the points lost,
-for example `Queue p90 was 7 min 12 s against a 1 min target: −28.` A component with no deduction
-has `deduction: null`.
+for example `Queue p90 was 7 min 12 s against a 1 min target: −28.` The points lost are
+`round(weight × (100 − score) / 100)` from the unrounded score and the weight **after**
+reweighting, so a score's deductions add up to what it lost, give or take rounding (#257). A
+component with no deduction has `deduction: null`.
 
 ## Areas of concern
 
@@ -592,9 +602,13 @@ workflow name and the labels, and snapshots), runs the reconciler's own passes
 up, and reads the endpoint for every window through the production source, at two moments (the
 ended hour in its grace, then rolled). `scripts/fleet-health-oracle.py` (Python standard library
 only, no GridOps code) computes the same page from the raw tables by this document; the test
-requires the two to agree: scores and components to the integer, weights, CPU-hours and usage to
-1e-6, speed indexes to 0.01 with their keys exactly, the trend, the live counts, and the concerns
-by key, severity, `since` and order. The oracle also classifies every job by the stored rules and
+requires the two to agree: scores and components to the integer, each component's deduction
+sentence exactly, weights, CPU-hours and usage to 1e-6, speed indexes to 0.01 with their keys
+exactly, the trend (and the scores the snapshot pass recorded, the fleet's and every machine's),
+the live counts and each machine's reserved CPU and memory (its unreleased capacity allocations
+on the root domain, seeded as admission writes them), and the concerns by key, severity, `since`
+and order. The pass runs in the binary's order because both run `fleet_health_passes`, the one
+copy of it. The oracle also classifies every job by the stored rules and
 reports each job whose stored category differs: before the backfill can classify it the pathless
 GitLab job is stored NULL and counts as `other` on the page and in the oracle alike, and after it
 both count it as `test`. With `GRIDOPS_FLEET_HEALTH_E2E_KEEP=<dir>` the test keeps the seeded
@@ -645,5 +659,6 @@ every `mod` line is in a #197 file; frontend issues add theirs as
   into one hour per (pool, category) (the scores only read sums).
 - **Rollup semantics** the contract tests pin: `job_count` is every final-attempt job completed in
   the hour and `completed_count` those that succeeded; unmanaged is `'unmanaged'` with 0
-  CPU-seconds; a pass rolls up every listed hour plus at most one catch-up hour.
+  CPU-seconds; a pass rolls up every listed hour and at least one catch-up hour (as many as fit in
+  its time budget since #204).
 - **The rules version** (#190) is a `settings` key, not a schema change.

@@ -223,7 +223,7 @@ pub(crate) struct FleetHealthState {
     source: Arc<dyn FleetHealthSource>,
     clock: Arc<dyn RegistryClock>,
     cache: Arc<HealthCache>,
-    /// The database source, while it is the one served, for [`Self::warm`].
+    /// The database source, while it is the one served, for its refresher.
     database: Option<DbFleetHealthSource>,
 }
 
@@ -240,13 +240,24 @@ impl FleetHealthState {
         }
     }
 
-    /// Reads the database source's speed indexes for every window in the
-    /// background (`DbFleetHealthSource::warm`), so the first page after the
-    /// API starts doesn't wait on them. `main` calls it once.
-    pub(crate) fn warm(&self) {
-        if let Some(database) = &self.database {
-            database.warm(self.clock.now_millis());
-        }
+    /// Starts the database source's speed refresher
+    /// (`DbFleetHealthSource::start_refresher`, every
+    /// `SPEED_REFRESH_EVERY` on this state's clock), so no page waits on the
+    /// speed indexes once its first round has run. `main` calls it once; a
+    /// state serving another source has none to start.
+    pub(crate) fn start_speed_refresher(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.database.as_ref().map(|database| {
+            database.start_refresher(
+                Arc::clone(&self.clock),
+                super::health_source::SPEED_REFRESH_EVERY,
+            )
+        })
+    }
+
+    /// The database source, for a test that drives its speed cache.
+    #[cfg(test)]
+    pub(crate) fn database_source(&self) -> Option<&DbFleetHealthSource> {
+        self.database.as_ref()
     }
 
     /// Replaces the source; tests inject `FakeFleetHealthSource`.
@@ -432,25 +443,34 @@ mod tests {
         Ok(())
     }
 
-    /// #204: warming the production state reads every window's speed
-    /// indexes in the background; a state serving another source has none
-    /// to warm.
+    /// #204: the production state's refresher reads every window's speed
+    /// indexes; a state serving another source has no refresher.
     #[tokio::test]
-    async fn warming_the_production_state_fills_its_speed_caches() -> Result<()> {
+    async fn the_production_state_starts_its_speed_refresher() -> Result<()> {
         let harness = Harness::new().await?;
         let state = super::FleetHealthState::new(harness.database.clone());
-        state.warm();
-        let database = state
-            .database
-            .as_ref()
+        let refresher = state
+            .start_speed_refresher()
             .ok_or_else(|| anyhow::anyhow!("production serves the database source"))?;
+        let database = state
+            .database_source()
+            .ok_or_else(|| anyhow::anyhow!("production serves the database source"))?;
+        for _ in 0..1_000 {
+            if gridops_core::fleet_health::HealthWindow::ALL
+                .iter()
+                .all(|window| database.cached_speed_at(*window).is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         for window in gridops_core::fleet_health::HealthWindow::ALL {
-            database.speed_refreshed(window).await;
             assert!(database.cached_speed_at(window).is_some(), "{window}");
         }
+        refresher.abort();
         let replaced = super::FleetHealthState::new(harness.database.clone())
             .with_source(Arc::new(harness.source.clone()));
-        assert!(replaced.database.is_none());
+        assert!(replaced.start_speed_refresher().is_none());
         Ok(())
     }
 
