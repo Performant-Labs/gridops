@@ -7,12 +7,21 @@
 //!
 //! #240's rules hold here too: the live read takes no lock of the source's
 //! (it reads the database and returns, and nothing of it is kept), and the
-//! answers don't depend on how many windows are asked at once. A window's
-//! speed cache is locked only by a computation of that window, while it
-//! reads or refreshes the indexes, so concurrent misses of one window share
-//! one read and other windows never wait on it.
+//! answers don't depend on how many windows are asked at once.
+//!
+//! The speed index reads raw jobs (the 7 d one about 0.4 s on production's
+//! data, against the page's 300 ms), so a window's indexes are served from
+//! its cache: under [`SPEED_TTL_MILLIS`] old as they are, and up to
+//! [`SPEED_STALE_MILLIS`] old while one background read refreshes them for
+//! the next call. Only a window with none, or one older than that, waits for
+//! the read; [`DbFleetHealthSource::warm`] fills every window when the API
+//! starts. One read per window runs at a time; it holds only that window's
+//! read lock, which no other window and no live read takes.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex as SyncMutex, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use gridops_core::fleet_health::{
@@ -24,22 +33,60 @@ use tokio::sync::Mutex;
 use super::health_live::collect_live;
 
 /// How long a window's speed indexes are served without reading them again
-/// (the epic's "cached for 5 minutes": the speed index reads raw jobs).
+/// (the epic's "cached for 5 minutes").
 const SPEED_TTL_MILLIS: i64 = 5 * 60 * 1_000;
 
-/// A window's speed indexes and when they were read.
-type CachedSpeed = Option<(i64, Arc<Vec<SpeedResult>>)>;
+/// How long past that they are still served while a background read
+/// refreshes them; older ones are read before answering.
+const SPEED_STALE_MILLIS: i64 = 10 * 60 * 1_000;
 
-/// The speed cache of each window, each behind its own lock.
+/// A window's speed indexes and the time they were read as of.
+type CachedSpeed = (i64, Arc<Vec<SpeedResult>>);
+
+/// One window's speed cache.
+#[derive(Debug, Default)]
+struct SpeedCache {
+    /// Only locked to read or write it, never across an await.
+    entry: SyncMutex<Option<CachedSpeed>>,
+    /// Held by whoever reads the window's indexes, so one read runs at a
+    /// time and a caller that waited on it finds the result.
+    reading: Mutex<()>,
+    /// A background refresh is under way.
+    refreshing: AtomicBool,
+}
+
+impl SpeedCache {
+    /// The cached indexes at `now` and their age, while they may be served
+    /// (not over [`SPEED_STALE_MILLIS`] old, nor from after `now`).
+    fn servable(&self, now: i64) -> Option<(i64, Arc<Vec<SpeedResult>>)> {
+        let entry = self.entry.lock().unwrap_or_else(PoisonError::into_inner);
+        entry.as_ref().and_then(|(at, results)| {
+            let age = now - at;
+            (0..SPEED_STALE_MILLIS)
+                .contains(&age)
+                .then(|| (age, Arc::clone(results)))
+        })
+    }
+
+    /// Keeps `results`, read as of `at`, unless the cache holds a later read.
+    fn store(&self, at: i64, results: Arc<Vec<SpeedResult>>) {
+        let mut entry = self.entry.lock().unwrap_or_else(PoisonError::into_inner);
+        if entry.as_ref().is_none_or(|(kept, _)| *kept <= at) {
+            *entry = Some((at, results));
+        }
+    }
+}
+
+/// The speed cache of each window.
 #[derive(Debug, Default)]
 struct SpeedCaches {
-    hour: Mutex<CachedSpeed>,
-    day: Mutex<CachedSpeed>,
-    week: Mutex<CachedSpeed>,
+    hour: SpeedCache,
+    day: SpeedCache,
+    week: SpeedCache,
 }
 
 impl SpeedCaches {
-    const fn window(&self, window: HealthWindow) -> &Mutex<CachedSpeed> {
+    const fn window(&self, window: HealthWindow) -> &SpeedCache {
         match window {
             HealthWindow::Hour => &self.hour,
             HealthWindow::Day => &self.day,
@@ -63,29 +110,96 @@ impl DbFleetHealthSource {
         }
     }
 
-    /// `window`'s speed indexes at `now`: the cached ones while under 5
-    /// minutes old, else read again. A cache from a later time than `now`
-    /// (a clock moved back) is read again too.
-    async fn speed(&self, window: HealthWindow, now: i64) -> anyhow::Result<Arc<Vec<SpeedResult>>> {
-        let mut cache = self.speed.window(window).lock().await;
-        if let Some((at, results)) = cache.as_ref() {
-            if (0..SPEED_TTL_MILLIS).contains(&(now - at)) {
-                return Ok(Arc::clone(results));
+    /// Reads every window's speed indexes as of `now` in the background,
+    /// so the first page after the API starts doesn't wait on them. Needs a
+    /// Tokio runtime; without one it does nothing.
+    pub(crate) fn warm(&self, now: i64) {
+        for window in HealthWindow::ALL {
+            if self.speed.window(window).servable(now).is_none() {
+                self.refresh_behind(window, now);
             }
         }
+    }
+
+    /// `window`'s speed indexes at `now`: the cached ones while they may be
+    /// served (starting a background refresh once they are over
+    /// [`SPEED_TTL_MILLIS`] old), else read before answering.
+    async fn speed(&self, window: HealthWindow, now: i64) -> anyhow::Result<Arc<Vec<SpeedResult>>> {
+        let cache = self.speed.window(window);
+        if let Some((age, results)) = cache.servable(now) {
+            if age >= SPEED_TTL_MILLIS {
+                self.refresh_behind(window, now);
+            }
+            return Ok(results);
+        }
+        let _reading = cache.reading.lock().await;
+        if let Some((_, results)) = cache.servable(now) {
+            return Ok(results);
+        }
         let results = Arc::new(speed::speed_indexes(&self.db, window, now).await?);
-        *cache = Some((now, Arc::clone(&results)));
+        cache.store(now, Arc::clone(&results));
         Ok(results)
     }
 
-    /// Holds every window's speed cache until the guards drop: a test's way
-    /// to show what does not wait on them.
+    /// Starts one background read of `window`'s indexes as of `now`, unless
+    /// one is under way. A failure is logged; the next call tries again.
+    fn refresh_behind(&self, window: HealthWindow, now: i64) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self
+            .speed
+            .window(window)
+            .refreshing
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let (db, caches) = (self.db.clone(), Arc::clone(&self.speed));
+        runtime.spawn(async move {
+            let cache = caches.window(window);
+            {
+                let _reading = cache.reading.lock().await;
+                match speed::speed_indexes(&db, window, now).await {
+                    Ok(results) => cache.store(now, Arc::new(results)),
+                    Err(error) => {
+                        tracing::warn!(error = ?error, %window, "fleet health speed index refresh failed");
+                    }
+                }
+            }
+            cache.refreshing.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Waits for `window`'s background refresh, if one is under way.
     #[cfg(test)]
-    async fn hold_speed_caches(&self) -> [tokio::sync::MutexGuard<'_, CachedSpeed>; 3] {
+    pub(super) async fn speed_refreshed(&self, window: HealthWindow) {
+        let cache = self.speed.window(window);
+        while cache.refreshing.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// When `window`'s cached indexes were read as of, if any.
+    #[cfg(test)]
+    pub(super) fn cached_speed_at(&self, window: HealthWindow) -> Option<i64> {
+        self.speed
+            .window(window)
+            .entry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(at, _)| *at)
+    }
+
+    /// Holds every window's speed read lock until the guards drop: a test's
+    /// way to show what does not wait on them.
+    #[cfg(test)]
+    async fn hold_speed_caches(&self) -> [tokio::sync::MutexGuard<'_, ()>; 3] {
         [
-            self.speed.hour.lock().await,
-            self.speed.day.lock().await,
-            self.speed.week.lock().await,
+            self.speed.hour.reading.lock().await,
+            self.speed.day.reading.lock().await,
+            self.speed.week.reading.lock().await,
         ]
     }
 }
@@ -226,11 +340,14 @@ mod tests {
         harness.finish().await
     }
 
-    /// The speed indexes are cached 5 minutes per window: jobs that would
-    /// move an index don't until the cache expires, and a window's cache
-    /// is its own.
+    /// The speed indexes are cached per window: under 5 minutes old they are
+    /// served as they are; from 5 to 10 minutes old they are still served,
+    /// and read again in the background for the next call, so a page refresh
+    /// never waits on the 7 d index (about 0.4 s on production's data); with
+    /// none, or one over 10 minutes old, the call reads them itself. A
+    /// window's cache is its own.
     #[tokio::test]
-    async fn the_speed_indexes_are_cached_for_5_minutes_per_window() -> Result<()> {
+    async fn the_speed_indexes_are_served_from_cache_and_refreshed_behind() -> Result<()> {
         let harness = Harness::new().await?;
         let source = DbFleetHealthSource::new(harness.db.clone());
         let before = callisto_index(&source.windowed(HealthWindow::Day, NOW).await?);
@@ -244,14 +361,43 @@ mod tests {
                 .await?,
         );
         assert_ne!(other, before, "the 7 d window computes its own");
-        let fresh = callisto_index(&source.windowed(HealthWindow::Day, NOW + 5 * MINUTE).await?);
-        assert_ne!(fresh, before, "read again after 5 minutes");
-        // A clock that moves back is not a fresh cache.
-        let back = callisto_index(&source.windowed(HealthWindow::Day, NOW).await?);
+
+        // 6 minutes on: still the cached indexes, while they are read again
+        // behind the call.
+        let stale = callisto_index(&source.windowed(HealthWindow::Day, NOW + 6 * MINUTE).await?);
+        assert_eq!(stale, before, "served while it is refreshed");
+        source.speed_refreshed(HealthWindow::Day).await;
+        let refreshed =
+            callisto_index(&source.windowed(HealthWindow::Day, NOW + 6 * MINUTE).await?);
+        assert_ne!(refreshed, before, "the refresh read the new jobs");
+
+        // Over 10 minutes old, or from a later time than the call (a clock
+        // that moved back), the call reads them itself.
+        let fresh = DbFleetHealthSource::new(harness.db.clone());
+        let first = callisto_index(&fresh.windowed(HealthWindow::Day, NOW).await?);
+        assert_eq!(first, refreshed);
+        harness.jobs(2_000, NOW - HOUR, 3).await?;
+        let late = callisto_index(&fresh.windowed(HealthWindow::Day, NOW + 11 * MINUTE).await?);
+        assert_ne!(late, first, "read inline past 10 minutes");
+        let back = callisto_index(&fresh.windowed(HealthWindow::Day, NOW + 5 * MINUTE).await?);
         assert_eq!(
-            back, fresh,
+            back, late,
             "recomputed at the earlier time from the same jobs"
         );
+        harness.finish().await
+    }
+
+    /// Warming reads every window's speed indexes in the background, so the
+    /// first page after the API starts doesn't wait on them.
+    #[tokio::test]
+    async fn warming_fills_every_windows_speed_cache() -> Result<()> {
+        let harness = Harness::new().await?;
+        let source = DbFleetHealthSource::new(harness.db.clone());
+        source.warm(NOW);
+        for window in HealthWindow::ALL {
+            source.speed_refreshed(window).await;
+            assert!(source.cached_speed_at(window).is_some(), "{window}");
+        }
         harness.finish().await
     }
 

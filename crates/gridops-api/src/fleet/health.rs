@@ -223,16 +223,29 @@ pub(crate) struct FleetHealthState {
     source: Arc<dyn FleetHealthSource>,
     clock: Arc<dyn RegistryClock>,
     cache: Arc<HealthCache>,
+    /// The database source, while it is the one served, for [`Self::warm`].
+    database: Option<DbFleetHealthSource>,
 }
 
 impl FleetHealthState {
     /// The production state: the database source over `db` (#204), the
     /// system clock, and an empty cache.
     pub(crate) fn new(db: SqlitePool) -> Self {
+        let database = DbFleetHealthSource::new(db);
         Self {
-            source: Arc::new(DbFleetHealthSource::new(db)),
+            source: Arc::new(database.clone()),
             clock: system_clock(),
             cache: Arc::new(HealthCache::default()),
+            database: Some(database),
+        }
+    }
+
+    /// Reads the database source's speed indexes for every window in the
+    /// background (`DbFleetHealthSource::warm`), so the first page after the
+    /// API starts doesn't wait on them. `main` calls it once.
+    pub(crate) fn warm(&self) {
+        if let Some(database) = &self.database {
+            database.warm(self.clock.now_millis());
         }
     }
 
@@ -240,6 +253,7 @@ impl FleetHealthState {
     #[must_use]
     pub(crate) fn with_source(mut self, source: Arc<dyn FleetHealthSource>) -> Self {
         self.source = source;
+        self.database = None;
         self
     }
 
@@ -415,6 +429,28 @@ mod tests {
         );
         assert_eq!(body["fleet"]["trend"], json!([]), "no snapshot yet");
         assert_eq!(harness.source.windowed_calls(), 0, "the fake is not called");
+        Ok(())
+    }
+
+    /// #204: warming the production state reads every window's speed
+    /// indexes in the background; a state serving another source has none
+    /// to warm.
+    #[tokio::test]
+    async fn warming_the_production_state_fills_its_speed_caches() -> Result<()> {
+        let harness = Harness::new().await?;
+        let state = super::FleetHealthState::new(harness.database.clone());
+        state.warm();
+        let database = state
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("production serves the database source"))?;
+        for window in gridops_core::fleet_health::HealthWindow::ALL {
+            database.speed_refreshed(window).await;
+            assert!(database.cached_speed_at(window).is_some(), "{window}");
+        }
+        let replaced = super::FleetHealthState::new(harness.database.clone())
+            .with_source(Arc::new(harness.source.clone()));
+        assert!(replaced.database.is_none());
         Ok(())
     }
 

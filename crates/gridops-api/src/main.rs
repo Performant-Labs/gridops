@@ -93,6 +93,8 @@ async fn main() -> Result<()> {
     let state = AppState::new(config.clone(), database, vault, github, bitbucket)?
         .with_gitlab(std::sync::Arc::new(GitLabClient::new()?));
     state.validate_api().await?;
+    // #204: the fleet health page's speed indexes, read before the first page.
+    state.fleet_health.warm();
     tokio::spawn({
         let state = state.clone();
         async move { state.follow_github_app_rename().await }

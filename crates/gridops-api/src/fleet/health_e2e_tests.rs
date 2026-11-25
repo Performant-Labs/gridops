@@ -53,9 +53,8 @@ const NOW_A: i64 = T + 10 * MINUTE;
 /// The hour before `T` is rolled up; the pathless GitLab job is classified.
 const NOW_B: i64 = T + 31 * MINUTE;
 
-/// The re-run's hours: attempt 1 completes in `RERUN_HOUR`, attempt 2 in the
-/// next one.
-const RERUN_HOUR: i64 = T - 5 * HOUR;
+/// The re-run: attempt 1 completes five hours before `T`, attempt 2 in the
+/// next hour.
 const RERUN_RUN: i64 = 900_000;
 /// The job that completes 20 s before `T`, in the hour in its grace at
 /// `NOW_A`.
@@ -151,8 +150,11 @@ async fn insert_samples(db: &SqlitePool, scenario: &Scenario, from: i64, until: 
     Ok(())
 }
 
-/// Seeds the scenario up to `NOW_A`.
-async fn seed(db: &SqlitePool) -> Result<Scenario> {
+/// Seeds the scenario around the whole hour `t` (`t` in the test), with
+/// samples up to `samples_until` (`NOW_A - 30 s` in the test).
+async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
+    let now_a = t + 10 * MINUTE;
+    let rerun_hour = t - 5 * HOUR;
     let fleet = testdata::seed_fleet(db).await?;
     let scenario = Scenario { fleet };
     let io = scenario.id("io")?;
@@ -187,7 +189,7 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
             7 | 19 => 50_000,
             _ => 20_000 + (index % 4) * 5_000,
         };
-        let completed = T - 48 * HOUR + index * 10 * MINUTE + 5 * MINUTE;
+        let completed = t - 48 * HOUR + index * 10 * MINUTE + 5 * MINUTE;
         let started = completed - duration;
         let mut job = JobSeed::completed(
             index + 1,
@@ -236,45 +238,45 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
         RERUN_RUN + 1,
         "lint",
         1,
-        RERUN_HOUR + 50 * MINUTE,
+        rerun_hour + 50 * MINUTE,
         false,
     ));
     jobs.push(rerun(
         RERUN_RUN + 2,
         "build image",
         1,
-        RERUN_HOUR + 40 * MINUTE,
+        rerun_hour + 40 * MINUTE,
         true,
     ));
     jobs.push(rerun(
         RERUN_RUN + 3,
         "lint",
         2,
-        RERUN_HOUR + 70 * MINUTE,
+        rerun_hour + 70 * MINUTE,
         true,
     ));
 
-    // The job finishing 20 s before `T`, and one in the hour in progress.
+    // The job finishing 20 s before `t`, and one in the hour in progress.
     jobs.push(JobSeed::completed(
         GRACE_JOB,
         "unit tests",
         Some(jupiter.as_str()),
-        T - 4 * MINUTE,
-        T - 3 * MINUTE,
-        T - 20_000,
+        t - 4 * MINUTE,
+        t - 3 * MINUTE,
+        t - 20_000,
     ));
     jobs.push(JobSeed::completed(
         CURRENT_JOB,
         "lint",
         Some(io.as_str()),
-        T,
-        T + MINUTE,
-        T + 5 * MINUTE,
+        t,
+        t + MINUTE,
+        t + 5 * MINUTE,
     ));
 
     // GitLab jobs on io, on the project-scoped connection (path known).
     for index in 0..6_i64 {
-        let completed = T - 20 * HOUR + index * 2 * HOUR;
+        let completed = t - 20 * HOUR + index * 2 * HOUR;
         let mut job = JobSeed::completed(
             700 + index,
             "rspec",
@@ -293,27 +295,27 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
         RUNNING_JOB,
         "unit tests",
         Some(jupiter.as_str()),
-        NOW_A - 6 * MINUTE,
-        NOW_A - 5 * MINUTE,
+        now_a - 6 * MINUTE,
+        now_a - 5 * MINUTE,
     ));
     let mut busy = JobSeed::running(
         BUSY_GITLAB_JOB,
         "rspec",
         Some(io.as_str()),
-        NOW_A - 6 * MINUTE,
-        NOW_A - 5 * MINUTE,
+        now_a - 6 * MINUTE,
+        now_a - 5 * MINUTE,
     );
     busy.gitlab = true;
     jobs.push(busy);
 
-    // Waiting: one the pool runs, queued 7 minutes before `NOW_A`, and one
+    // Waiting: one the pool runs, queued 7 minutes before `now_a`, and one
     // asking for a label no pool offers.
     jobs.push(JobSeed::queued(
         QUEUED_JOB,
         "unit tests",
-        NOW_A - 7 * MINUTE,
+        now_a - 7 * MINUTE,
     ));
-    let mut gpu = JobSeed::queued(UNMATCHED_JOB, "train model", NOW_A - 2 * MINUTE);
+    let mut gpu = JobSeed::queued(UNMATCHED_JOB, "train model", now_a - 2 * MINUTE);
     gpu.labels = vec!["self-hosted".to_owned(), "gpu".to_owned()];
     jobs.push(gpu);
 
@@ -341,11 +343,11 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
          VALUES (?,'e2e-unscoped',999,77001,1,'success','[\"docker\"]',?,NULL,NULL,?,?,NULL,'rspec unit',NULL,?,?)",
     )
     .bind(PATHLESS)
-    .bind(T + 5 * MINUTE)
-    .bind(NOW_A - 40 * MINUTE)
-    .bind(T + 5 * MINUTE)
-    .bind(T)
-    .bind(T + 5 * MINUTE)
+    .bind(t + 5 * MINUTE)
+    .bind(now_a - 40 * MINUTE)
+    .bind(t + 5 * MINUTE)
+    .bind(t)
+    .bind(t + 5 * MINUTE)
     .execute(db)
     .await?;
 
@@ -353,7 +355,7 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
     // on io, all succeeding. Every one over an hour old, so no start gate.
     let jupiter_host = scenario.host("Jupiter")?;
     for index in 0..24_i64 {
-        let at = T - 22 * HOUR + index * 30 * MINUTE;
+        let at = t - 22 * HOUR + index * 30 * MINUTE;
         let failed = index % 4 == 0;
         testdata::insert_start_attempt(
             db,
@@ -384,7 +386,7 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
             db,
             &scenario.fleet,
             io_host,
-            T - 20 * HOUR + index * 20 * MINUTE,
+            t - 20 * HOUR + index * 20 * MINUTE,
             PlacementEnd::Stopped,
         )
         .await?;
@@ -395,10 +397,10 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
     testdata::insert_samples(
         db,
         scenario.host("europa")?,
-        &[SampleSeed::at(T - 72 * HOUR)],
+        &[SampleSeed::at(t - 72 * HOUR)],
     )
     .await?;
-    insert_samples(db, &scenario, T - 48 * HOUR, NOW_A - 30_000).await?;
+    insert_samples(db, &scenario, t - 48 * HOUR, samples_until).await?;
 
     // Earlier snapshots for the trend; one is older than the 24 h window.
     sqlx::query(
@@ -406,12 +408,12 @@ async fn seed(db: &SqlitePool) -> Result<Scenario> {
              (?,'24h',71,'{}'),(?,'24h',74,'{}'),(?,'24h',NULL,'{}'),(?,'24h',60,'{}'),
              (?,'7d',70,'{}'),(?,'1h',66,'{}')"#,
     )
-    .bind(T - 20 * HOUR)
-    .bind(T - 12 * HOUR)
-    .bind(T - 4 * HOUR)
-    .bind(T - 30 * HOUR)
-    .bind(T - 3 * 24 * HOUR)
-    .bind(T - 20 * MINUTE)
+    .bind(t - 20 * HOUR)
+    .bind(t - 12 * HOUR)
+    .bind(t - 4 * HOUR)
+    .bind(t - 30 * HOUR)
+    .bind(t - 3 * 24 * HOUR)
+    .bind(t - 20 * MINUTE)
     .execute(db)
     .await?;
     Ok(scenario)
@@ -835,7 +837,7 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
     let _classifier = CLASSIFIER_TEST_LOCK.lock().await;
     let harness = Harness::with_database_source().await?;
     let db = harness.database.clone();
-    let scenario = seed(&db).await?;
+    let scenario = seed(&db, T, NOW_A - 30_000).await?;
     let path = harness.path().to_owned();
     let io = scenario.id("io")?;
     let jupiter = scenario.id("Jupiter")?;
@@ -974,5 +976,30 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
             json!(NOW_B)
         ])
     );
+    Ok(())
+}
+
+/// Seeds the scenario around the current hour into
+/// `GRIDOPS_FLEET_HEALTH_WALKTHROUGH_DB` (a new file) and runs the passes,
+/// for the UI walkthrough (#204 item 5): the same fleet, with samples three
+/// hours into the future so the machines stay online while it runs.
+#[tokio::test]
+#[ignore = "by hand, for the UI walkthrough (GRIDOPS_FLEET_HEALTH_WALKTHROUGH_DB)"]
+async fn seed_for_walkthrough() -> Result<()> {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("GRIDOPS_FLEET_HEALTH_WALKTHROUGH_DB")
+            .context("GRIDOPS_FLEET_HEALTH_WALKTHROUGH_DB names the database to create")?,
+    );
+    ensure!(!path.exists(), "{} exists already", path.display());
+    let _classifier = CLASSIFIER_TEST_LOCK.lock().await;
+    let db = gridops_core::connect_database_path(&path).await?;
+    let now = gridops_core::now_millis();
+    let t = gridops_core::fleet_health::hour::floor_hour(now - 10 * MINUTE);
+    let now_a = t + 10 * MINUTE;
+    seed(&db, t, now + 3 * HOUR).await?;
+    run_passes(&db, now_a, 200).await?;
+    run_passes(&db, now, 3).await?;
+    db.close().await;
+    println!("seeded {} around {t}", path.display());
     Ok(())
 }

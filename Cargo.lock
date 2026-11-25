@@ -1080,6 +1080,7 @@ dependencies = [
  "gridops-reconciler",
  "hex",
  "hmac 0.12.1",
+ "log",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rsa",
