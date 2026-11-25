@@ -9,7 +9,9 @@ import { JOB_CATEGORIES, type FleetHealthViewProps, type FleetLiveStats, type Jo
  * The live strip (#203): what is queued and running right now, by category
  * (`data-queued-category` / `data-running-category`), the totals (`data-testid="live-queued-total"`
  * and `"live-running-total"`) and the oldest queued job's wait. One horizontal stacked bar per
- * side, the same colours as the category legend and the window charts.
+ * side, the same colours as the category legend and the window charts. Under the queued side, the
+ * queue by pool (`data-queued-pool`, each linked to its pool page) and the jobs no pool will run
+ * (`data-testid="live-queued-unmatched"`, linked to the queue), as the API sends them (#253).
  */
 export function LiveStrip({ data }: FleetHealthViewProps) {
   const live = data.live;
@@ -26,6 +28,7 @@ export function LiveStrip({ data }: FleetHealthViewProps) {
       </div>
       <div className="space-y-2.5 px-4 py-3">
         <LegendRow attribute="data-queued-category" counts={live.queuedByCategory} label="Queued" testId="live-queued-total" total={live.queuedTotal} />
+        <QueuedByPool pools={live.queuedByPool} unmatched={live.queuedUnmatched} />
         {scale === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">Nothing is queued or running right now.</p>
         ) : (
@@ -46,6 +49,38 @@ export function LiveStrip({ data }: FleetHealthViewProps) {
         <LegendRow attribute="data-running-category" counts={live.runningByCategory} label="Running" testId="live-running-total" total={live.runningTotal} />
       </div>
     </section>
+  );
+}
+
+/**
+ * Where the queued jobs wait: one link per pool with jobs queued for it, in the API's order (most
+ * first), then the jobs no pool will run. Nothing when neither has any.
+ */
+function QueuedByPool({ pools, unmatched }: { pools: FleetLiveStats["queuedByPool"]; unmatched: number }) {
+  if (pools.length === 0 && unmatched === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+      <span>By pool</span>
+      {pools.map((pool) => (
+        <Link
+          className="flex min-w-0 items-center gap-1.5 hover:text-foreground"
+          data-queued-pool={pool.poolId}
+          key={pool.poolId}
+          params={{ poolId: pool.poolId }}
+          to="/runner-pools/$poolId"
+        >
+          <span className="tabular font-medium text-foreground">{pool.queued}</span>
+          <span className="max-w-40 truncate">{pool.poolName}</span>
+        </Link>
+      ))}
+      {unmatched === 0 ? null : (
+        <Link className="flex items-center gap-1.5 hover:text-foreground" to="/queued-jobs">
+          <span data-testid="live-queued-unmatched">
+            <span className="tabular font-medium text-danger">{unmatched}</span> {unmatched === 1 ? "job" : "jobs"} with no matching pool
+          </span>
+        </Link>
+      )}
+    </div>
   );
 }
 

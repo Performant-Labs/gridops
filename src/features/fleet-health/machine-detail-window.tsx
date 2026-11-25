@@ -137,14 +137,22 @@ export function slowestKeys(host: HostHealth): SlowKey[] {
     .slice(0, 5);
 }
 
-/** This machine's median against the fleet's, with the run counts behind each median. */
+/**
+ * This machine's median against the fleet's, with the run counts behind each median. The keys are
+ * the speed index's `topKeys`: only keys slower here than on the rest of the fleet (a ratio above
+ * 1.0), so a machine with an index at or below the fleet's median may have none, which is said as
+ * such; "not enough data" is only for a machine with no index at any runner size.
+ */
 function SlowestKeys({ host }: { host: HostHealth }) {
   const keys = slowestKeys(host);
+  const indexed = host.speed.some((size) => size.index !== null);
   return (
     <section aria-label="Slowest job keys" className="space-y-2">
       <h4 className="text-xs font-medium text-muted-foreground">Slowest job keys — this machine's median against the fleet's</h4>
       {keys.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Not enough data: fewer than 3 job keys qualify.</p>
+        <p className="text-sm text-muted-foreground">
+          {indexed ? "No job runs slower here than on the rest of the fleet." : "Not enough data: fewer than 3 job keys qualify."}
+        </p>
       ) : (
         <ul className="divide-y divide-border rounded-lg border border-border bg-panel">
           {keys.map((entry) => (

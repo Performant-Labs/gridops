@@ -458,6 +458,94 @@ pub struct WaitingJobPools {
 /// GitHub job behind them is shown under the pool that will run it, but they
 /// are not listed.
 pub async fn waiting_job_pools(database: &SqlitePool) -> Result<Vec<WaitingJobPools>, sqlx::Error> {
+    Ok(waiting_owners(database).await?.0)
+}
+
+/// A GitLab job waiting for a runner, as the fleet health page queues it
+/// with the GitHub jobs (#253): one per GitLab instance and job id however
+/// many connections recorded it, `pending` as the furthest along of its rows
+/// (the scaler's demand; a `created` job waits for earlier stages, and a
+/// running one has its runner).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaitingGitlabJob {
+    pub base_url: String,
+    pub job_id: i64,
+    /// When the job was first recorded.
+    pub queued_at: i64,
+    /// The stored category of any of its rows; `None` until classified.
+    pub category: Option<String>,
+    pub job_name: Option<String>,
+    pub project_path: Option<String>,
+    /// The pool it is shown under, by [`waiting_job_pools`]' rule: an
+    /// autoscaling pool that will start or free a runner for it, else the
+    /// first matching manual-mode pool; `None` when no pool will run it.
+    pub owner: Option<WaitingGitlabOwner>,
+}
+
+/// The pool a waiting GitLab job is shown under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaitingGitlabOwner {
+    pub pool_id: String,
+    /// Only a manual-mode pool can run it: nothing starts a runner for it.
+    pub manual: bool,
+}
+
+/// Every GitLab job waiting for a runner ([`WaitingGitlabJob`]), oldest
+/// first, with the pool it is shown under. Two reads, both on the partial
+/// index `gitlab_jobs_active_created_idx` (its `IN` list verbatim), so only
+/// active jobs are ever read: the pending jobs themselves, and the ownership
+/// [`waiting_job_pools`] computes for the GitHub jobs, in which GitLab jobs
+/// already take their room.
+///
+/// # Errors
+/// A read failed.
+pub async fn waiting_gitlab_jobs(
+    database: &SqlitePool,
+) -> Result<Vec<WaitingGitlabJob>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT connection.base_url,gj.job_id,MIN(gj.created_at) AS queued_at,
+              MAX(CASE gj.status WHEN 'running' THEN 2 WHEN 'pending' THEN 1 ELSE 0 END) AS tier,
+              MAX(gj.category) AS category,MAX(gj.job_name) AS job_name,
+              MAX(gj.project_path) AS project_path
+            FROM gitlab_jobs gj
+            JOIN gitlab_connections connection ON connection.id=gj.connection_id
+            WHERE gj.status IN ('created','waiting_for_resource','preparing','pending','running')
+            GROUP BY connection.base_url,gj.job_id
+            HAVING tier=1
+            ORDER BY queued_at,connection.base_url,gj.job_id"#,
+    )
+    .fetch_all(database)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut owners = waiting_owners(database).await?.1;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let base_url: String = row.get("base_url");
+            let job_id: i64 = row.get("job_id");
+            WaitingGitlabJob {
+                owner: owners.remove(&(base_url.clone(), job_id)),
+                base_url,
+                job_id,
+                queued_at: row.get("queued_at"),
+                category: row.get("category"),
+                job_name: row.get("job_name"),
+                project_path: row.get("project_path"),
+            }
+        })
+        .collect())
+}
+
+/// The GitLab jobs' owners in [`waiting_owners`], by instance and job id.
+type GitlabOwners = std::collections::HashMap<(String, i64), WaitingGitlabOwner>;
+
+/// [`waiting_job_pools`], and the pool each waiting GitLab job is shown
+/// under by the same rule, from one ownership computation.
+async fn waiting_owners(
+    database: &SqlitePool,
+) -> Result<(Vec<WaitingJobPools>, GitlabOwners), sqlx::Error> {
     let candidates = queued_job_candidates(database, true).await?;
     let mut owners = assign_queued_jobs(
         candidates
@@ -475,10 +563,33 @@ pub async fn waiting_job_pools(database: &SqlitePool) -> Result<Vec<WaitingJobPo
     .map(|owner| (owner.job.clone(), owner))
     .collect::<std::collections::HashMap<_, _>>();
     let mut jobs = Vec::<WaitingJobPools>::new();
+    let mut gitlab = GitlabOwners::new();
     for candidate in candidates {
-        // GitLab jobs took their room above; the list itself is GitHub's.
-        let QueuedJobKey::Github(job_id) = candidate.job else {
-            continue;
+        // GitLab jobs took their room above; the list itself is GitHub's,
+        // and their owners are kept apart (#253).
+        let job_id = match candidate.job {
+            QueuedJobKey::Github(job_id) => job_id,
+            QueuedJobKey::Gitlab { base_url, job_id } => {
+                let key = (base_url, job_id);
+                if let Some(owner) = owners.remove(&QueuedJobKey::Gitlab {
+                    base_url: key.0.clone(),
+                    job_id,
+                }) {
+                    gitlab.insert(
+                        key,
+                        WaitingGitlabOwner {
+                            pool_id: owner.pool_id,
+                            manual: false,
+                        },
+                    );
+                } else if candidate.standing == PoolStanding::Manual {
+                    gitlab.entry(key).or_insert(WaitingGitlabOwner {
+                        pool_id: candidate.pool,
+                        manual: true,
+                    });
+                }
+                continue;
+            }
         };
         if jobs.last().is_none_or(|last| last.job_id != job_id) {
             jobs.push(WaitingJobPools {
@@ -499,7 +610,7 @@ pub async fn waiting_job_pools(database: &SqlitePool) -> Result<Vec<WaitingJobPo
         }
         job.matching.push((candidate.pool, candidate.standing));
     }
-    Ok(jobs)
+    Ok((jobs, gitlab))
 }
 
 /// The autoscaling owner of every job waiting to start that has one; see

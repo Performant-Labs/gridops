@@ -3,7 +3,8 @@
 //! median. 1.0 is typical; 1.5 is half again as slow.
 //!
 //! The rules (`docs/design/fleet-health.md`): a job key is repository +
-//! workflow name + job name with a trailing shard counter stripped; only
+//! workflow name + job name with a trailing shard counter stripped (a GitLab
+//! job's, project path + job name, #253); only
 //! successful final-attempt runs completed inside the window count; the
 //! index is the run-count-weighted geometric mean of (own median ÷ fleet
 //! median) over keys with at least 5 runs on the machine at that size and 5
@@ -36,6 +37,16 @@ const TOP_KEYS: usize = 5;
 pub fn job_key(repository: &str, workflow: &str, job_name: &str) -> String {
     let name = strip_shard_suffix(job_name);
     format!("{repository} / {workflow} / {name}")
+}
+
+/// The key a GitLab job's runs are compared under (#253): project path and
+/// job name, the shard counter stripped as in [`job_key`] (GitLab names a
+/// `parallel` job's copies `name 1/4`, `name 2/4`, …). A GitLab job has no
+/// workflow, so its key has two parts and never equals a GitHub job's.
+#[must_use]
+pub fn gitlab_job_key(project_path: &str, job_name: &str) -> String {
+    let name = strip_shard_suffix(job_name);
+    format!("{project_path} / {name}")
 }
 
 /// A job name trimmed, without its trailing shard counter if it has one.
@@ -77,9 +88,10 @@ fn split_shard_counter(trimmed: &str) -> Option<(&str, &str)> {
 /// the [`TOP_KEYS`] keys that push it up most, or `index: None` (and no keys)
 /// with fewer than [`MIN_KEYS`] shared keys: not enough data.
 ///
-/// One query walks the window's successful final-attempt jobs joined to the
-/// placements that ran them, keeping every duration, so both medians are
-/// true ones, not histogram estimates. It runs once per hour of the window
+/// One query walks the window's successful final-attempt GitHub jobs joined
+/// to the placements that ran them, keeping every duration, so both medians
+/// are true ones, not histogram estimates, and a second does the same for
+/// the successful GitLab jobs (#253). Each runs once per hour of the window
 /// (`completed_at`, the indexed bound): one statement over a whole week's
 /// jobs is itself a slow one (394 ms on the synthetic week the contract test
 /// runs), against #179's 100 ms rule, which the contract test enforces on
@@ -101,10 +113,31 @@ pub async fn speed_indexes(
     let mut slice_start = start;
     while slice_start < now {
         let slice_end = (slice_start + super::HOUR_MILLIS).min(now);
-        for (repository, workflow, name, host_id, cpu_millis, durations) in
-            grouped_durations(db, slice_start, slice_end).await?
-        {
-            let key = job_key(&repository, &workflow, &name);
+        let github = grouped_durations(db, slice_start, slice_end)
+            .await?
+            .into_iter()
+            .map(
+                |(repository, workflow, name, host_id, cpu_millis, durations)| {
+                    (
+                        job_key(&repository, &workflow, &name),
+                        host_id,
+                        cpu_millis,
+                        durations,
+                    )
+                },
+            );
+        let gitlab = grouped_gitlab_durations(db, slice_start, slice_end)
+            .await?
+            .into_iter()
+            .map(|(project_path, name, host_id, cpu_millis, durations)| {
+                (
+                    gitlab_job_key(&project_path, &name),
+                    host_id,
+                    cpu_millis,
+                    durations,
+                )
+            });
+        for (key, host_id, cpu_millis, durations) in github.chain(gitlab) {
             let cpu_millis = u32::try_from(cpu_millis)
                 .context("a placement's cpu_millis is not a runner size")?;
             let durations = parse_durations(&durations)?;
@@ -244,6 +277,64 @@ async fn grouped_durations(
                      WHERE later.run_id = job.run_id
                        AND later_sync.run_attempt > sync.run_attempt)
             GROUP BY repo.full_name, run.workflow_name, job.name, p.host_id, p.cpu_millis"#,
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+/// The successful GitLab jobs completed in `[from, to)` (#253), grouped as
+/// [`grouped_durations`] groups GitHub's, by (project path, job name,
+/// machine, runner size), through `gitlab_jobs_completed_idx`. A GitLab job
+/// is its own only attempt (as #191's rollup reads it); `status='success'`
+/// is its success. A job without a name, a path or a start (a row written
+/// before migration 0050) has no key or duration and is left out. A job
+/// recorded under several connections of one GitLab instance (a project's
+/// and its group's) counts once, by its row with the lowest id (looked up on
+/// `gitlab_jobs_connection_job_unique` per connection of the instance). Its
+/// machine is the newest `runners` row with its
+/// `gitlab_runner_id` on the same instance, and that row's newest placement.
+///
+/// # Errors
+/// The read failed.
+async fn grouped_gitlab_durations(
+    db: &SqlitePool,
+    from: i64,
+    to: i64,
+) -> anyhow::Result<Vec<(String, String, String, i64, String)>> {
+    let rows = sqlx::query_as::<_, (String, String, String, i64, String)>(
+        r#"SELECT job.project_path, job.job_name, p.host_id, p.cpu_millis,
+                  GROUP_CONCAT(job.completed_at - job.started_at) AS durations
+             FROM gitlab_jobs job
+             JOIN gitlab_connections connection ON connection.id = job.connection_id
+             JOIN runners r ON r.id = (
+                    SELECT cand.id FROM runners cand
+                      JOIN gitlab_connections cand_connection
+                        ON cand_connection.id = cand.gitlab_connection_id
+                     WHERE cand.gitlab_runner_id = job.gitlab_runner_id
+                       AND cand_connection.base_url = connection.base_url
+                     ORDER BY cand.created_at DESC, cand.id DESC LIMIT 1)
+             JOIN workload_placements p ON p.id = (
+                    SELECT latest.id FROM workload_placements latest
+                     WHERE latest.runner_id = r.id
+                     ORDER BY latest.generation DESC, latest.updated_at DESC, latest.id DESC
+                     LIMIT 1)
+            WHERE job.completed_at >= ?
+              AND job.completed_at < ?
+              AND job.status = 'success'
+              AND job.started_at IS NOT NULL
+              AND job.job_name IS NOT NULL
+              AND job.project_path IS NOT NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM gitlab_connections other_connection
+                      JOIN gitlab_jobs other
+                        ON other.connection_id = other_connection.id
+                       AND other.job_id = job.job_id
+                     WHERE other_connection.base_url = connection.base_url
+                       AND other.id < job.id)
+            GROUP BY job.project_path, job.job_name, p.host_id, p.cpu_millis"#,
     )
     .bind(from)
     .bind(to)
@@ -793,6 +884,108 @@ mod tests {
             .map(|name| (job_key("acme/app", "CI", name), 6, 24))
             .collect();
         assert_eq!(runs, expected, "(key, machine runs, fleet runs)");
+        harness.close().await
+    }
+
+    /// #253 item 5: GitLab jobs are speed samples too, keyed by
+    /// `project path / job name` (shard counter stripped), so a machine that
+    /// runs only GitLab jobs has an index. Only successful jobs with a name,
+    /// a path and a start count, and a job recorded under two connections of
+    /// one GitLab instance (a project's and its group's) counts once.
+    #[tokio::test]
+    async fn gitlab_jobs_are_speed_samples_keyed_by_project_path_and_job_name() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        let mut jobs = Vec::new();
+        for (name, duration) in [
+            ("rspec 1/4", 120_000_i64),
+            ("lint", 60_000),
+            ("build", 600_000),
+        ] {
+            for (host, factor) in [("io", 1), ("europa", 1), ("callisto", 2)] {
+                let host_id = harness.fleet.host(host)?.id.clone();
+                for run in 0..5_i64 {
+                    let id = harness.next_id;
+                    harness.next_id += 1;
+                    let completed = NOW - 2 * HOUR - run * 60_000;
+                    let mut job = JobSeed::completed(
+                        id,
+                        name,
+                        Some(&host_id),
+                        completed - factor * duration - 5_000,
+                        completed - factor * duration,
+                        completed,
+                    );
+                    job.gitlab = true;
+                    jobs.push(job);
+                }
+            }
+        }
+        // Left out: a failed job, and jobs with no name or no path (written
+        // before migration 0050), each far slower than the rest.
+        for (id, status) in [
+            (9_001_i64, "failed"),
+            (9_002, "nameless"),
+            (9_003, "pathless"),
+        ] {
+            let host_id = harness.fleet.host("callisto")?.id.clone();
+            let mut job = JobSeed::completed(
+                id,
+                "lint",
+                Some(&host_id),
+                NOW - 3 * HOUR - 10_000_000,
+                NOW - 3 * HOUR - 9_000_000,
+                NOW - 3 * HOUR,
+            );
+            job.gitlab = true;
+            if status == "failed" {
+                job.conclusion = Some("failure".to_owned());
+            }
+            jobs.push(job);
+        }
+        testdata::insert_jobs(&harness.db, &harness.fleet, &jobs).await?;
+        sqlx::query("UPDATE gitlab_jobs SET job_name=NULL WHERE job_id=9002")
+            .execute(&harness.db)
+            .await?;
+        sqlx::query("UPDATE gitlab_jobs SET project_path=NULL WHERE job_id=9003")
+            .execute(&harness.db)
+            .await?;
+        // Every callisto job also seen through the group connection.
+        sqlx::query(
+            "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+             VALUES ('group-connection','group','https://gitlab.test','group',2,'acme','group.token','group.webhook',1,1)",
+        )
+        .execute(&harness.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,gitlab_runner_id,created_at,updated_at,category,job_name,project_path,started_at,completed_at)
+             SELECT id||'-group','group-connection',project_id,job_id,pipeline_id,status,tag_list,status_changed_at,gitlab_runner_id,created_at,updated_at,category,job_name,project_path,started_at,completed_at
+               FROM gitlab_jobs",
+        )
+        .execute(&harness.db)
+        .await?;
+
+        let results = harness.indexes().await?;
+        let callisto = harness.result(&results, "callisto", 2_000)?;
+        let index = callisto
+            .index
+            .ok_or_else(|| anyhow::anyhow!("callisto has no index: {callisto:?}"))?;
+        assert!(
+            (index - 2.0).abs() < 1e-9,
+            "callisto runs at half speed: {index}"
+        );
+        let keys: Vec<(String, u32, u32)> = callisto
+            .top_keys
+            .iter()
+            .map(|key| (key.key.clone(), key.host_runs, key.fleet_runs))
+            .collect();
+        let mut expected: Vec<(String, u32, u32)> = ["build", "lint", "rspec"]
+            .into_iter()
+            .map(|name| (format!("acme/app / {name}"), 5, 15))
+            .collect();
+        expected.sort();
+        assert_eq!(keys, expected, "(key, machine runs, fleet runs)");
+        let io = harness.result(&results, "io", 2_000)?;
+        assert_eq!(io.index, Some(1.0), "io runs at the fleet median: {io:?}");
         harness.close().await
     }
 }

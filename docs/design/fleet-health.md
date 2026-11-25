@@ -203,7 +203,9 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
 
 1. A job key is `repository / workflow / job name` (`speed::job_key`), with a trailing shard
    counter stripped (` (n/m)`, ` [n/m]` or ` n/m`, then trimmed), so a suite's shards compare
-   together.
+   together. A GitLab job's key is `project path / job name` (`speed::gitlab_job_key`, the same
+   stripping: GitLab names a `parallel` job's copies `name 1/4`, …), so a machine running only
+   GitLab jobs has an index too (#253); it has two parts and never equals a GitHub key.
 2. Only successful final-attempt runs completed inside the window count. The speed index's rule
    is stricter than the rollup's, since a dropped sample only thins a key: a job is left out
    when any later attempt of its run is known (a later job of the run, or the run row's
@@ -211,7 +213,12 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
    are not speed samples, though the rollup counts them (#239). They are grouped by key
    and by (machine, runner size), the runner size being the placement's `cpu_millis`. A job's
    machine is its runner's newest `runners` row and that row's newest `workload_placements` row,
-   as the hourly rollup reads it, so duplicate rows never count a job twice (#239).
+   as the hourly rollup reads it, so duplicate rows never count a job twice (#239). GitLab jobs
+   (#253) are read the same way, per hour through `gitlab_jobs_completed_idx`: `status='success'`
+   is success and a job is its own only attempt, as in the rollup; a job without a name, a path or
+   a start (written before `0050`) is left out; a job recorded under several connections of one
+   GitLab instance counts once (its lowest row id); its runner is the newest `runners` row with
+   its `gitlab_runner_id` on the same instance (`base_url`).
 3. For each key, the fleet median is the true median duration of its runs on every machine, the
    machine's own runs included, so a machine running most of a key's jobs drifts toward 1.0 on
    it; each (machine, size) has its own median.
@@ -220,7 +227,10 @@ against the fleet's median (#193, `speed::speed_indexes(db, window, now)`):
    rest of the fleet. 1.0 is typical, 1.5 half again as slow.
 5. Fewer than 3 such keys gives `index: null` ("not enough data").
 6. `topKeys` are the keys that push the index up most, with both medians and both run counts:
-   only keys with a ratio above 1.0 (slower than the fleet), worst first, at most 5 (#239).
+   only keys with a ratio above 1.0 (slower than the fleet), worst first, at most 5 (#239). So a
+   machine with an index but no key slower than on the rest of the fleet has none: the machine
+   detail's "Slowest job keys" then says "No job runs slower here than on the rest of the fleet",
+   and "Not enough data" only when no runner size has an index (#253).
 
 ## Scores
 
@@ -300,8 +310,9 @@ has `deduction: null`.
 A concern is `{key, severity, title, detail, subject, link, since}`. The `key` is stable for the
 same condition (for example `host-offline:<host id>`); `subject` is `{kind: "fleet"}`,
 `{kind: "host", id}` or `{kind: "pool", id}`; `link` points to what explains it
-(`/fleet/health#machine-<host id>`, `/queued-jobs`, `/fleet/machines/<host id>`,
-`/settings/general`); `since` is when it started (epoch ms), or `null`.
+(`/fleet/health#machine-<host id>`, `/fleet/health#fleet-component-<component key>`,
+`/queued-jobs`, `/fleet/machines/<host id>`, `/settings/general`); `since` is when it started
+(epoch ms), or `null`.
 
 **Order** (`merge_concerns(windowed, live)`): one concern per key (a live concern replaces a
 windowed one with the same key), worst severity first (`critical`, `warning`, `info`), then the
@@ -313,7 +324,7 @@ enough data never raises one.
 
 | Key | Severity | When |
 |---|---|---|
-| `fleet-component:<component key>` | critical under 50, warning under 70 | a fleet component scores below that |
+| `fleet-component:<component key>` | critical under 50, warning under 70 | a fleet component scores below that; links to the component's row on the fleet score card, `/fleet/health#fleet-component-<component key>` (#253) |
 | `host-score:<host>` | critical under 50, warning under 70 | a machine scores below that; `detail` names its worst component |
 | `host-slow:<host>:<cpu millis>` | warning | a speed index ≥ 1.3 at one runner size, naming the slowest job key |
 | `host-idle-while-queued:<host>` | warning | busy share under 30% while the fleet's queue-wait component is under 70 |
@@ -325,9 +336,10 @@ enough data never raises one.
 |---|---|---|
 | `host-offline:<host>` | critical | a machine with a CPU budget above 0 has no `host_samples` row in the last 5 minutes; `since` is its last sample |
 | `start-gate:<host>` | warning | `start_health::start_gate` sets the machine aside from new placements |
+| `start-failures:<host>` | warning from 25 %, critical from 50 % | at least 3 start failures in the last hour (as the machine's live stats count them, below) that are at least 25 % of its starts in the hour: placements whose `start_runner` command was issued in the hour (`host_commands_host_kind_issued_idx`, as the machine rollup counts `start_attempts`), at least the failures, so the share is at most 100 %. Title "Jupiter failed 9 of 24 runner starts in the last hour"; links to the machine's row (`/fleet/health#machine-<host>`); `since` is the oldest of those failures (#253) |
 | `disk:<host>` | critical or warning | the Overview's disk alarm, from the same read (`crate::resources::fleet_root_disks`, #240): `disk::alarm_for` on the newest sample's free space against the root disk's observed size (`fleet_observed_domains`, not the admin-set budget), only for a machine whose heartbeat is at most 120 s old |
-| `unmatched-jobs` | critical | queued jobs no pool can run (the Overview's split, `fleet_queue_breakdown`) |
-| `oldest-queued` | critical over 10 min, warning over 5 min | the oldest queued job's wait; `detail` names the job and the repository |
+| `unmatched-jobs` | critical | queued jobs no pool can run (the Overview's split, `fleet_queue_breakdown`, plus the waiting GitLab jobs no pool will run, #253) |
+| `oldest-queued` | critical over 10 min, warning over 5 min | the oldest queued job's wait, GitHub or GitLab; `detail` names the job and the repository (a GitLab job's project path) |
 | `uncertain:<host>` | warning | the machine has placements in state `uncertain` |
 
 `title` is short ("europa is offline"); `detail` is one sentence with the numbers.
@@ -341,7 +353,9 @@ Overview's disk read:
 - `gridops_core::fleet::registry::host_live_reads(pool, now)`: every approved, non-deleted machine
   in id order, built by the same helpers `/fleet/hosts` uses for an administrator (counts,
   `physicalBudget`, `physicalAllocation`, `latestRootMeasurement`, placement failures in the last
-  hour, the start gate), in one read transaction. Its counts are over the machine's live
+  hour, the start gate), in one read transaction. Its placement-failure count is every
+  `placement_failed` event of the hour, as `/fleet/hosts` shows it, read as a count only (not the
+  day of failures `/fleet/hosts` also lists); the page does not use it (#253). Its counts are over the machine's live
   placements only (#240): the unfinished ones through `workload_placements_host_idx(host_id,state)`
   and the finished ones still holding capacity, never its finished history, which retention
   never deletes; every count equals `/fleet/hosts`' but the known-runner count;
@@ -350,14 +364,27 @@ Overview's disk read:
   category (NULL as `other`). For a user who sees every installation it gives exactly the
   Overview's numbers;
 - `crate::resources::fleet_root_disks(pool, now)`: the read behind the Overview's fleet disk
-  alarms (#240), so the two always agree.
+  alarms (#240), so the two always agree;
+- `gridops_core::autoscaling::waiting_gitlab_jobs(pool)` (#253): the GitLab jobs waiting for a
+  runner, which the Overview's split leaves out. One per GitLab instance and job id however many
+  connections recorded it, `pending` as the furthest along of its rows (a `created` job waits for
+  earlier stages; a running one has its runner), read on the partial index
+  `gitlab_jobs_active_created_idx`, each under the pool `waiting_job_pools`' ownership rule gives
+  it (an autoscaling pool, else the first matching manual-mode pool) or unmatched. They are added
+  to the queued total, by category (NULL as `other`), by pool and to the unmatched count; one an
+  autoscaling pool will run is a candidate for the oldest queued job.
 
 **Per machine:** online (a sample in the last 5 minutes), or offline with the last-seen time;
 runners running now by category (each running CI placement whose runner has a
 `current_job_id` or is busy, `status='busy'` and `busy=1`, counted once: a GitLab runner is only
-ever marked busy. A GitHub runner's `current_job_id` gives the job's category; no job row, or a
-NULL category, is `other`. Plus fix-agent runs from fix placements); CPU and memory reserved against the budget; CPU, memory
-and disk used from the latest sample; start failures in the last hour. **Fleet:** queued jobs by
+ever marked busy. A GitHub runner's `current_job_id` gives the job's category; a GitLab runner's
+job is the `gitlab_jobs` row running on it (its `gitlab_runner_id` on the runner's instance,
+status `running`, on the partial index of active jobs, #253); no job row, or a NULL category, is
+`other`. Plus fix-agent runs from fix placements); CPU and memory reserved against the budget;
+CPU, memory and disk used from the latest sample; start failures in the last hour: the
+`placement_failed` events that `start_health::is_start_failure` puts on the machine, read on
+`fleet_events_host_kind_time_idx` and judged as the start gate and the machine rollup judge them,
+so an operator's release or a runner removed before its start never counts (#253). **Fleet:** queued jobs by
 category and by pool, the unmatched count and the oldest queued job with its wait; running jobs
 by category. The per-category counts add up to their totals. Every query is bounded (by state
 indexes or `observed_at` within the last hour); the whole function should take under 50 ms on
@@ -444,10 +471,19 @@ composition slots, not the placeholder text.
   them, and a concern new since the previous data is `data-new="true"`.
 - **Fleet score card:** the score in its band (`ScoreGauge`, `src/components/charts/score-gauge.tsx`,
   which carries `data-band`), the trend, and a row per component (`data-component-key`,
-  `data-insufficient="true"` without a score) with its deduction.
+  `data-insufficient="true"` without a score) with its deduction. Each row has the id
+  `fleet-component-<key>`, the anchor its `fleet-component:<key>` concern links to (#253).
 - **Live strip:** totals in `data-testid="live-queued-total"` / `"live-running-total"`, one
   element per category with jobs (`data-queued-category` / `data-running-category`), and the
-  oldest wait (`formatOldestWait`: "45 s", "12 min", "3 h 5 min", "1 h").
+  oldest wait (`formatOldestWait`: "45 s", "12 min", "3 h 5 min", "1 h"). Under the queued side,
+  the queue by pool as the API orders `queuedByPool` (`data-queued-pool`, each a link to its pool
+  page, `/runner-pools/<pool id>`) and the jobs no pool will run (`queuedUnmatched`,
+  `data-testid="live-queued-unmatched"`, a link to `/queued-jobs`); nothing when both are empty
+  (#253).
+- **Machine detail, slowest job keys:** the speed index's `topKeys` (see
+  [The relative speed index](#the-relative-speed-index)): "No job runs slower here than on the
+  rest of the fleet" when a runner size has an index but no key is slower, "Not enough data" when
+  none has an index (#253).
 - **Colours:** the theme's variables only, light and dark: the band tones, and
   `--category-<category>` (`categoryColor`).
 - **The Overview tile (#203):** `metricTiles(metrics, health)` takes the 24-hour health (the
@@ -557,7 +593,10 @@ case) a wave-1 issue: each changed file must be the issue's own, an add-only cha
 shared files, or the removal of its own markers from a contract test. A pull request closing no
 wave-1 issue passes; one closing two fails. #204 is wave 2 and not checked: it owns
 `health_source.rs`, `fleet_health_snapshot.rs` and the source selection in `health.rs`
-(`FleetHealthState::new`), after #194.
+(`FleetHealthState::new`), after #194. #253 (`wave2b`, also not checked) runs beside it and owns
+the live half's fixes: `health_live.rs`, the speed index's GitLab read, the concern links, the
+pending-GitLab and failed-placement reads, and the live strip, machine detail and score card
+anchors.
 
 Rust issues add their own tests inside the module they own (`#[cfg(test)] mod tests`), because
 every `mod` line is in a #197 file; frontend issues add theirs as
