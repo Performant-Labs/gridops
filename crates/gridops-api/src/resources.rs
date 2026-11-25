@@ -89,12 +89,18 @@ macro_rules! visible_queued_jobs {
 
 /// Every queued job of the fleet, whoever can see it: the clause of
 /// `visible_queued_jobs!` without its user (#197, the fleet health page).
+/// `wj.status<>'completed'` changes no result (the `IN` list already
+/// excludes it); it is there so SQLite reads the jobs through the partial
+/// `workflow_jobs_open_created_idx` (`WHERE status<>'completed'`), which
+/// holds only the open jobs, instead of scanning every job ever recorded:
+/// fleet health's live read runs this on every computation (#245).
 macro_rules! fleet_queued_jobs {
     () => {
         "FROM workflow_jobs wj
           JOIN workflow_runs wr ON wr.id=wj.run_id
           JOIN repositories repo ON repo.id=wr.repository_id
-          WHERE wj.status IN ('queued','waiting','pending','requested') AND wr.status!='completed'"
+          WHERE wj.status<>'completed' AND wj.status IN ('queued','waiting','pending','requested')
+            AND wr.status!='completed'"
     };
 }
 

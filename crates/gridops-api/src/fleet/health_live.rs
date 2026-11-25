@@ -507,17 +507,72 @@ mod tests {
         }
     }
 
+    /// How many SQLite virtual machine steps `work` takes on the database at
+    /// `path`: it runs on a one-connection pool of its own whose progress
+    /// handler counts every step. Unlike a time, the count depends only on
+    /// the data and the query plans, so it shows a read that walks a
+    /// machine's history even when that is still fast (#245).
+    async fn vm_steps<T, Work, Done>(path: &std::path::Path, work: Work) -> Result<(T, u64)>
+    where
+        Work: FnOnce(SqlitePool) -> Done,
+        Done: std::future::Future<Output = Result<T>>,
+    {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(path))
+            .await?;
+        let steps = Arc::new(AtomicU64::new(0));
+        {
+            let mut connection = pool.acquire().await?;
+            let mut handle = connection.lock_handle().await?;
+            let counter = Arc::clone(&steps);
+            handle.set_progress_handler(1, move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                true
+            });
+        }
+        let value = work(pool.clone()).await?;
+        let count = steps.load(Ordering::Relaxed);
+        pool.close().await;
+        Ok((value, count))
+    }
+
+    /// The VM steps of `host_live_reads` and of `collect_live` at `NOW`.
+    async fn live_path_steps(path: &std::path::Path) -> Result<(u64, u64)> {
+        let (_, reads) = vm_steps(path, |db| async move {
+            host_live_reads(&db, NOW).await.map_err(anyhow::Error::from)
+        })
+        .await?;
+        let (_, live) = vm_steps(path, |db| async move { collect_live(&db, NOW).await }).await?;
+        Ok((reads, live))
+    }
+
     /// Item 4: the live read reads only the placements that may still be on
     /// a machine, however long its history. On top of the synthetic week, io
     /// has four more weeks of finished jobs (each a stopped placement), and
     /// both `host_live_reads` and `collect_live` stay under the speed check.
+    ///
+    /// #245: the speed check alone also passed before the fix (the old
+    /// statement read io's whole history in under 100 ms), so the test also
+    /// counts the work SQLite does: four more weeks of history must leave
+    /// both reads' VM steps within 5 % of the week's. Reading the history
+    /// (`counts` instead of `live_counts`, `state!='released'` on the
+    /// allocations, or the queue breakdown's queued jobs without the
+    /// open-jobs index, which scanned every job ever recorded) multiplies
+    /// them.
     #[tokio::test]
     async fn the_live_path_passes_the_speed_check_however_long_the_placement_history() -> Result<()>
     {
         let directory =
             std::env::temp_dir().join(format!("gridops-live-history-{}", uuid::Uuid::new_v4()));
-        let db = gridops_core::connect_database_path(&directory.join("db.sqlite")).await?;
+        let path = directory.join("db.sqlite");
+        let db = gridops_core::connect_database_path(&path).await?;
         let week = testdata::build_week(&db, NOW).await?;
+        let (reads_on_week, live_on_week) = live_path_steps(&path).await?;
         let io = week.fleet.host("io")?.id.clone();
         let start = NOW - 35 * DAY;
         let history: Vec<JobSeed> = (0..40_000_i64)
@@ -543,6 +598,16 @@ mod tests {
             placements >= 40_000,
             "io's history: {placements} placements"
         );
+        let (reads_with_history, live_with_history) = live_path_steps(&path).await?;
+        for (read, on_week, with_history) in [
+            ("host_live_reads", reads_on_week, reads_with_history),
+            ("collect_live", live_on_week, live_with_history),
+        ] {
+            assert!(
+                with_history <= on_week + on_week / 20,
+                "{read}: {on_week} VM steps on the week, {with_history} with io's {placements} placements"
+            );
+        }
 
         let reads = speed_check::check(&db, async {
             host_live_reads(&db, NOW).await.map_err(anyhow::Error::from)
@@ -695,5 +760,80 @@ mod tests {
             BTreeMap::from([(JobCategory::Test, 1), (JobCategory::Other, 1)]),
         );
         seeded.close().await
+    }
+
+    /// #245: the live path's timings on the synthetic week, for the record in
+    /// `docs/handoffs/244-review.md`; a measurement, not a check. Run it in a
+    /// release build: `cargo test --release -p gridops-api --bin gridops-api
+    /// -- --ignored --nocapture live_path_timings`. The endpoint still serves
+    /// the fake source (#204 plugs in the database), so its lines are the
+    /// cache and HTTP overhead alone.
+    #[tokio::test]
+    #[ignore = "a measurement, not a check (#245)"]
+    async fn live_path_timings_on_the_synthetic_week() -> Result<()> {
+        use std::time::{Duration, Instant};
+
+        use axum::http::StatusCode;
+
+        use crate::fleet::health_test_support::{HEALTH, Harness};
+
+        const RUNS: usize = 21;
+        fn summary(name: &str, mut times: Vec<Duration>) {
+            times.sort();
+            let at = |share: usize| times[(times.len() - 1) * share / 100];
+            eprintln!(
+                "{name}: median {:?}, p95 {:?}, max {:?} ({} runs)",
+                at(50),
+                at(95),
+                at(100),
+                times.len()
+            );
+        }
+
+        let directory =
+            std::env::temp_dir().join(format!("gridops-live-timings-{}", uuid::Uuid::new_v4()));
+        let db = gridops_core::connect_database_path(&directory.join("db.sqlite")).await?;
+        testdata::build_week(&db, NOW).await?;
+        host_live_reads(&db, NOW).await?;
+        collect_live(&db, NOW).await?;
+        let (mut reads, mut queue, mut live) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..RUNS {
+            let started = Instant::now();
+            host_live_reads(&db, NOW).await?;
+            reads.push(started.elapsed());
+            let started = Instant::now();
+            crate::resources::fleet_queue_breakdown(&db, NOW)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+            queue.push(started.elapsed());
+            let started = Instant::now();
+            collect_live(&db, NOW).await?;
+            live.push(started.elapsed());
+        }
+        summary("host_live_reads", reads);
+        summary("fleet_queue_breakdown", queue);
+        summary("collect_live", live);
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+
+        let harness = Harness::new().await?;
+        let uri = format!("{HEALTH}?window=24h");
+        let (mut cold, mut cached) = (Vec::new(), Vec::new());
+        for _ in 0..RUNS {
+            harness.clock.advance(31_000);
+            let started = Instant::now();
+            let (status, body) = harness.admin_get(&uri).await?;
+            cold.push(started.elapsed());
+            // PR-Agent 0c2908df410d: time the 200s, never an error path.
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body.get("stale"), Some(&serde_json::json!(false)));
+            let started = Instant::now();
+            let (status, body) = harness.admin_get(&uri).await?;
+            cached.push(started.elapsed());
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        summary("GET /fleet/health, cold (fake source)", cold);
+        summary("GET /fleet/health, cached", cached);
+        Ok(())
     }
 }
