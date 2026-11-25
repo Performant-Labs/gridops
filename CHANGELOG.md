@@ -19,6 +19,17 @@ Known problems in the current release are in the README's
   job tables' `completed_at`. Existing jobs keep their rows and stay
   unclassified; nothing is rebuilt. Timed on a copy of a 3 GB production
   database: under a second. (#197)
+- Migration `0052` adds the fleet placement finish queue: the ended
+  placements the reconciler still has to finish, queued by triggers when a
+  placement ends (#259). It writes nothing to the existing placements, so it
+  takes the same time on any database: 1 ms on a synthetic one with 60,000
+  placements. After the upgrade the reconciler queues the placements that
+  ended earlier and still have work left, 500 placements per short write
+  transaction (about 5 ms each), at most 40 batches (20,000 placements) a
+  pass, with a 25 ms pause between batches. Until the sweep reaches them,
+  those earlier placements wait: a database with 100,000 placements is caught
+  up after 5 passes, the first right after the upgrade: about 2 minutes at
+  the default 30 s interval.
 
 ### Added
 
@@ -30,6 +41,18 @@ Known problems in the current release are in the README's
   placeholder under **Settings → General**. New GitHub and GitLab jobs get a
   `category` column, and the reconciler keeps 90 days of fleet health
   rollups. See [Fleet health](docs/design/fleet-health.md). (#197)
+
+### Fixed
+
+- **The reconciler no longer runs out of memory as the fleet's history
+  grows.** Every pass read and finished every fleet placement that had ever
+  ended, nearly every placement ever made, so each pass's work and the
+  reconciler's memory grew with the history until the kernel killed it at its
+  512 MiB limit, every 15 to 60 minutes. A pass now reads only the ended
+  placements it has not finished yet. Uncertain placements are still read on
+  every pass until they are cleaned, as before, so ones that are never
+  cleaned (a start that never succeeded, a machine that never comes back)
+  still add up. (#259)
 
 ## 0.2.0 - 2026-11-22
 

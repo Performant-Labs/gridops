@@ -344,7 +344,28 @@ mod tests {
         .fetch_one(&pool)
         .await?
         .get::<i64, _>("count");
-        assert_eq!(tables, 79);
+        assert_eq!(tables, 81);
+        // #259: the fleet placements still to finish, and the sweep that
+        // queues those that ended before the queue existed.
+        assert!(table_exists(&pool, "placement_finish_queue").await?);
+        assert!(table_exists(&pool, "placement_finish_sweep").await?);
+        // A rebuild of `workload_placements` or `runners` would drop these
+        // without an error, and ended placements would never be finished.
+        let triggers: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE '%placement_finish_queue%'
+              ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            triggers,
+            [
+                "runners_queue_finish_on_return",
+                "workload_placements_queue_finish_on_end",
+                "workload_placements_queue_finish_on_insert",
+                "workload_placements_unqueue_finish_on_resume",
+            ]
+        );
         assert!(table_exists(&pool, "workflow_job_sync").await?);
         assert!(table_exists(&pool, "runner_pool_waits").await?);
         assert!(table_exists(&pool, "runner_pool_exclusive_labels").await?);

@@ -291,10 +291,29 @@ pub(super) async fn tick(app: &Reconciler) -> Result<()> {
         }
     }
     let mut retried = false;
-    for placement in
-        placement::placements(&app.database, &["failed", "cleaned", "uncertain"]).await?
-    {
-        retried |= finish(app, &placement).await?;
+    // Only the ended placements with something left to do, from the finish
+    // queue: the settled ones are nearly every placement ever made (#259).
+    // Those that ended before the queue existed join it a batch at a time.
+    if let Err(error) = placement::queue_earlier_ended_placements(&app.database).await {
+        tracing::warn!(error = ?error, "could not queue earlier ended fleet placements");
+    }
+    for placement in placement::ended_placements_to_finish(&app.database).await? {
+        // One placement that cannot be finished stays queued for the next
+        // pass; it does not stop the others.
+        match finish(app, &placement).await {
+            Ok(retry) => retried |= retry,
+            Err(error) => {
+                tracing::warn!(placement = %placement.id, error = ?error, "could not finish fleet runner");
+                continue;
+            }
+        }
+        // A failed or cleaned placement has nothing left once finished, and
+        // leaves the queue; an uncertain one is finished again until it is
+        // cleaned.
+        if let Err(error) = placement::finished(&app.database, placement.id, &placement.state).await
+        {
+            tracing::warn!(placement = %placement.id, error = ?error, "could not take a finished fleet runner off the queue");
+        }
     }
     if retried {
         // Place the replacements now rather than on the next pass.
