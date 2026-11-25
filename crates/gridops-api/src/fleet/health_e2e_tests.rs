@@ -380,6 +380,54 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
             .await?;
         }
     }
+    // A machine revoked since: its starts in the window still count for the
+    // fleet, though it is no longer one of the page's machines.
+    let revoked = SeededHost {
+        id: "0f000001-0000-4000-8000-0000000000ff".to_owned(),
+        name: "retired-box".to_owned(),
+        root_domain_id: "0f000002-0000-4000-8000-0000000000ff".to_owned(),
+        backend_id: "0f000003-0000-4000-8000-0000000000ff".to_owned(),
+        ..scenario.host("europa")?.clone()
+    };
+    sqlx::query(
+        "INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at,deleted_at)
+         VALUES (?,?,'linux','x64','revoked','retired','verified',1,1,?)",
+    )
+    .bind(&revoked.id)
+    .bind(&revoked.name)
+    .bind(t - 2 * HOUR)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes)
+         VALUES (?,?,NULL,'Physical',4000,8192,0)",
+    )
+    .bind(&revoked.root_domain_id)
+    .bind(&revoked.id)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
+         VALUES (?,?,?,'docker','linux','x64','ready',0,1,1)",
+    )
+    .bind(&revoked.backend_id)
+    .bind(&revoked.id)
+    .bind(&revoked.root_domain_id)
+    .execute(db)
+    .await?;
+    for index in 0..4_i64 {
+        let at = t - 12 * HOUR + index * 10 * MINUTE;
+        testdata::insert_start_attempt(db, &scenario.fleet, &revoked, at, PlacementEnd::Failed)
+            .await?;
+        testdata::insert_placement_failure(
+            db,
+            &revoked,
+            at,
+            PlacementFailureReason::AgentSessionLost,
+            None,
+        )
+        .await?;
+    }
     let io_host = scenario.host("io")?;
     for index in 0..20_i64 {
         testdata::insert_start_attempt(
@@ -904,10 +952,10 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         BTreeMap::from([("check".to_owned(), 1), ("test".to_owned(), 1)]),
         "the backfill moved the pathless GitLab job from other to test"
     );
-    // 44 starts in the day, 6 failing on Jupiter: 38/44 = 86.4% succeeded,
-    // (0.8636 - 0.80) / 0.19 = 33.
+    // 48 starts in the day: 6 failing on Jupiter and 4 on the revoked
+    // machine, so 38/48 = 79.2% succeeded, under the 80% floor: 0.
     assert_eq!(day["fleet"]["components"][1]["key"], "start-reliability");
-    assert_eq!(day["fleet"]["components"][1]["score"], 33);
+    assert_eq!(day["fleet"]["components"][1]["score"], 0);
     assert_eq!(
         component(host(day, &jupiter)?, "start-reliability"),
         0,

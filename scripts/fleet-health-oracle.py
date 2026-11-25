@@ -335,15 +335,17 @@ class Oracle:
             "failures": failures,
         }
 
-    def host_hours(self, hosts):
-        """Every machine's row for every hour of the window: an hour with no
-        samples still has one (0 minutes)."""
+    def host_hours(self):
+        """Every machine's row for every hour of the window, every machine
+        that ever enrolled included (a revoked one's starts still happened):
+        an hour with no samples still has one (0 minutes)."""
+        ids = [row["id"] for row in self.q("SELECT id FROM fleet_hosts ORDER BY id")]
         rows = []
         hour = self.first
         while hour < self.now:
             end = min(hour + HOUR, self.now)
-            for host in hosts:
-                rows.append(self.host_hour(host["id"], hour, end))
+            for host_id in ids:
+                rows.append(self.host_hour(host_id, hour, end))
             hour += HOUR
         return rows
 
@@ -890,7 +892,7 @@ class Oracle:
     def run(self):
         hosts = self.hosts()
         jobs = self.counted_jobs(self.first, self.now)
-        host_rows = self.host_hours(hosts)
+        host_rows = self.host_hours()
         speed = self.speed()
         fleet_score, fleet_components, fleet_queue, scored_hosts = self.score(hosts, jobs, host_rows, speed)
         live_fleet, host_live, live_concerns = self.live(hosts)

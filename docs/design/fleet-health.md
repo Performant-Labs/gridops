@@ -287,7 +287,7 @@ one reconcile interval (30 s by default), or the catch-up after downtime, one ho
 | Key | Label | Weight | Measures | 100 at | 0 at |
 |---|---|---|---|---|---|
 | `queue-wait` | Queue wait | 40 | p90 wait of every job in the window, from the merged histograms | ≤ 1 min | ≥ 10 min |
-| `start-reliability` | Start reliability | 20 | successful starts ÷ start attempts (machine-fault failures only) | ≥ 99% | ≤ 80% |
+| `start-reliability` | Start reliability | 20 | successful starts ÷ start attempts (machine-fault failures only), on every machine that started runners in the window, one revoked or deleted since included | ≥ 99% | ≤ 80% |
 | `infra-failures` | Infrastructure failures | 15 | infrastructure-failed jobs ÷ every completed final-attempt job (`job_count`: successes and failures alike, so an outage still scores) | 0% | ≥ 5% |
 | `capacity-fit` | Capacity fit | 15 | share of hours with jobs waiting over 1 min while the fleet's CPU used p50 was under 50% of budget | 0% | ≥ 25% |
 | `availability` | Availability | 10 | online minutes weighted by each machine's CPU budget ÷ covered minutes, each machine's online minutes capped at the covered minutes first (its sampled minute in progress can put it one over) | 100% | ≤ 80% |

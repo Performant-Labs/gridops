@@ -257,8 +257,8 @@ mod tests {
             row(HOUR, JobCategory::Check, 1, 7_163.0, empty, empty),
         ];
         let usage = categories(&rows);
-        assert_eq!(usage[0].cpu_hours, 0.03);
-        assert_eq!(usage[1].cpu_hours, 1.99, "7,163 s is 1.98972… h");
+        let hours: Vec<f64> = usage.iter().map(|entry| entry.cpu_hours).collect();
+        assert_eq!(hours, [0.03, 1.99], "100 s and 7,163 s (1.98972… h)");
         assert_eq!(
             hourly(&rows)[0].cpu_hours,
             BTreeMap::from([(JobCategory::Test, 0.03), (JobCategory::Check, 1.99)])
