@@ -6,7 +6,8 @@
 -- its memory limit. A placement now joins this queue when it ends (`failed`,
 -- `cleaned` or `uncertain`): the reconciler finishes it, and takes a failed
 -- or cleaned one off once nothing is left to do, so a pass reads the queue
--- and none of the history. An uncertain placement stays until it is cleaned.
+-- and none of the settled history. An uncertain placement stays until it
+-- is cleaned, as it was read on every pass before.
 --
 -- Whether a placement is finished at all rests on the triggers below. A later
 -- migration that rebuilds `workload_placements` or `runners` (create, copy,
@@ -54,15 +55,15 @@ BEGIN
 END;
 
 -- Placements that ended before this migration are queued by the reconciler,
--- only when they still have something to finish, in short batches by rowid
--- (`placement::queue_earlier_ended_placements`): up to `end_rowid`, the last
--- placement that existed here. Later ones are queued by the triggers above.
--- Nothing is written to the existing placements, so this migration takes no
--- longer on a large table than on an empty one.
+-- only when they still have something to finish, in short batches in
+-- placement id order (`placement::queue_earlier_ended_placements`), resuming
+-- after `last_id`: the id, unlike the rowid, survives a VACUUM. Later ones are
+-- queued by the triggers above. Nothing is written to the existing
+-- placements, so this migration takes no longer on a large table than on an
+-- empty one.
 CREATE TABLE placement_finish_sweep (
   singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-  next_rowid INTEGER NOT NULL,
-  end_rowid INTEGER NOT NULL
+  last_id TEXT NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1))
 ) STRICT;
-INSERT INTO placement_finish_sweep (singleton,next_rowid,end_rowid)
-SELECT 1,0,COALESCE(MAX(rowid),0) FROM workload_placements;
+INSERT INTO placement_finish_sweep (singleton,last_id,done) VALUES (1,'',0);

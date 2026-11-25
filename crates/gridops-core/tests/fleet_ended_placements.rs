@@ -90,17 +90,14 @@ impl Database {
 
     /// The database as migration 0052 found one with placements already
     /// ended: nothing queued, and the sweep of every existing placement still
-    /// to run.
+    /// to run from the first placement id.
     async fn as_before_the_queue(&self) -> Result<()> {
         sqlx::query("DELETE FROM placement_finish_queue")
             .execute(&self.db)
             .await?;
-        sqlx::query(
-            "UPDATE placement_finish_sweep
-                SET next_rowid=0,end_rowid=(SELECT COALESCE(MAX(rowid),0) FROM workload_placements)",
-        )
-        .execute(&self.db)
-        .await?;
+        sqlx::query("UPDATE placement_finish_sweep SET last_id='',done=0")
+            .execute(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -473,6 +470,36 @@ async fn placements_that_ended_before_the_queue_are_queued_only_with_work_left()
     d.close().await
 }
 
+#[tokio::test]
+async fn the_sweep_resumes_after_the_last_placement_id_it_reached() -> Result<()> {
+    let d = Database::new().await?;
+    let in_service = Ended {
+        runner: "online",
+        ..SETTLED
+    };
+    let mut made = d.many(4, &in_service).await?;
+    d.as_before_the_queue().await?;
+    // Halfway: the sweep goes by placement id, which a VACUUM (or a backup
+    // made with VACUUM INTO) never changes, unlike the rowid.
+    made.sort();
+    sqlx::query("UPDATE placement_finish_sweep SET last_id=?")
+        .bind(&made[1])
+        .execute(&d.db)
+        .await?;
+    assert_eq!(placement::queue_earlier_ended_placements(&d.db).await?, 2);
+    let mut queued: Vec<String> =
+        sqlx::query_scalar("SELECT placement_id FROM placement_finish_queue ORDER BY placement_id")
+            .fetch_all(&d.db)
+            .await?;
+    queued.sort();
+    assert_eq!(queued, made[2..]);
+    let done: bool = sqlx::query_scalar("SELECT done FROM placement_finish_sweep")
+        .fetch_one(&d.db)
+        .await?;
+    assert!(done);
+    d.close().await
+}
+
 /// SQLite VM instructions run by `work` on `pool`, a one-connection pool.
 async fn vm_steps<T>(
     pool: &SqlitePool,
@@ -542,6 +569,52 @@ async fn a_pass_reads_none_of_the_settled_started_failures() -> Result<()> {
     assert!(
         settled_once < 500,
         "the pass ran {settled_once} VM instructions with one placement left to finish"
+    );
+    counted.close().await;
+    d.close().await
+}
+
+#[tokio::test]
+async fn a_sweep_batch_reads_only_its_own_placements() -> Result<()> {
+    const SETTLED_BEFORE: usize = 3_000;
+    let d = Database::new().await?;
+    let mut made = d.many(SETTLED_BEFORE, &SETTLED).await?;
+    made.extend(
+        d.many(
+            3,
+            &Ended {
+                runner: "online",
+                ..SETTLED
+            },
+        )
+        .await?,
+    );
+    d.as_before_the_queue().await?;
+    // Only the last few placement ids are left to sweep.
+    made.sort();
+    let last = made.len() - 4;
+    sqlx::query("UPDATE placement_finish_sweep SET last_id=?")
+        .bind(&made[last])
+        .execute(&d.db)
+        .await?;
+    let counted = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&d.path))
+        .await?;
+    // Once uncounted, on a copy of the sweep's state, to load the schema.
+    counted.acquire().await?;
+    sqlx::query("SELECT 1 FROM placement_finish_sweep")
+        .execute(&counted)
+        .await?;
+    let (_, steps) = vm_steps(&counted, async {
+        Ok(placement::queue_earlier_ended_placements(&counted).await?)
+    })
+    .await?;
+    // A batch that visited the settled placements before its range would
+    // run several instructions for each of them.
+    assert!(
+        steps < 2_000,
+        "sweeping the last 3 placements ran {steps} VM instructions with {SETTLED_BEFORE} settled before them"
     );
     counted.close().await;
     d.close().await

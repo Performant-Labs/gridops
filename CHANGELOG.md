@@ -24,8 +24,8 @@ Known problems in the current release are in the README's
   placement ends (#259). It writes nothing to the existing placements, so it
   takes the same time on any database: 1 ms on a synthetic one with 60,000
   placements. After the upgrade the reconciler queues the placements that
-  ended earlier and still have work left, 500 rowids per short write
-  transaction (about 4 ms each), at most 40 batches (20,000 placements) a
+  ended earlier and still have work left, 500 placements per short write
+  transaction (about 5 ms each), at most 40 batches (20,000 placements) a
   pass, with a 25 ms pause between batches. Until the sweep reaches them,
   those earlier placements wait: a database with 100,000 placements is caught
   up after 5 passes, about 2.5 minutes at the default 30 s interval.
@@ -48,7 +48,8 @@ Known problems in the current release are in the README's
   ended, nearly every placement ever made, so each pass's work and the
   reconciler's memory grew with the history until the kernel killed it at its
   512 MiB limit, every 15 to 60 minutes. A pass now reads only the ended
-  placements with something left to do. (#259)
+  placements it has not finished yet, and uncertain ones until they are
+  cleaned. (#259)
 
 ## 0.2.0 - 2026-11-22
 
