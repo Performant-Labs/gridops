@@ -62,8 +62,8 @@ async function serveApi(page: Page, role: Role) {
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const key = fixtureKey(role, request);
-    const pathOnly = key.replace(/\?.*$/, "");
-    const answer = fixtures[key] ?? Object.entries(fixtures).find(([other]) => other.replace(/\?.*$/, "") === pathOnly)?.[1];
+    // Exact matches only (query included): a scan of one window never gets another's answer.
+    const answer = fixtures[key];
     if (!answer) {
       await route.fulfill({ status: 404, json: { error: `Not recorded: ${key}`, code: "not_found" } });
       return;
@@ -144,25 +144,45 @@ for (const theme of THEMES) {
       test("the fleet health page: every window, every concern, each machine expanded", async ({ page }) => {
         await open(page, { path: "/fleet/health", role: "admin", theme, ready: '[data-testid="fleet-health-sections"]' });
         const picker = page.getByRole("group", { name: "Window" });
-        for (const window of ["1h", "7d", "24h"]) {
-          await picker.locator("button").filter({ hasText: new RegExp(`^${window}$`) }).click();
+        const rows = page.locator('[data-health-section="machine-table"] button[aria-expanded]');
+        await expect(rows.first()).toBeVisible();
+        const machines = await rows.count();
+        // Switches to `window` and waits for its answer to be on screen: until then the page shows
+        // loading rows, which a scan must not mistake for the window.
+        const choose = async (window: string) => {
+          const button = picker.locator("button").filter({ hasText: new RegExp(`^${window}$`) });
+          if ((await button.getAttribute("aria-pressed")) !== "true") {
+            const answered = page.waitForResponse((response) => {
+              const url = new URL(response.url());
+              return url.pathname === "/api/v1/fleet/health" && url.searchParams.get("window") === window;
+            });
+            await button.click();
+            await answered;
+          }
           await expect(picker.getByRole("button", { pressed: true })).toHaveText(window);
+          await expect(rows).toHaveCount(machines);
           await page.waitForLoadState("networkidle");
+        };
+        for (const window of ["1h", "7d", "24h"]) {
+          await choose(window);
           await expectNoBlockingViolations(page, `health ${window}`);
         }
         const showAll = page.getByRole("button", { name: /^Show all/ });
         if (await showAll.count()) await showAll.click();
-        const rows = page.locator('[data-health-section="machine-table"] button[aria-expanded]');
-        await expect(rows.first()).toBeVisible();
         for (const window of ["24h", "1h", "7d"]) {
-          await picker.locator("button").filter({ hasText: new RegExp(`^${window}$`) }).click();
-          await page.waitForLoadState("networkidle");
-          for (let index = 0; index < (await rows.count()); index += 1) {
+          await choose(window);
+          for (let index = 0; index < machines; index += 1) {
             const row = rows.nth(index);
             if ((await row.getAttribute("aria-expanded")) !== "true") await row.click();
             await expect(row).toHaveAttribute("aria-expanded", "true");
             const machine = `health ${window}, every concern, machine ${index + 1} expanded`;
-            if (window === "24h") await expectNoBlockingViolations(page, machine);
+            // The usage chart's tooltip is scanned too: hovering the chart draws it (#256).
+            const usage = page.locator(`[id="${await row.getAttribute("aria-controls")}"] [data-testid="machine-usage-chart"]`);
+            if (await usage.count()) {
+              await usage.hover();
+              await expect(usage.locator(".recharts-tooltip-wrapper")).toContainText(" h");
+            }
+            await expectNoBlockingViolations(page, machine);
             await expectTicksInsideCharts(page, machine);
           }
         }
