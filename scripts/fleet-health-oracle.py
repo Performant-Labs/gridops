@@ -614,7 +614,7 @@ class Oracle:
                 {
                     "category": category,
                     "jobs": len(mine),
-                    "cpuHours": sum(job["cpu_seconds"] for job in mine) / 3600.0,
+                    "cpuHours": rnd(sum(job["cpu_seconds"] for job in mine) / 3600.0 * 100.0) / 100.0,
                     "medianDurationMs": None if median is None else rnd(median),
                     "p90QueueWaitMs": None if p90 is None else rnd(p90),
                 }
@@ -627,8 +627,11 @@ class Oracle:
         for job in jobs:
             if job["cpu_seconds"] > 0:
                 entry = hours.setdefault(job["hour"], {})
-                entry[job["category"]] = entry.get(job["category"], 0.0) + job["cpu_seconds"] / 3600.0
-        return [{"hour": hour, "cpuHours": hours[hour]} for hour in sorted(hours)]
+                entry[job["category"]] = entry.get(job["category"], 0.0) + job["cpu_seconds"]
+        return [
+            {"hour": hour, "cpuHours": {c: rnd(s / 3600.0 * 100.0) / 100.0 for c, s in hours[hour].items()}}
+            for hour in sorted(hours)
+        ]
 
     def trend(self):
         rows = self.q(

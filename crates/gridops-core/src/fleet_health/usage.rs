@@ -7,7 +7,7 @@
 //!
 //! The median and the p90 are estimated from the merged histograms with
 //! [`percentile`], as the queue-wait score is, and rounded to the
-//! millisecond. No I/O here.
+//! millisecond; CPU-hours are rounded to the hundredth. No I/O here.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +38,11 @@ impl Default for Sums {
 /// Seconds in an hour: CPU-seconds to CPU-hours.
 const SECONDS_PER_HOUR: f64 = 3_600.0;
 
+/// CPU-seconds as CPU-hours to the hundredth, as the page shows them.
+fn cpu_hours(cpu_seconds: f64) -> f64 {
+    (cpu_seconds / SECONDS_PER_HOUR * 100.0).round() / 100.0
+}
+
 /// The usage of every category with jobs in `rows`, in category order:
 /// final-attempt jobs, CPU-hours reserved, the median duration (p50 of the
 /// duration histograms) and the p90 queue wait (of the wait histograms).
@@ -58,7 +63,7 @@ pub fn categories<'a>(rows: impl IntoIterator<Item = &'a HourlyJobRow>) -> Vec<C
         .map(|(category, sums)| CategoryUsage {
             category,
             jobs: u32::try_from(sums.jobs).unwrap_or(u32::MAX),
-            cpu_hours: sums.cpu_seconds / SECONDS_PER_HOUR,
+            cpu_hours: cpu_hours(sums.cpu_seconds),
             median_duration_ms: percentile(&sums.duration, 0.5).map(|ms| ms.round() as i64),
             p90_queue_wait_ms: percentile(&sums.wait, 0.9).map(|ms| ms.round() as i64),
         })
@@ -76,12 +81,18 @@ pub fn hourly<'a>(rows: impl IntoIterator<Item = &'a HourlyJobRow>) -> Vec<Hourl
                 .entry(row.hour)
                 .or_default()
                 .entry(row.category)
-                .or_insert(0.0) += row.cpu_seconds_sum / SECONDS_PER_HOUR;
+                .or_insert(0.0) += row.cpu_seconds_sum;
         }
     }
     hours
         .into_iter()
-        .map(|(hour, cpu_hours)| HourlyUsage { hour, cpu_hours })
+        .map(|(hour, seconds)| HourlyUsage {
+            hour,
+            cpu_hours: seconds
+                .into_iter()
+                .map(|(category, seconds)| (category, cpu_hours(seconds)))
+                .collect(),
+        })
         .collect()
 }
 
@@ -225,6 +236,32 @@ mod tests {
                     cpu_hours: BTreeMap::from([(JobCategory::Check, 1.0)]),
                 },
             ]
+        );
+    }
+
+    /// CPU-hours go on the wire to the hundredth, as the page shows them
+    /// (the legend's tooltip, the usage chart): 100 CPU-seconds is 0.03 h,
+    /// not 0.027777….
+    #[test]
+    fn cpu_hours_are_rounded_to_the_hundredth() {
+        let empty = [0; HISTOGRAM_BUCKETS];
+        let rows = [
+            row(
+                HOUR,
+                JobCategory::Test,
+                1,
+                100.0,
+                empty,
+                [0, 0, 0, 0, 1, 0, 0, 0, 0],
+            ),
+            row(HOUR, JobCategory::Check, 1, 7_163.0, empty, empty),
+        ];
+        let usage = categories(&rows);
+        assert_eq!(usage[0].cpu_hours, 0.03);
+        assert_eq!(usage[1].cpu_hours, 1.99, "7,163 s is 1.98972… h");
+        assert_eq!(
+            hourly(&rows)[0].cpu_hours,
+            BTreeMap::from([(JobCategory::Test, 0.03), (JobCategory::Check, 1.99)])
         );
     }
 

@@ -68,10 +68,13 @@ impl SpeedCache {
         })
     }
 
-    /// Keeps `results`, read as of `at`, unless the cache holds a later read.
-    fn store(&self, at: i64, results: Arc<Vec<SpeedResult>>) {
+    /// Keeps `results`, read as of `at`. A background refresh keeps a
+    /// later read the cache already holds (`only_newer`); a caller's own
+    /// read replaces whatever is there, so a clock that moved back caches
+    /// its read instead of reading again on every call.
+    fn store(&self, at: i64, results: Arc<Vec<SpeedResult>>, only_newer: bool) {
         let mut entry = self.entry.lock().unwrap_or_else(PoisonError::into_inner);
-        if entry.as_ref().is_none_or(|(kept, _)| *kept <= at) {
+        if !only_newer || entry.as_ref().is_none_or(|(kept, _)| *kept <= at) {
             *entry = Some((at, results));
         }
     }
@@ -137,7 +140,7 @@ impl DbFleetHealthSource {
             return Ok(results);
         }
         let results = Arc::new(speed::speed_indexes(&self.db, window, now).await?);
-        cache.store(now, Arc::clone(&results));
+        cache.store(now, Arc::clone(&results), false);
         Ok(results)
     }
 
@@ -161,7 +164,7 @@ impl DbFleetHealthSource {
             {
                 let _reading = cache.reading.lock().await;
                 match speed::speed_indexes(&db, window, now).await {
-                    Ok(results) => cache.store(now, Arc::new(results)),
+                    Ok(results) => cache.store(now, Arc::new(results), true),
                     Err(error) => {
                         tracing::warn!(error = ?error, %window, "fleet health speed index refresh failed");
                     }
@@ -383,6 +386,11 @@ mod tests {
         assert_eq!(
             back, late,
             "recomputed at the earlier time from the same jobs"
+        );
+        assert_eq!(
+            fresh.cached_speed_at(HealthWindow::Day),
+            Some(NOW + 5 * MINUTE),
+            "a read at the earlier time replaces the later one, so the next call is cached"
         );
         harness.finish().await
     }

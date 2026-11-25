@@ -417,12 +417,13 @@ What the database source (#204) puts in the windowed fields:
 - **`speed`:** one entry per runner size the machine ran successful jobs at in the window,
   smallest first.
 - **`categories`** (fleet and machine): per category with jobs, in category order, the window's
-  final-attempt jobs, CPU-hours (`cpu_seconds_sum ÷ 3600`), the median duration (p50 of the merged
-  duration histograms) and the p90 queue wait (of the merged wait histograms), both interpolated as
-  the queue-wait score is and rounded to the millisecond (`fleet_health::usage`). The fleet's
-  folds every row, unmanaged runners' included; a machine's folds its own.
-- **`usage`:** the machine's CPU-hours by category per hour, oldest first, one entry per hour with
-  any CPU-hours and in it each category with some.
+  final-attempt jobs, CPU-hours (`cpu_seconds_sum ÷ 3600`, to the hundredth), the median duration
+  (p50 of the merged duration histograms) and the p90 queue wait (of the merged wait histograms),
+  both interpolated as the queue-wait score is and rounded to the millisecond
+  (`fleet_health::usage`). The fleet's folds every row, unmanaged runners' included; a machine's
+  folds its own.
+- **`usage`:** the machine's CPU-hours by category per hour (to the hundredth), oldest first, one
+  entry per hour with any CPU-hours and in it each category with some.
 - **`trend`:** the window's snapshots recorded in `[now − W, now]`, oldest first; none yet is an
   empty list ("No trend yet"). Past snapshots are never made up.
 
