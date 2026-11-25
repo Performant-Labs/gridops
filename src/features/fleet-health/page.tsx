@@ -53,7 +53,11 @@ export function saveHealthWindow(window: HealthWindow): void {
   }
 }
 
-const WINDOW_LABELS: Record<HealthWindow, string> = { "1h": "1 hour", "24h": "24 hours", "7d": "7 days" };
+/**
+ * Each window button's accessible name: its visible text first, then the window in words
+ * ("24h, 24 hours"), so a voice-control user can say what they see (WCAG 2.5.3, #256).
+ */
+export const WINDOW_NAMES: Record<HealthWindow, string> = { "1h": "1h, 1 hour", "24h": "24h, 24 hours", "7d": "7d, 7 days" };
 
 /**
  * `/fleet/health`: the fleet's health over a window. The frame (#195) lays out every section and
@@ -77,7 +81,8 @@ export function FleetHealthPage() {
         actions={
           <>
             <WindowPicker onChange={choose} value={window_} />
-            <Button disabled={health.refreshing} onClick={health.refresh} size="sm" variant="ghost">
+            {/* Below `sm` the button shows only its icon, so the name comes from `aria-label` (#256). */}
+            <Button aria-label="Refresh" disabled={health.refreshing} onClick={health.refresh} size="sm" variant="ghost">
               <RefreshCw className={cn(health.refreshing && "animate-spin")} /><span className="hidden sm:inline">Refresh</span>
             </Button>
           </>
@@ -162,7 +167,7 @@ function WindowPicker({ onChange, value }: { onChange: (value: HealthWindow) => 
     <div aria-label="Window" className="flex rounded-md border border-border-strong p-0.5" role="group">
       {HEALTH_WINDOWS.map((option) => (
         <button
-          aria-label={WINDOW_LABELS[option]}
+          aria-label={WINDOW_NAMES[option]}
           aria-pressed={value === option}
           className={cn("h-6 rounded-[4px] px-2 text-xs font-medium transition-colors", value === option ? "bg-selected text-foreground" : "text-muted-foreground hover:text-foreground")}
           key={option}

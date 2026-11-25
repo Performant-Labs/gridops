@@ -5,7 +5,7 @@
  */
 import type { JobCategory } from "./types";
 
-export { FAIR_SCORE, GOOD_SCORE, TRACK_COLOR, bandColor, bandTone, scoreBand, type ScoreBand } from "~/components/charts/chart-theme";
+export { FAIR_SCORE, GOOD_SCORE, TRACK_COLOR, bandColor, bandTextColor, bandTone, scoreBand, type ScoreBand } from "~/components/charts/chart-theme";
 
 const CATEGORY_LABELS: Record<JobCategory, string> = {
   test: "Test",

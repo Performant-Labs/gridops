@@ -244,9 +244,10 @@ export function JobCategoriesSection() {
               <span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground" title="Jobs completed in the last 7 days this rule would classify">
                 {overLimits ? "—" : preview?.rules[index]?.matches ?? "—"}
               </span>
-              <Button aria-label="Move up" disabled={index === 0} onClick={() => move(index, -1)} size="icon-xs" variant="ghost"><ChevronUp /></Button>
-              <Button aria-label="Move down" disabled={index === rules.length - 1} onClick={() => move(index, 1)} size="icon-xs" variant="ghost"><ChevronDown /></Button>
-              <Button aria-label="Delete rule" onClick={() => remove(index)} size="icon-xs" variant="ghost"><Trash2 /></Button>
+              {/* Each name carries the rule's number, as the fields' do, so a screen reader says which rule it acts on (#258). */}
+              <Button aria-label={`Move rule ${index + 1} up`} disabled={index === 0} onClick={() => move(index, -1)} size="icon-xs" variant="ghost"><ChevronUp /></Button>
+              <Button aria-label={`Move rule ${index + 1} down`} disabled={index === rules.length - 1} onClick={() => move(index, 1)} size="icon-xs" variant="ghost"><ChevronDown /></Button>
+              <Button aria-label={`Delete rule ${index + 1}`} onClick={() => remove(index)} size="icon-xs" variant="ghost"><Trash2 /></Button>
             </div>
             {rowError ? <p className="text-xs text-danger">{rowError}</p> : null}
           </div>

@@ -1,5 +1,5 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowRight, ArrowUpRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow, Zap } from "lucide-react";
+import { ArrowRight, Bot, Boxes, CircleGauge, Github, Plus, Radio, RefreshCw, Settings2, Workflow, Zap } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 
@@ -19,8 +19,7 @@ import { AttentionAlerts } from "~/features/dashboard/attention-alerts";
 import { OldestQueuedJob } from "~/features/dashboard/queued-job-reference";
 import { QueuedJobsList } from "~/features/dashboard/queued-jobs";
 import { FleetWorkloadSection } from "~/features/fleet/fleet-workload-section";
-import { useFleetHealth } from "~/features/fleet-health/api";
-import { metricTiles } from "~/features/dashboard/metric-tiles";
+import { MetricStrip } from "~/features/dashboard/metric-strip";
 import type { CapacityHistory, CapacityWindow, DashboardOverview, MachinePerformance, QueuedJobsPage, RunnerStartPhase } from "~/features/dashboard/types";
 import { syncGitHubAction } from "~/features/operations/operations.functions";
 import { platformForPool } from "~/features/platform-connections/registry";
@@ -32,13 +31,14 @@ import { useRefreshInterval, useRefreshSignal } from "~/lib/use-refresh-interval
 import { cn, formatAge, formatDateTime } from "~/lib/utils";
 
 export const Route = createFileRoute("/_app/")({
-  loader: async () => {
+  loader: async ({ context }) => {
     // Agent runs need a signed-in viewer; without one the overview shows none.
     const [overview, agentRuns] = await Promise.all([
       getDashboardOverview(),
       getAgentRunsPage().then((page) => page.items, () => null),
     ]);
-    return { ...overview, agentRuns: overview.authenticated ? agentRuns : null };
+    // Fleet health is for administrators only, so only theirs asks for it (#256).
+    return { ...overview, agentRuns: overview.authenticated ? agentRuns : null, admin: context.viewer?.role === "admin" };
   },
   pendingComponent: () => <ResourcePageLoading icon={CircleGauge} title="Overview" />,
   component: OverviewPage,
@@ -60,7 +60,7 @@ function OverviewPage() {
         actions={
           <>
             {data.authenticated ? (
-              <AsyncActionButton action={() => syncGitHubAction()} icon={<RefreshCw />} success="GitHub installation access refreshed." variant="ghost">
+              <AsyncActionButton action={() => syncGitHubAction()} icon={<RefreshCw />} success="GitHub installation access refreshed." title="Refresh GitHub" variant="ghost">
                 <span className="hidden sm:inline">Refresh GitHub</span>
               </AsyncActionButton>
             ) : (
@@ -77,7 +77,7 @@ function OverviewPage() {
         <div className="w-full space-y-8 px-4 py-6 sm:px-6 lg:px-8">
           {!configurationComplete ? <ConfigurationCallout data={data} /> : null}
           {data.authenticated && data.slo.alerts.length ? <AttentionAlerts alerts={data.slo.alerts} /> : null}
-          <MetricStrip data={data} />
+          <MetricStrip admin={data.admin} data={data} />
           <div className="grid gap-8 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,1fr)]">
             <div className="min-w-0 space-y-8">
               <CapacitySection installations={data.installations} />
@@ -116,27 +116,6 @@ function ConfigurationCallout({ data }: { data: DashboardOverview }) {
     >
       Still required: {missing.join(", ")}. Operational controls stay disabled until credentials are complete.
     </Callout>
-  );
-}
-
-function MetricStrip({ data }: { data: DashboardOverview }) {
-  // Administrators only: a member's 403 leaves `health.data` empty and the strip as it was.
-  const health = useFleetHealth("24h", { enabled: data.authenticated });
-  const metrics = metricTiles(data.metrics, health.data);
-  return (
-    <section aria-label="Runner metrics" className={cn("grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border", metrics.length > 5 ? "xl:grid-cols-6" : "xl:grid-cols-5")}>
-      {metrics.map((metric) => (
-        <Link className="group flex flex-col gap-1 bg-panel px-4 py-3.5 transition-colors hover:bg-hover" key={metric.label} to={metric.to}>
-          <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            <StatusDot pulse={false} tone={metric.tone} />
-            <span className="truncate">{metric.label}</span>
-            <ArrowUpRight className="ml-auto size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
-          </span>
-          <span className="tabular text-2xl font-semibold tracking-tight text-foreground">{metric.value}</span>
-          <span className={cn("text-xs", metric.tone === "danger" ? "text-danger" : "text-faint")}>{metric.hint}</span>
-        </Link>
-      ))}
-    </section>
   );
 }
 
@@ -282,7 +261,7 @@ function PoolsSection({ pools, unmatched }: { pools: DashboardOverview["pools"];
             <span className="min-w-0 flex-1 truncate font-medium">{pool.name}</span>
             <span className="hidden text-xs capitalize text-muted-foreground sm:inline">{platformForPool(pool).pool.scopeLabel(pool)} · {pool.mode}</span>
             <CapacityMeter busy={pool.busy} desired={pool.desired} online={pool.online} />
-            <span className={cn("tabular w-20 text-right text-xs", pool.queue > 0 ? "text-warning" : "text-faint")}>{pool.queue} queued</span>
+            <span className={cn("tabular w-20 text-right text-xs", pool.queue > 0 ? "text-warning-text" : "text-faint")}>{pool.queue} queued</span>
           </Link>
         ))}
         {unmatched > 0 ? (
@@ -368,7 +347,7 @@ function MachineSpeed({ machine }: { machine: MachinePerformance }) {
     : `Takes ${percent}% of the usual time, compared on ${machine.comparedJobs} ${machine.comparedJobs === 1 ? "job" : "jobs"}`;
   return (
     <Tooltip content={hint}>
-      <span className={cn("tabular relative z-[1] w-24 shrink-0 text-right text-xs", percent === null ? "text-faint" : percent < 100 ? "text-success" : percent > 100 ? "text-warning" : "text-muted-foreground")}>{label}</span>
+      <span className={cn("tabular relative z-[1] w-24 shrink-0 text-right text-xs", percent === null ? "text-faint" : percent < 100 ? "text-success-text" : percent > 100 ? "text-warning-text" : "text-muted-foreground")}>{label}</span>
     </Tooltip>
   );
 }
@@ -399,7 +378,7 @@ function AgentRunsSection({ runs }: { runs: AgentRunListItem[] }) {
       <SectionHeading
         actions={
           <span className="flex items-center gap-2">
-            {active.length ? <span className="text-xs text-progress">{active.length} active</span> : null}
+            {active.length ? <span className="text-xs text-progress-text">{active.length} active</span> : null}
             <ViewAll to="/agent-runs" />
           </span>
         }

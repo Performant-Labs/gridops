@@ -45,7 +45,7 @@ function RepositoriesPage() {
       <PageHeader
         actions={
           <>
-            <Button disabled={repositories.isFetching} onClick={() => void repositories.refetch()} size="sm" variant="ghost">
+            <Button aria-label="Refresh" disabled={repositories.isFetching} onClick={() => void repositories.refetch()} size="sm" variant="ghost">
               <RefreshCw className={cn(repositories.isFetching && "animate-spin")} /><span className="hidden sm:inline">Refresh</span>
             </Button>
             <Link className={buttonVariants({ size: "sm" })} to="/runner-pools/new"><Plus />New pool</Link>

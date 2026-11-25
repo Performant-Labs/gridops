@@ -37,7 +37,7 @@ jobs:
     # of logins). A fork pull request, or any pull request while that variable
     # is unset, runs hosted.
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(vars.TRUSTED_CI_AUTHORS || '[]'), github.event.pull_request.user.login))) && 'self-hosted-linux' || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -67,6 +67,22 @@ jobs:
 
       - name: Run application tests
         run: npm test
+
+      # #256: axe over the fleet health page, the Overview and the job-category settings in light
+      # and dark at 360 and 1280 px (tests/a11y/), on the build above with recorded API answers.
+      # Headless Chromium only; a hosted runner also installs its system libraries.
+      - name: Install the headless browser
+        timeout-minutes: 5
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
+            npx playwright install --with-deps --only-shell chromium
+          else
+            npx playwright install --only-shell chromium
+          fi
+
+      - name: Run the accessibility tests
+        timeout-minutes: 5
+        run: npm run test:a11y
 
       - name: Test the build number script
         run: sh scripts/test-build-info.sh

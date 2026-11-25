@@ -449,7 +449,7 @@ function RecoverSection({ host }: { host: HostItem }) {
 }
 
 const logLevelClass: Record<AgentLog["level"], string> = {
-  error: "text-destructive",
+  error: "text-danger",
   warn: "text-amber-600 dark:text-amber-400",
   info: "text-muted-foreground",
   debug: "text-faint",
@@ -463,7 +463,7 @@ function AgentLogDrawer({ hostId, name }: { hostId: string; name: string }) {
   return (
     <Dialog onOpenChange={setOpen} open={open}>
       <DialogTrigger asChild>
-        <Button size="sm" variant="outline"><ScrollText /><span className="hidden sm:inline">Agent log</span></Button>
+        <Button aria-label="Agent log" size="sm" variant="outline"><ScrollText /><span className="hidden sm:inline">Agent log</span></Button>
       </DialogTrigger>
       <SheetContent className="max-w-3xl" description="Kept for a day." heading={`Agent log · ${name}`}>
         {open ? <AgentLog hostId={hostId} /> : null}

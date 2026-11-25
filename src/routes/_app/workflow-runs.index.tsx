@@ -90,7 +90,7 @@ function JobSummary({ run }: { run: WorkflowRun }) {
       {run.runsOn?.slice(0, 3).map((platform) => <PlatformBadge key={`${platform.kind}:${platform.machine?.id ?? ""}:${platform.os}:${platform.architecture}`} platform={platform} />)}
       {(run.runsOn?.length ?? 0) > 3 ? <span className="text-faint">+{(run.runsOn?.length ?? 0) - 3}</span> : null}
       {run.failedJobs ? <span className="text-danger">{run.failedJobs} failed</span> : null}
-      {run.activeJobs ? <span className="text-progress">{run.activeJobs} active</span> : null}
+      {run.activeJobs ? <span className="text-progress-text">{run.activeJobs} active</span> : null}
       <span className="text-faint">{run.jobCount} {run.jobCount === 1 ? "job" : "jobs"}</span>
     </span>
   );

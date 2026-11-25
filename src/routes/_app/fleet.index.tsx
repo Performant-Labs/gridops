@@ -34,7 +34,7 @@ function MachinesPage() {
       <PageHeader
         actions={
           <>
-            <Button disabled={hosts.isFetching} onClick={() => void hosts.refetch()} size="sm" variant="ghost">
+            <Button aria-label="Refresh" disabled={hosts.isFetching} onClick={() => void hosts.refetch()} size="sm" variant="ghost">
               <RefreshCw className={cn(hosts.isFetching && "animate-spin")} /><span className="hidden sm:inline">Refresh</span>
             </Button>
             <AddMachineButton />

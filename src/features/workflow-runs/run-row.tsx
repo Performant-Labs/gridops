@@ -46,7 +46,7 @@ export function RunRow({ run, meta, trailing, className }: { run: RunRowData; me
       {meta}
       {run.waitingJobs && run.status !== "completed" ? (
         <Tooltip content={`${run.waitingJobs} ${run.waitingJobs === 1 ? "job hasn't" : "jobs haven't"} started yet`}>
-          <span className="tabular relative z-[1] hidden shrink-0 text-xs text-warning sm:inline">{run.waitingJobs} waiting</span>
+          <span className="tabular relative z-[1] hidden shrink-0 text-xs text-warning-text sm:inline">{run.waitingJobs} waiting</span>
         </Tooltip>
       ) : null}
       {run.prioritised && run.status !== "completed" ? (
