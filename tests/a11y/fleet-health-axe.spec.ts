@@ -80,9 +80,10 @@ test.afterAll(() => {
   writeFileSync(RECORD, `${JSON.stringify(sorted, null, 2)}\n`);
 });
 
-/** Opens `path` signed in as `role`, in `theme`, and waits for `ready`. */
-async function open(page: Page, { path, role, theme, ready }: { path: string; role: Role; theme: "light" | "dark"; ready: string }) {
+/** Opens `path` signed in as `role`, in `theme` (and on the health `window`), and waits for `ready`. */
+async function open(page: Page, { path, role, theme, ready, window: healthWindow }: { path: string; role: Role; theme: "light" | "dark"; ready: string; window?: string }) {
   await page.addInitScript((value) => window.localStorage.setItem("gridops-theme", value), theme);
+  if (healthWindow) await page.addInitScript((value) => window.localStorage.setItem("gridops.fleetHealth.window", value), healthWindow);
   await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
   await serveApi(page, role);
   await page.goto(path);
@@ -110,6 +111,31 @@ async function expectNoBlockingViolations(page: Page, state: string) {
       violation.nodes.map((node) => `${violation.impact} ${violation.id}: ${node.target.join(" ")} (${node.failureSummary?.split("\n").slice(1).join("; ").trim()})`),
     );
   expect.soft(blocking, `${state}: serious or critical axe violations`).toEqual([]);
+}
+
+/**
+ * The health page's machine rows, and `choose(window)`: switches to `window` with the picker and
+ * waits for its answer to be on screen. Until then the page shows loading rows, which a scan must
+ * not mistake for the window.
+ */
+function healthPage(page: Page) {
+  const picker = page.getByRole("group", { name: "Window" });
+  const rows = page.locator('[data-health-section="machine-table"] button[aria-expanded]');
+  const choose = async (window: string) => {
+    const button = picker.locator("button").filter({ hasText: new RegExp(`^${window}$`) });
+    if ((await button.getAttribute("aria-pressed")) !== "true") {
+      const answered = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === "/api/v1/fleet/health" && url.searchParams.get("window") === window;
+      });
+      await button.click();
+      await answered;
+    }
+    await expect(picker.getByRole("button", { pressed: true })).toHaveText(window);
+    await expect(rows.first()).toBeVisible();
+    await page.waitForLoadState("networkidle");
+  };
+  return { choose, rows };
 }
 
 /**
@@ -141,36 +167,25 @@ for (const theme of THEMES) {
         await expectTicksInsideCharts(page, "overview");
       });
 
-      test("the fleet health page: every window, every concern, each machine expanded", async ({ page }) => {
+      test("the fleet health page on each window, switched to with the picker", async ({ page }) => {
         await open(page, { path: "/fleet/health", role: "admin", theme, ready: '[data-testid="fleet-health-sections"]' });
-        const picker = page.getByRole("group", { name: "Window" });
-        const rows = page.locator('[data-health-section="machine-table"] button[aria-expanded]');
-        await expect(rows.first()).toBeVisible();
-        const machines = await rows.count();
-        // Switches to `window` and waits for its answer to be on screen: until then the page shows
-        // loading rows, which a scan must not mistake for the window.
-        const choose = async (window: string) => {
-          const button = picker.locator("button").filter({ hasText: new RegExp(`^${window}$`) });
-          if ((await button.getAttribute("aria-pressed")) !== "true") {
-            const answered = page.waitForResponse((response) => {
-              const url = new URL(response.url());
-              return url.pathname === "/api/v1/fleet/health" && url.searchParams.get("window") === window;
-            });
-            await button.click();
-            await answered;
-          }
-          await expect(picker.getByRole("button", { pressed: true })).toHaveText(window);
-          await expect(rows).toHaveCount(machines);
-          await page.waitForLoadState("networkidle");
-        };
+        const { choose } = healthPage(page);
         for (const window of ["1h", "7d", "24h"]) {
           await choose(window);
           await expectNoBlockingViolations(page, `health ${window}`);
         }
-        const showAll = page.getByRole("button", { name: /^Show all/ });
-        if (await showAll.count()) await showAll.click();
-        for (const window of ["24h", "1h", "7d"]) {
+      });
+
+      for (const window of ["24h", "1h", "7d"]) {
+        test(`the fleet health page on ${window}: every concern, each machine expanded`, async ({ page }) => {
+          // Five machines, each scanned: slower than the default 30 s on a busy runner.
+          test.setTimeout(120_000);
+          await open(page, { path: "/fleet/health", role: "admin", theme, ready: '[data-testid="fleet-health-sections"]', window });
+          const { choose, rows } = healthPage(page);
           await choose(window);
+          const showAll = page.getByRole("button", { name: /^Show all/ });
+          if (await showAll.count()) await showAll.click();
+          const machines = await rows.count();
           for (let index = 0; index < machines; index += 1) {
             const row = rows.nth(index);
             if ((await row.getAttribute("aria-expanded")) !== "true") await row.click();
@@ -185,8 +200,8 @@ for (const theme of THEMES) {
             await expectNoBlockingViolations(page, machine);
             await expectTicksInsideCharts(page, machine);
           }
-        }
-      });
+        });
+      }
 
       test("the job-categories settings", async ({ page }) => {
         await open(page, { path: "/settings/general", role: "admin", theme, ready: 'text="Job categories"' });
