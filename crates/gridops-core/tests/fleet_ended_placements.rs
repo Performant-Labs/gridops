@@ -4,7 +4,7 @@
 //! the reconciler's work and memory grow with the fleet's history until it
 //! was killed at its memory limit.
 
-use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::Result;
 use gridops_core::{
@@ -17,6 +17,11 @@ use gridops_core::{
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
+
+/// How many placements [`ended_placement`] has made. Each is a second older
+/// than the one before it, so the oldest-first order is the reverse of the
+/// order they are made in, not the table's own order.
+static MADE: AtomicI64 = AtomicI64::new(0);
 
 async fn database() -> Result<(std::path::PathBuf, SqlitePool)> {
     let directory =
@@ -52,7 +57,8 @@ async fn ended_placement(
         Uuid::new_v4().to_string(),
         Uuid::new_v4().to_string(),
     );
-    let at = gridops_core::now_millis() - 3_600_000;
+    // Each placement is a second older than the one made before it.
+    let at = gridops_core::now_millis() - 3_600_000 - 1_000 * MADE.fetch_add(1, Ordering::Relaxed);
     let mut tx = db.begin().await?;
     sqlx::query(
         "INSERT INTO runners (id,pool_id,name,status,deleted_at,created_at,updated_at)
@@ -148,7 +154,7 @@ async fn ended_placement(
     Ok(placement)
 }
 
-async fn to_finish(db: &SqlitePool) -> Result<BTreeSet<String>> {
+async fn to_finish(db: &SqlitePool) -> Result<Vec<String>> {
     Ok(placement::ended_placements_to_finish(db)
         .await?
         .into_iter()
@@ -168,12 +174,13 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         absence_recorded: true,
         holds_capacity: false,
     };
-    let mut expected = BTreeSet::new();
-    let mut ignored = BTreeSet::new();
+    // In the order they are made; the newest first.
+    let mut expected = Vec::new();
+    let mut ignored = Vec::new();
 
     // Settled: the runner is retired and nothing is held or unrecorded.
-    ignored.insert(ended_placement(&db, &fleet, host, &settled).await?);
-    ignored.insert(
+    ignored.push(ended_placement(&db, &fleet, host, &settled).await?);
+    ignored.push(
         ended_placement(
             &db,
             &fleet,
@@ -188,7 +195,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
     // A failed start whose runner is retired: abandonment never touches a
     // started placement, so there is nothing left, even with no absence
     // recorded.
-    ignored.insert(
+    ignored.push(
         ended_placement(
             &db,
             &fleet,
@@ -203,7 +210,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         .await?,
     );
     // An unstarted failure that abandonment already settled.
-    ignored.insert(
+    ignored.push(
         ended_placement(
             &db,
             &fleet,
@@ -218,7 +225,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         .await?,
     );
     // Not ended: followed elsewhere in the pass.
-    ignored.insert(
+    ignored.push(
         ended_placement(
             &db,
             &fleet,
@@ -233,7 +240,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
     );
 
     // Its runner is still in service and must be retired.
-    expected.insert(
+    expected.push(
         ended_placement(
             &db,
             &fleet,
@@ -246,7 +253,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         .await?,
     );
     // A failed start whose runner still waits: it is retried or retired.
-    expected.insert(
+    expected.push(
         ended_placement(
             &db,
             &fleet,
@@ -260,7 +267,7 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         .await?,
     );
     // Uncertain placements are cleaned up until they are cleaned.
-    expected.insert(
+    expected.push(
         ended_placement(
             &db,
             &fleet,
@@ -299,9 +306,11 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         },
     )
     .await?;
-    expected.insert(unrecorded.clone());
-    expected.insert(holding.clone());
+    expected.push(unrecorded.clone());
+    expected.push(holding.clone());
 
+    // Oldest first.
+    expected.reverse();
     let found = to_finish(&db).await?;
     assert_eq!(found, expected, "settled: {ignored:?}");
 
@@ -310,9 +319,8 @@ async fn only_ended_placements_with_work_left_are_finished() -> Result<()> {
         placement::abandon_unstarted(&db, placement_id.parse()?, &PlacementFailure::unknown())
             .await?;
     }
-    let found = to_finish(&db).await?;
-    assert!(!found.contains(&unrecorded) && !found.contains(&holding));
-    assert_eq!(found.len(), expected.len() - 2);
+    expected.retain(|placement_id| ![&unrecorded, &holding].contains(&placement_id));
+    assert_eq!(to_finish(&db).await?, expected);
 
     db.close().await;
     std::fs::remove_dir_all(directory)?;

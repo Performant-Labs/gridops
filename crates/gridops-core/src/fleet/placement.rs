@@ -79,15 +79,15 @@ pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placem
 /// - a `failed` one that was never started and still holds capacity or has
 ///   no recorded absence, which [`abandon_unstarted`] releases and records.
 ///
-/// A placement that ended and was settled is never read again. These are
-/// almost every placement ever made, and reading and finishing them all on
-/// every pass made each pass's work, and the reconciler's memory, grow with
-/// the fleet's history until the reconciler was killed at its memory limit.
+/// The settled ones are left out: they are nearly every placement ever made,
+/// and reading and finishing them all on every pass made each pass's work,
+/// and the reconciler's memory, grow with the fleet's history until the
+/// reconciler was killed at its memory limit.
 pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placement>, FleetError> {
-    // Each branch is read through an index, so the read costs what is left
-    // to do, not the history: in-service runners are found from
-    // `runners(pool_id,status)` (the `CROSS JOIN` keeps that order), not by
-    // visiting every cleaned placement.
+    // Each branch reads through an index and never visits a settled
+    // placement: in-service runners are found from the `runners` index on
+    // `(pool_id,…,status)` (the `CROSS JOIN` keeps that order), and unsettled
+    // failures from migration 0052's partial indexes, which hold only them.
     let rows = sqlx::query(select_placements!(
         "WHERE p.id IN (
             SELECT id FROM workload_placements WHERE state='uncertain'
@@ -99,13 +99,18 @@ pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placeme
                AND ended.state IN ('failed','cleaned')
             UNION
             SELECT failed.id FROM workload_placements failed
+                INDEXED BY workload_placements_unsettled_failure_idx
              WHERE failed.state='failed'
+               AND (failed.local_absence_proven_at IS NULL
+                    OR failed.delayed_starts_excluded_at IS NULL)
                AND NOT EXISTS (SELECT 1 FROM host_commands c
                                 WHERE c.placement_id=failed.id AND c.kind='start_runner')
-               AND (failed.local_absence_proven_at IS NULL
-                    OR failed.delayed_starts_excluded_at IS NULL
-                    OR EXISTS (SELECT 1 FROM capacity_allocations a
-                                WHERE a.placement_id=failed.id AND a.state!='released')))
+            UNION
+            SELECT held.id FROM capacity_allocations a INDEXED BY capacity_allocations_held_idx
+              CROSS JOIN workload_placements held ON held.id=a.placement_id
+             WHERE a.state!='released' AND held.state='failed'
+               AND NOT EXISTS (SELECT 1 FROM host_commands c
+                                WHERE c.placement_id=held.id AND c.kind='start_runner'))
           ORDER BY p.created_at,p.id"
     ))
     .fetch_all(pool)
