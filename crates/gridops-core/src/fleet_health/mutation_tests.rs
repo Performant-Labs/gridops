@@ -174,6 +174,8 @@ fn each_concern_threshold_holds_one_unit_either_side() {
         cpu_budget_millis: 4_000,
         memory_budget_mib: 1_000,
         disk_total_bytes: None,
+        created_at: None,
+        retired_at: None,
     };
     let slow = |index: f64| SpeedResult {
         host_id: "h".to_owned(),
@@ -676,6 +678,8 @@ fn host_info(id: &str, cpu: u32, memory: u32, disk: Option<u64>) -> HostInfo {
         cpu_budget_millis: cpu,
         memory_budget_mib: memory,
         disk_total_bytes: disk,
+        created_at: None,
+        retired_at: None,
     }
 }
 

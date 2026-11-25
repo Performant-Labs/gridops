@@ -250,7 +250,9 @@ pub async fn speed_indexes(
 /// join whatever the window's volume. The name is grouped as stored; the
 /// shard suffix is stripped in [`job_key`], in Rust. A job's machine is its
 /// runner's newest `runners` row and that row's newest placement, as #191's
-/// rollup reads it, so duplicate rows never count a job twice.
+/// rollup reads it, so duplicate rows never count a job twice. Only a job on
+/// a machine that is approved, not deleted, and existed when the job
+/// completed counts (#262, [`super::machines`]).
 ///
 /// # Errors
 /// The read failed.
@@ -259,7 +261,7 @@ async fn grouped_durations(
     from: i64,
     to: i64,
 ) -> anyhow::Result<Vec<(String, String, String, String, i64, String)>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, i64, String)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64, String)>(concat!(
         r#"SELECT repo.full_name, run.workflow_name, job.name, p.host_id, p.cpu_millis,
                   GROUP_CONCAT(job.completed_at - job.started_at) AS durations
              FROM workflow_jobs job
@@ -274,6 +276,12 @@ async fn grouped_durations(
                      WHERE latest.runner_id = r.id
                      ORDER BY latest.generation DESC, latest.updated_at DESC, latest.id DESC
                      LIMIT 1)
+             JOIN fleet_hosts fh ON fh.id = p.host_id
+              AND "#,
+        crate::fleet_machine_approved!("fh"),
+        " AND ",
+        crate::fleet_machine_existed_at!("fh", "job.completed_at"),
+        r#"
              LEFT JOIN workflow_job_sync sync ON sync.job_id = job.id
             WHERE job.status = 'completed'
               AND job.conclusion = 'success'
@@ -288,7 +296,7 @@ async fn grouped_durations(
                      WHERE later.run_id = job.run_id
                        AND later_sync.run_attempt > sync.run_attempt)
             GROUP BY repo.full_name, run.workflow_name, job.name, p.host_id, p.cpu_millis"#,
-    )
+    ))
     .bind(from)
     .bind(to)
     .fetch_all(db)
@@ -307,7 +315,8 @@ async fn grouped_durations(
 /// and its group's) counts once, by its row with the lowest id (looked up on
 /// `gitlab_jobs_connection_job_unique` per connection of the instance). Its
 /// machine is the newest `runners` row with its
-/// `gitlab_runner_id` on the same instance, and that row's newest placement.
+/// `gitlab_runner_id` on the same instance, and that row's newest placement,
+/// on a machine [`grouped_durations`] would count (#262).
 ///
 /// # Errors
 /// The read failed.
@@ -316,7 +325,7 @@ async fn grouped_gitlab_durations(
     from: i64,
     to: i64,
 ) -> anyhow::Result<Vec<(String, String, String, String, i64, String)>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, i64, String)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, i64, String)>(concat!(
         r#"SELECT connection.base_url, job.project_path, job.job_name, p.host_id, p.cpu_millis,
                   GROUP_CONCAT(job.completed_at - job.started_at) AS durations
              FROM gitlab_jobs job
@@ -333,6 +342,12 @@ async fn grouped_gitlab_durations(
                      WHERE latest.runner_id = r.id
                      ORDER BY latest.generation DESC, latest.updated_at DESC, latest.id DESC
                      LIMIT 1)
+             JOIN fleet_hosts fh ON fh.id = p.host_id
+              AND "#,
+        crate::fleet_machine_approved!("fh"),
+        " AND ",
+        crate::fleet_machine_existed_at!("fh", "job.completed_at"),
+        r#"
             WHERE job.completed_at >= ?
               AND job.completed_at < ?
               AND job.status = 'success'
@@ -348,7 +363,7 @@ async fn grouped_gitlab_durations(
                        AND other.id < job.id)
             GROUP BY connection.base_url, job.project_path, job.job_name, p.host_id,
                      p.cpu_millis"#,
-    )
+    ))
     .bind(from)
     .bind(to)
     .fetch_all(db)
@@ -1169,6 +1184,77 @@ mod tests {
         let results = harness.indexes().await?;
         let callisto = harness.result(&results, "callisto", 2_000);
         assert!(callisto.is_err(), "callisto ran nothing: {results:?}");
+        harness.close().await
+    }
+
+    /// #262: the speed index's machine set is the fleet machines'. A revoked
+    /// machine's runs are left out of the fleet medians and get no index; a
+    /// machine retired after its runs keeps them, and a run its machine
+    /// completed after its retirement (or before its creation) is left out.
+    #[tokio::test]
+    async fn only_runs_on_a_fleet_machine_while_it_existed_count() -> Result<()> {
+        let mut harness = Harness::new().await?;
+        for key in ["k1", "k2", "k3"] {
+            harness.runs("io", 2_000, key, 5, 100_000).await?;
+            harness.runs("Jupiter", 2_000, key, 5, 100_000).await?;
+            // callisto is slow at every key, then revoked.
+            harness.runs("callisto", 2_000, key, 5, 400_000).await?;
+            // europa, retired an hour after these runs, is twice as slow.
+            harness.runs("europa", 2_000, key, 5, 200_000).await?;
+        }
+        let (callisto, europa, io) = (
+            harness.fleet.host("callisto")?.id.clone(),
+            harness.fleet.host("europa")?.id.clone(),
+            harness.fleet.host("io")?.id.clone(),
+        );
+        sqlx::query(
+            "UPDATE fleet_hosts SET enrollment_state='revoked',lifecycle_state='retired',
+                    retired_at=?1 WHERE id=?2",
+        )
+        .bind(NOW - HOUR)
+        .bind(&callisto)
+        .execute(&harness.db)
+        .await?;
+        sqlx::query("UPDATE fleet_hosts SET lifecycle_state='retired',retired_at=? WHERE id=?")
+            .bind(NOW - HOUR)
+            .bind(&europa)
+            .execute(&harness.db)
+            .await?;
+        // A run io "completed" before io existed is not io's.
+        harness
+            .runs_at("io", 2_000, "k1", 1, 900_000, NOW - 20 * HOUR)
+            .await?;
+        sqlx::query("UPDATE fleet_hosts SET created_at=? WHERE id=?")
+            .bind(NOW - 10 * HOUR)
+            .bind(&io)
+            .execute(&harness.db)
+            .await?;
+        let results = harness.indexes().await?;
+        assert!(
+            results.iter().all(|result| result.host_id != callisto),
+            "a revoked machine has no index: {results:?}"
+        );
+        // Each key: io and Jupiter at 100 s, europa at 200 s; the fleet
+        // median over those 15 runs is 100 s, so europa's index is 2.0
+        // (callisto's runs would make it 150 s, and the index 1.33).
+        let europa_result = harness.result(&results, "europa", 2_000)?;
+        assert!(
+            europa_result
+                .index
+                .is_some_and(|index| (index - 2.0).abs() < 1e-9),
+            "europa {:?}",
+            europa_result.index
+        );
+        let fleet_runs: Vec<(String, u32)> = europa_result
+            .top_keys
+            .iter()
+            .map(|key| (key.key.clone(), key.fleet_runs))
+            .collect();
+        assert_eq!(fleet_runs.len(), 3, "{fleet_runs:?}");
+        assert!(
+            fleet_runs.iter().all(|(_, runs)| *runs == 15),
+            "neither callisto's runs nor the one before io existed count: {fleet_runs:?}"
+        );
         harness.close().await
     }
 }

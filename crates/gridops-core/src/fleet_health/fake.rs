@@ -79,6 +79,8 @@ fn hosts() -> Vec<HostInfo> {
         cpu_budget_millis: cpu,
         memory_budget_mib: memory,
         disk_total_bytes: Some(disk),
+        created_at: None,
+        retired_at: None,
     })
     .collect()
 }

@@ -28,6 +28,7 @@ pub mod concerns;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod hour;
+pub mod machines;
 pub mod score;
 pub mod speed;
 #[cfg(any(test, feature = "test-support"))]
@@ -610,7 +611,9 @@ pub struct HourlyHostRow {
     pub uncertain_placements: u32,
 }
 
-/// A machine the scores are about: its budgets and root disk.
+/// A machine the scores are about: its budgets and root disk, and when it
+/// was created and retired (#262, [`machines`]): it counts only for the part
+/// of the window between the two. `None` is no bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInfo {
     pub id: String,
@@ -618,6 +621,8 @@ pub struct HostInfo {
     pub cpu_budget_millis: u32,
     pub memory_budget_mib: u32,
     pub disk_total_bytes: Option<u64>,
+    pub created_at: Option<i64>,
+    pub retired_at: Option<i64>,
 }
 
 /// A machine's root disk over the window: its size and the least free.

@@ -287,15 +287,24 @@ pub fn nearest_rank(sorted: &[i64], percent: i64) -> Option<i64> {
 }
 
 /// Every machine's hour `[from, to)` (`from` on a whole hour, `to` at most
-/// an hour later): one per `fleet_hosts` row in id order, also for a machine
-/// with no samples (0 minutes, no percentiles).
+/// an hour later): one per `fleet_hosts` row that existed during it, in id
+/// order, also for a machine with no samples (0 minutes, no percentiles).
+/// Whatever its enrollment, so a revoked or deleted machine's starts before
+/// it went still count for the fleet; none before a machine's `created_at`
+/// or from its `retired_at` on (#262, [`super::machines`]).
 ///
 /// # Errors
 /// A read failed.
 pub async fn host_hours(db: &SqlitePool, from: i64, to: i64) -> Result<Vec<HostHour>> {
-    let hosts: Vec<String> = sqlx::query_scalar("SELECT id FROM fleet_hosts ORDER BY id")
-        .fetch_all(db)
-        .await?;
+    let hosts: Vec<String> = sqlx::query_scalar(concat!(
+        "SELECT fh.id FROM fleet_hosts fh WHERE ",
+        crate::fleet_machine_overlaps!("fh", "?1", "?2"),
+        " ORDER BY fh.id"
+    ))
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await?;
     let uncertain = uncertain_counts(db, from, to).await?;
     let mut hours = Vec::with_capacity(hosts.len());
     for host_id in &hosts {
@@ -612,5 +621,90 @@ mod tests {
         assert_eq!(ceil_hour(NOW), NOW);
         assert!(!is_past_grace(NOW - HOUR, NOW + 15 * MINUTE - 1));
         assert!(is_past_grace(NOW - HOUR, NOW + 15 * MINUTE));
+    }
+
+    /// #262: an hour has a row for every machine that existed during it,
+    /// whatever its enrollment (a deleted machine's starts before it went
+    /// count for the fleet), and none for one retired before it or created
+    /// after it: a retired machine gets no more 0-minute rows.
+    #[tokio::test]
+    async fn an_hour_has_rows_only_for_the_machines_that_existed_in_it() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("gridops-host-hours-{}", uuid::Uuid::new_v4()));
+        let db = crate::connect_database_path(&directory.join("db.sqlite")).await?;
+        for (id, enrollment, lifecycle, created, retired, deleted) in [
+            ("a-active", "approved", "active", 1, None, None),
+            (
+                "b-retired-before",
+                "approved",
+                "retired",
+                1,
+                Some(NOW - 1),
+                None,
+            ),
+            (
+                "c-retired-during",
+                "approved",
+                "retired",
+                1,
+                Some(NOW + 30 * MINUTE),
+                None,
+            ),
+            (
+                "d-created-during",
+                "approved",
+                "active",
+                NOW + 30 * MINUTE,
+                None,
+                None,
+            ),
+            (
+                "e-created-after",
+                "approved",
+                "active",
+                NOW + HOUR,
+                None,
+                None,
+            ),
+            (
+                "f-deleted-during",
+                "revoked",
+                "retired",
+                1,
+                Some(NOW + 10 * MINUTE),
+                Some(NOW + 10 * MINUTE),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at,retired_at,deleted_at)
+                 VALUES (?,?,'linux','x64',?,?,'verified',?,1,?,?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(enrollment)
+            .bind(lifecycle)
+            .bind(created)
+            .bind(retired)
+            .bind(deleted)
+            .execute(&db)
+            .await?;
+        }
+        let ids: Vec<String> = host_hours(&db, NOW, NOW + HOUR)
+            .await?
+            .into_iter()
+            .map(|hour| hour.host_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "a-active",
+                "c-retired-during",
+                "d-created-during",
+                "f-deleted-during"
+            ]
+        );
+        db.close().await;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 }

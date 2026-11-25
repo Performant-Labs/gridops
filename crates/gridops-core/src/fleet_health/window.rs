@@ -14,38 +14,58 @@ use super::{
     concerns, hour, score, usage,
 };
 
-/// A machine's id, name, root CPU and memory budget, and observed root disk.
-type HostRow = (String, String, Option<i64>, Option<i64>, Option<i64>);
+/// A machine's id, name, root CPU and memory budget, observed root disk,
+/// `created_at`, and `retired_at` while it is retired.
+type HostRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    Option<i64>,
+);
 
-/// Every approved, non-deleted machine in id order (the machines the live
-/// half reads, `host_live_reads`), with its root budget's CPU and memory and
-/// its root disk's size as its agent observed it (`fleet_observed_domains`,
-/// the size the disk alarm reads since #240, not the admin-set budget disk),
-/// `None` before any observation. A machine with no root budget row has a
-/// budget of 0.
+/// The window's machines in id order (#262, [`super::machines`]): every
+/// approved, non-deleted machine whose life overlaps the covered time
+/// `[ceil_hour(now − W), now)`, so one retired before the window is not on
+/// the page and one retired or created during it is, with its span. Each has
+/// its root budget's CPU and memory and its root disk's size as its agent
+/// observed it (`fleet_observed_domains`, the size the disk alarm reads since
+/// #240, not the admin-set budget disk), `None` before any observation. A
+/// machine with no root budget row has a budget of 0.
 ///
 /// # Errors
 /// The read failed, or a budget does not fit its type.
-pub async fn host_infos(db: &SqlitePool) -> Result<Vec<HostInfo>> {
-    let rows: Vec<HostRow> = sqlx::query_as(
+pub async fn host_infos(db: &SqlitePool, window: HealthWindow, now: i64) -> Result<Vec<HostInfo>> {
+    let rows: Vec<HostRow> = sqlx::query_as(concat!(
         "SELECT fh.id,fh.name,d.cpu_millis,d.memory_mib,
                 (SELECT o.disk_bytes FROM fleet_observed_domains o
-                  WHERE o.host_id=fh.id AND o.local_key='root') AS disk_bytes
+                  WHERE o.host_id=fh.id AND o.local_key='root') AS disk_bytes,
+                fh.created_at,
+                CASE WHEN fh.lifecycle_state='retired' THEN fh.retired_at END
            FROM fleet_hosts fh
            LEFT JOIN host_resource_domains d ON d.host_id=fh.id AND d.parent_domain_id IS NULL
-          WHERE fh.enrollment_state='approved' AND fh.deleted_at IS NULL
-          ORDER BY fh.id",
-    )
+          WHERE ",
+        crate::fleet_machine_approved!("fh"),
+        " AND ",
+        crate::fleet_machine_overlaps!("fh", "?1", "?2"),
+        " ORDER BY fh.id"
+    ))
+    .bind(hour::ceil_hour(now - window.millis()))
+    .bind(now)
     .fetch_all(db)
     .await?;
     rows.into_iter()
-        .map(|(id, name, cpu, memory, disk)| {
+        .map(|(id, name, cpu, memory, disk, created_at, retired_at)| {
             Ok(HostInfo {
                 cpu_budget_millis: u32::try_from(cpu.unwrap_or(0))
                     .with_context(|| format!("{name}'s CPU budget"))?,
                 memory_budget_mib: u32::try_from(memory.unwrap_or(0))
                     .with_context(|| format!("{name}'s memory budget"))?,
                 disk_total_bytes: disk.and_then(|bytes| u64::try_from(bytes).ok()),
+                created_at: Some(created_at),
+                retired_at,
                 id,
                 name,
             })
@@ -92,7 +112,7 @@ pub async fn inputs(
     now: i64,
     speed: Vec<SpeedResult>,
 ) -> Result<FleetHealthInputs> {
-    let hosts = host_infos(db).await?;
+    let hosts = host_infos(db, window, now).await?;
     let (hourly, host_hourly) = hour::window_rows(db, window, now).await?;
     Ok(FleetHealthInputs {
         window,
@@ -148,7 +168,7 @@ pub fn assemble(
             let own: Vec<&HourlyJobRow> = rows
                 .iter()
                 .copied()
-                .filter(|row| row.host.as_str() == info.id)
+                .filter(|row| row.host.as_str() == info.id && info.counts_hour(row.hour))
                 .collect();
             let mut speed: Vec<HostSpeed> = inputs
                 .speed

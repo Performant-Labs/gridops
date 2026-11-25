@@ -271,6 +271,8 @@ mod tests {
             cpu_budget_millis: 10_000,
             memory_budget_mib: 1_000,
             disk_total_bytes: None,
+            created_at: None,
+            retired_at: None,
         }
     }
 
