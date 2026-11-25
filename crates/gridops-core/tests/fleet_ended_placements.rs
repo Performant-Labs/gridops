@@ -339,6 +339,41 @@ async fn every_placement_that_ends_is_finished_once_oldest_first() -> Result<()>
 }
 
 #[tokio::test]
+async fn a_finished_placement_whose_runner_comes_back_is_finished_again() -> Result<()> {
+    let d = Database::new().await?;
+    let placement = d.ended(&STARTED_FAILURE).await?;
+    let runner: String =
+        sqlx::query_scalar("SELECT workload_id FROM workload_placements WHERE id=?")
+            .bind(&placement)
+            .fetch_one(&d.db)
+            .await?;
+    finish_all(&d.db).await?;
+    assert_eq!(d.queued().await?, 0);
+
+    // A late job event marks the retired runner busy again, by name, as
+    // `associate_runner_with_job` does: the pass has to retire it again.
+    sqlx::query("UPDATE runners SET busy=1,status='busy' WHERE id=? AND deleted_at IS NULL")
+        .bind(&runner)
+        .execute(&d.db)
+        .await?;
+    assert_eq!(ids(&d.db).await?, std::slice::from_ref(&placement));
+
+    // Retired and finished again, it leaves; a runner that only changes
+    // between retired states queues nothing.
+    sqlx::query("UPDATE runners SET busy=0,status='failed' WHERE id=?")
+        .bind(&runner)
+        .execute(&d.db)
+        .await?;
+    finish_all(&d.db).await?;
+    sqlx::query("UPDATE runners SET status='deleted',deleted_at=1 WHERE id=?")
+        .bind(&runner)
+        .execute(&d.db)
+        .await?;
+    assert_eq!(d.queued().await?, 0);
+    d.close().await
+}
+
+#[tokio::test]
 async fn placements_that_ended_before_the_queue_are_queued_only_with_work_left() -> Result<()> {
     let d = Database::new().await?;
     // Settled: nothing left to do.

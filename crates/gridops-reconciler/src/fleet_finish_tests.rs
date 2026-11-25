@@ -146,8 +146,9 @@ impl Harness {
 #[tokio::test]
 async fn a_pass_finishes_each_ended_placement_once() -> Result<()> {
     let h = Harness::new().await?;
+    let mut failed_starts = Vec::new();
     for _ in 0..25 {
-        h.placement("failed", "failed").await?;
+        failed_starts.push(h.placement("failed", "failed").await?);
     }
     // Cleaned, but its runner row is still in service: the pass retires it.
     let in_service = h.placement("cleaned", "online").await?;
@@ -163,6 +164,16 @@ async fn a_pass_finishes_each_ended_placement_once() -> Result<()> {
     // The next pass reads the queue, which holds nothing of the settled
     // history, and leaves it as it was.
     fleet::tick(&h.app).await?;
+    assert_eq!(h.queued_states().await?, ["uncertain"]);
+
+    // A late job event marks a retired runner busy again: the next pass
+    // retires it again, as passes did when they finished every placement.
+    sqlx::query("UPDATE runners SET busy=1,status='busy' WHERE id=?")
+        .bind(&failed_starts[0])
+        .execute(&h.app.database)
+        .await?;
+    fleet::tick(&h.app).await?;
+    assert_eq!(h.runner(&failed_starts[0]).await?.0, "failed");
     assert_eq!(h.queued_states().await?, ["uncertain"]);
     h.finish().await
 }

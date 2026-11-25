@@ -7,6 +7,13 @@
 -- `cleaned` or `uncertain`): the reconciler finishes it, and takes a failed
 -- or cleaned one off once nothing is left to do, so a pass reads the queue
 -- and none of the history. An uncertain placement stays until it is cleaned.
+--
+-- Whether a placement is finished at all rests on the triggers below. A later
+-- migration that rebuilds `workload_placements` or `runners` (create, copy,
+-- drop, rename) drops them without an error, and dropping the old
+-- `workload_placements` cascades to this queue: it must create them again and
+-- queue what was queued. `db::tests::fresh_database_applies_every_migration`
+-- checks they exist.
 CREATE TABLE placement_finish_queue (
   placement_id TEXT PRIMARY KEY NOT NULL REFERENCES workload_placements(id) ON DELETE CASCADE
 ) STRICT;
@@ -32,6 +39,18 @@ AFTER UPDATE OF state ON workload_placements
 WHEN NEW.state NOT IN ('failed','cleaned','uncertain')
 BEGIN
   DELETE FROM placement_finish_queue WHERE placement_id = NEW.id;
+END;
+
+-- A runner row that comes back into service after its placement was finished
+-- (a late job event marks a retired runner busy or online by name) has its
+-- ended placement finished again, which retires it again.
+CREATE TRIGGER runners_queue_finish_on_return
+AFTER UPDATE OF status ON runners
+WHEN OLD.status IN ('deleted','failed') AND NEW.status NOT IN ('deleted','failed')
+BEGIN
+  INSERT OR IGNORE INTO placement_finish_queue (placement_id)
+  SELECT id FROM workload_placements
+   WHERE workload_id = NEW.id AND state IN ('failed','cleaned','uncertain');
 END;
 
 -- Placements that ended before this migration are queued by the reconciler,

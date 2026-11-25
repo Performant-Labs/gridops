@@ -298,11 +298,22 @@ pub(super) async fn tick(app: &Reconciler) -> Result<()> {
         tracing::warn!(error = ?error, "could not queue earlier ended fleet placements");
     }
     for placement in placement::ended_placements_to_finish(&app.database).await? {
-        retried |= finish(app, &placement).await?;
+        // One placement that cannot be finished stays queued for the next
+        // pass; it does not stop the others.
+        match finish(app, &placement).await {
+            Ok(retry) => retried |= retry,
+            Err(error) => {
+                tracing::warn!(placement = %placement.id, error = ?error, "could not finish fleet runner");
+                continue;
+            }
+        }
         // A failed or cleaned placement has nothing left once finished, and
         // leaves the queue; an uncertain one is finished again until it is
         // cleaned.
-        placement::finished(&app.database, placement.id, &placement.state).await?;
+        if let Err(error) = placement::finished(&app.database, placement.id, &placement.state).await
+        {
+            tracing::warn!(placement = %placement.id, error = ?error, "could not take a finished fleet runner off the queue");
+        }
     }
     if retried {
         // Place the replacements now rather than on the next pass.

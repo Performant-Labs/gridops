@@ -25,7 +25,10 @@ Known problems in the current release are in the README's
   takes the same time on any database: 1 ms on a synthetic one with 60,000
   placements. After the upgrade the reconciler queues the placements that
   ended earlier and still have work left, 500 rowids per short write
-  transaction (about 4 ms each), at most 40 batches a pass.
+  transaction (about 4 ms each), at most 40 batches (20,000 placements) a
+  pass, with a 25 ms pause between batches. Until the sweep reaches them,
+  those earlier placements wait: a database with 100,000 placements is caught
+  up after 5 passes, about 2.5 minutes at the default 30 s interval.
 
 ### Added
 
