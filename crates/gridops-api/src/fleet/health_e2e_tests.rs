@@ -73,6 +73,12 @@ const UNMATCHED_JOB: i64 = 960_004;
 const BUSY_GITLAB_JOB: i64 = 960_001;
 const RUNNING_JOB: i64 = 960_002;
 const RUNNING_GITLAB_JOB: i64 = 960_005;
+/// GitLab jobs waiting for a runner (#253): one the pool runs, queued
+/// before every GitHub job (so the oldest), one asking for a tag no pool
+/// offers, and one still `created` while a row of it already runs.
+const GITLAB_QUEUED_JOB: i64 = 960_006;
+const GITLAB_UNMATCHED_JOB: i64 = 960_007;
+const GITLAB_STARTED_JOB: i64 = 960_008;
 
 /// One of the regular jobs: (name, typical duration in seconds).
 const JOBS: [(&str, i64); 6] = [
@@ -338,8 +344,46 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     let mut gpu = JobSeed::queued(UNMATCHED_JOB, "train model", now_a - 2 * MINUTE);
     gpu.labels = vec!["self-hosted".to_owned(), "gpu".to_owned()];
     jobs.push(gpu);
+    let mut gitlab_queued = JobSeed::queued(GITLAB_QUEUED_JOB, "rspec", now_a - 12 * MINUTE);
+    gitlab_queued.gitlab = true;
+    jobs.push(gitlab_queued);
+    let mut gitlab_unmatched = JobSeed::queued(GITLAB_UNMATCHED_JOB, "train", now_a - MINUTE);
+    gitlab_unmatched.gitlab = true;
+    gitlab_unmatched.labels = vec!["gpu".to_owned()];
+    jobs.push(gitlab_unmatched);
+    let mut gitlab_started = JobSeed::queued(GITLAB_STARTED_JOB, "lint", now_a - 9 * MINUTE);
+    gitlab_started.gitlab = true;
+    jobs.push(gitlab_started);
 
     testdata::insert_jobs(db, &scenario.fleet, &jobs).await?;
+    // The pool runs the project-scoped GitLab connection's jobs.
+    sqlx::query(
+        "INSERT INTO runner_pool_gitlab_connections (pool_id,connection_id,created_at)
+         SELECT ?,id,1 FROM gitlab_connections",
+    )
+    .bind(&scenario.fleet.pool_id)
+    .execute(db)
+    .await?;
+    // GITLAB_STARTED_JOB: its row is `created`, and a second row of the same
+    // job on the same instance already runs, so it is not waiting.
+    sqlx::query("UPDATE gitlab_jobs SET status='created' WHERE job_id=?")
+        .bind(GITLAB_STARTED_JOB)
+        .execute(db)
+        .await?;
+    sqlx::query(
+        "INSERT INTO gitlab_connections (id,name,base_url,scope_kind,scope_id,scope_path,access_token_key,webhook_secret_key,created_at,updated_at)
+         VALUES ('e2e-twin','e2e twin','https://gitlab.test','group',6,'acme-twin','twin.token','twin.webhook',1,1)",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO gitlab_jobs (id,connection_id,project_id,job_id,pipeline_id,status,tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path)
+         SELECT id||'-twin','e2e-twin',project_id,job_id,pipeline_id,'running',tag_list,status_changed_at,created_at,updated_at,category,job_name,project_path
+           FROM gitlab_jobs WHERE job_id=?",
+    )
+    .bind(GITLAB_STARTED_JOB)
+    .execute(db)
+    .await?;
     sqlx::query("DELETE FROM gitlab_jobs WHERE job_id=?")
         .bind(BUSY_GITLAB_JOB)
         .execute(db)
@@ -1174,12 +1218,21 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         host(day, &jupiter)?["live"]["runningByCategory"],
         json!({"test": 1})
     );
-    assert_eq!(day["live"]["oldestQueued"]["jobId"], QUEUED_JOB);
+    // The GitLab job queued 12 minutes before NOW_A has waited longer than
+    // the GitHub one (7): it is the oldest. Unmatched: the GitHub job asking
+    // for `gpu` and the GitLab one asking for it. Queued: 2 GitHub, 2
+    // GitLab (the `created` one already runs elsewhere).
+    assert_eq!(day["live"]["oldestQueued"]["jobId"], GITLAB_QUEUED_JOB);
     assert_eq!(
         day["live"]["oldestQueued"]["waitMs"],
-        NOW_B - (NOW_A - 7 * MINUTE)
+        NOW_B - (NOW_A - 12 * MINUTE)
     );
-    assert_eq!(day["live"]["queuedUnmatched"], 1);
+    assert_eq!(day["live"]["queuedUnmatched"], 2);
+    assert_eq!(day["live"]["queuedTotal"], 4);
+    assert_eq!(
+        day["live"]["queuedByPool"][0]["queued"], 2,
+        "the GitHub job and the GitLab job the pool runs"
+    );
     // The trend: the seeded snapshots of the day and the one the pass
     // recorded at NOW_B, oldest first.
     assert_eq!(

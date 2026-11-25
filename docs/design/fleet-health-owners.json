@@ -98,7 +98,9 @@
         "scripts/fleet-health-oracle.py",
         "docs/handoffs/204-ui-walkthrough/**",
         "docs/design/fleet-health.md",
-        "src/features/fleet-health/placeholder-card.tsx"
+        "src/features/fleet-health/placeholder-card.tsx",
+        "src/features/fleet-health/fixture.json",
+        "docs/openapi/gridops-v1.json"
       ],
       "addOnly": [
         "crates/gridops-core/src/fleet_health/mod.rs",

@@ -22,8 +22,9 @@ prints one JSON object. The end-to-end test
 Simplifications, each one the seeded test data stays inside:
 - The live queue split counts a waiting GitHub job as served when some pool
   that covers its repository offers all its labels (the pool's labels and its
-  name); GitLab jobs, platform labels, pool capacity and pausing are not
-  modelled.
+  name); platform labels, pool capacity and pausing are not modelled for it.
+  Waiting GitLab jobs follow #253's rule (see `gitlab_owner`), except which of
+  several autoscaling pools with room a job goes to.
 """
 
 import argparse
@@ -975,13 +976,39 @@ class Oracle:
             wait = now - job["created_at"]
             if oldest is None or wait > oldest["waitMs"]:
                 oldest = {"jobId": job["id"], "waitMs": wait, "queuedAt": job["created_at"]}
+        # GitLab jobs waiting for a runner (#253): a job is one per instance
+        # and job id over its active rows, waiting while its best row is
+        # `pending` (none `running`); it is shown under a pool when a pool
+        # linked to one of its connections, running on some platform, offers
+        # all its tags (or takes untagged jobs when it has none): an
+        # autoscaling one first, else a manual one. A job an autoscaling pool
+        # runs can be the oldest, when it has waited longer than the GitHub
+        # one.
+        gitlab_oldest = None
+        for job in self.waiting_gitlab_jobs():
+            category = job["category"] if job["category"] in CATEGORIES else "other"
+            by_category[category] = by_category.get(category, 0) + 1
+            owner = self.gitlab_owner(job)
+            if owner is None:
+                unmatched += 1
+                continue
+            by_pool[owner["id"]] = by_pool.get(owner["id"], 0) + 1
+            if not owner["manual"] and (gitlab_oldest is None or job["queued_at"] < gitlab_oldest["queued_at"]):
+                gitlab_oldest = job
+        waiting_gitlab = len(self.waiting_gitlab_jobs())
+        if gitlab_oldest is not None and (oldest is None or now - gitlab_oldest["queued_at"] > oldest["waitMs"]):
+            oldest = {
+                "jobId": gitlab_oldest["job_id"],
+                "waitMs": now - gitlab_oldest["queued_at"],
+                "queuedAt": gitlab_oldest["queued_at"],
+            }
         if unmatched > 0:
             concerns.append({"key": "unmatched-jobs", "severity": "critical", "since": None})
         if oldest is not None and oldest["waitMs"] > 5 * MINUTE:
             severity = "critical" if oldest["waitMs"] > 10 * MINUTE else "warning"
             concerns.append({"key": "oldest-queued", "severity": severity, "since": oldest["queuedAt"]})
         fleet = {
-            "queuedTotal": len(queued),
+            "queuedTotal": len(queued) + waiting_gitlab,
             "queuedByCategory": by_category,
             "queuedByPool": sorted(by_pool.items(), key=lambda pair: (-pair[1], pair[0])),
             "queuedUnmatched": unmatched,
@@ -990,6 +1017,71 @@ class Oracle:
             "runningByCategory": fleet_running,
         }
         return fleet, host_live, concerns
+
+    def waiting_gitlab_jobs(self):
+        """The GitLab jobs waiting for a runner, one per (instance, job id)."""
+        groups = {}
+        for row in self.q(
+            """SELECT gj.*,c.base_url FROM gitlab_jobs gj JOIN gitlab_connections c ON c.id=gj.connection_id
+                WHERE gj.status IN ('created','waiting_for_resource','preparing','pending','running')"""
+        ):
+            groups.setdefault((row["base_url"], row["job_id"]), []).append(dict(row))
+        jobs = []
+        for (base_url, job_id), rows in sorted(groups.items()):
+            tier = max(2 if row["status"] == "running" else 1 if row["status"] == "pending" else 0 for row in rows)
+            if tier != 1:
+                continue
+            categories = [row["category"] for row in rows if row["category"] is not None]
+            tags = [row["tag_list"] for row in rows if row["tag_list"] != "[]"]
+            jobs.append(
+                {
+                    "base_url": base_url,
+                    "job_id": job_id,
+                    "queued_at": min(row["created_at"] for row in rows),
+                    "category": max(categories) if categories else None,
+                    "tags": json.loads(max(tags)) if tags else [],
+                    "connections": {row["connection_id"] for row in rows},
+                }
+            )
+        return jobs
+
+    def gitlab_owner(self, job):
+        """The pool a waiting GitLab job is shown under: the first pool (a
+        repository-scoped one first, then the oldest) linked to one of its
+        connections, running on some platform, and offering all its tags (or
+        taking untagged jobs when it has none), autoscaling (not paused, its
+        circuit closed) before manual (autoscaling off); `None` when none
+        will run it. Among several autoscaling pools the API picks the first
+        with room, which the seeded fleet (one pool) never has to choose."""
+        wanted = {str(tag).lower() for tag in job["tags"]}
+        scaling, manual = [], []
+        for pool in self.q(
+            """SELECT * FROM runner_pools ORDER BY CASE WHEN scope='repository' THEN 0 ELSE 1 END,created_at,id"""
+        ):
+            linked = self.q("SELECT connection_id FROM runner_pool_gitlab_connections WHERE pool_id=?", pool["id"])
+            if not {row["connection_id"] for row in linked} & job["connections"]:
+                continue
+            providers = [str(provider).lower() for provider in json.loads(pool["providers"] or "[]")]
+            profiles = self.q(
+                "SELECT 1 FROM pool_execution_profiles WHERE pool_id=? AND enabled=1 AND archived_at IS NULL",
+                pool["id"],
+            )
+            if not profiles and not any(provider in ("docker", "tart") for provider in providers):
+                continue
+            offered = {str(label).lower() for label in json.loads(pool["labels"] or "[]")}
+            if (not wanted and not pool["run_untagged"]) or not wanted <= offered:
+                continue
+            if pool["paused"]:
+                continue
+            if not pool["autoscaling_enabled"]:
+                manual.append(pool)
+            elif not pool["provision_circuit_open"]:
+                scaling.append(pool)
+        if scaling:
+            return {"id": scaling[0]["id"], "manual": False}
+        if manual:
+            return {"id": manual[0]["id"], "manual": True}
+        return None
 
     def start_gate(self, host_id):
         """Three or more machine-fault start failures in the last 15 minutes
