@@ -84,10 +84,16 @@ pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placem
 /// and the reconciler's memory, grow with the fleet's history until the
 /// reconciler was killed at its memory limit.
 pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placement>, FleetError> {
-    // Each branch reads through an index and never visits a settled
+    // Each branch reads through an index instead of visiting every ended
     // placement: in-service runners are found from the `runners` index on
     // `(pool_id,…,status)` (the `CROSS JOIN` keeps that order), and unsettled
-    // failures from migration 0052's partial indexes, which hold only them.
+    // failures from migration 0052's partial indexes: failures with no
+    // recorded absence, and allocations not yet released. Every path that
+    // fails a placement records its absence and releases its capacity as it
+    // does (`registry::commands::release`, `registry::unconfirmed`,
+    // `abandon_unstarted`), so those indexes hold the failures still to
+    // settle, plus any started failure an older version left without a
+    // recorded absence.
     let rows = sqlx::query(select_placements!(
         "WHERE p.id IN (
             SELECT id FROM workload_placements WHERE state='uncertain'
