@@ -30,7 +30,8 @@ fn band(score: u8) -> Option<Severity> {
     }
 }
 
-/// `fleet-component:<key>`: critical under 50, warning under 70.
+/// `fleet-component:<key>`: critical under 50, warning under 70, linking to
+/// the component's row (`/fleet/health#fleet-component-<key>`).
 #[must_use]
 pub fn fleet_component(component: &ScoreComponent) -> Option<Concern> {
     let severity = band(component.score?)?;
@@ -58,7 +59,9 @@ pub fn fleet_component(component: &ScoreComponent) -> Option<Concern> {
         },
         detail,
         subject: ConcernSubject::Fleet,
-        link: Some("/fleet/health".to_owned()),
+        // The component's row on the fleet score card, not the page itself
+        // (#253): `fleet-score-card.tsx` anchors each row by its key.
+        link: Some(format!("/fleet/health#fleet-component-{}", component.key)),
         since: None,
     })
 }
@@ -435,5 +438,44 @@ mod tests {
             host_slow(&info, &result).map(|concern| concern.title),
             Some("io is slow at 1.5 CPUs".to_owned())
         );
+    }
+
+    /// #253 item 7: a fleet component's concern links to that component's
+    /// row on the fleet score card (`#fleet-component-<key>`), not to the
+    /// page it is already on; a machine's concerns keep their machine's row.
+    #[test]
+    fn a_fleet_component_concern_links_to_its_component_row() {
+        for key in [
+            "queue-wait",
+            "start-reliability",
+            "infra-failures",
+            "capacity-fit",
+            "availability",
+        ] {
+            let concern = fleet_component(&component(key, "Label", Some(10)));
+            assert_eq!(
+                concern.and_then(|concern| concern.link),
+                Some(format!("/fleet/health#fleet-component-{key}")),
+                "{key}"
+            );
+        }
+        let inputs = inputs(Vec::new(), vec![job_row(JobCategory::Test, 40)]);
+        let scored = ScoredFleet {
+            score: Some(30),
+            components: vec![component("queue-wait", "Queue wait", Some(30))],
+            hosts: vec![host("h-1", "io", Some(30), None)],
+        };
+        for concern in windowed(&inputs, &scored) {
+            let link = concern.link.unwrap_or_default();
+            match concern.subject {
+                ConcernSubject::Fleet => {
+                    assert!(link.starts_with("/fleet/health#fleet-component-"), "{link}");
+                }
+                ConcernSubject::Host(id) => {
+                    assert_eq!(link, format!("/fleet/health#machine-{id}"));
+                }
+                ConcernSubject::Pool(_) => {}
+            }
+        }
     }
 }

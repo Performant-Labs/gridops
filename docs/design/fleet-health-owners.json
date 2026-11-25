@@ -1,5 +1,5 @@
 {
-  "$comment": "Which files each fleet health issue of epic #198 owns, for the Fleet health guard (scripts/fleet-health-guard.mjs, #197). `owns`: files (globs allowed) the issue may change freely. `addOnly`: shared files where it may only add lines. `contractTests`: #197's contract test files, whatever glob they match; a wave-1 pull request may only remove its own `contract: #N` markers from them. `wave2`: listed for the record, not checked by the guard. Every other file is #197's. See docs/design/fleet-health.md, Ownership.",
+  "$comment": "Which files each fleet health issue of epic #198 owns, for the Fleet health guard (scripts/fleet-health-guard.mjs, #197). `owns`: files (globs allowed) the issue may change freely. `addOnly`: shared files where it may only add lines. `contractTests`: #197's contract test files, whatever glob they match; a wave-1 pull request may only remove its own `contract: #N` markers from them. `wave2` and `wave2b`: listed for the record, not checked by the guard. Every other file is #197's. See docs/design/fleet-health.md, Ownership.",
   "contractTests": [
     "crates/**/*_contract_tests.rs",
     "tests/fleet-health-*.contract.test.ts",
@@ -86,6 +86,27 @@
         "crates/gridops-api/src/fleet/health.rs"
       ],
       "addOnly": []
+    }
+  },
+  "wave2b": {
+    "253": {
+      "owns": [
+        "crates/gridops-api/src/fleet/health_live.rs",
+        "crates/gridops-core/src/fleet/registry/queries.rs",
+        "crates/gridops-core/src/autoscaling.rs",
+        "crates/gridops-core/src/fleet_health/speed.rs",
+        "crates/gridops-core/src/fleet_health/concerns.rs",
+        "crates/gridops-core/src/fleet_health/mod.rs",
+        "src/features/fleet-health/live-strip.tsx",
+        "src/features/fleet-health/machine-detail.tsx",
+        "src/features/fleet-health/machine-detail-window.tsx",
+        "src/features/fleet-health/fleet-score-card.tsx",
+        "tests/fleet-health-253-*.test.ts",
+        "docs/design/fleet-health.md",
+        "docs/openapi/gridops-v1.json"
+      ],
+      "addOnly": [],
+      "$comment": "queries.rs: the failed-placement read only; autoscaling.rs: the waiting (queued) read only; mod.rs: the start_failures_last_hour and OldestQueued comments only; fleet-health.md: the sections describing these rules; docs/openapi/gridops-v1.json: the fleet health description's oldestQueued.jobId sentence only (review of PR 254)."
     }
   }
 }
