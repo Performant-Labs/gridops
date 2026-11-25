@@ -79,26 +79,31 @@ and its rollups count. A re-enrolled machine is a new row with its own `created_
 stays behind, approved and `retired`, with the `retired_at` of the re-enrollment, so the page
 must never read it as a machine that went offline.
 
-- **A fleet machine** is approved, not deleted and not retired (`fleet_machine_now!`). The live
-  half reads only these: the live machine list and every live concern (offline, start gate, start
-  failures, disk, uncertain placements).
-- **Over a window**, a machine counts for the part of its life inside the window's covered time
-  `[ceil_hour(now − W), now)`: from its `created_at` until its `retired_at` (only while its
-  lifecycle is `retired`). A machine retired before the window starts isn't on the page at all. A
-  machine retired during the window counts only for the time before `retired_at`, and a machine
-  created during the window only from `created_at`, so a new machine isn't scored offline for the
-  hours before it existed. The window's machines are the approved, non-deleted ones whose life
-  overlaps the covered time (`fleet_machine_overlaps!`); each one's covered time (its *span*,
-  `HostInfo::span`) is the denominator of its availability and busy share, and of its share of
-  the fleet's availability (see [Scores](#scores)), and only its rows (machine and job) of an hour
-  its span reaches count for it. A retired row without a `retired_at` counts as retired before
-  any window.
+- **A fleet machine** is approved, not deleted and not retired (`fleet_machine_now!`). The page
+  shows fleet machines only, in every window: the machine list (`hosts`), every machine score and
+  every concern, live (offline, start gate, start failures, disk, uncertain placements) or
+  windowed (`host-score`, `host-slow`, `host-idle-while-queued`). A retired machine is never on
+  the page, whatever the window: not in `hosts`, in no concern, and not a `HostInfo` (the scores'
+  machines).
+- **A machine created during the window** counts only from its `created_at`, so a new machine
+  isn't scored offline for the hours before it existed: its covered time (see [Scores](#scores))
+  starts there, and only its rows of the hours from then count for it.
+- **A machine retired during the window** (`RetiredHost`, in `FleetHealthInputs::retired_hosts`)
+  still counts for the fleet's components for its time before `retired_at`, so the window's fleet
+  totals stay right: its rows count for the fleet's start reliability, queue wait and
+  infrastructure failures as every machine's rows do, and its CPU budget and online minutes count
+  for the fleet's availability and capacity fit over its span, `[max(ceil_hour(now − W),
+  created_at), min(now, retired_at))`, never its rows after `retired_at`. A machine retired before
+  the window starts counts for nothing. Both kinds are read once (`window::window_machines`): the
+  approved, non-deleted machines whose life overlaps the covered time (`fleet_machine_overlaps!`).
+  A retired row without a `retired_at` counts as retired before any window.
 - **The machine rollup** writes a row for every `fleet_hosts` row, whatever its enrollment, that
   existed during the hour, so a revoked or deleted machine's starts before it went still count for
   the fleet's start reliability, and a retired machine gets no more rows (deleting a machine
   retires it at its deletion if it was not retired already).
 - **The speed index** reads a job only when its machine is approved, not deleted, and existed when
-  the job completed (`fleet_machine_existed_at!`).
+  the job completed (`fleet_machine_existed_at!`), so a machine retired during the window still
+  counts in the fleet medians for its runs before `retired_at`, though it has no index on the page.
 
 ## Job categories
 
@@ -329,7 +334,8 @@ score.
   one of them), as before. An hour is a misfit when one of its jobs waited at least 1 min (the
   1–2 min bucket and up) while the CPU used p50 of the machines with a sample that hour, summed,
   was under half of those same machines' CPU budgets; an hour with no sampled machine is not a
-  misfit.
+  misfit. The machines are the page's and those retired during the window, each only in the
+  hours its span reaches.
 
 **The grace-hour contract with #204.** The source reads `fleet_health_hourly` and
 `fleet_host_hourly` only for hours past their grace (`hour + 1 h + ROLLUP_GRACE_MILLIS <= now`).
@@ -349,7 +355,7 @@ one reconcile interval (30 s by default), or the catch-up after downtime, a few 
 | `start-reliability` | Start reliability | 20 | successful starts ÷ start attempts (machine-fault failures only), on every machine that started runners in the window, one revoked or deleted since included | ≥ 99% | ≤ 80% |
 | `infra-failures` | Infrastructure failures | 15 | infrastructure-failed jobs ÷ every completed final-attempt job (`job_count`: successes and failures alike, so an outage still scores) | 0% | ≥ 5% |
 | `capacity-fit` | Capacity fit | 15 | share of hours with jobs waiting over 1 min while the fleet's CPU used p50 was under 50% of budget | 0% | ≥ 25% |
-| `availability` | Availability | 10 | Σ (each machine's online minutes × its CPU budget) ÷ Σ (its covered minutes × its CPU budget), each machine's online minutes capped at its covered minutes first (its sampled minute in progress can put it one over) | 100% | ≤ 80% |
+| `availability` | Availability | 10 | Σ (each machine's online minutes × its CPU budget) ÷ Σ (its covered minutes × its CPU budget), over the page's machines and those retired during the window ([Fleet machines](#fleet-machines)), each machine's online minutes capped at its covered minutes first (its sampled minute in progress can put it one over) | 100% | ≤ 80% |
 
 **Machine:**
 
@@ -491,9 +497,9 @@ the fixture, the fake and #204's oracle with it, so it waits for a change that n
 Machines are in id order on the wire; the page sorts them worst score first.
 
 What the database source (#204) puts in the windowed fields:
-- **`hosts`:** the window's machines ([Fleet machines](#fleet-machines)): every approved,
-  non-deleted machine whose life overlaps the covered time, so also one retired during the
-  window (its `live` is `null`: the live half reads only machines not retired), with
+- **`hosts`:** the fleet machines ([Fleet machines](#fleet-machines)): every approved,
+  non-deleted machine that is not retired and was created before `now` (a retired one is on no
+  page, in any window), with
   `cpuBudgetMillis` and `memoryBudgetMib` from its root budget (`host_resource_domains`, 0 without
   one) and `diskTotalBytes` the size of its root disk as its agent observed it
   (`fleet_observed_domains`, the size the disk alarm and the headroom score read; `null` before
@@ -678,9 +684,9 @@ machines with their budgets, one installation, repository `acme/app` and a pool 
 **The end-to-end test and the oracle (#204).** `crates/gridops-api/src/fleet/health_e2e_tests.rs`
 seeds two days of the five fixture machines (jobs, a re-run across an hour boundary, a job in the
 hour still in its grace, a pathless GitLab job on a group-scoped connection, a machine with no
-budget and one never online, a re-enrolled machine (a retired row named callisto, retired 30 h
-before the evaluation hour, beside the active one: not on the 1 h and 24 h pages, on 7 d scored
-only for its hours before `retired_at`, and never live nor with a live concern), a machine
+budget and one never online, a re-enrolled machine (a retired row named callisto, retired 10 h
+before the evaluation hour, beside the active one: on no page and in no concern in any window,
+while the fleet's components count its hours before `retired_at` on 24 h and 7 d), a machine
 created 6 h before the evaluation hour (scored only from its `created_at`), a nearly full disk with a fresh heartbeat and a low one with a stale
 heartbeat, a busy GitLab runner with no job row and one whose running job has its row, GitLab
 jobs on three machines, start attempts and failures (machine-fault failures in the last hour

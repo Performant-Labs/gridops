@@ -501,7 +501,6 @@ fn each_concern_rule_fires_at_its_threshold_and_not_just_below_it() {
         memory_budget_mib: 65_536,
         disk_total_bytes: Some(500 * GIB),
         created_at: None,
-        retired_at: None,
     };
     let speed = |index: Option<f64>| SpeedResult {
         host_id: "h-1".to_owned(),

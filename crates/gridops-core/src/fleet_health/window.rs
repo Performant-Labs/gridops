@@ -10,8 +10,8 @@ use sqlx::SqlitePool;
 
 use super::{
     FleetHealthInputs, FleetLiveStats, FleetSummary, HealthTargets, HealthWindow, HostHealth,
-    HostInfo, HostSpeed, HourlyJobRow, ScoredFleet, SpeedResult, TrendPoint, WindowedHealth,
-    concerns, hour, score, usage,
+    HostInfo, HostSpeed, HourlyJobRow, RetiredHost, ScoredFleet, SpeedResult, TrendPoint,
+    WindowedHealth, concerns, hour, score, usage,
 };
 
 /// A machine's id, name, root CPU and memory budget, observed root disk,
@@ -28,16 +28,23 @@ type HostRow = (
 
 /// The window's machines in id order (#262, [`super::machines`]): every
 /// approved, non-deleted machine whose life overlaps the covered time
-/// `[ceil_hour(now − W), now)`, so one retired before the window is not on
-/// the page and one retired or created during it is, with its span. Each has
-/// its root budget's CPU and memory and its root disk's size as its agent
-/// observed it (`fleet_observed_domains`, the size the disk alarm reads since
-/// #240, not the admin-set budget disk), `None` before any observation. A
-/// machine with no root budget row has a budget of 0.
+/// `[ceil_hour(now − W), now)`. The ones not retired are the page's
+/// (`HostInfo`, counting from their `created_at`); the ones retired during
+/// the window are never on the page but count for the fleet's components
+/// until their `retired_at` (`RetiredHost`); one retired before the window
+/// is neither. Each page machine has its root budget's CPU and memory and
+/// its root disk's size as its agent observed it (`fleet_observed_domains`,
+/// the size the disk alarm reads since #240, not the admin-set budget disk),
+/// `None` before any observation. A machine with no root budget row has a
+/// budget of 0.
 ///
 /// # Errors
 /// The read failed, or a budget does not fit its type.
-pub async fn host_infos(db: &SqlitePool, window: HealthWindow, now: i64) -> Result<Vec<HostInfo>> {
+pub async fn window_machines(
+    db: &SqlitePool,
+    window: HealthWindow,
+    now: i64,
+) -> Result<(Vec<HostInfo>, Vec<RetiredHost>)> {
     let rows: Vec<HostRow> = sqlx::query_as(concat!(
         "SELECT fh.id,fh.name,d.cpu_millis,d.memory_mib,
                 (SELECT o.disk_bytes FROM fleet_observed_domains o
@@ -56,21 +63,31 @@ pub async fn host_infos(db: &SqlitePool, window: HealthWindow, now: i64) -> Resu
     .bind(now)
     .fetch_all(db)
     .await?;
-    rows.into_iter()
-        .map(|(id, name, cpu, memory, disk, created_at, retired_at)| {
-            Ok(HostInfo {
-                cpu_budget_millis: u32::try_from(cpu.unwrap_or(0))
-                    .with_context(|| format!("{name}'s CPU budget"))?,
-                memory_budget_mib: u32::try_from(memory.unwrap_or(0))
-                    .with_context(|| format!("{name}'s memory budget"))?,
-                disk_total_bytes: disk.and_then(|bytes| u64::try_from(bytes).ok()),
+    let mut hosts = Vec::new();
+    let mut retired_hosts = Vec::new();
+    for (id, name, cpu, memory, disk, created_at, retired_at) in rows {
+        let cpu_budget_millis =
+            u32::try_from(cpu.unwrap_or(0)).with_context(|| format!("{name}'s CPU budget"))?;
+        if let Some(retired_at) = retired_at {
+            retired_hosts.push(RetiredHost {
+                id,
+                cpu_budget_millis,
                 created_at: Some(created_at),
                 retired_at,
-                id,
-                name,
-            })
-        })
-        .collect()
+            });
+            continue;
+        }
+        hosts.push(HostInfo {
+            cpu_budget_millis,
+            memory_budget_mib: u32::try_from(memory.unwrap_or(0))
+                .with_context(|| format!("{name}'s memory budget"))?,
+            disk_total_bytes: disk.and_then(|bytes| u64::try_from(bytes).ok()),
+            created_at: Some(created_at),
+            id,
+            name,
+        });
+    }
+    Ok((hosts, retired_hosts))
 }
 
 /// The fleet score's trend for `window`: its snapshots recorded in
@@ -112,12 +129,13 @@ pub async fn inputs(
     now: i64,
     speed: Vec<SpeedResult>,
 ) -> Result<FleetHealthInputs> {
-    let hosts = host_infos(db, window, now).await?;
+    let (hosts, retired_hosts) = window_machines(db, window, now).await?;
     let (hourly, host_hourly) = hour::window_rows(db, window, now).await?;
     Ok(FleetHealthInputs {
         window,
         now,
         hosts,
+        retired_hosts,
         hourly,
         host_hourly,
         speed,
@@ -168,7 +186,7 @@ pub fn assemble(
             let own: Vec<&HourlyJobRow> = rows
                 .iter()
                 .copied()
-                .filter(|row| row.host.as_str() == info.id && info.counts_hour(row.hour))
+                .filter(|row| row.host.as_str() == info.id && info.life().counts_hour(row.hour))
                 .collect();
             let mut speed: Vec<HostSpeed> = inputs
                 .speed

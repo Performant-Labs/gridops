@@ -272,7 +272,6 @@ mod tests {
             memory_budget_mib: 1_000,
             disk_total_bytes: None,
             created_at: None,
-            retired_at: None,
         }
     }
 
@@ -301,6 +300,7 @@ mod tests {
             window: HealthWindow::Day,
             now: HOUR_MILLIS,
             hosts: vec![info("h-1", "io")],
+            retired_hosts: Vec::new(),
             hourly,
             host_hourly: Vec::new(),
             speed,

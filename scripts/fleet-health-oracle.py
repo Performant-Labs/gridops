@@ -225,10 +225,23 @@ class Oracle:
         return hosts
 
     def hosts(self):
-        """The window's machines (#262): the approved, non-deleted ones whose
-        life overlaps the covered time [first, now). One retired before the
-        window isn't on the page; one created or retired during it is."""
-        return [host for host in self.approved_hosts() if self.lives(host, self.first, self.now)]
+        """The page's machines (#262): approved, not deleted, not retired, and
+        created before now. A retired machine is never on the page."""
+        return [
+            host
+            for host in self.approved_hosts()
+            if host["retired"] is None and self.lives(host, self.first, self.now)
+        ]
+
+    def retired_hosts(self):
+        """The machines retired during the window (#262): off the page, but
+        their time before `retired_at` counts for the fleet's availability and
+        capacity fit."""
+        return [
+            host
+            for host in self.approved_hosts()
+            if host["retired"] is not None and self.lives(host, self.first, self.now)
+        ]
 
     def live_hosts(self):
         """The fleet's machines now (#262): approved, not deleted, not retired."""
@@ -626,6 +639,9 @@ class Oracle:
         return until // MINUTE - begin // MINUTE, (until - begin) / 1000.0
 
     def score(self, hosts, jobs, host_rows, speed):
+        # The fleet's availability and capacity fit also count the machines
+        # retired during the window, each over its own span (#262).
+        fleet_machines = hosts + self.retired_hosts()
         total_jobs = len(jobs)
         enough = total_jobs >= 20
         wait = [0] * 9
@@ -654,7 +670,7 @@ class Oracle:
                 for row in host_rows:
                     if row["hour"] != hour or row["cpu_p50"] is None:
                         continue
-                    host = next((h for h in hosts if h["id"] == row["host"]), None)
+                    host = next((h for h in fleet_machines if h["id"] == row["host"]), None)
                     if host is None or not self.lives_in_hour(host, hour):
                         continue
                     used += row["cpu_p50"]
@@ -667,7 +683,7 @@ class Oracle:
         # by its budget (#262).
         online = 0.0
         budget = 0.0
-        for host in hosts:
+        for host in fleet_machines:
             covered_minutes, _ = self.host_covered(host)
             minutes = sum(
                 row["online"] for row in host_rows if row["host"] == host["id"] and self.lives_in_hour(host, row["hour"])
@@ -1314,6 +1330,9 @@ class Oracle:
             },
             "live": live_fleet,
             "hosts": out_hosts,
+            # Not on the page: the machines retired during the window, which
+            # the fleet components count (#262). The e2e reads it.
+            "fleetOnlyHosts": [host["id"] for host in self.retired_hosts()],
             "concerns": [{"key": c["key"], "severity": c["severity"], "since": c["since"]} for c in concerns],
             "classification": self.classification(),
         }

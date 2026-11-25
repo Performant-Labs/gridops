@@ -2,26 +2,30 @@
 //! fleet health page, its snapshots and its rollups count, and for which part
 //! of a window.
 //!
-//! A **fleet machine** is approved, not deleted and not retired. That is the
-//! live half's machine set ([`fleet_machine_now!`]: the live machine list and every live
-//! concern, the disk alarm's read included).
+//! A **fleet machine** is approved, not deleted and not retired. It is the
+//! page's machine set: the live half's ([`fleet_machine_now!`]: the live
+//! machine list and every live concern, the disk alarm's read included), and
+//! every window's (`HostInfo`: the machine table, the machine scores and
+//! every windowed concern), for a window counting from its `created_at`
+//! ([`HostInfo::life`]), so a machine created during the window is not
+//! scored offline for the hours before it existed. A retired machine is never
+//! on the page, in any window: a re-enrolled machine is a new row with its
+//! own `created_at`, and its retired row stays behind.
 //!
-//! Over a window, a machine counts for the part of its life inside the
-//! window: from its `created_at` until its `retired_at` (only while its
-//! lifecycle is `retired`; a re-enrolled machine is a new row with its own
-//! `created_at`, and its retired row stays behind). So the window's machines
-//! ([`overlaps`]) are the approved, non-deleted ones whose life overlaps the
-//! window's covered time: one retired before the window starts isn't on the
-//! page at all, one retired during it counts only for the time before
-//! `retired_at`, and one created during it only from `created_at`
-//! ([`HostInfo::span`]). A retired row without a `retired_at` counts as
-//! retired since before any window. The machine rollup writes a row for every
-//! machine that existed during the hour ([`fleet_machine_overlaps!`] on the hour, any
-//! enrollment state: a revoked or deleted machine's starts before it went
-//! still count for the fleet), and the speed index reads a job only when its
-//! machine is approved, not deleted, and existed when the job completed
+//! The fleet's components still count a machine retired during the window
+//! ([`RetiredHost`]) for its time before `retired_at`: its rows already count
+//! for the fleet's starts and jobs, and its budget and online minutes count
+//! for the fleet's availability and capacity fit over its span
+//! ([`Life::span`]), so the window's fleet totals stay right. One retired
+//! before the window starts counts for nothing. A retired row without a
+//! `retired_at` counts as retired since before any window.
+//!
+//! The machine rollup writes a row for every machine that existed during the
+//! hour ([`fleet_machine_overlaps!`] on the hour, any enrollment state: a
+//! revoked or deleted machine's starts before it went still count for the
+//! fleet), and the speed index reads a job only when its machine is
+//! approved, not deleted, and existed when the job completed
 //! ([`fleet_machine_existed_at!`]).
-
 //!
 //! The SQL rules are macros expanding to string literals, so a query keeps
 //! them in one `concat!` and stays a static string: each takes the
@@ -29,7 +33,7 @@
 //! [`fleet_machine_existed_at!`] SQL expressions (binds or columns) for the
 //! time.
 
-use super::{HOUR_MILLIS, HostInfo};
+use super::{HOUR_MILLIS, HostInfo, RetiredHost};
 
 /// SQL: `fleet_hosts` row `$alias` is approved and not deleted.
 #[macro_export]
@@ -101,24 +105,53 @@ macro_rules! fleet_machine_existed_at {
     };
 }
 
-impl HostInfo {
-    /// The part of `[from, to)` this machine counts for: from its creation
-    /// until its retirement. Empty (`start >= end`) when it did not exist
-    /// then.
+/// When a machine lived: from `created_at` until `retired_at`, each `None`
+/// for no bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Life {
+    pub created_at: Option<i64>,
+    pub retired_at: Option<i64>,
+}
+
+impl Life {
+    /// The part of `[from, to)` the machine lived in. Empty (`start >= end`)
+    /// when it did not exist then.
     #[must_use]
-    pub fn span(&self, from: i64, to: i64) -> (i64, i64) {
+    pub fn span(self, from: i64, to: i64) -> (i64, i64) {
         (
             self.created_at.map_or(from, |created| from.max(created)),
             self.retired_at.map_or(to, |retired| to.min(retired)),
         )
     }
 
-    /// Whether the hour starting at `hour` holds some of this machine's life,
+    /// Whether the hour starting at `hour` holds some of the machine's life,
     /// so its rows of that hour count.
     #[must_use]
-    pub fn counts_hour(&self, hour: i64) -> bool {
+    pub fn counts_hour(self, hour: i64) -> bool {
         let (start, end) = self.span(hour, hour + HOUR_MILLIS);
         start < end
+    }
+}
+
+impl HostInfo {
+    /// A page machine's life: from its creation on (it is never retired).
+    #[must_use]
+    pub const fn life(&self) -> Life {
+        Life {
+            created_at: self.created_at,
+            retired_at: None,
+        }
+    }
+}
+
+impl RetiredHost {
+    /// A retired machine's life: from its creation until its retirement.
+    #[must_use]
+    pub const fn life(&self) -> Life {
+        Life {
+            created_at: self.created_at,
+            retired_at: Some(self.retired_at),
+        }
     }
 }
 
@@ -131,18 +164,13 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::{HOUR_MILLIS, HostInfo};
+    use super::{HOUR_MILLIS, Life};
     use crate::connect_database_path;
 
     const T: i64 = 1_800_000_000_000;
 
-    fn info(created_at: Option<i64>, retired_at: Option<i64>) -> HostInfo {
-        HostInfo {
-            id: "a".to_owned(),
-            name: "a".to_owned(),
-            cpu_budget_millis: 1_000,
-            memory_budget_mib: 1_024,
-            disk_total_bytes: None,
+    fn info(created_at: Option<i64>, retired_at: Option<i64>) -> Life {
+        Life {
             created_at,
             retired_at,
         }

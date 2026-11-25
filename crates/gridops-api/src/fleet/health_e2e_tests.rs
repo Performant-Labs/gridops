@@ -26,7 +26,7 @@
 //! runner whose running job has its row, machine-fault start failures in the
 //! last hour (a `start-failures` concern) beside an operator's release that
 //! doesn't count, a revoked machine's starts, and the capacity admission
-//! charges (reserved CPU and memory). Since #262: callisto re-enrolled 30 h
+//! charges (reserved CPU and memory). Since #262: callisto re-enrolled 10 h
 //! before `T` (its old row approved and retired, sampled until then, beside
 //! the active one of the same name), and ganymede, created 6 h before `T`.
 //!
@@ -83,7 +83,7 @@ const GITLAB_UNMATCHED_JOB: i64 = 960_007;
 const GITLAB_STARTED_JOB: i64 = 960_008;
 /// #262: callisto's old row is retired this long before `T` (it re-enrolled
 /// under the fixture's row); ganymede is created this long before `T`.
-const RETIRED_BEFORE_T: i64 = 30 * HOUR;
+const RETIRED_BEFORE_T: i64 = 10 * HOUR;
 const CREATED_BEFORE_T: i64 = 6 * HOUR;
 
 /// One of the regular jobs: (name, typical duration in seconds).
@@ -1056,43 +1056,28 @@ fn compare(window: &str, at: &'static str, api: &Value, oracle: &Value) -> Resul
     diff.finish()
 }
 
-/// #262, beside the oracle's agreement: callisto's retired row (retired 30 h
-/// before `T`, as production's was when #262 was seen) is never live and
-/// raises no live concern (offline, start gate, start failures, disk,
-/// uncertain). The 1 h and 24 h windows start after its retirement, so it is
-/// not on those pages at all: no score. On 7 d it is, scored only for its
-/// hours before `retired_at`, with no live stats. The active callisto is on
-/// every page beside it, and ganymede, created 6 h before `T` and online
-/// every minute since, is fully available on every window and not offline.
-fn check_machines(window: &str, api: &Value, scenario: &Scenario) -> Result<()> {
+/// #262, beside the oracle's agreement: callisto's retired row (retired
+/// 10 h before `T`) is on no page, in no window: not in the machine list and
+/// in no concern. The fleet's components still count its hours before
+/// `retired_at`: the oracle counts it, as a fleet-only machine, on 24 h and
+/// 7 d (which hold some of its life) and not on 1 h (which starts after its
+/// retirement), and the API agrees with the oracle on every fleet component.
+/// The active callisto is on every page beside it, and ganymede, created 6 h
+/// before `T` and online every minute since, is fully available on every
+/// window and not offline.
+fn check_machines(window: &str, api: &Value, oracle: &Value, scenario: &Scenario) -> Result<()> {
     let old = scenario.retired_callisto.id.as_str();
     let keys = concern_keys(api);
-    let live = [
-        "host-offline:",
-        "start-gate:",
-        "start-failures:",
-        "disk:",
-        "uncertain:",
-    ];
     ensure!(
-        !keys
-            .iter()
-            .any(|key| key.contains(old) && live.iter().any(|kind| key.starts_with(kind))),
-        "{window}: a live concern on callisto's retired row: {keys:?}"
+        !array(&api["hosts"]).iter().any(|host| host["id"] == old)
+            && !keys.iter().any(|key| key.contains(old)),
+        "{window}: callisto's retired row is on the page: {keys:?}"
     );
-    let row = array(&api["hosts"]).iter().find(|host| host["id"] == old);
-    if window == "7d" {
-        let row = row.with_context(|| format!("{window}: no row for callisto's retired row"))?;
-        ensure!(
-            row["live"].is_null(),
-            "{window}: the retired row has live stats"
-        );
-    } else {
-        ensure!(
-            row.is_none() && !keys.iter().any(|key| key.contains(old)),
-            "{window}: callisto's retired row is on the page: {keys:?}"
-        );
-    }
+    let fleet_only: Vec<&Value> = array(&oracle["fleetOnlyHosts"]).iter().collect();
+    ensure!(
+        fleet_only.iter().any(|id| *id == old) == (window != "1h"),
+        "{window}: the fleet counts callisto's retired row: {fleet_only:?}"
+    );
     let callisto = host(api, &scenario.id("callisto")?)?;
     ensure!(
         !callisto["live"].is_null(),
@@ -1219,7 +1204,7 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{api}");
         let expected = oracle(&path, window, NOW_A)?;
         compare(window, "NOW_A", &api, &expected)?;
-        check_machines(window, &api, &scenario)?;
+        check_machines(window, &api, &expected, &scenario)?;
         at_a.insert(window, (api, expected));
     }
     // Before the backfill can classify it, the pathless GitLab job is NULL,
@@ -1260,7 +1245,7 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{api}");
         let expected = oracle(&path, window, NOW_B)?;
         compare(window, "NOW_B", &api, &expected)?;
-        check_machines(window, &api, &scenario)?;
+        check_machines(window, &api, &expected, &scenario)?;
         // The snapshot the pass recorded at NOW_B holds the scores the
         // oracle computes at NOW_B: the fleet's on the trend, and every
         // machine's in the row.
