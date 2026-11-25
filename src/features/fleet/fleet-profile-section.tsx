@@ -320,7 +320,7 @@ function ProfileEditor({ poolId, poolDockerImage, profile, description, hostEnab
               ) : null}
             </div>
             {platform.runtimeKind === "docker" && poolImage && platform.image.trim() !== poolImage ? (
-              <p className="text-xs text-warning">
+              <p className="text-xs text-warning-text">
                 Not the pool’s Docker image (<code className="font-mono">{poolImage}</code>), so jobs here may miss tools it has.{" "}
                 <button className="underline underline-offset-2" onClick={() => update(platform.key, (current) => ({ ...current, image: poolImage }))} type="button">
                   Use the pool’s image

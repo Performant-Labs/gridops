@@ -26,7 +26,9 @@
 //! runner whose running job has its row, machine-fault start failures in the
 //! last hour (a `start-failures` concern) beside an operator's release that
 //! doesn't count, a revoked machine's starts, and the capacity admission
-//! charges (reserved CPU and memory).
+//! charges (reserved CPU and memory). Since #262: callisto re-enrolled 10 h
+//! before `T` (its old row approved and retired, sampled until then, beside
+//! the active one of the same name), and ganymede, created 6 h before `T`.
 //!
 //! The evaluation runs at two moments: `NOW_A`, ten minutes into hour `T`
 //! (the hour that just ended is in its grace and computed live), and
@@ -79,6 +81,10 @@ const RUNNING_GITLAB_JOB: i64 = 960_005;
 const GITLAB_QUEUED_JOB: i64 = 960_006;
 const GITLAB_UNMATCHED_JOB: i64 = 960_007;
 const GITLAB_STARTED_JOB: i64 = 960_008;
+/// #262: callisto's old row is retired this long before `T` (it re-enrolled
+/// under the fixture's row); ganymede is created this long before `T`.
+const RETIRED_BEFORE_T: i64 = 10 * HOUR;
+const CREATED_BEFORE_T: i64 = 6 * HOUR;
 
 /// One of the regular jobs: (name, typical duration in seconds).
 const JOBS: [(&str, i64); 6] = [
@@ -90,13 +96,20 @@ const JOBS: [(&str, i64); 6] = [
     ("deploy", 90),
 ];
 
-/// The scenario's seeded fleet.
+/// The scenario's seeded fleet, and the two machines #262 adds: callisto's
+/// retired row and ganymede, created during the windows.
 struct Scenario {
     fleet: SeededFleet,
+    retired_callisto: SeededHost,
+    ganymede: SeededHost,
+    ganymede_created: i64,
 }
 
 impl Scenario {
     fn host(&self, name: &str) -> Result<&SeededHost> {
+        if name == "ganymede" {
+            return Ok(&self.ganymede);
+        }
         self.fleet.host(name)
     }
 
@@ -138,19 +151,22 @@ fn sample(host: &str, at: i64, newest: i64) -> SampleSeed {
 }
 
 /// A sample a minute for each sampled machine from `from` (exclusive) up to
-/// `until` (inclusive): io, callisto and `MacBookPro` up to `until`, Jupiter
-/// stopping four minutes earlier (a stale heartbeat while still online).
+/// `until` (inclusive): io, callisto, `MacBookPro` and ganymede (from its
+/// creation, `created`) up to `until`, Jupiter stopping four minutes earlier
+/// (a stale heartbeat while still online).
 async fn insert_samples(db: &SqlitePool, scenario: &Scenario, from: i64, until: i64) -> Result<()> {
-    for (name, last) in [
-        ("io", until),
-        ("callisto", until),
-        ("MacBookPro", until),
-        ("Jupiter", until - 210_000),
+    for (name, first, last) in [
+        ("io", from, until),
+        ("callisto", from, until),
+        ("MacBookPro", from, until),
+        ("Jupiter", from, until - 210_000),
+        // Never before its creation.
+        ("ganymede", from.max(scenario.ganymede_created - 1), until),
     ] {
         let host = scenario.host(name)?;
         let mut samples = Vec::new();
         let mut at = until;
-        while at > from {
+        while at > first {
             if at <= last {
                 samples.push(sample(name, at, until));
             }
@@ -168,7 +184,41 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     let now_a = t + 10 * MINUTE;
     let rerun_hour = t - 5 * HOUR;
     let fleet = testdata::seed_fleet(db).await?;
-    let scenario = Scenario { fleet };
+    // #262: callisto re-enrolled `RETIRED_BEFORE_T` before `t`: its old row
+    // stays, approved and retired, beside the fixture's row (the new one).
+    // ganymede joins the fleet `CREATED_BEFORE_T` before `t`.
+    let retired_callisto = SeededHost {
+        id: "0f000001-0000-4000-8000-0000000000fe".to_owned(),
+        root_domain_id: "0f000002-0000-4000-8000-0000000000fe".to_owned(),
+        backend_id: "0f000003-0000-4000-8000-0000000000fe".to_owned(),
+        ..fleet.host("callisto")?.clone()
+    };
+    let ganymede = SeededHost {
+        id: "0f000001-0000-4000-8000-0000000000fd".to_owned(),
+        name: "ganymede".to_owned(),
+        cpu_budget_millis: 4_000,
+        memory_budget_mib: 16_384,
+        root_domain_id: "0f000002-0000-4000-8000-0000000000fd".to_owned(),
+        backend_id: "0f000003-0000-4000-8000-0000000000fd".to_owned(),
+        ..fleet.host("europa")?.clone()
+    };
+    let ganymede_created = t - CREATED_BEFORE_T;
+    insert_machine(
+        db,
+        &retired_callisto,
+        "approved",
+        "retired",
+        1,
+        Some(t - RETIRED_BEFORE_T),
+    )
+    .await?;
+    insert_machine(db, &ganymede, "approved", "active", ganymede_created, None).await?;
+    let scenario = Scenario {
+        fleet,
+        retired_callisto,
+        ganymede,
+        ganymede_created,
+    };
     let io = scenario.id("io")?;
     let jupiter = scenario.id("Jupiter")?;
     let callisto = scenario.id("callisto")?;
@@ -452,34 +502,16 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
         name: "retired-box".to_owned(),
         root_domain_id: "0f000002-0000-4000-8000-0000000000ff".to_owned(),
         backend_id: "0f000003-0000-4000-8000-0000000000ff".to_owned(),
+        cpu_budget_millis: 4_000,
+        memory_budget_mib: 8_192,
         ..scenario.host("europa")?.clone()
     };
-    sqlx::query(
-        "INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at,deleted_at)
-         VALUES (?,?,'linux','x64','revoked','retired','verified',1,1,?)",
-    )
-    .bind(&revoked.id)
-    .bind(&revoked.name)
-    .bind(t - 2 * HOUR)
-    .execute(db)
-    .await?;
-    sqlx::query(
-        "INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes)
-         VALUES (?,?,NULL,'Physical',4000,8192,0)",
-    )
-    .bind(&revoked.root_domain_id)
-    .bind(&revoked.id)
-    .execute(db)
-    .await?;
-    sqlx::query(
-        "INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
-         VALUES (?,?,?,'docker','linux','x64','ready',0,1,1)",
-    )
-    .bind(&revoked.backend_id)
-    .bind(&revoked.id)
-    .bind(&revoked.root_domain_id)
-    .execute(db)
-    .await?;
+    // Deleted as `delete_host` deletes: revoked, and retired when deleted.
+    insert_machine(db, &revoked, "revoked", "retired", 1, Some(t - 2 * HOUR)).await?;
+    sqlx::query("UPDATE fleet_hosts SET deleted_at=retired_at WHERE id=?")
+        .bind(&revoked.id)
+        .execute(db)
+        .await?;
     for index in 0..4_i64 {
         let at = t - 12 * HOUR + index * 10 * MINUTE;
         testdata::insert_start_attempt(db, &scenario.fleet, &revoked, at, PlacementEnd::Failed)
@@ -552,6 +584,13 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     )
     .await?;
     insert_samples(db, &scenario, t - 48 * HOUR, samples_until).await?;
+    // callisto's old row reported every minute until it was retired (the
+    // last sample 30 s before).
+    let old_samples: Vec<SampleSeed> = (1..=(48 * HOUR - RETIRED_BEFORE_T) / MINUTE)
+        .map(|minute| t - 48 * HOUR + minute * MINUTE - 30_000)
+        .map(|at| sample("callisto", at, 0))
+        .collect();
+    testdata::insert_samples(db, &scenario.retired_callisto, &old_samples).await?;
 
     // Earlier snapshots for the trend; one is older than the 24 h window.
     sqlx::query(
@@ -568,6 +607,54 @@ async fn seed(db: &SqlitePool, t: i64, samples_until: i64) -> Result<Scenario> {
     .execute(db)
     .await?;
     Ok(scenario)
+}
+
+/// Writes a machine that `testdata::seed_fleet` does not: its `fleet_hosts`
+/// row (created at `created`, retired at `retired`), its root budget and a
+/// disabled backend.
+async fn insert_machine(
+    db: &SqlitePool,
+    host: &SeededHost,
+    enrollment: &str,
+    lifecycle: &str,
+    created: i64,
+    retired: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO fleet_hosts (id,name,host_os,architecture,enrollment_state,lifecycle_state,integrity_state,created_at,updated_at,retired_at)
+         VALUES (?,?,'linux','x64',?,?,'verified',?,?,?)",
+    )
+    .bind(&host.id)
+    .bind(&host.name)
+    .bind(enrollment)
+    .bind(lifecycle)
+    .bind(created)
+    .bind(created)
+    .bind(retired)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO host_resource_domains (id,host_id,parent_domain_id,name,cpu_millis,memory_mib,disk_bytes)
+         VALUES (?,?,NULL,'Physical',?,?,0)",
+    )
+    .bind(&host.root_domain_id)
+    .bind(&host.id)
+    .bind(i64::from(host.cpu_budget_millis))
+    .bind(i64::from(host.memory_budget_mib))
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO host_backends (id,host_id,domain_id,runtime_kind,execution_os,architecture,readiness,enabled,created_at,updated_at)
+         VALUES (?,?,?,'docker','linux','x64','ready',0,?,?)",
+    )
+    .bind(&host.backend_id)
+    .bind(&host.id)
+    .bind(&host.root_domain_id)
+    .bind(created)
+    .bind(created)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// The capacity admission charges, which the seed's placements otherwise
@@ -969,6 +1056,46 @@ fn compare(window: &str, at: &'static str, api: &Value, oracle: &Value) -> Resul
     diff.finish()
 }
 
+/// #262, beside the oracle's agreement: callisto's retired row (retired
+/// 10 h before `T`) is on no page, in no window: not in the machine list and
+/// in no concern. The fleet's components still count its hours before
+/// `retired_at`: the oracle counts it, as a fleet-only machine, on 24 h and
+/// 7 d (which hold some of its life) and not on 1 h (which starts after its
+/// retirement), and the API agrees with the oracle on every fleet component.
+/// The active callisto is on every page beside it, and ganymede, created 6 h
+/// before `T` and online every minute since, is fully available on every
+/// window and not offline.
+fn check_machines(window: &str, api: &Value, oracle: &Value, scenario: &Scenario) -> Result<()> {
+    let old = scenario.retired_callisto.id.as_str();
+    let keys = concern_keys(api);
+    ensure!(
+        !array(&api["hosts"]).iter().any(|host| host["id"] == old)
+            && !keys.iter().any(|key| key.contains(old)),
+        "{window}: callisto's retired row is on the page: {keys:?}"
+    );
+    let fleet_only: Vec<&Value> = array(&oracle["fleetOnlyHosts"]).iter().collect();
+    ensure!(
+        fleet_only.iter().any(|id| *id == old) == (window != "1h"),
+        "{window}: the fleet counts callisto's retired row: {fleet_only:?}"
+    );
+    let callisto = host(api, &scenario.id("callisto")?)?;
+    ensure!(
+        !callisto["live"].is_null(),
+        "{window}: the active callisto is live"
+    );
+    let ganymede = host(api, &scenario.ganymede.id)?;
+    ensure!(
+        *component(ganymede, "availability") == 100,
+        "{window}: ganymede's availability {}",
+        component(ganymede, "availability")
+    );
+    ensure!(
+        !keys.contains(&format!("host-offline:{}", scenario.ganymede.id)),
+        "{window}: ganymede offline: {keys:?}"
+    );
+    Ok(())
+}
+
 /// The jobs whose stored category differs from what the stored rules give
 /// them, as the oracle classifies: `(job, stored, rules)`.
 fn misclassified(oracle: &Value) -> Vec<(String, Value, String)> {
@@ -1077,6 +1204,7 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{api}");
         let expected = oracle(&path, window, NOW_A)?;
         compare(window, "NOW_A", &api, &expected)?;
+        check_machines(window, &api, &expected, &scenario)?;
         at_a.insert(window, (api, expected));
     }
     // Before the backfill can classify it, the pathless GitLab job is NULL,
@@ -1117,6 +1245,7 @@ async fn the_page_matches_the_oracle_on_the_seeded_fleet() -> Result<()> {
         assert_eq!(status, StatusCode::OK, "{api}");
         let expected = oracle(&path, window, NOW_B)?;
         compare(window, "NOW_B", &api, &expected)?;
+        check_machines(window, &api, &expected, &scenario)?;
         // The snapshot the pass recorded at NOW_B holds the scores the
         // oracle computes at NOW_B: the fleet's on the trend, and every
         // machine's in the row.

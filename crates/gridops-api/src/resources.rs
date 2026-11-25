@@ -5962,7 +5962,7 @@ pub(crate) async fn fleet_root_disks(
     database: &sqlx::SqlitePool,
     now: i64,
 ) -> sqlx::Result<Vec<FleetRootDisk>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(concat!(
         r#"SELECT fh.id AS host_id,fh.name AS host_name,
                   (SELECT s.disk_free_bytes FROM host_samples s
                     WHERE s.host_id=fh.id AND s.disk_free_bytes IS NOT NULL
@@ -5971,10 +5971,11 @@ pub(crate) async fn fleet_root_disks(
              FROM fleet_hosts fh
              JOIN fleet_observed_domains d
                ON d.host_id=fh.id AND d.local_key='root'
-            WHERE fh.enrollment_state='approved'
-              AND fh.lifecycle_state NOT IN ('retired')
-              AND fh.last_heartbeat_at>=?"#,
-    )
+            WHERE "#,
+        // The fleet machines (#262), as the fleet health page reads them.
+        gridops_core::fleet_machine_now!("fh"),
+        " AND fh.last_heartbeat_at>=?"
+    ))
     .bind(now - DISK_ALARM_HEARTBEAT_MILLIS)
     .fetch_all(database)
     .await?;

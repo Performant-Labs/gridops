@@ -186,15 +186,21 @@ class Oracle:
 
     # -- Machines --------------------------------------------------------
 
-    def hosts(self):
+    def approved_hosts(self):
         """Approved, non-deleted machines in id order, with the root budget's
-        CPU and memory and the observed root disk's size."""
+        CPU and memory, the observed root disk's size, and their life: from
+        `created_at` until `retired_at` while retired (#262; a retired row
+        without a `retired_at` retired before any window, -inf)."""
         rows = self.q(
-            """SELECT fh.id,fh.name,fh.last_heartbeat_at,fh.lifecycle_state FROM fleet_hosts fh
+            """SELECT fh.id,fh.name,fh.last_heartbeat_at,fh.lifecycle_state,fh.created_at,fh.retired_at
+                 FROM fleet_hosts fh
                 WHERE fh.enrollment_state='approved' AND fh.deleted_at IS NULL ORDER BY fh.id"""
         )
         hosts = []
         for row in rows:
+            retired = None
+            if row["lifecycle_state"] == "retired":
+                retired = row["retired_at"] if row["retired_at"] is not None else -math.inf
             budget = self.q(
                 "SELECT cpu_millis,memory_mib FROM host_resource_domains WHERE host_id=? AND parent_domain_id IS NULL",
                 row["id"],
@@ -212,9 +218,49 @@ class Oracle:
                     "disk": disk[0]["disk_bytes"] if disk else None,
                     "heartbeat": row["last_heartbeat_at"],
                     "lifecycle": row["lifecycle_state"],
+                    "created": row["created_at"],
+                    "retired": retired,
                 }
             )
         return hosts
+
+    def hosts(self):
+        """The page's machines (#262): approved, not deleted, not retired, and
+        created before now. A retired machine is never on the page."""
+        return [
+            host
+            for host in self.approved_hosts()
+            if host["retired"] is None and self.lives(host, self.first, self.now)
+        ]
+
+    def retired_hosts(self):
+        """The machines retired during the window (#262): off the page, but
+        their time before `retired_at` counts for the fleet's availability and
+        capacity fit."""
+        return [
+            host
+            for host in self.approved_hosts()
+            if host["retired"] is not None and self.lives(host, self.first, self.now)
+        ]
+
+    def live_hosts(self):
+        """The fleet's machines now (#262): approved, not deleted, not retired."""
+        return [host for host in self.approved_hosts() if host["lifecycle"] != "retired"]
+
+    @staticmethod
+    def span(host, start, end):
+        """The part of [start, end) `host` lived in: from its creation until
+        its retirement."""
+        retired = host["retired"] if host["retired"] is not None else math.inf
+        return max(start, host["created"]), min(end, retired)
+
+    @staticmethod
+    def lives(host, start, end):
+        begin, until = Oracle.span(host, start, end)
+        return begin < until
+
+    def lives_in_hour(self, host, hour):
+        return self.lives(host, hour, hour + HOUR)
 
     # -- Jobs ------------------------------------------------------------
 
@@ -365,18 +411,33 @@ class Oracle:
         }
 
     def host_hours(self):
-        """Every machine's row for every hour of the window, every machine
-        that ever enrolled included (a revoked one's starts still happened):
-        an hour with no samples still has one (0 minutes)."""
-        ids = [row["id"] for row in self.q("SELECT id FROM fleet_hosts ORDER BY id")]
+        """Every machine's row for every hour of the window it lived in, every
+        machine that ever enrolled included (a revoked one's starts still
+        happened): an hour with no samples still has one (0 minutes). #262:
+        none for an hour before its creation or after its retirement."""
+        machines = []
+        for row in self.q("SELECT id,created_at,lifecycle_state,retired_at FROM fleet_hosts ORDER BY id"):
+            retired = None
+            if row["lifecycle_state"] == "retired":
+                retired = row["retired_at"] if row["retired_at"] is not None else -math.inf
+            machines.append({"id": row["id"], "created": row["created_at"], "retired": retired})
         rows = []
         hour = self.first
         while hour < self.now:
             end = min(hour + HOUR, self.now)
-            for host_id in ids:
-                rows.append(self.host_hour(host_id, hour, end))
+            for machine in machines:
+                if self.lives(machine, hour, end):
+                    rows.append(self.host_hour(machine["id"], hour, end))
             hour += HOUR
         return rows
+
+    def speed_machine(self, host_id, at):
+        """#262: a job counts for the speed index only on a machine that is
+        approved, not deleted, and lived when the job completed."""
+        if not hasattr(self, "_speed_machines"):
+            self._speed_machines = {host["id"]: host for host in self.approved_hosts()}
+        host = self._speed_machines.get(host_id)
+        return host is not None and host["created"] <= at and (host["retired"] is None or at < host["retired"])
 
     # -- The speed index -------------------------------------------------
 
@@ -445,7 +506,7 @@ class Oracle:
                     continue
             runner = self.runner_row("github_runner_id", job["runner_id"])
             placement = self.placement_of_runner(runner)
-            if placement is None:
+            if placement is None or not self.speed_machine(placement["host_id"], job["completed_at"]):
                 continue
             key = self.job_key(job["repository"], job["workflow_name"], job["name"])
             duration = job["completed_at"] - job["started_at"]
@@ -480,7 +541,7 @@ class Oracle:
                 job["base_url"],
             )
             placement = self.placement_of_runner(runner[0]["id"] if runner else None)
-            if placement is None:
+            if placement is None or not self.speed_machine(placement["host_id"], job["completed_at"]):
                 continue
             key = self.gitlab_key(job["base_url"], job["project_path"], job["job_name"])
             duration = job["completed_at"] - job["started_at"]
@@ -568,9 +629,19 @@ class Oracle:
             total = rnd(sum(part["raw"] * entry["weight"] for part, entry in zip(parts, out) if part["raw"] is not None) / 100.0)
         return total, out
 
+    def host_covered(self, host):
+        """#262: the whole minutes and the seconds of the covered time `host`
+        lived in, from the minute it was created in to the minute it was
+        retired in (the minute in progress, as `now`'s, not counted)."""
+        begin, until = self.span(host, self.first, self.now)
+        if begin >= until:
+            return 0, 0.0
+        return until // MINUTE - begin // MINUTE, (until - begin) / 1000.0
+
     def score(self, hosts, jobs, host_rows, speed):
-        covered_minutes = self.covered() // MINUTE
-        covered_seconds = self.covered() / 1000.0
+        # The fleet's availability and capacity fit also count the machines
+        # retired during the window, each over its own span (#262).
+        fleet_machines = hosts + self.retired_hosts()
         total_jobs = len(jobs)
         enough = total_jobs >= 20
         wait = [0] * 9
@@ -599,8 +670,8 @@ class Oracle:
                 for row in host_rows:
                     if row["hour"] != hour or row["cpu_p50"] is None:
                         continue
-                    host = next((h for h in hosts if h["id"] == row["host"]), None)
-                    if host is None:
+                    host = next((h for h in fleet_machines if h["id"] == row["host"]), None)
+                    if host is None or not self.lives_in_hour(host, hour):
                         continue
                     used += row["cpu_p50"]
                     budget += host["cpu"]
@@ -608,13 +679,18 @@ class Oracle:
                     count += 1
             misfit = count / hours if hours > 0 else None
 
+        # Each machine's online minutes over its own covered minutes, weighted
+        # by its budget (#262).
         online = 0.0
         budget = 0.0
-        for host in hosts:
-            minutes = sum(row["online"] for row in host_rows if row["host"] == host["id"])
+        for host in fleet_machines:
+            covered_minutes, _ = self.host_covered(host)
+            minutes = sum(
+                row["online"] for row in host_rows if row["host"] == host["id"] and self.lives_in_hour(host, row["hour"])
+            )
             online += min(minutes, covered_minutes) * host["cpu"]
-            budget += host["cpu"]
-        availability = online / (budget * covered_minutes) if budget > 0 and covered_minutes > 0 else None
+            budget += covered_minutes * host["cpu"]
+        availability = online / budget if budget > 0 else None
 
         few_jobs = "fewer than 20 jobs completed in the window"
         few_starts = "fewer than 20 runner starts in the window"
@@ -671,8 +747,9 @@ class Oracle:
 
         scored_hosts = []
         for host in hosts:
-            rows = [row for row in host_rows if row["host"] == host["id"]]
-            own_jobs = [job for job in jobs if job["host"] == host["id"]]
+            covered_minutes, covered_seconds = self.host_covered(host)
+            rows = [row for row in host_rows if row["host"] == host["id"] and self.lives_in_hour(host, row["hour"])]
+            own_jobs = [job for job in jobs if job["host"] == host["id"] and self.lives_in_hour(host, job["hour"])]
             minutes = sum(row["online"] for row in rows)
             h_attempts = sum(row["attempts"] for row in rows)
             h_failures = sum(row["failures"] for row in rows)
@@ -708,7 +785,7 @@ class Oracle:
                 headroom = memory
             budgeted = host["cpu"] > 0
             busy = None
-            if budgeted:
+            if budgeted and covered_seconds > 0:
                 cpu_seconds = sum(job["cpu_seconds"] for job in own_jobs)
                 busy = cpu_seconds / (host["cpu"] / 1000.0 * covered_seconds)
             avail = minutes / covered_minutes if rows and covered_minutes > 0 else None
@@ -1215,12 +1292,12 @@ class Oracle:
         host_rows = self.host_hours()
         speed = self.speed()
         fleet_score, fleet_components, fleet_queue, scored_hosts = self.score(hosts, jobs, host_rows, speed)
-        live_fleet, host_live, live_concerns = self.live(hosts)
+        live_fleet, host_live, live_concerns = self.live(self.live_hosts())
         windowed = self.windowed_concerns(hosts, fleet_components, fleet_queue, scored_hosts, speed, jobs)
         concerns = self.merge(windowed, live_concerns)
         out_hosts = []
         for host, scored in zip(hosts, scored_hosts):
-            own = [job for job in jobs if job["host"] == host["id"]]
+            own = [job for job in jobs if job["host"] == host["id"] and self.lives_in_hour(host, job["hour"])]
             out_hosts.append(
                 {
                     "id": host["id"],
@@ -1253,6 +1330,9 @@ class Oracle:
             },
             "live": live_fleet,
             "hosts": out_hosts,
+            # Not on the page: the machines retired during the window, which
+            # the fleet components count (#262). The e2e reads it.
+            "fleetOnlyHosts": [host["id"] for host in self.retired_hosts()],
             "concerns": [{"key": c["key"], "severity": c["severity"], "since": c["since"]} for c in concerns],
             "classification": self.classification(),
         }

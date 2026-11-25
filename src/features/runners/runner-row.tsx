@@ -120,7 +120,7 @@ export function RunnerRow({ runner, showPool = true }: { runner: Runner; showPoo
       {runner.ephemeral ? null : <Badge className="hidden md:inline-flex" variant="outline">persistent</Badge>}
       {runner.currentJobName ? (
         runner.currentRunId ? (
-          <Link className="relative hidden min-w-0 max-w-64 items-center gap-1.5 truncate rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-2xs font-medium text-info hover:bg-info/15 md:inline-flex" params={{ runId: String(runner.currentRunId) }} to="/workflow-runs/$runId">
+          <Link className="relative hidden min-w-0 max-w-64 items-center gap-1.5 truncate rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-2xs font-medium text-info-text hover:bg-info/15 md:inline-flex" params={{ runId: String(runner.currentRunId) }} to="/workflow-runs/$runId">
             <span className="size-1.5 shrink-0 rounded-full bg-info live-pulse" /><span className="truncate">{runner.currentJobName}</span>
           </Link>
         ) : <Badge className="hidden md:inline-flex" dot="bg-info">{runner.currentJobName}</Badge>

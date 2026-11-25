@@ -2421,8 +2421,8 @@ pub struct HostLiveRead {
     pub start_gate: Option<StartGateReadV1>,
 }
 
-/// Every approved, non-deleted machine's [`HostLiveRead`] as of `now`, in id
-/// order, from one read transaction: what `list_hosts` gives a system admin
+/// Every fleet machine's (approved, not deleted, not retired: #262,
+/// `fleet_health::machines`) [`HostLiveRead`] as of `now`, in id order, from one read transaction: what `list_hosts` gives a system admin
 /// for the same fields, without a browser principal (D-3(f)). The fleet
 /// health endpoint is admin-only, so it reads as one.
 ///
@@ -2447,10 +2447,13 @@ pub async fn host_live_reads(
             .map_err(|_| QueryError::DependencyUnavailable)?,
         now,
     };
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id,name FROM fleet_hosts
-          WHERE enrollment_state='approved' AND deleted_at IS NULL ORDER BY id",
-    )
+    // The fleet machines (#262): approved, not deleted and not retired, so a
+    // re-enrolled machine's retired row is never read as offline.
+    let rows: Vec<(String, String)> = sqlx::query_as(concat!(
+        "SELECT h.id,h.name FROM fleet_hosts h WHERE ",
+        crate::fleet_machine_now!("h"),
+        " ORDER BY h.id"
+    ))
     .fetch_all(&mut *tx)
     .await?;
     let mut reads = Vec::with_capacity(rows.len());

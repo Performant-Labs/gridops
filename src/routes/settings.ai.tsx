@@ -139,7 +139,7 @@ function ConnectionRow({ connection, inUse, canManage }: { connection: AiConnect
           {" "}· connected {formatRelativeTime(connection.createdAt)}
         </div>
         {notReady ? (
-          <div className={cn("mt-0.5 text-xs leading-5", connection.status === "error" ? "text-danger" : "text-warning")}>
+          <div className={cn("mt-0.5 text-xs leading-5", connection.status === "error" ? "text-danger" : "text-warning-text")}>
             {connectionStatusLabel(connection.status)}{connection.statusDetail ? <span className="text-muted-foreground"> · {connection.statusDetail}</span> : null}
           </div>
         ) : null}

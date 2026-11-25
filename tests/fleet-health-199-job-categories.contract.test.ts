@@ -6,7 +6,8 @@
  * nothing else here (`Fleet health guard`). `JobCategoriesSection` takes no props; it loads the
  * rules from `GET /api/v1/settings/job-categories` and saves through `src/lib/api.ts`. It marks:
  * - one row per rule, `data-rule-index` = its position, with an `input[name="pattern"]` and
- *   "Move up", "Move down" and "Delete rule" buttons (text or `aria-label`); "Add rule" adds an
+ *   "Move rule N up", "Move rule N down" and "Delete rule N" buttons, N its position from 1 (text
+ *   or `aria-label`; #258 put the rule's number in their names); "Add rule" adds an
  *   empty row at the end; "Save" PUTs `{rules: [{category, field, pattern}]}` in row order;
  * - a 422's per-rule `details` (`ApiError.details`) shown inside the row at that position;
  * - the preview (`POST …/preview` with the rules as edited) refreshed 500 ms after the last edit.
@@ -79,11 +80,11 @@ describe("job category rules", () => {
     await mount();
     const second = rows()[1];
     if (!second) throw new Error("no second rule");
-    await click(button("Move up", second));
+    await click(button("Move rule 2 up", second));
     expect(patterns()).toEqual([defaults[1]?.pattern, defaults[0]?.pattern, defaults[2]?.pattern, defaults[3]?.pattern]);
     const third = rows()[2];
     if (!third) throw new Error("no third rule");
-    await click(button("Move down", third));
+    await click(button("Move rule 3 down", third));
     await click(button("Save"));
     await settle();
     expect(saved(calls)).toEqual([{
@@ -104,7 +105,7 @@ describe("job category rules", () => {
     type(pattern(added), "notify");
     const check = rows()[2];
     if (!check) throw new Error("no third rule");
-    await click(button("Delete rule", check));
+    await click(button("Delete rule 3", check));
     expect(patterns()).toEqual([defaults[0]?.pattern, defaults[1]?.pattern, defaults[3]?.pattern, "notify"]);
     await click(button("Save"));
     await settle();

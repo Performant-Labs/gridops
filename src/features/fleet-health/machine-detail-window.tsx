@@ -38,7 +38,13 @@ const tickLabel = (millis: number, window: HealthWindow) =>
     ? new Date(millis).toLocaleDateString([], { day: "numeric", month: "short" })
     : new Date(millis).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-/** CPU-hours by category over the window, stacked (Recharts, the page's chart rules). */
+/**
+ * CPU-hours by category over the window, stacked (Recharts, the page's chart rules). The SVG clips
+ * what falls outside it, so the right margin holds half the last time label ("01:00 PM" centred on
+ * the last hour) and the y-axis sizes itself to its longest label ("0.035 h") (#258). The tooltip
+ * is drawn in the theme's popover colours (#256): Recharts' default is white with each line in its
+ * series colour, which in the dark theme put light text on white.
+ */
 function UsageChart({ host, window: windowKey }: { host: HostHealth; window: HealthWindow }) {
   const { categories, points } = usagePoints(host);
   if (categories.length === 0) {
@@ -47,7 +53,7 @@ function UsageChart({ host, window: windowKey }: { host: HostHealth; window: Hea
   return (
     <div className="h-44 w-full" data-testid="machine-usage-chart">
       <ResponsiveContainer height="100%" width="100%">
-        <AreaChart data={points} margin={{ bottom: 0, left: 0, right: 8, top: 4 }}>
+        <AreaChart data={points} margin={{ bottom: 0, left: 0, right: 28, top: 4 }}>
           <CartesianGrid stroke="var(--border)" vertical={false} />
           <XAxis
             axisLine={false}
@@ -63,13 +69,9 @@ function UsageChart({ host, window: windowKey }: { host: HostHealth; window: Hea
             tick={{ fill: "var(--faint)", fontSize: 11 }}
             tickFormatter={(value: number) => `${value} h`}
             tickLine={false}
-            width={40}
+            width="auto"
           />
-          <ChartTooltip
-            formatter={(value) => `${value} h`}
-            isAnimationActive={false}
-            labelFormatter={(hour) => new Date(Number(hour)).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
-          />
+          <ChartTooltip content={<UsageTooltip />} cursor={{ stroke: "var(--border-strong)" }} isAnimationActive={false} />
           <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
           {categories.map((category) => (
             <Area
@@ -87,6 +89,30 @@ function UsageChart({ host, window: windowKey }: { host: HostHealth; window: Hea
           ))}
         </AreaChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+/** One hour's CPU-hours by category: a dot in the category's colour, the text in the theme's. */
+function UsageTooltip({ active, label, payload }: {
+  active?: boolean;
+  label?: unknown;
+  payload?: { color?: string; name?: unknown; value?: unknown }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const hour = Number(label);
+  return (
+    <div className="rounded-md border border-border-strong bg-popover px-2 py-1.5 text-xs text-foreground shadow-popover">
+      {Number.isFinite(hour) ? (
+        <div className="mb-1 font-medium">{new Date(hour).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div>
+      ) : null}
+      {payload.map((item) => (
+        <div className="flex items-center gap-1.5" key={String(item.name)}>
+          <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+          <span className="text-muted-foreground">{String(item.name)}</span>
+          <span className="ml-auto pl-3 tabular-nums">{String(item.value)} h</span>
+        </div>
+      ))}
     </div>
   );
 }

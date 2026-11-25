@@ -28,6 +28,7 @@ pub mod concerns;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod hour;
+pub mod machines;
 pub mod score;
 pub mod speed;
 #[cfg(any(test, feature = "test-support"))]
@@ -610,7 +611,9 @@ pub struct HourlyHostRow {
     pub uncertain_placements: u32,
 }
 
-/// A machine the scores are about: its budgets and root disk.
+/// A machine on the page, which the scores are about: its budgets and root
+/// disk, and when it was created (#262, [`machines`]): it counts only from
+/// then. `None` is no bound. A page machine is never retired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInfo {
     pub id: String,
@@ -618,6 +621,19 @@ pub struct HostInfo {
     pub cpu_budget_millis: u32,
     pub memory_budget_mib: u32,
     pub disk_total_bytes: Option<u64>,
+    pub created_at: Option<i64>,
+}
+
+/// A machine retired during the window (#262, [`machines`]): never on the
+/// page (no machine row, score or concern), but its time before `retired_at`
+/// (and from `created_at`) still counts for the fleet's availability and
+/// capacity fit, as its rows already count for the fleet's starts and jobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredHost {
+    pub id: String,
+    pub cpu_budget_millis: u32,
+    pub created_at: Option<i64>,
+    pub retired_at: i64,
 }
 
 /// A machine's root disk over the window: its size and the least free.
@@ -687,6 +703,8 @@ pub struct FleetHealthInputs {
     /// The window is `[now - window, now)`.
     pub now: i64,
     pub hosts: Vec<HostInfo>,
+    /// The machines retired during the window: fleet components only (#262).
+    pub retired_hosts: Vec<RetiredHost>,
     pub hourly: Vec<HourlyJobRow>,
     pub host_hourly: Vec<HourlyHostRow>,
     pub speed: Vec<SpeedResult>,

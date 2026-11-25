@@ -47,7 +47,7 @@ function WorkflowRunDetailPage() {
       <PageHeader
         actions={
           <>
-            <a className={buttonVariants({ size: "sm", variant: "ghost" })} href={run.htmlUrl} rel="noreferrer" target="_blank"><ExternalLink /><span className="hidden sm:inline">GitHub</span></a>
+            <a aria-label="GitHub" className={buttonVariants({ size: "sm", variant: "ghost" })} href={run.htmlUrl} rel="noreferrer" target="_blank"><ExternalLink /><span className="hidden sm:inline">GitHub</span></a>
             <RunActionsMenu run={run} showDownload triggerVariant="outline" />
           </>
         }
@@ -89,7 +89,7 @@ function WorkflowRunDetailPage() {
             <PropertyGroup title="Run">
               <PropertyRow label="Status">
                 <StatusBadge status={state} />
-                {run.waitingJobs ? <span className="tabular text-xs text-warning">{run.waitingJobs} waiting</span> : null}
+                {run.waitingJobs ? <span className="tabular text-xs text-warning-text">{run.waitingJobs} waiting</span> : null}
               </PropertyRow>
               <PropertyRow label="Repository" title={run.repository}><span className="truncate">{run.repository}</span></PropertyRow>
               <PropertyRow label="Branch" title={run.headBranch ?? "detached"}><GitBranch className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate font-mono text-xs">{run.headBranch ?? "detached"}</span></PropertyRow>
@@ -152,7 +152,7 @@ function JobRow({ job, onOpen, selected }: { job: Job; onOpen: () => void; selec
         {job.machine ? <MachineLink className="hidden max-w-56 sm:block" machine={job.machine} platform /> : null}
         {waiting ? (
           <Tooltip content="Time since the job was queued">
-            <span className="tabular relative w-24 shrink-0 text-right text-xs text-warning">queued {formatDuration(job.startedAt, null)}</span>
+            <span className="tabular relative w-24 shrink-0 text-right text-xs text-warning-text">queued {formatDuration(job.startedAt, null)}</span>
           </Tooltip>
         ) : <span className="tabular w-24 shrink-0 text-right text-xs text-muted-foreground">{formatDuration(job.startedAt, job.completedAt)}</span>}
         <Tooltip content="Open on GitHub">
@@ -167,14 +167,14 @@ function JobRow({ job, onOpen, selected }: { job: Job; onOpen: () => void; selec
 function JobDiagnosis({ diagnosis }: { diagnosis: NonNullable<Job["diagnosis"]> }) {
   return (
     <div className="mx-4 mb-3 ml-11 rounded-md border border-border-strong bg-panel-subtle px-3 py-2.5 text-xs leading-5">
-      <p className="text-secondary-foreground"><span className="font-medium text-warning">Waiting · </span>{diagnosis.summary}</p>
+      <p className="text-secondary-foreground"><span className="font-medium text-warning-text">Waiting · </span>{diagnosis.summary}</p>
       {diagnosis.candidates.length ? (
         <div className="mt-2 space-y-1 border-t border-border pt-2">
           {diagnosis.candidates.map((candidate) => (
             <div className="flex items-center gap-2" key={candidate.id}>
               {candidate.status === "ready" ? <CircleCheck className="size-3.5 shrink-0 text-success" /> : <CircleX className="size-3.5 shrink-0 text-faint" />}
               <Link className="font-medium hover:underline" params={{ poolId: candidate.id }} to="/runner-pools/$poolId">{candidate.name}</Link>
-              <span className={candidate.status === "manual" ? "text-warning" : "text-muted-foreground"}>{diagnosisCandidateLabel(candidate)}</span>
+              <span className={candidate.status === "manual" ? "text-warning-text" : "text-muted-foreground"}>{diagnosisCandidateLabel(candidate)}</span>
               <span className="tabular ml-auto text-faint">{candidate.busyRunners}/{candidate.activeRunners} busy · max {candidate.maximumRunners}</span>
             </div>
           ))}

@@ -124,7 +124,7 @@ function LiveLogsPage() {
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-2">
                       <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{target.jobName}</span>
-                      {target.kind === "live" ? <span className="shrink-0 rounded-full bg-info/15 px-1.5 text-2xs font-medium text-info">Live</span> : null}
+                      {target.kind === "live" ? <span className="shrink-0 rounded-full bg-info/15 px-1.5 text-2xs font-medium text-info-text">Live</span> : null}
                       <span className="tabular shrink-0 text-2xs text-faint">{formatAge(target.updatedAt)}</span>
                     </span>
                     <span className="mt-0.5 block truncate text-xs text-muted-foreground">

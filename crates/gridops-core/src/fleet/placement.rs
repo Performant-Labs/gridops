@@ -41,21 +41,193 @@ pub struct Placement {
     pub updated_at: i64,
 }
 
+/// What [`placements`] and [`ended_placements_to_finish`] read of a
+/// placement: `$from` (the placements `p`, or what leads to them), then
+/// `$filter` (its `WHERE` and `ORDER BY`).
+macro_rules! select_placements {
+    ($from:literal, $filter:literal) => {
+        concat!(
+            "SELECT p.id,p.workload_id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
+                    pr.runtime_kind,pr.mode,pr.labels_json
+               FROM ",
+            $from,
+            "
+               JOIN workload_intents i ON i.id=p.intent_id
+               JOIN pool_execution_profiles pr ON pr.id=i.profile_id
+             ",
+            $filter
+        )
+    };
+}
+
 /// Placements in any of `states`, oldest first.
 pub async fn placements(pool: &SqlitePool, states: &[&str]) -> Result<Vec<Placement>, FleetError> {
     let states = serde_json::to_string(states).map_err(|_| FleetError::Invariant("states"))?;
-    let rows = sqlx::query(
-        "SELECT p.id,p.workload_id,p.host_id,p.state,p.runner_id,p.target_id,p.updated_at,i.pool_id,i.profile_id,
-                pr.runtime_kind,pr.mode,pr.labels_json
-           FROM workload_placements p
-           JOIN workload_intents i ON i.id=p.intent_id
-           JOIN pool_execution_profiles pr ON pr.id=i.profile_id
-          WHERE p.state IN (SELECT value FROM json_each(?))
-          ORDER BY p.created_at,p.id",
-    )
+    let rows = sqlx::query(select_placements!(
+        "workload_placements p",
+        "WHERE p.state IN (SELECT value FROM json_each(?))
+          ORDER BY p.created_at,p.id"
+    ))
     .bind(states)
     .fetch_all(pool)
     .await?;
+    to_placements(rows)
+}
+
+/// The ended placements (`failed`, `cleaned` or `uncertain`) the reconciler
+/// still has to finish, oldest first (#259): those in the finish queue
+/// (migration 0052).
+///
+/// A placement joins the queue when it ends, and leaves it through
+/// [`finished`] once a pass has finished it in a failed or cleaned state and
+/// nothing is left to do. So every failed or cleaned placement that was
+/// finished, started failures included, is never read again, unless its
+/// runner comes back into service. Reading and finishing every ended
+/// placement on every pass made each pass's work, and the reconciler's
+/// memory, grow with the fleet's history until the reconciler was killed at
+/// its memory limit.
+///
+/// An uncertain placement stays queued, and is finished on every pass until
+/// it is cleaned, as every pass did before the queue. That includes one that
+/// may never be: one whose start never succeeded (no runtime identity to
+/// clean up) or whose machine never gets work authority again. Those still
+/// grow with the history of such failures.
+pub async fn ended_placements_to_finish(pool: &SqlitePool) -> Result<Vec<Placement>, FleetError> {
+    // The queue leads (`CROSS JOIN` keeps that order), so the read costs one
+    // primary-key lookup per queued placement.
+    let rows = sqlx::query(select_placements!(
+        "placement_finish_queue q CROSS JOIN workload_placements p ON p.id=q.placement_id",
+        "WHERE p.state IN ('failed','cleaned','uncertain')
+          ORDER BY p.created_at,p.id"
+    ))
+    .fetch_all(pool)
+    .await?;
+    to_placements(rows)
+}
+
+/// Takes `placement` off the finish queue: a pass finished it in `state`, a
+/// failed or cleaned one, and nothing is left to do for it. Answers whether
+/// it was taken off. A placement that has since moved on to another state
+/// stays queued, so it is finished in that state too; so does one whose
+/// runner row came back into service after `finish` retired it (a late job
+/// event), which the queue's trigger on `runners` could not queue again while
+/// it was still queued: the next pass retires the runner again.
+///
+/// Nothing is left once `finish` has run for a failed or cleaned placement:
+/// its runner row is retired (or replaced through a retried start), and an
+/// unstarted failure's capacity released and absence recorded by
+/// [`abandon_unstarted`]. A started failure's capacity and absence are the
+/// agent's results' to settle, never a pass's, so a pass has nothing more
+/// to do for it either.
+pub async fn finished(
+    pool: &SqlitePool,
+    placement: PlacementId,
+    state: &str,
+) -> Result<bool, FleetError> {
+    Ok(sqlx::query(
+        "DELETE FROM placement_finish_queue
+          WHERE placement_id=?1 AND ?2 IN ('failed','cleaned')
+            AND EXISTS (SELECT 1 FROM workload_placements p WHERE p.id=?1 AND p.state=?2
+                         AND NOT EXISTS (SELECT 1 FROM runners r WHERE r.id=p.workload_id
+                                          AND r.status NOT IN ('deleted','failed')))",
+    )
+    .bind(placement.to_string())
+    .bind(state)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Queues the placements that ended before the finish queue existed and
+/// still have something to finish: an uncertain one; one whose runner row is
+/// still in service; and an unstarted failure that still holds capacity or
+/// has no recorded absence. The settled ones, nearly all of them, are never
+/// queued.
+///
+/// The sweep goes through the placements in id order, resuming after the
+/// last id it reached (`placement_finish_sweep`, migration 0052; the id,
+/// unlike the rowid, survives a VACUUM),
+/// [`retention::BATCH_SIZE`](crate::retention::BATCH_SIZE) placements at a
+/// time, each batch its own short write transaction, with
+/// [`retention::BATCH_PAUSE`](crate::retention::BATCH_PAUSE) between batches
+/// so other writers get the lock (#222), and at most
+/// [`retention::MAX_BATCHES`](crate::retention::MAX_BATCHES) batches a call;
+/// the rest waits for the next pass. Placements made since the migration are
+/// queued by its triggers, and sweeping one again changes nothing. Once the
+/// sweep is done, a call reads one row. Answers how many placements it
+/// queued.
+pub async fn queue_earlier_ended_placements(pool: &SqlitePool) -> Result<usize, FleetError> {
+    use crate::retention::{BATCH_PAUSE, BATCH_SIZE, MAX_BATCHES};
+    let mut queued = 0;
+    for batch in 0..MAX_BATCHES {
+        // Read without the write lock first: once the sweep is done, that
+        // is all a pass does here.
+        let Some(after) = sqlx::query_scalar::<_, String>(
+            "SELECT last_id FROM placement_finish_sweep WHERE done=0",
+        )
+        .fetch_optional(pool)
+        .await?
+        else {
+            break;
+        };
+        if batch > 0 {
+            tokio::time::sleep(BATCH_PAUSE).await;
+        }
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let upto: Option<String> = sqlx::query_scalar(
+            "SELECT MAX(id) FROM (SELECT id FROM workload_placements WHERE id>? ORDER BY id LIMIT ?)",
+        )
+        .bind(&after)
+        .bind(BATCH_SIZE)
+        .fetch_one(&mut *tx)
+        .await?;
+        let Some(upto) = upto else {
+            // Only from where this call found it: a sweep that another
+            // process moved on in the meantime is left to it.
+            sqlx::query("UPDATE placement_finish_sweep SET done=1 WHERE last_id=?")
+                .bind(&after)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            break;
+        };
+        // The batch is read by its id range; the unary `+` keeps the
+        // planner off `workload_placements_state_idx`, which would visit
+        // every ended placement in the table to find the batch's.
+        let added = sqlx::query(
+            "INSERT OR IGNORE INTO placement_finish_queue (placement_id)
+             SELECT p.id FROM workload_placements p
+              WHERE p.id>? AND p.id<=?
+                AND (+p.state='uncertain'
+                     OR (+p.state IN ('failed','cleaned')
+                         AND EXISTS (SELECT 1 FROM runners r WHERE r.id=p.workload_id
+                                      AND r.status NOT IN ('deleted','failed')))
+                     OR (+p.state='failed'
+                         AND NOT EXISTS (SELECT 1 FROM host_commands c
+                                          WHERE c.placement_id=p.id AND c.kind='start_runner')
+                         AND (p.local_absence_proven_at IS NULL
+                              OR p.delayed_starts_excluded_at IS NULL
+                              OR EXISTS (SELECT 1 FROM capacity_allocations a
+                                          WHERE a.placement_id=p.id AND a.state!='released'))))",
+        )
+        .bind(&after)
+        .bind(&upto)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        sqlx::query("UPDATE placement_finish_sweep SET last_id=? WHERE last_id=? AND done=0")
+            .bind(&upto)
+            .bind(&after)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        queued += usize::try_from(added).unwrap_or(usize::MAX);
+    }
+    Ok(queued)
+}
+
+fn to_placements(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<Placement>, FleetError> {
     rows.into_iter()
         .map(|row| {
             Ok(Placement {

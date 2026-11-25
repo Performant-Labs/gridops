@@ -164,7 +164,7 @@ function Sidebar({ viewer, onSearch, onNavigate }: { viewer: Viewer | null; onSe
         <div className="flex h-7 items-center gap-2 px-2 text-2xs text-faint">
           <StatusDot tone="success" />
           <span className="flex-1">Control plane online</span>
-          <button aria-label="Search and commands" className="inline-flex items-center gap-1 rounded px-1 hover:text-muted-foreground" onClick={onSearch} type="button">{IS_APPLE_PLATFORM ? <CommandIcon className="size-3" /> : "Ctrl "}K</button>
+          <button aria-keyshortcuts={IS_APPLE_PLATFORM ? "Meta+K" : "Control+K"} aria-label={`Search and commands, ${IS_APPLE_PLATFORM ? "⌘K" : "Ctrl K"}`} className="inline-flex items-center gap-1 rounded px-1 hover:text-muted-foreground" onClick={onSearch} type="button">{IS_APPLE_PLATFORM ? <CommandIcon className="size-3" /> : "Ctrl "}K</button>
         </div>
       </div>
     </aside>
