@@ -28,7 +28,8 @@ const HIDDEN_CHARS_ALLOWED = 3;
 const MIN_TARGET = 24;
 const MIN_TEXT_PX = 11;
 
-export async function findMobileProblems(page: Page): Promise<MobileProblems> {
+/** Checks the page; `allowed` stands in for `TRUNCATION_ALLOWED` (the self-test passes its own). */
+export async function findMobileProblems(page: Page, allowed: { selector: string; reason: string }[] = TRUNCATION_ALLOWED): Promise<MobileProblems> {
   return page.evaluate(
     ({ allowed, hiddenCharsAllowed, minTarget, minText }) => {
       const describe = (element: Element) => {
@@ -127,7 +128,7 @@ export async function findMobileProblems(page: Page): Promise<MobileProblems> {
 
       return { sideways, smallTargets, smallText: [...smallText], truncated };
     },
-    { allowed: TRUNCATION_ALLOWED.map((entry) => entry.selector), hiddenCharsAllowed: HIDDEN_CHARS_ALLOWED, minTarget: MIN_TARGET, minText: MIN_TEXT_PX },
+    { allowed: allowed.map((entry) => entry.selector), hiddenCharsAllowed: HIDDEN_CHARS_ALLOWED, minTarget: MIN_TARGET, minText: MIN_TEXT_PX },
   );
 }
 

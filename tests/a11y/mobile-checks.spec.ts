@@ -9,7 +9,7 @@ import { findMobileProblems } from "./mobile-checks";
 test.use({ viewport: { width: 360, height: 780 }, isMobile: true, hasTouch: true });
 
 /** A page shaped like the app: a fixed shell, `#main`, and a scrolling page body inside it. */
-async function page(page: Page, body: string) {
+async function page(page: Page, body: string, allowed?: Parameters<typeof findMobileProblems>[1]) {
   await page.setContent(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>
     body { margin: 0; font: 14px/1.4 sans-serif; }
     #shell { position: fixed; inset: 0; display: flex; overflow: hidden; }
@@ -19,7 +19,7 @@ async function page(page: Page, body: string) {
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     button { font: inherit; }
   </style></head><body><div id="shell"><a class="sr-only" href="#main">Skip to content</a><main id="main"><div class="body">${body}</div></main></div></body></html>`);
-  return findMobileProblems(page);
+  return findMobileProblems(page, allowed);
 }
 
 const NONE = { sideways: [], smallTargets: [], smallText: [], truncated: [] };
@@ -77,4 +77,23 @@ test("it catches text under 11 px, once per place", async ({ page: p }) => {
 test("it catches an ellipsis that hides more than a few characters", async ({ page: p }) => {
   const problems = await page(p, `<p class="truncate" style="width: 120px">The sandbox could not reach the package registry</p>`);
   expect(problems.truncated).toEqual([expect.stringMatching(/^<p> "The sandbox could not reach the package " hides about \d+ characters$/)]);
+});
+
+/**
+ * A 20 px paragraph cut off at 100 px around a block of a known width, so the hidden amount is
+ * exact: `hiddenPx`, at half the font size (10 px) per character. (An inline block would add the
+ * line's trailing space, about one font size, to the overflow.)
+ */
+const cut = (hiddenPx: number, attributes = "") => `<p class="truncate" ${attributes} style="width: 100px; font-size: 20px"><span style="display: block; width: ${100 + hiddenPx}px">x</span></p>`;
+
+test("an ellipsis hiding 3 characters or fewer passes, and 4 or more fails", async ({ page: p }) => {
+  expect((await page(p, cut(30))).truncated).toEqual([]);
+  expect((await page(p, cut(40))).truncated).toEqual(['<p> "x" hides about 4 characters']);
+});
+
+test("the allow-list exempts only the element its selector names", async ({ page: p }) => {
+  const problems = await page(p, `<div data-copyable>${cut(80, 'data-url="callback"')}${cut(80)}</div>`, [{ selector: '[data-url="callback"]', reason: "a copy button gives the full URL" }]);
+  expect(problems.truncated).toEqual(['<p> "x" hides about 8 characters']);
+  // A selector naming an ancestor exempts every ellipsis inside it: entries must name the element.
+  expect((await page(p, `<div data-copyable>${cut(80)}${cut(80)}</div>`, [{ selector: "[data-copyable]", reason: "too broad" }])).truncated).toEqual([]);
 });
