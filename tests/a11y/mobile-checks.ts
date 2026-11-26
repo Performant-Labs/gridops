@@ -30,6 +30,11 @@ const MIN_TEXT_PX = 11;
 
 /** Checks the page; `allowed` stands in for `TRUNCATION_ALLOWED` (the self-test passes its own). */
 export async function findMobileProblems(page: Page, allowed: { selector: string; reason: string }[] = TRUNCATION_ALLOWED): Promise<MobileProblems> {
+  // Measure where things come to rest: a sheet still sliding in pokes past the edge. Endless
+  // animations (spinners) are left alone, or this would never return.
+  await page.evaluate(() => Promise.all(document.getAnimations()
+    .filter((animation) => Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)))
+    .map((animation) => animation.finished.catch(() => undefined))));
   return page.evaluate(
     ({ allowed, hiddenCharsAllowed, minTarget, minText }) => {
       const describe = (element: Element) => {
@@ -59,6 +64,20 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         for (let parent = element.parentElement; parent && parent.id !== "main"; parent = parent.parentElement) if (scrolls(parent)) return false;
         return true;
       });
+      // An open dialog or sheet sits outside `#main` (portaled, fixed): it must fit the viewport,
+      // and so must its own scrolling area, the outermost scroller inside it.
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
+      for (const dialog of dialogs) {
+        const box = dialog.getBoundingClientRect();
+        if (box.left < -1 || box.right > root.clientWidth + 1) sideways.push(`${describe(dialog)} spans ${Math.round(box.left)}–${Math.round(box.right)} px of a ${root.clientWidth} px viewport`);
+        if (dialog.scrollWidth > dialog.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(dialog).overflowX)) sideways.push(`${describe(dialog)} is ${dialog.scrollWidth} px wide in ${dialog.clientWidth} px`);
+        for (const element of dialog.querySelectorAll("*")) {
+          if (!scrolls(element)) continue;
+          let outer = true;
+          for (let parent = element.parentElement; parent && parent !== dialog; parent = parent.parentElement) if (scrolls(parent)) outer = false;
+          if (outer) panels.push(element);
+        }
+      }
       for (const panel of panels) {
         if (panel.scrollWidth > panel.clientWidth + 1) {
           const widest = [...panel.querySelectorAll("*")]

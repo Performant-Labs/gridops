@@ -45,6 +45,19 @@ test("a wide table may scroll sideways inside its own scroller", async ({ page: 
   expect(problems.sideways).toEqual([]);
 });
 
+test("it catches a dialog wider than the phone, and a dialog's scrolling area wider than the dialog", async ({ page: p }) => {
+  await page(p, "<h1>Webhooks</h1>");
+  const wide = await p.evaluate(() => {
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Delivery" style="position: fixed; top: 0; left: 0; width: 420px; height: 600px">wide</div>`);
+  }).then(() => findMobileProblems(p));
+  expect(wide.sideways).toEqual(['<div> "Delivery" spans 0–420 px of a 360 px viewport']);
+  await p.evaluate(() => {
+    document.querySelector('[role="dialog"]')?.remove();
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Payload" style="position: fixed; inset: 0 0 0 20px; display: flex; flex-direction: column"><div style="flex: 1; overflow: auto"><pre style="margin: 0; height: 400px">${"x".repeat(200)}</pre></div></div>`);
+  });
+  expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the scrolling panel is \d+ px wide in 340 px/)]);
+});
+
 test("it catches a document wider than the phone", async ({ page: p }) => {
   await p.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><body style="margin: 0"><div style="width: 500px">wide</div></body>`);
   expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the document is 500 px wide in a 360 px viewport$/)]);
