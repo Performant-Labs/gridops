@@ -18,7 +18,7 @@ import { mkdirSync } from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { open, saveRecordingAfterAll, type Role, type Theme } from "./api";
+import { type EditAnswer, open, saveRecordingAfterAll, type Role, type Theme } from "./api";
 import { findMobileProblems, saveScreens } from "./mobile-checks";
 
 const SHOTS = process.env.GRIDOPS_MOBILE_SHOTS;
@@ -47,6 +47,8 @@ type Screen = {
   states?: State[];
   /** Failing today: the check is `fixme` until `issue` fixes it. */
   fixme?: boolean;
+  /** Changes the recorded answers, for data the recording lacks. */
+  edit?: EditAnswer;
 };
 
 const heading = (text: string) => `h1:has-text("${text}"):visible`;
@@ -85,13 +87,57 @@ const createToken: State["act"] = async (page) => {
   await expect(page.getByRole("dialog")).toContainText("ci deploy");
 };
 
+/**
+ * The Overview with what the recording lacks (#271): activity with long messages, machine
+ * performance with and without a speed, and enough kinds of failure to fill a tile's hint.
+ * Made up here, as the rest of the fixtures are.
+ */
+const busyOverview: EditAnswer = (path, body) => {
+  if (path === "/api/v1/agent-runs?page=1&perPage=25") {
+    const runs = body as { items: { title: string | null }[] };
+    if (runs.items[0]) runs.items[0].title = "Pin the flaky snapshot test's clock to a fixed time zone so it passes in CI";
+    return runs;
+  }
+  if (path !== "/api/v1/overview") return body;
+  const overview = body as { recordedAt?: string; machines: unknown; activity: unknown; slo: { failures: unknown } };
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  overview.slo.failures = [{ reason: "failure", count: 12 }, { reason: "startup_failure", count: 3 }, { reason: "timed_out", count: 2 }, { reason: "action_required", count: 1 }];
+  overview.machines = { windowDays: 7, items: [
+    { id: IO.split("/").pop(), name: "io", os: "linux", architecture: "x64", jobs: 42, succeeded: 40, failed: 2, medianSeconds: 312, relativePercent: 82, comparedJobs: 17, fastest: true },
+    { id: "0f000001-0000-4000-8000-000000000002", name: "callisto", os: "macos", architecture: "arm64", jobs: 2, succeeded: 2, failed: 0, medianSeconds: 540, relativePercent: null, comparedJobs: 0, fastest: false },
+  ] };
+  overview.activity = [
+    { id: "activity-1", level: "error", event: "runner_start_failed", message: "The runner on callisto did not register with GitHub within 5 minutes; the machine was left out of new placements.", runnerId: "0f000003-0000-4000-8000-000000000001", poolId: null, createdAt: at(4) },
+    { id: "activity-2", level: "warning", event: "pool_scaled", message: "linux-docker asked for 3 runners for 3 queued jobs but the fleet has room for 2.", runnerId: null, poolId: POOL.split("/").pop(), createdAt: at(12) },
+    { id: "activity-3", level: "info", event: "runner_assigned", message: "unit tests in acme/app (CI) went to io.", runnerId: null, poolId: null, createdAt: at(30) },
+  ];
+  return overview;
+};
+
 export const SCREENS: Screen[] = [
   // #270: the app shell, navigation and sign-in.
   { issue: 270, route: "login.tsx", path: "/login", ready: heading("Log in to GridOps"), role: "anonymous" },
   { issue: 270, route: "_app.tsx", path: "/queued-jobs", ready: heading("Queued jobs"), states: [{ name: "navigation open", act: dialog("Open navigation") }] },
   { issue: 270, route: "settings.tsx", path: "/settings/general", ready: heading("General"), states: [{ name: "settings navigation open", act: dialog("Open navigation") }] },
   // #271: the Overview.
-  { issue: 271, route: "_app/index.tsx", fixme: true, path: "/", ready: heading("Overview") },
+  { issue: 271, route: "_app/index.tsx", path: "/", ready: heading("Overview"), states: [{
+    // A section's controls wrap below its heading on a phone rather than squeezing it onto two lines.
+    name: "section headings on one line",
+    act: async (page) => {
+      const wrapped = await page.locator("#main h2:visible").evaluateAll((headings) => headings
+        .filter((h2) => h2.getBoundingClientRect().height > parseFloat(getComputedStyle(h2).lineHeight) * 1.5)
+        .map((h2) => h2.textContent));
+      expect(wrapped).toEqual([]);
+    },
+  }] },
+  { issue: 271, route: "_app/index.tsx", path: "/", ready: heading("Overview"), variant: "busy", edit: busyOverview, states: [{
+    // A machine's speed is explained in a hover tooltip on a wider screen; a phone shows it.
+    name: "machine speed explained",
+    act: async (page) => {
+      await expect(page.getByText("Takes 82% of the usual time, compared on 17 jobs")).toBeVisible();
+      await expect(page.getByText("Needs 3 successful jobs that also ran on another machine")).toBeVisible();
+    },
+  }] },
   // #272: fleet machines and a machine's page.
   { issue: 272, route: "_app/fleet.index.tsx", path: "/fleet", ready: heading("Machines"), states: [{ name: "add machine open", act: dialog("Add machine") }] },
   { issue: 272, route: "_app/fleet.machines.$hostId.tsx", path: IO, ready: heading("io"), states: [{ name: "agent log open", act: dialog("Agent log") }] },
@@ -110,7 +156,11 @@ export const SCREENS: Screen[] = [
   { issue: 275, route: "_app/workflow-runs.$runId.tsx", fixme: true, path: "/workflow-runs/960002", ready: "h1" },
   { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", ready: heading("Live logs") },
   // #276: agent runs.
-  { issue: 276, route: "_app/agent-runs.tsx", fixme: true, path: "/agent-runs", ready: heading("Agent runs") },
+  { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs"), states: [{ name: "run open", act: dialog(/^Show agent run for/) }],
+    // A stage longer than the recorded one, as the agent reports them: the run's sheet must show it whole.
+    edit: (path, body) => path.startsWith("/api/v1/agent-runs") && body && typeof body === "object"
+      ? { ...body, ...("stage" in body ? { stage: "running the repository's tests" } : {}), ...("items" in body ? { items: (body as { items: object[] }).items.map((item) => ("stage" in item && (item as { stage: unknown }).stage ? { ...item, stage: "running the repository's tests" } : item)) } : {}) }
+      : body },
   // #277: repositories, platform connections and webhooks.
   { issue: 277, route: "_app/repositories.tsx", path: "/repositories", ready: heading("Repositories") },
   { issue: 277, route: "_app/platform-connections.tsx", fixme: true, path: "/platform-connections", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
@@ -170,7 +220,7 @@ for (const theme of THEMES) {
         const title = `#${screen.issue} ${screen.route} (${screen.path})${screen.variant ? `, ${screen.variant}` : ""}`;
         (screen.fixme && !RUN_ALL ? test.fixme : test)(title, async ({ page }) => {
           test.setTimeout(60_000);
-          await open(page, { path: screen.path, role: screen.role ?? "admin", theme, ready: screen.ready });
+          await open(page, { path: screen.path, role: screen.role ?? "admin", theme, ready: screen.ready, edit: screen.edit });
           if (screen.lands) expect(new URL(page.url()).pathname).toBe(screen.lands);
           const base = `${screen.route.replace(/[/$.]/g, "_")}${screen.variant ? `-${screen.variant}` : ""}-${width}-${theme}`;
           if (SHOTS) mkdirSync(SHOTS, { recursive: true });

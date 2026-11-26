@@ -15,6 +15,11 @@ export type Role = "admin" | "member" | "anonymous";
 export type Theme = "light" | "dark";
 type Recorded = { status: number; body: unknown };
 type Fixtures = Record<string, Recorded>;
+/**
+ * Changes an API answer before the page gets it, by the request's path and query: how a screen is
+ * checked with data the recording lacks (long messages, more rows). Edited answers are never recorded.
+ */
+export type EditAnswer = (path: string, body: unknown) => unknown;
 
 export const LIVE = process.env.GRIDOPS_A11Y_BASE_URL;
 const RECORD = process.env.GRIDOPS_A11Y_RECORD;
@@ -31,15 +36,23 @@ function fixtureKey(role: Role, request: Request) {
   return `${role} ${request.method()} ${url.pathname}${url.search}`;
 }
 
-/** Answers `/api/v1` from the fixtures (recorded mode), or records the live answers. */
-export async function serveApi(page: Page, role: Role) {
+/** Answers `/api/v1` from the fixtures (recorded mode), or records the live answers; `edit` changes either. */
+export async function serveApi(page: Page, role: Role, edit?: EditAnswer) {
   if (LIVE) {
     if (role !== "anonymous") {
       const cookie = process.env[role === "admin" ? "GRIDOPS_A11Y_ADMIN_SESSION" : "GRIDOPS_A11Y_MEMBER_SESSION"];
       if (!cookie) throw new Error(`GRIDOPS_A11Y_${role.toUpperCase()}_SESSION is required with GRIDOPS_A11Y_BASE_URL`);
       await page.context().addCookies([{ name: "gridops_session", value: cookie, url: LIVE }]);
     }
-    if (RECORD) {
+    if (edit) {
+      await page.route("**/api/v1/**", async (route) => {
+        const response = await route.fetch();
+        const body = await response.json().catch(() => undefined);
+        if (body === undefined) return route.fulfill({ response });
+        const url = new URL(route.request().url());
+        await route.fulfill({ response, json: edit(`${url.pathname}${url.search}`, body) });
+      });
+    } else if (RECORD) {
       page.on("response", async (response) => {
         if (!new URL(response.url()).pathname.startsWith("/api/v1/")) return;
         const body = await response.json().catch(() => undefined);
@@ -61,7 +74,8 @@ export async function serveApi(page: Page, role: Role) {
       await route.fulfill({ status: 404, json: { error: `Not recorded: ${key}`, code: "not_found" } });
       return;
     }
-    await route.fulfill({ status: answer.status, json: answer.body });
+    const url = new URL(request.url());
+    await route.fulfill({ status: answer.status, json: edit ? edit(`${url.pathname}${url.search}`, structuredClone(answer.body)) : answer.body });
   });
 }
 
@@ -77,11 +91,11 @@ export function saveRecordingAfterAll() {
 }
 
 /** Opens `path` signed in as `role`, in `theme` (and on the health `window`), and waits for `ready`. */
-export async function open(page: Page, { path, role, theme, ready, window: healthWindow }: { path: string; role: Role; theme: Theme; ready: string; window?: string }) {
+export async function open(page: Page, { path, role, theme, ready, window: healthWindow, edit }: { path: string; role: Role; theme: Theme; ready: string; window?: string; edit?: EditAnswer }) {
   await page.addInitScript((value) => window.localStorage.setItem("gridops-theme", value), theme);
   if (healthWindow) await page.addInitScript((value) => window.localStorage.setItem("gridops.fleetHealth.window", value), healthWindow);
   await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
-  await serveApi(page, role);
+  await serveApi(page, role, edit);
   await page.goto(path);
   await expect(page.locator(ready).first()).toBeVisible();
   await expect(page.locator("html")).toHaveClass(theme === "dark" ? /\bdark\b/ : /^(?!.*\bdark\b)/);

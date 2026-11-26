@@ -94,7 +94,8 @@ export function AgentRunPanel({
           <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
           <RunStatusIcon status={agentRunIconStatus(status)} />
           <span className="shrink-0 font-medium text-foreground">Agent</span>
-          <span className="min-w-0 truncate text-muted-foreground">
+          {/* On a phone the status and stage wrap rather than being cut off (#276). */}
+          <span className="min-w-0 text-muted-foreground [overflow-wrap:anywhere] sm:truncate">
             {label}{stage ? <span className="text-faint"> · {stage}</span> : null}
           </span>
         </button>

@@ -35,8 +35,9 @@ export function AgentRunRow({ run }: { run: AgentRunListItem }) {
           {repositoryName}{run.runNumber ? <span className="text-faint"> #{run.runNumber}</span> : null}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium text-foreground">{run.title ?? `Fix ${run.jobName}`}</span>
-          <span className="block truncate text-2xs text-muted-foreground">
+          {/* On a phone both lines wrap: a title or a failed run's error would otherwise be cut to a few words (#271). */}
+          <span className="block font-medium text-foreground [overflow-wrap:anywhere] sm:truncate">{run.title ?? `Fix ${run.jobName}`}</span>
+          <span className="block text-2xs text-muted-foreground [overflow-wrap:anywhere] sm:truncate">
             {run.workflowName ? `${run.workflowName} · ` : ""}{run.jobName}
             {!terminal && run.stage ? <span className="text-progress-text"> · {run.stage}</span> : null}
             {run.status === "failed" && run.error ? <span className="text-danger"> · {run.error}</span> : null}

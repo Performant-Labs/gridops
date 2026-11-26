@@ -100,6 +100,12 @@ test("it catches an ellipsis that hides more than a few characters", async ({ pa
   expect(problems.truncated).toEqual([expect.stringMatching(/^<p> "The sandbox could not reach the package " hides about \d+ characters$/)]);
 });
 
+test("it catches text clamped to a number of lines that hides some, not a clamp it fits in", async ({ page: p }) => {
+  const clamped = (text: string) => `<p style="width: 120px; line-height: 20px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2">${text}</p>`;
+  const problems = await page(p, `${clamped("12 failed · 3 failed to start · 2 timed out · 1 need action")}${clamped("4 failed")}`);
+  expect(problems.truncated).toEqual([expect.stringMatching(/^<p> "12 failed · 3 failed to start · 2 timed " clamped to 2 lines hides about \d+ more$/)]);
+});
+
 /**
  * A 20 px paragraph cut off at 100 px around a block of a known width, so the hidden amount is
  * exact: `hiddenPx`, at half the font size (10 px) per character. (An inline block would add the

@@ -271,8 +271,10 @@ export function PropertyRow({ label, children, title }: { label: string; childre
 export function SectionHeading({ children, actions, className }: { children: React.ReactNode; actions?: React.ReactNode; className?: string }) {
   return (
     // A fixed height keeps headings level across columns whether or not they carry a control.
-    <div className={cn("flex min-h-8 items-center justify-between gap-3", className)}>
-      <h2 className="text-sm font-medium text-foreground">{children}</h2>
+    // When the controls don't fit beside the heading (a phone), they wrap below it rather than
+    // squeezing the heading onto two lines (#271).
+    <div className={cn("flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-2", className)}>
+      <h2 className="min-w-[min(100%,max-content)] text-sm font-medium text-foreground">{children}</h2>
       {actions ? <div className="flex items-center gap-1.5">{actions}</div> : null}
     </div>
   );

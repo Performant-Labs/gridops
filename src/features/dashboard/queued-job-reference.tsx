@@ -9,17 +9,21 @@ export function jobConfirmation(job: QueuedJobReference, formatTime: (iso: strin
   return job.confirmedAt ? `GitHub last reported it ${job.status} at ${formatTime(job.confirmedAt)}.` : "Not yet confirmed with GitHub.";
 }
 
-/** The job, its repository and its workflow, linking to the job on GitHub. */
+/**
+ * The job, its repository and its workflow, linking to the job on GitHub. The text wraps rather
+ * than being cut off, and the link is at least 24 px tall, so it is a target a finger can hit
+ * beside the alert's own link (#271, WCAG 2.2 2.5.8).
+ */
 export function QueuedJobLink({ job, className }: { job: QueuedJobReference; className?: string }) {
   return (
     <a
-      className={cn("inline-flex min-w-0 max-w-full items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline", className)}
+      className={cn("inline-flex min-h-6 min-w-0 max-w-full items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline", className)}
       href={job.htmlUrl}
       rel="noreferrer"
       target="_blank"
       title={`Open ${job.name} on GitHub`}
     >
-      <span className="truncate">{`${job.name} · ${job.repository} · ${job.workflow}`}</span>
+      <span className="min-w-0 [overflow-wrap:anywhere]">{`${job.name} · ${job.repository} · ${job.workflow}`}</span>
       <ExternalLink aria-hidden className="size-3 shrink-0" />
     </a>
   );

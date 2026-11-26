@@ -319,7 +319,11 @@ function MachinesSection({ machines }: { machines: NonNullable<DashboardOverview
       <div className="overflow-hidden rounded-lg border border-border">
         {machines.items.map((machine) => (
           <Link className={cn(listRowClassName, "last:border-b-0 focus:bg-hover focus:shadow-[inset_2px_0_0_var(--primary)] focus:outline-none")} data-list-row="" key={machine.id} params={{ hostId: machine.id }} to="/fleet/machines/$hostId">
-            <span className="min-w-0 flex-1 truncate font-medium">{machine.name}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">{machine.name}</span>
+              {/* The speed's explanation is a hover tooltip on a wider screen; a phone shows it (#271). */}
+              <span className="block text-2xs text-muted-foreground sm:hidden">{speedHint(machine)}</span>
+            </span>
             {machine.fastest ? (
               <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-strong px-2 py-0.5 text-2xs font-medium text-foreground"><Zap className="size-3" />Fastest</span>
             ) : null}
@@ -339,14 +343,19 @@ function MachinesSection({ machines }: { machines: NonNullable<DashboardOverview
   );
 }
 
+/** What the machine's speed is measured on, or what it still needs. */
+function speedHint(machine: MachinePerformance) {
+  const percent = machine.relativePercent;
+  return percent === null
+    ? "Needs 3 successful jobs that also ran on another machine"
+    : `Takes ${percent}% of the usual time, compared on ${machine.comparedJobs} ${machine.comparedJobs === 1 ? "job" : "jobs"}`;
+}
+
 function MachineSpeed({ machine }: { machine: MachinePerformance }) {
   const percent = machine.relativePercent;
   const label = percent === null ? "—" : percent < 100 ? `${100 - percent}% quicker` : percent > 100 ? `${percent - 100}% slower` : "Usual speed";
-  const hint = percent === null
-    ? "Needs 3 successful jobs that also ran on another machine"
-    : `Takes ${percent}% of the usual time, compared on ${machine.comparedJobs} ${machine.comparedJobs === 1 ? "job" : "jobs"}`;
   return (
-    <Tooltip content={hint}>
+    <Tooltip content={speedHint(machine)}>
       <span className={cn("tabular relative z-[1] w-24 shrink-0 text-right text-xs", percent === null ? "text-faint" : percent < 100 ? "text-success-text" : percent > 100 ? "text-warning-text" : "text-muted-foreground")}>{label}</span>
     </Tooltip>
   );
@@ -466,7 +475,8 @@ function SloCell({ label, value, hint, className, to, footer }: { label: string;
     <>
       <div className="truncate text-xs text-muted-foreground">{label}</div>
       <div className="tabular mt-1 text-lg font-semibold tracking-tight">{value}</div>
-      <div className="mt-0.5 line-clamp-2 text-2xs text-faint" title={hint}>{hint}</div>
+      {/* Clamped to two lines beside the other tiles on a wider screen; whole on a phone (#271). */}
+      <div className="mt-0.5 text-2xs text-faint sm:line-clamp-2" title={hint}>{hint}</div>
     </>
   );
   if (to && footer) {
@@ -520,12 +530,13 @@ function ActivityItem({ item }: { item: DashboardOverview["activity"][number] })
   const body = (
     <>
       <StatusDot pulse={false} tone={tone} />
-      <span className="max-w-[45%] shrink-0 truncate font-medium text-foreground">{humanizeEvent(item.event)}</span>
-      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={item.message}>{item.message}</span>
+      {/* On a phone the message goes whole on its own line under the event, rather than being cut off (#271). */}
+      <span className="min-w-0 flex-1 font-medium text-foreground [overflow-wrap:anywhere] sm:max-w-[45%] sm:flex-none sm:shrink-0 sm:truncate">{humanizeEvent(item.event)}</span>
+      <span className="order-last basis-full pl-5 text-muted-foreground [overflow-wrap:anywhere] sm:order-none sm:min-w-0 sm:flex-1 sm:basis-auto sm:truncate sm:pl-0" title={item.message}>{item.message}</span>
       <time className="tabular shrink-0 text-xs text-faint" dateTime={item.createdAt}>{formatAge(item.createdAt)}</time>
     </>
   );
-  const className = cn(listRowClassName, "min-h-10 last:border-b-0");
+  const className = cn(listRowClassName, "min-h-10 flex-wrap gap-y-1 last:border-b-0 sm:flex-nowrap");
   if (item.runnerId) return <Link className={className} data-list-row="" search={{ target: item.runnerId }} to="/live-logs">{body}</Link>;
   if (item.poolId) return <Link className={className} data-list-row="" params={{ poolId: item.poolId }} to="/runner-pools/$poolId">{body}</Link>;
   return <div className={className}>{body}</div>;
