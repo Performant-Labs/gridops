@@ -72,7 +72,9 @@ export function MachineScoreTable({ data, expanded: expandedProp, hash: routerHa
           ))
         )}
       </div>
-      <p className="mt-2 text-xs text-faint">Worst score first. Expand a machine for what it is doing now and what it ran in the window.</p>
+      <p className="mt-2 text-xs text-faint">
+        {"Worst score first. The small bars are the score's parts; expand a machine for each part, what it is doing now and what it ran in the window."}
+      </p>
     </section>
   );
 }

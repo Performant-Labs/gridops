@@ -122,8 +122,8 @@ export function FleetHealthPage() {
  */
 type HealthSlot = "live-strip" | "areas-of-concern" | "fleet-score" | "category-legend" | "machine-table" | "machine-detail";
 
-function Slot({ name, children }: { name: HealthSlot; children: ReactNode }) {
-  return <div className="min-w-0" data-health-section={name}>{children}</div>;
+function Slot({ name, children, className }: { name: HealthSlot; children: ReactNode; className?: string }) {
+  return <div className={cn("min-w-0", className)} data-health-section={name}>{children}</div>;
 }
 
 function HealthSections({ data, window }: FleetHealthViewProps) {
@@ -156,7 +156,8 @@ function HealthSections({ data, window }: FleetHealthViewProps) {
       <Slot name="machine-table">
         <MachineScoreTable data={data} expanded={expanded} hash={hash} onExpandedChange={setExpanded} window={window} />
       </Slot>
-      <Slot name="machine-detail"><MachineDetail data={data} expandedId={expanded} window={window} /></Slot>
+      {/* On one column the detail is in its row and this slot only points at it (#280). */}
+      <Slot className="hidden lg:block" name="machine-detail"><MachineDetail data={data} expandedId={expanded} window={window} /></Slot>
       <Slot name="category-legend"><CategoryLegend data={data} window={window} /></Slot>
     </div>
   );

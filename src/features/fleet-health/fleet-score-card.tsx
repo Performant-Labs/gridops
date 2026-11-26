@@ -68,7 +68,7 @@ function TrendChart({ score, trend, window }: { score: number | null; trend: Fle
             axisLine={false}
             dataKey="at"
             minTickGap={24}
-            tick={{ fill: "var(--faint)", fontSize: 10 }}
+            tick={{ fill: "var(--faint)", fontSize: 11 }}
             tickFormatter={(value: number) => trendTick(value, window)}
             tickLine={false}
           />
@@ -76,7 +76,7 @@ function TrendChart({ score, trend, window }: { score: number | null; trend: Fle
             allowDecimals={false}
             axisLine={false}
             domain={[0, 100]}
-            tick={{ fill: "var(--faint)", fontSize: 10 }}
+            tick={{ fill: "var(--faint)", fontSize: 11 }}
             tickFormatter={(value: number) => String(value)}
             tickLine={false}
             width={26}
