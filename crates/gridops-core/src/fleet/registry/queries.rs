@@ -1251,6 +1251,10 @@ async fn allocation_read(
     })
 }
 
+/// The counts the machine and backend reads show, over the machine's live
+/// placements only ([`counts_sql`]), so a read never walks the machine's
+/// finished history, which retention never deletes. Up to #267 this read
+/// every placement the machine ever had: about 1 s a machine in production.
 async fn counts(
     tx: &mut Transaction<'_, Sqlite>,
     snapshot: &Snapshot,
@@ -1259,40 +1263,18 @@ async fn counts(
     target_filter: Option<&str>,
     scope: CountScope,
 ) -> Result<FleetRecordCounts, QueryError> {
-    let prefix = if target_filter.is_none() && scope == CountScope::VisibleTargets {
-        readable_targets_cte()
-    } else {
-        ""
-    };
-    let target_clause = if target_filter.is_some() {
-        " AND p.target_id=?"
-    } else if scope == CountScope::VisibleTargets {
-        " AND EXISTS (SELECT 1 FROM readable_targets rt WHERE rt.id=p.target_id)"
-    } else {
-        ""
-    };
-    let sql = format!(
-        "{prefix} SELECT {COUNTS_COLUMNS} FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id LEFT JOIN runners r ON r.id=p.runner_id WHERE p.host_id=?{backend_clause}{target_clause}",
-        prefix = prefix,
-        backend_clause = if backend_id.is_some() {
-            " AND p.backend_id=?"
-        } else {
-            ""
-        },
-        target_clause = target_clause,
-    );
-    if backend_id.is_some() {
-        debug_assert!(sql.contains("p.backend_id=?"));
-    }
+    let visible = target_filter.is_none() && scope == CountScope::VisibleTargets;
+    let sql = counts_sql(visible, backend_id.is_some(), target_filter.is_some());
     let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
-    if !prefix.is_empty() {
+    if visible {
         query = query
             .bind(i64::from(snapshot.system_admin))
             .bind(&snapshot.user_id)
             .bind(&snapshot.user_id)
             .bind(&snapshot.user_id);
     }
-    query = query.bind(host_id.to_string());
+    let host = host_id.to_string();
+    query = query.bind(host.clone()).bind(host);
     if let Some(backend_id) = backend_id {
         query = query.bind(backend_id.to_string());
     }
@@ -1303,7 +1285,7 @@ async fn counts(
     counts_from_row(&row, scope)
 }
 
-/// The placement counts of [`counts`] and [`live_counts`], over placements
+/// The placement counts of [`counts`], over placements
 /// `p` (with intent `i` and runner `r`).
 const COUNTS_COLUMNS: &str = "COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.runner_id IS NOT NULL AND r.deleted_at IS NULL THEN p.runner_id END) AS runners,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state!='released') THEN p.id END) AS charged_fix,COUNT(DISTINCT CASE WHEN i.kind='ci_runner' AND p.state='running' THEN p.id END) AS running_ci,COUNT(DISTINCT CASE WHEN i.kind='fix_sandbox' AND p.state='running' THEN p.id END) AS running_fix,COUNT(DISTINCT CASE WHEN p.state='uncertain' OR EXISTS (SELECT 1 FROM capacity_allocations ca WHERE ca.placement_id=p.id AND ca.state='uncertain' AND ca.state!='released') THEN p.id END) AS uncertain";
 
@@ -1316,15 +1298,35 @@ const UNFINISHED_PLACEMENT_STATES: &str = "'reserved','preparing','registering',
 /// `capacity_allocations_domain_idx (domain_id,state)` seeks each of them.
 const UNRELEASED_ALLOCATION_STATES: &str = "'reserved','committed','releasing','uncertain'";
 
-/// The statement of [`live_counts`]: [`COUNTS_COLUMNS`] over the machine's
-/// live placements only, the unfinished ones (through
+/// The statement of [`counts`]: [`COUNTS_COLUMNS`] over the machine's live
+/// placements only, the unfinished ones (through
 /// `workload_placements_host_idx`) and the finished ones still holding
 /// capacity (through its domains' unreleased allocations), so it reads
-/// nothing of the machine's finished history, which retention never deletes.
-/// Binds the machine's id twice.
-fn live_counts_sql() -> String {
+/// nothing of the machine's finished history. `visible` limits it to the
+/// readable targets (binding the snapshot's four values first), `backend`
+/// and `target` to one backend and one target. Binds the machine's id
+/// twice, then the backend's and the target's ids when asked for.
+///
+/// Every count is what the whole history gives, since a finished placement
+/// holding no capacity is never running, charged or uncertain, except
+/// `known_managed_runner_count`, which counts only the runners of live
+/// placements: a finished placement's runner is not one the machine runs.
+fn counts_sql(visible: bool, backend: bool, target: bool) -> String {
+    let with = if visible {
+        format!("{},", readable_targets_cte())
+    } else {
+        "WITH".to_owned()
+    };
+    let backend_clause = if backend { " AND p.backend_id=?" } else { "" };
+    let target_clause = if target {
+        " AND p.target_id=?"
+    } else if visible {
+        " AND EXISTS (SELECT 1 FROM readable_targets rt WHERE rt.id=p.target_id)"
+    } else {
+        ""
+    };
     format!(
-        "WITH live(id) AS (
+        "{with} live(id) AS (
            SELECT id FROM workload_placements WHERE host_id=? AND state IN ({UNFINISHED_PLACEMENT_STATES})
            UNION
            SELECT a.placement_id FROM host_resource_domains d
@@ -1333,26 +1335,9 @@ fn live_counts_sql() -> String {
          SELECT {COUNTS_COLUMNS} FROM live
            JOIN workload_placements p ON p.id=live.id
            JOIN workload_intents i ON i.id=p.intent_id
-           LEFT JOIN runners r ON r.id=p.runner_id"
+           LEFT JOIN runners r ON r.id=p.runner_id
+          WHERE 1=1{backend_clause}{target_clause}"
     )
-}
-
-/// The machine's counts over its live placements (fleet health's live read,
-/// #240): every count is what [`counts`] gives for `CountScope::Host`, since
-/// a finished placement holding no capacity is never running, charged or
-/// uncertain, except `known_managed_runner_count`, which counts only the
-/// runners of live placements.
-async fn live_counts(
-    tx: &mut Transaction<'_, Sqlite>,
-    host_id: HostId,
-) -> Result<FleetRecordCounts, QueryError> {
-    let host = host_id.to_string();
-    let row = sqlx::query(sqlx::AssertSqlSafe(live_counts_sql()))
-        .bind(&host)
-        .bind(&host)
-        .fetch_one(&mut **tx)
-        .await?;
-    counts_from_row(&row, CountScope::Host)
 }
 
 fn counts_from_row(
@@ -2467,7 +2452,7 @@ pub async fn host_live_reads(
         .await?
         .ok_or(QueryError::MalformedData)?;
         let root_id = parse_domain_id(&root_id)?;
-        let counts = live_counts(&mut tx, host_id).await?;
+        let counts = counts(&mut tx, &snapshot, host_id, None, None, CountScope::Host).await?;
         // The count only: the last day's failures `placement_failures` also
         // reads are not part of the live view (#253).
         let failed_placements_last_hour =
@@ -2618,12 +2603,26 @@ mod live_plan_tests {
         Ok(rows.into_iter().map(|row| row.3).collect())
     }
 
-    /// The live counts seek the machine's unfinished placements by state and
-    /// its domains' unreleased allocations; nothing reads a machine's
-    /// placements by `host_id` alone, which is its whole history.
+    /// Every count statement (the machine and backend reads, for each scope
+    /// and filter, and the live read) seeks the machine's unfinished
+    /// placements by state and its domains' unreleased allocations; nothing
+    /// reads a machine's placements by `host_id` alone, which is its whole
+    /// history (#267: the machine read did, about 1 s a machine).
     #[tokio::test]
-    async fn the_live_counts_read_only_live_placements() -> Result<()> {
-        let steps = plan(&super::live_counts_sql()).await?;
+    async fn every_count_statement_reads_only_live_placements() -> Result<()> {
+        for visible in [false, true] {
+            for backend in [false, true] {
+                for target in [false, true] {
+                    assert_reads_only_live_placements(&super::counts_sql(visible, backend, target))
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn assert_reads_only_live_placements(sql: &str) -> Result<()> {
+        let steps = plan(sql).await?;
         assert!(
             steps
                 .iter()
@@ -2709,8 +2708,24 @@ mod live_plan_tests {
         Ok(())
     }
 
-    /// #245 (review of #244): `live_counts` gives every count `counts` gives
-    /// for `CountScope::Host` (the read `host_live_reads` made before #240),
+    /// The statement `counts` ran up to #267, over every placement the
+    /// machine ever had, kept to check the live statement against.
+    const HISTORY_COUNTS_SQL: &str = "SELECT {COUNTS} FROM workload_placements p JOIN workload_intents i ON i.id=p.intent_id LEFT JOIN runners r ON r.id=p.runner_id WHERE p.host_id=?";
+
+    async fn history_counts(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        host_id: &str,
+    ) -> Result<super::FleetRecordCounts> {
+        let sql = HISTORY_COUNTS_SQL.replace("{COUNTS}", super::COUNTS_COLUMNS);
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(host_id)
+            .fetch_one(&mut **tx)
+            .await?;
+        Ok(super::counts_from_row(&row, super::CountScope::Host)?)
+    }
+
+    /// #245 (review of #244), #267: `counts` gives every count the whole
+    /// history gives (the read `host_live_reads` made before #240),
     /// except the known-runner count, for a machine with a placement in each
     /// of the twelve states crossed with no allocation and each of the five
     /// allocation states: a finished placement still holding capacity is
@@ -2808,7 +2823,8 @@ mod live_plan_tests {
         };
         for host in &fleet.hosts {
             let host_id = super::parse_host_id(&host.id)?;
-            let mut full = super::counts(
+            let mut full = history_counts(&mut tx, &host.id).await?;
+            let live = super::counts(
                 &mut tx,
                 &snapshot,
                 host_id,
@@ -2817,7 +2833,6 @@ mod live_plan_tests {
                 super::CountScope::Host,
             )
             .await?;
-            let live = super::live_counts(&mut tx, host_id).await?;
             if host.id == io {
                 // Six running; 4 × 12 holding an unreleased allocation; six
                 // uncertain plus the eleven others holding an uncertain one.
