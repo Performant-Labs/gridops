@@ -1,13 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * #256: the browser tests (`npm run test:a11y`), today the axe pass over the fleet health page,
- * the Overview and the job-categories settings (`tests/a11y/`). Headless Chromium only.
+ * #256: the browser tests (`npm run test:a11y`): the axe pass over the fleet health page, the
+ * Overview and the job-categories settings, and #269's phone check over every screen
+ * (`tests/a11y/`, see its README). Headless Chromium only.
  *
  * By default it serves the built SPA (`dist/`, so `npm run build` first) with `vite preview` and
  * answers the API from recorded responses (`tests/a11y/api-fixtures.json`). With
  * `GRIDOPS_A11Y_BASE_URL` set it drives a running GridOps instead (the API serving the SPA, with
- * its own data); see `tests/a11y/fleet-health-axe.spec.ts`.
+ * its own data); see `tests/a11y/api.ts`.
  */
 const live = process.env.GRIDOPS_A11Y_BASE_URL;
 const PREVIEW_PORT = 4317;
