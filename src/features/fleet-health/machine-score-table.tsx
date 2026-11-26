@@ -107,6 +107,7 @@ function MachineRow({ data, host, open, onToggle, window: windowKey }: { data: F
             <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <StatusDot tone={live === null ? "neutral" : live.online ? "success" : "danger"} />
               {live === null ? "Unknown" : live.online ? "Online" : live.lastSeenAt === null ? "Offline" : `Offline · last seen ${formatRelativeTime(new Date(live.lastSeenAt).toISOString())}`}
+              {live?.online ? <RunningCount live={live} /> : null}
             </span>
           </div>
           <ComponentBars host={host} />
@@ -119,6 +120,17 @@ function MachineRow({ data, host, open, onToggle, window: windowKey }: { data: F
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** How many runners an online machine is running right now, all categories together. */
+function RunningCount({ live }: { live: NonNullable<HostHealth["live"]> }) {
+  const total = Object.values(live.runningByCategory).reduce((sum, count) => sum + count, 0);
+  return (
+    <>
+      <span aria-hidden="true">·</span>
+      <span className="text-foreground" data-running-count={total}>{`${total} running`}</span>
+    </>
   );
 }
 
