@@ -134,16 +134,18 @@ export const SCREENS: Screen[] = [
     await row.click();
     await expect(row).toHaveAttribute("aria-expanded", "true");
   } }] },
-  // Empty: a member with no installation access sees each list's empty state.
+  // Empty: a member with no installation access sees each list's empty state. Each entry waits for
+  // that state's own text, so a recording where the member sees rows fails instead of passing as
+  // a second check of the loaded list.
   ...[
-    { issue: 273, route: "_app/runner-pools.index.tsx", path: "/runner-pools", ready: heading("Runner pools") },
-    { issue: 274, route: "_app/runners.tsx", path: "/runners", ready: heading("Runners") },
-    { issue: 274, route: "_app/queued-jobs.tsx", path: "/queued-jobs", ready: heading("Queued jobs") },
-    { issue: 275, route: "_app/workflow-runs.index.tsx", path: "/workflow-runs", ready: heading("Workflow runs") },
-    { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", ready: heading("Live logs") },
-    { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs") },
-    { issue: 277, route: "_app/repositories.tsx", path: "/repositories", ready: heading("Repositories") },
-  ].map((screen): Screen => ({ ...screen, role: "member", variant: "empty" })),
+    { issue: 273, route: "_app/runner-pools.index.tsx", path: "/runner-pools", empty: "Create your first runner pool" },
+    { issue: 274, route: "_app/runners.tsx", path: "/runners", empty: "No managed runners" },
+    { issue: 274, route: "_app/queued-jobs.tsx", path: "/queued-jobs", empty: "No queued jobs" },
+    { issue: 275, route: "_app/workflow-runs.index.tsx", path: "/workflow-runs", empty: "No workflow runs yet" },
+    { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", empty: "No job logs yet" },
+    { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", empty: "No agent runs yet" },
+    { issue: 277, route: "_app/repositories.tsx", path: "/repositories", empty: "No repositories yet" },
+  ].map(({ empty, ...screen }): Screen => ({ ...screen, ready: `#main :text-is("${empty}"):visible`, role: "member", variant: "empty" })),
   // The root layout: every screen above renders inside it.
   { issue: 270, route: "__root.tsx", path: "/login", ready: heading("Log in to GridOps"), role: "anonymous" },
 ];
