@@ -63,6 +63,28 @@ const dialog = (name: string | RegExp): State["act"] => async (page) => {
   await page.waitForLoadState("networkidle");
 };
 
+/**
+ * Creates an API token, answered here with a made-up token (no secret is recorded or real), and
+ * waits for the dialog that shows its secret once.
+ */
+const createToken: State["act"] = async (page) => {
+  const secret = `gat_${"Ab1-_x9Z".repeat(5)}Ab0`;
+  await page.route(/\/api\/v1\/.*api-tokens/, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const now = await page.evaluate(() => Date.now());
+    const iso = (ms: number) => new Date(ms).toISOString();
+    await route.fulfill({ status: 201, json: {
+      id: "0f0000aa-0000-4000-8000-000000000001", name: "ci deploy", displayPrefix: secret.slice(4, 12), scopes: ["fleet:read"],
+      createdAt: iso(now), expiresAt: iso(now + 90 * 24 * 3_600_000), lastUsedAt: null, revokedAt: null, tokenSecret: secret,
+    } });
+  });
+  await page.locator("#api-token-name").fill("ci deploy");
+  const scope = page.locator('[id="api-token-scope-fleet:read"]');
+  if ((await scope.getAttribute("aria-checked")) !== "true") await scope.click();
+  await page.getByRole("button", { name: "Create token" }).click();
+  await expect(page.getByRole("dialog")).toContainText("ci deploy");
+};
+
 export const SCREENS: Screen[] = [
   // #270: the app shell, navigation and sign-in.
   { issue: 270, route: "login.tsx", path: "/login", ready: heading("Log in to GridOps"), role: "anonymous" },
@@ -103,7 +125,7 @@ export const SCREENS: Screen[] = [
   { issue: 279, route: "settings.general.tsx", path: "/settings/general", ready: heading("General") },
   { issue: 279, route: "settings.preferences.tsx", fixme: true, path: "/settings/preferences", ready: heading("Preferences") },
   { issue: 279, route: "settings.members.tsx", fixme: true, path: "/settings/members", ready: heading("Members") },
-  { issue: 279, route: "settings.api-tokens.tsx", path: "/settings/api-tokens", ready: heading("API tokens") },
+  { issue: 279, route: "settings.api-tokens.tsx", path: "/settings/api-tokens", ready: heading("API tokens"), states: [{ name: "a new token's secret shown", act: createToken }] },
   { issue: 279, route: "settings.runner-host.tsx", path: "/settings/runner-host", ready: heading("Runner host") },
   { issue: 279, route: "settings.ai.tsx", path: "/settings/ai", ready: heading("AI agent") },
   // #280: fleet health (fixed by #281).

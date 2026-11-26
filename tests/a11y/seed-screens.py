@@ -68,7 +68,7 @@ def main() -> None:
         ("runner_pool.updated", "runner_pool", "0f000004-0000-4000-8000-000000000001", {"name": "linux-docker", "fields": ["maxRunners", "labels"]}),
         ("fleet_host.approved", "fleet_host", "0f000001-0000-4000-8000-000000000002", {"name": "Jupiter"}),
         ("settings.updated", "settings", None, {"keys": ["jobCategories"]}),
-        ("api_token.created", "api_token", "a11y-token-1", {"name": "deploy bot"}),
+        ("api_token.created", "api_token", "0f0000a1-0000-4000-8000-000000000001", {"name": "deploy bot"}),
         ("member.role_changed", "user", "a11y-member", {"from": "admin", "to": "member"}),
         ("workflow_run.rerun_requested", "workflow_run", "960001", {"repository": "acme/app"}),
     ]
@@ -108,11 +108,11 @@ def main() -> None:
             (f"a11y-agent-{index}", "manual" if index == 0 else "automatic", status, stage, outcome, title, summary, url, number, branch, error, "anthropic", "claude-sonnet-5-5", 14 + index, 37 + index, "a11y-admin", created, created + MINUTE, created + 40 * MINUTE if done else None, created + 40 * MINUTE, job_id),
         )
 
-    tokens = [("deploy bot", ["fleet:read", "fleet:write"], None), ("dashboard reader", ["fleet:read"], None), ("old laptop", ["fleet:read"], now - 3 * 24 * HOUR)]
+    tokens = [("deploy bot", ["fleet:read", "fleet:enroll", "pools:read"], None), ("dashboard reader", ["fleet:read"], None), ("old laptop", ["fleet:read"], now - 3 * 24 * HOUR)]
     for index, (name, scopes, revoked) in enumerate(tokens):
         db.execute(
             "INSERT INTO api_tokens (id,user_id,name,verifier,display_prefix,scopes_json,created_at,expires_at,last_used_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (f"a11y-token-{index + 1}", "a11y-admin", name, b64(secrets.token_bytes(32)), f"gop_{secrets.token_hex(3)}", json.dumps(scopes), now - (index + 2) * 24 * HOUR, now + 60 * 24 * HOUR, now - (index + 1) * HOUR, revoked),
+            (f"0f0000a1-0000-4000-8000-00000000000{index + 1}", "a11y-admin", name, b64(secrets.token_bytes(32)), secrets.token_hex(4), json.dumps(scopes), now - (index + 2) * 24 * HOUR, now + 60 * 24 * HOUR, now - (index + 1) * HOUR, revoked),
         )
 
     db.commit()

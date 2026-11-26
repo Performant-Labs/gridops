@@ -179,15 +179,48 @@
     }
   },
   "admin GET /api/v1/fleet/api-tokens": {
-    "status": 400,
+    "status": 200,
     "body": {
-      "code": "invalid_request",
-      "message": "Invalid fleet request",
-      "requestId": "d7c3a1fe-29d4-415a-b60d-e681f36d53c9",
-      "details": {
-        "kind": "invalid_field",
-        "field": "scopes"
-      }
+      "items": [
+        {
+          "id": "0f0000a1-0000-4000-8000-000000000001",
+          "name": "deploy bot",
+          "displayPrefix": "df26cd0f",
+          "scopes": [
+            "fleet:read",
+            "fleet:enroll",
+            "pools:read"
+          ],
+          "createdAt": "2026-11-24T15:55:30.245Z",
+          "expiresAt": "2027-01-25T15:55:30.245Z",
+          "lastUsedAt": "2026-11-26T14:55:30.245Z",
+          "revokedAt": null
+        },
+        {
+          "id": "0f0000a1-0000-4000-8000-000000000002",
+          "name": "dashboard reader",
+          "displayPrefix": "e013be49",
+          "scopes": [
+            "fleet:read"
+          ],
+          "createdAt": "2026-11-23T15:55:30.245Z",
+          "expiresAt": "2027-01-25T15:55:30.245Z",
+          "lastUsedAt": "2026-11-26T13:55:30.245Z",
+          "revokedAt": null
+        },
+        {
+          "id": "0f0000a1-0000-4000-8000-000000000003",
+          "name": "old laptop",
+          "displayPrefix": "746be430",
+          "scopes": [
+            "fleet:read"
+          ],
+          "createdAt": "2026-11-22T15:55:30.245Z",
+          "expiresAt": "2027-01-25T15:55:30.245Z",
+          "lastUsedAt": "2026-11-26T12:55:30.245Z",
+          "revokedAt": "2026-11-23T15:55:30.245Z"
+        }
+      ]
     }
   },
   "admin GET /api/v1/fleet/health?window=1h": {
