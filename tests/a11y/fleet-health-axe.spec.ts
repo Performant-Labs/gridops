@@ -12,85 +12,26 @@
  * - Live: `GRIDOPS_A11Y_BASE_URL` names a running GridOps (the API serving the built SPA) and
  *   `GRIDOPS_A11Y_ADMIN_SESSION` / `GRIDOPS_A11Y_MEMBER_SESSION` the `gridops_session` cookie
  *   values to sign in with. Nothing is stubbed. With `GRIDOPS_A11Y_RECORD=<file>` as well (and
- *   `--workers=1`), the API's answers are written to `<file>`: that is how the fixtures were made.
+ *   `--workers=1`), the API's answers are written to `<file>`: that is how the fixtures were made
+ *   (`api.ts`; the recipe, with #269's extra screen data, is in `README.md`).
  *
  * Either way, `GRIDOPS_A11Y_REPORT=<file>` appends one JSON line per scan: the state, the width and
  * theme, and its violations by impact (moderate and minor ones too), for a written record.
  */
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-type Role = "admin" | "member";
-type Recorded = { status: number; body: unknown };
-type Fixtures = Record<string, Recorded>;
+import { open, saveRecordingAfterAll } from "./api";
 
-const LIVE = process.env.GRIDOPS_A11Y_BASE_URL;
-const RECORD = process.env.GRIDOPS_A11Y_RECORD;
 const REPORT = process.env.GRIDOPS_A11Y_REPORT;
-const FIXTURES_PATH = new URL("./api-fixtures.json", import.meta.url);
 const THEMES = ["light", "dark"] as const;
 const WIDTHS = [360, 1280] as const;
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 const BLOCKING = new Set(["serious", "critical"]);
-const recorded: Fixtures = {};
 
-const fixtures: Fixtures = LIVE ? {} : (JSON.parse(readFileSync(FIXTURES_PATH, "utf8")) as Fixtures);
-
-/** The key of a request in the fixtures: role, method and path with its query. */
-function fixtureKey(role: Role, request: Request) {
-  const url = new URL(request.url());
-  return `${role} ${request.method()} ${url.pathname}${url.search}`;
-}
-
-/** Answers `/api/v1` from the fixtures (recorded mode), or records the live answers. */
-async function serveApi(page: Page, role: Role) {
-  if (LIVE) {
-    const cookie = process.env[role === "admin" ? "GRIDOPS_A11Y_ADMIN_SESSION" : "GRIDOPS_A11Y_MEMBER_SESSION"];
-    if (!cookie) throw new Error(`GRIDOPS_A11Y_${role.toUpperCase()}_SESSION is required with GRIDOPS_A11Y_BASE_URL`);
-    await page.context().addCookies([{ name: "gridops_session", value: cookie, url: LIVE }]);
-    if (RECORD) {
-      page.on("response", async (response) => {
-        if (!new URL(response.url()).pathname.startsWith("/api/v1/")) return;
-        const body = await response.json().catch(() => undefined);
-        if (body !== undefined) recorded[fixtureKey(role, response.request())] = { status: response.status(), body };
-      });
-    }
-    return;
-  }
-  await page.route("**/api/v1/**", async (route) => {
-    const request = route.request();
-    const key = fixtureKey(role, request);
-    // Exact matches only (query included): a scan of one window never gets another's answer.
-    const answer = fixtures[key];
-    if (!answer) {
-      await route.fulfill({ status: 404, json: { error: `Not recorded: ${key}`, code: "not_found" } });
-      return;
-    }
-    await route.fulfill({ status: answer.status, json: answer.body });
-  });
-}
-
-test.afterAll(() => {
-  if (!RECORD || Object.keys(recorded).length === 0) return;
-  const previous = existsSync(RECORD) ? (JSON.parse(readFileSync(RECORD, "utf8")) as Fixtures) : {};
-  const merged = { ...previous, ...recorded };
-  const sorted = Object.fromEntries(Object.keys(merged).sort().map((key) => [key, merged[key]]));
-  writeFileSync(RECORD, `${JSON.stringify(sorted, null, 2)}\n`);
-});
-
-/** Opens `path` signed in as `role`, in `theme` (and on the health `window`), and waits for `ready`. */
-async function open(page: Page, { path, role, theme, ready, window: healthWindow }: { path: string; role: Role; theme: "light" | "dark"; ready: string; window?: string }) {
-  await page.addInitScript((value) => window.localStorage.setItem("gridops-theme", value), theme);
-  if (healthWindow) await page.addInitScript((value) => window.localStorage.setItem("gridops.fleetHealth.window", value), healthWindow);
-  await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
-  await serveApi(page, role);
-  await page.goto(path);
-  await expect(page.locator(ready).first()).toBeVisible();
-  await expect(page.locator("html")).toHaveClass(theme === "dark" ? /\bdark\b/ : /^(?!.*\bdark\b)/);
-  await page.waitForLoadState("networkidle");
-}
+saveRecordingAfterAll();
 
 /**
  * Runs axe over the whole page; fails on any serious or critical violation, listing each node. The

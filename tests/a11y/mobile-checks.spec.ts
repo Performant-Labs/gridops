@@ -1,0 +1,120 @@
+/**
+ * #269: each phone check (`mobile-checks.ts`) catches its kind of problem on a small test page,
+ * and passes the same page without it, so a screen that passes `mobile.spec.ts` has none.
+ */
+import { expect, test, type Page } from "@playwright/test";
+
+import { findMobileProblems } from "./mobile-checks";
+
+test.use({ viewport: { width: 360, height: 780 }, isMobile: true, hasTouch: true });
+
+/** A page shaped like the app: a fixed shell, `#main`, and a scrolling page body inside it. */
+async function page(page: Page, body: string, allowed?: Parameters<typeof findMobileProblems>[1]) {
+  await page.setContent(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>
+    body { margin: 0; font: 14px/1.4 sans-serif; }
+    #shell { position: fixed; inset: 0; display: flex; overflow: hidden; }
+    #main { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; }
+    .body { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    button { font: inherit; }
+  </style></head><body><div id="shell"><a class="sr-only" href="#main">Skip to content</a><main id="main"><div class="body">${body}</div></main></div></body></html>`);
+  return findMobileProblems(page, allowed);
+}
+
+const NONE = { sideways: [], smallTargets: [], smallText: [], truncated: [] };
+
+test("a page with none of the problems passes", async ({ page: p }) => {
+  expect(await page(p, `
+    <h1>Runners</h1>
+    <p>Read the <a href="/docs">runner docs</a> before you add one.</p>
+    <div style="display: flex; gap: 8px"><button style="min-width: 24px; min-height: 24px">A</button><button style="min-width: 24px; min-height: 24px">B</button></div>
+    <div style="display: flex; gap: 24px; margin-top: 24px"><button style="width: 16px; height: 16px; padding: 0">x</button><button style="width: 16px; height: 16px; padding: 0">y</button></div>
+    <p class="truncate" style="width: 200px">acme/app · unit tests</p>
+    <p class="truncate" style="width: 160px">acme/app · unit testss</p>
+    <p style="font-size: 11px">Last seen 4 min ago</p>`)).toEqual(NONE);
+});
+
+test("it catches a page body wider than the phone", async ({ page: p }) => {
+  const problems = await page(p, `<h1>Runs</h1><table style="width: 640px"><tr><td>a very wide table</td></tr></table><div style="height: 1200px"></div>`);
+  expect(problems.sideways).toEqual([expect.stringMatching(/^the scrolling panel is \d+ px wide in \d+ px; widest: <table>/)]);
+});
+
+test("a wide table may scroll sideways inside its own scroller", async ({ page: p }) => {
+  const problems = await page(p, `<h1>Runs</h1><div style="overflow-x: auto"><table style="width: 640px; height: 400px"><tr><td>a very wide, tall table</td></tr></table></div><div style="height: 1200px"></div>`);
+  expect(problems.sideways).toEqual([]);
+});
+
+test("it catches a dialog wider than the phone, and a dialog's scrolling area wider than the dialog", async ({ page: p }) => {
+  await page(p, "<h1>Webhooks</h1>");
+  const wide = await p.evaluate(() => {
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Delivery" style="position: fixed; top: 0; left: 0; width: 420px; height: 600px">wide</div>`);
+  }).then(() => findMobileProblems(p));
+  expect(wide.sideways).toEqual(['<div> "Delivery" spans 0–420 px of a 360 px viewport']);
+  await p.evaluate(() => {
+    document.querySelector('[role="dialog"]')?.remove();
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Payload" style="position: fixed; inset: 0 0 0 20px; display: flex; flex-direction: column"><div style="flex: 1; overflow: auto"><pre style="margin: 0; height: 400px">${"x".repeat(200)}</pre></div></div>`);
+  });
+  expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the scrolling panel is \d+ px wide in 340 px/)]);
+});
+
+test("it catches a dialog that clips content wider than itself", async ({ page: p }) => {
+  await page(p, "<h1>Webhooks</h1>");
+  await p.evaluate(() => {
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Payload" style="position: fixed; inset: 0 0 0 20px; overflow: hidden"><div style="display: flex"><pre style="margin: 0">${"x".repeat(200)}</pre></div></div>`);
+  });
+  expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^<div> "Payload.*" holds \d+ px of content in 340 px$/)]);
+});
+
+test("it catches a document wider than the phone", async ({ page: p }) => {
+  await p.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><body style="margin: 0"><div style="width: 500px">wide</div></body>`);
+  expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the document is 500 px wide in a 360 px viewport$/)]);
+});
+
+test("it catches small targets that crowd each other, not small ones with room", async ({ page: p }) => {
+  const problems = await page(p, `
+    <div style="display: flex; gap: 2px"><button aria-label="Edit" style="width: 16px; height: 16px; padding: 0"></button><button aria-label="Delete" style="width: 16px; height: 16px; padding: 0"></button></div>
+    <div style="display: flex; gap: 24px; margin-top: 40px"><button aria-label="Up" style="width: 16px; height: 16px; padding: 0"></button><button aria-label="Down" style="width: 16px; height: 16px; padding: 0"></button></div>`);
+  expect(problems.smallTargets).toEqual([
+    '<button> "Edit" is 16 × 16 px, too close to <button> "Delete"',
+    '<button> "Delete" is 16 × 16 px, too close to <button> "Edit"',
+  ]);
+});
+
+test("it catches small targets whose 24 px circles overlap, though neither circle reaches the other button", async ({ page: p }) => {
+  // Centres 22 px apart: each circle stops 2 px short of the other button, but the circles overlap.
+  const problems = await page(p, `<div style="display: flex; gap: 6px"><button aria-label="Up" style="width: 16px; height: 16px; padding: 0"></button><button aria-label="Down" style="width: 16px; height: 16px; padding: 0"></button></div>`);
+  expect(problems.smallTargets).toEqual([
+    '<button> "Up" is 16 × 16 px, too close to <button> "Down"',
+    '<button> "Down" is 16 × 16 px, too close to <button> "Up"',
+  ]);
+});
+
+test("it catches text under 11 px, once per place", async ({ page: p }) => {
+  const problems = await page(p, `<div>Go to Runs <kbd style="font-size: 10px">G</kbd> then <kbd style="font-size: 10px">R</kbd></div><p style="font-size: 11px">fine</p>`);
+  expect(problems.smallText).toEqual(['10 px in <div> "Go to Runs G then R"']);
+});
+
+test("it catches an ellipsis that hides more than a few characters", async ({ page: p }) => {
+  const problems = await page(p, `<p class="truncate" style="width: 120px">The sandbox could not reach the package registry</p>`);
+  expect(problems.truncated).toEqual([expect.stringMatching(/^<p> "The sandbox could not reach the package " hides about \d+ characters$/)]);
+});
+
+/**
+ * A 20 px paragraph cut off at 100 px around a block of a known width, so the hidden amount is
+ * exact: `hiddenPx`, at half the font size (10 px) per character. (An inline block would add the
+ * line's trailing space, about one font size, to the overflow.)
+ */
+const cut = (hiddenPx: number, attributes = "") => `<p class="truncate" ${attributes} style="width: 100px; font-size: 20px"><span style="display: block; width: ${100 + hiddenPx}px">x</span></p>`;
+
+test("an ellipsis hiding 3 characters or fewer passes, and 4 or more fails", async ({ page: p }) => {
+  expect((await page(p, cut(30))).truncated).toEqual([]);
+  expect((await page(p, cut(40))).truncated).toEqual(['<p> "x" hides about 4 characters']);
+});
+
+test("the allow-list exempts only the element its selector names", async ({ page: p }) => {
+  const problems = await page(p, `<div data-copyable>${cut(80, 'data-url="callback"')}${cut(80)}</div>`, [{ selector: '[data-url="callback"]', reason: "a copy button gives the full URL" }]);
+  expect(problems.truncated).toEqual(['<p> "x" hides about 8 characters']);
+  // A selector naming an ancestor exempts every ellipsis inside it: entries must name the element.
+  expect((await page(p, `<div data-copyable>${cut(80)}${cut(80)}</div>`, [{ selector: "[data-copyable]", reason: "too broad" }])).truncated).toEqual([]);
+});

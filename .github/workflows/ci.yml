@@ -69,7 +69,8 @@ jobs:
         run: npm test
 
       # #256: axe over the fleet health page, the Overview and the job-category settings in light
-      # and dark at 360 and 1280 px (tests/a11y/), on the build above with recorded API answers.
+      # and dark at 360 and 1280 px; #269: every screen's phone check at 360 and 390 px
+      # (tests/a11y/, see its README), on the build above with recorded API answers.
       # Headless Chromium only; a hosted runner also installs its system libraries.
       - name: Install the headless browser
         timeout-minutes: 5
@@ -81,7 +82,7 @@ jobs:
           fi
 
       - name: Run the accessibility tests
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: npm run test:a11y
 
       - name: Test the build number script
