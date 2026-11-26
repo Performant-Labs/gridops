@@ -58,6 +58,14 @@ test("it catches a dialog wider than the phone, and a dialog's scrolling area wi
   expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the scrolling panel is \d+ px wide in 340 px/)]);
 });
 
+test("it catches a dialog that clips content wider than itself", async ({ page: p }) => {
+  await page(p, "<h1>Webhooks</h1>");
+  await p.evaluate(() => {
+    document.body.insertAdjacentHTML("beforeend", `<div role="dialog" aria-label="Payload" style="position: fixed; inset: 0 0 0 20px; overflow: hidden"><div style="display: flex"><pre style="margin: 0">${"x".repeat(200)}</pre></div></div>`);
+  });
+  expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^<div> "Payload.*" holds \d+ px of content in 340 px$/)]);
+});
+
 test("it catches a document wider than the phone", async ({ page: p }) => {
   await p.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><body style="margin: 0"><div style="width: 500px">wide</div></body>`);
   expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the document is 500 px wide in a 360 px viewport$/)]);

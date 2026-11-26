@@ -70,7 +70,8 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
       for (const dialog of dialogs) {
         const box = dialog.getBoundingClientRect();
         if (box.left < -1 || box.right > root.clientWidth + 1) sideways.push(`${describe(dialog)} spans ${Math.round(box.left)}–${Math.round(box.right)} px of a ${root.clientWidth} px viewport`);
-        if (dialog.scrollWidth > dialog.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(dialog).overflowX)) sideways.push(`${describe(dialog)} is ${dialog.scrollWidth} px wide in ${dialog.clientWidth} px`);
+        // Content wider than the dialog either scrolls sideways or, with `overflow: hidden`, is cut off.
+        if (dialog.scrollWidth > dialog.clientWidth + 1) sideways.push(`${describe(dialog)} holds ${dialog.scrollWidth} px of content in ${dialog.clientWidth} px`);
         for (const element of dialog.querySelectorAll("*")) {
           if (!scrolls(element)) continue;
           let outer = true;
