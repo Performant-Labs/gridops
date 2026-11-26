@@ -93,12 +93,14 @@ const createToken: State["act"] = async (page) => {
  * Made up here, as the rest of the fixtures are.
  */
 const busyOverview: EditAnswer = (path, body) => {
-  if (path === "/api/v1/agent-runs?page=1&perPage=25") {
+  // By path alone, so a change to the query doesn't drop the data; the state below checks it shows.
+  const pathname = path.split("?")[0];
+  if (pathname === "/api/v1/agent-runs") {
     const runs = body as { items: { title: string | null }[] };
     if (runs.items[0]) runs.items[0].title = "Pin the flaky snapshot test's clock to a fixed time zone so it passes in CI";
     return runs;
   }
-  if (path !== "/api/v1/overview") return body;
+  if (pathname !== "/api/v1/overview") return body;
   const overview = body as { recordedAt?: string; machines: unknown; activity: unknown; slo: { failures: unknown } };
   const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
   overview.slo.failures = [{ reason: "failure", count: 12 }, { reason: "startup_failure", count: 3 }, { reason: "timed_out", count: 2 }, { reason: "action_required", count: 1 }];
@@ -131,9 +133,13 @@ export const SCREENS: Screen[] = [
     },
   }] },
   { issue: 271, route: "_app/index.tsx", path: "/", ready: heading("Overview"), variant: "busy", edit: busyOverview, states: [{
-    // A machine's speed is explained in a hover tooltip on a wider screen; a phone shows it.
+    // A machine's speed is explained in a hover tooltip on a wider screen; a phone shows it. The
+    // other edited data is checked to show too, so a request the edit stops matching fails here.
     name: "machine speed explained",
     act: async (page) => {
+      await expect(page.getByText("Pin the flaky snapshot test's clock to a fixed time zone so it passes in CI")).toBeVisible();
+      await expect(page.getByText("The runner on callisto did not register with GitHub")).toBeVisible();
+      await expect(page.getByText("12 failed")).toBeVisible();
       await expect(page.getByText("Takes 82% of the usual time, compared on 17 jobs")).toBeVisible();
       await expect(page.getByText("Needs 3 successful jobs that also ran on another machine")).toBeVisible();
     },
@@ -156,7 +162,11 @@ export const SCREENS: Screen[] = [
   { issue: 275, route: "_app/workflow-runs.$runId.tsx", fixme: true, path: "/workflow-runs/960002", ready: "h1" },
   { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", ready: heading("Live logs") },
   // #276: agent runs.
-  { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs"), states: [{ name: "run open", act: dialog(/^Show agent run for/) }],
+  { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs"), states: [{ name: "run open", act: async (page) => {
+      await dialog(/^Show agent run for/)(page);
+      // The edited stage shows, so a request the edit stops matching fails here.
+      await expect(page.getByRole("dialog")).toContainText("running the repository's tests");
+    } }],
     // A stage longer than the recorded one, as the agent reports them: the run's sheet must show it whole.
     edit: (path, body) => path.startsWith("/api/v1/agent-runs") && body && typeof body === "object"
       ? { ...body, ...("stage" in body ? { stage: "running the repository's tests" } : {}), ...("items" in body ? { items: (body as { items: object[] }).items.map((item) => ("stage" in item && (item as { stage: unknown }).stage ? { ...item, stage: "running the repository's tests" } : item)) } : {}) }
