@@ -1,6 +1,6 @@
 /**
  * #269 (epic #268): every screen at phone width (360 and 390 px), light and dark, in each of its
- * states (loaded, a row expanded, a dialog open), checked for what a script can check: no sideways
+ * states (empty, loaded, a row expanded, a dialog open), checked for what a script can check: no sideways
  * scrolling, targets of at least 24 px (WCAG 2.2 2.5.8), no text under 11 px, and no ellipsis
  * hiding text that has no other form. The checks are in `mobile-checks.ts`; `mobile-checks.spec.ts`
  * shows each one catching its problem.
@@ -42,6 +42,8 @@ type Screen = {
   lands?: string;
   /** Who is signed in; the administrator unless said. */
   role?: Role;
+  /** Tells apart two entries for one route, as in "empty". */
+  variant?: string;
   states?: State[];
   /** Failing today: the check is `fixme` until `issue` fixes it. */
   fixme?: boolean;
@@ -110,6 +112,16 @@ export const SCREENS: Screen[] = [
     await row.click();
     await expect(row).toHaveAttribute("aria-expanded", "true");
   } }] },
+  // Empty: a member with no installation access sees each list's empty state.
+  ...[
+    { issue: 273, route: "_app/runner-pools.index.tsx", path: "/runner-pools", ready: heading("Runner pools") },
+    { issue: 274, route: "_app/runners.tsx", path: "/runners", ready: heading("Runners") },
+    { issue: 274, route: "_app/queued-jobs.tsx", path: "/queued-jobs", ready: heading("Queued jobs") },
+    { issue: 275, route: "_app/workflow-runs.index.tsx", path: "/workflow-runs", ready: heading("Workflow runs") },
+    { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", ready: heading("Live logs") },
+    { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs") },
+    { issue: 277, route: "_app/repositories.tsx", path: "/repositories", ready: heading("Repositories") },
+  ].map((screen): Screen => ({ ...screen, role: "member", variant: "empty" })),
   // The root layout: every screen above renders inside it.
   { issue: 270, route: "__root.tsx", path: "/login", ready: heading("Log in to GridOps"), role: "anonymous" },
 ];
@@ -131,12 +143,12 @@ for (const theme of THEMES) {
       test.use({ viewport: { width, height: 780 }, isMobile: true, hasTouch: true });
 
       for (const screen of SCREENS) {
-        const title = `#${screen.issue} ${screen.route} (${screen.path})`;
+        const title = `#${screen.issue} ${screen.route} (${screen.path})${screen.variant ? `, ${screen.variant}` : ""}`;
         (screen.fixme && !RUN_ALL ? test.fixme : test)(title, async ({ page }) => {
           test.setTimeout(60_000);
           await open(page, { path: screen.path, role: screen.role ?? "admin", theme, ready: screen.ready });
           if (screen.lands) expect(new URL(page.url()).pathname).toBe(screen.lands);
-          const base = `${screen.route.replace(/[/$.]/g, "_")}-${width}-${theme}`;
+          const base = `${screen.route.replace(/[/$.]/g, "_")}${screen.variant ? `-${screen.variant}` : ""}-${width}-${theme}`;
           if (SHOTS) mkdirSync(SHOTS, { recursive: true });
           await expectReadableOnPhone(page, "loaded");
           if (SHOTS) await saveScreens(page, SHOTS, `${base}-loaded`);

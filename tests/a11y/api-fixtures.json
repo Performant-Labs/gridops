@@ -11787,6 +11787,16 @@
       "details": null
     }
   },
+  "member GET /api/v1/log-streams?page=1&perPage=25": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 25,
+      "total": 0
+    }
+  },
   "member GET /api/v1/overview": {
     "status": 200,
     "body": {
@@ -11893,6 +11903,16 @@
       }
     }
   },
+  "member GET /api/v1/overview/queued-jobs?page=1&perPage=25": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 25,
+      "total": 0
+    }
+  },
   "member GET /api/v1/overview/queued-jobs?page=1&perPage=5": {
     "status": 200,
     "body": {
@@ -11910,6 +11930,47 @@
       "slotSetting": 2,
       "slots": null,
       "tartAgent": "unknown"
+    }
+  },
+  "member GET /api/v1/repositories?q=&page=1&perPage=50": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 50,
+      "query": "",
+      "total": 0
+    }
+  },
+  "member GET /api/v1/runner-pools?page=1&perPage=25": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 25,
+      "total": 0
+    }
+  },
+  "member GET /api/v1/runners?page=1&perPage=25": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 25,
+      "total": 0
+    }
+  },
+  "member GET /api/v1/workflow-runs?page=1&perPage=25": {
+    "status": 200,
+    "body": {
+      "authenticated": true,
+      "items": [],
+      "page": 1,
+      "perPage": 25,
+      "total": 0
     }
   }
 }
