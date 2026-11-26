@@ -27,7 +27,7 @@ export function CategoryLegend({ data }: FleetHealthViewProps) {
     <section aria-label="Job categories" className="rounded-lg border border-border bg-panel">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
         <h2 className="text-sm font-medium text-foreground">Job categories</h2>
-        <Link className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground" to="/settings/general">
+        <Link className="flex min-h-6 shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground" to="/settings/general">
           Edit job categories <ArrowRight className="size-3" />
         </Link>
       </div>
@@ -39,7 +39,7 @@ export function CategoryLegend({ data }: FleetHealthViewProps) {
             <li className="flex min-w-0 items-baseline gap-2 py-1.5" key={category}>
               <span aria-hidden className="size-2 shrink-0 self-center rounded-full" style={{ backgroundColor: categoryColor(category) }} />
               <span className="shrink-0 text-sm font-medium text-foreground">{categoryLabel(category)}</span>
-              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={CATEGORY_DESCRIPTIONS[category]}>{CATEGORY_DESCRIPTIONS[category]}</span>
+              <span className="min-w-0 flex-1 text-xs text-muted-foreground sm:truncate" data-category-description={category} title={CATEGORY_DESCRIPTIONS[category]}>{CATEGORY_DESCRIPTIONS[category]}</span>
               {share !== null ? (
                 <span className="tabular shrink-0 text-xs text-faint" title={`${hours} CPU hours in the window`}>{share}% of CPU time</span>
               ) : null}

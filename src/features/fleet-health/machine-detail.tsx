@@ -4,7 +4,7 @@ import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { StatusDot } from "~/components/status-icon";
 import { formatBytes, formatCores, formatMib } from "~/features/fleet/fleet-ui";
 import { cn, formatRelativeTime } from "~/lib/utils";
-import { categoryColor, categoryLabel } from "./chart-theme";
+import { TRACK_COLOR, bandColor, categoryColor, categoryLabel, scoreBand } from "./chart-theme";
 import { MachineWindowSection } from "./machine-detail-window";
 import { JOB_CATEGORIES, type FleetHealthViewProps, type HostHealth } from "./types";
 
@@ -37,9 +37,41 @@ export function MachineDetail({ data, expandedId, host, window: windowKey }: Fle
   }
   return (
     <div className="space-y-5" data-machine-detail={host.id}>
+      <ScoreSection host={host} />
       <NowSection host={host} />
       <MachineWindowSection host={host} window={windowKey} />
     </div>
+  );
+}
+
+/**
+ * The machine's score components, each with its score and the sentence behind it (#280): the
+ * row's small bars carry these only in a tooltip, which a phone cannot show.
+ */
+function ScoreSection({ host }: { host: HostHealth }) {
+  return (
+    <section aria-label="Score" className="space-y-3">
+      <h3 className="text-xs font-medium uppercase tracking-wide text-faint">Score</h3>
+      <ul className="grid gap-x-8 gap-y-3 sm:grid-cols-2">
+        {host.components.map((component) => {
+          const insufficient = component.score === null;
+          return (
+            <li className="min-w-0" data-detail-component={component.key} key={component.key}>
+              <div className="flex items-baseline gap-2">
+                <span className={cn("min-w-0 text-sm font-medium", insufficient ? "text-muted-foreground" : "text-foreground")}>{component.label}</span>
+                <span className="tabular ml-auto shrink-0 text-xs text-muted-foreground">{insufficient ? "—" : Math.round(component.score ?? 0)}</span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full" style={{ backgroundColor: TRACK_COLOR }}>
+                <div className="h-full rounded-full" style={{ backgroundColor: bandColor(scoreBand(component.score)), width: `${component.score ?? 0}%` }} />
+              </div>
+              <p className="mt-1 text-xs leading-4 text-muted-foreground">
+                {component.deduction ?? (insufficient ? "Not enough data" : "On target")}
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
