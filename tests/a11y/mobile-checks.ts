@@ -50,9 +50,15 @@ export async function findMobileProblems(page: Page): Promise<MobileProblems> {
       const sideways: string[] = [];
       const root = document.documentElement;
       if (root.scrollWidth > root.clientWidth + 1) sideways.push(`the document is ${root.scrollWidth} px wide in a ${root.clientWidth} px viewport`);
-      for (const panel of document.querySelectorAll("#main *")) {
-        const style = getComputedStyle(panel);
-        if (!/(auto|scroll)/.test(style.overflowY) || panel.clientHeight < 200) continue;
+      // The page's panel is the outermost scroll container in `#main`; a wide table's own
+      // scroller inside it may scroll sideways, as the epic allows.
+      const scrolls = (element: Element) => /(auto|scroll)/.test(getComputedStyle(element).overflowY) && element.clientHeight >= 200;
+      const panels = [...document.querySelectorAll("#main *")].filter((element) => {
+        if (!scrolls(element)) return false;
+        for (let parent = element.parentElement; parent && parent.id !== "main"; parent = parent.parentElement) if (scrolls(parent)) return false;
+        return true;
+      });
+      for (const panel of panels) {
         if (panel.scrollWidth > panel.clientWidth + 1) {
           const widest = [...panel.querySelectorAll("*")]
             .filter((child) => child.getBoundingClientRect().right > panel.getBoundingClientRect().right + 1)
@@ -73,20 +79,23 @@ export async function findMobileProblems(page: Page): Promise<MobileProblems> {
       };
       const boxes = outer.map((element) => ({ element, box: element.getBoundingClientRect() }));
       const smallTargets: string[] = [];
+      const undersized = (b: DOMRect) => b.width < minTarget - 0.5 || b.height < minTarget - 0.5;
+      const radius = minTarget / 2;
       for (const { element, box } of boxes) {
-        if (box.width >= minTarget - 0.5 && box.height >= minTarget - 0.5) continue;
+        if (!undersized(box)) continue;
         if (inSentence(element)) continue;
         const cx = box.left + box.width / 2;
         const cy = box.top + box.height / 2;
-        const radius = minTarget / 2;
         const overlapped = boxes.find(({ element: other, box: b }) => {
           if (other === element) return false;
-          // The circle overlaps the other box when the box's nearest point is within the radius.
+          // The circle overlaps the other target when the box's nearest point is within the radius.
           const nx = Math.max(b.left, Math.min(cx, b.right));
           const ny = Math.max(b.top, Math.min(cy, b.bottom));
-          if (Math.hypot(nx - cx, ny - cy) >= radius) return false;
-          // Two undersized targets: overlapping 24 px circles count as well (2.5.8's spacing).
-          return true;
+          if (Math.hypot(nx - cx, ny - cy) < radius) return true;
+          // Or another undersized target's circle: two 24 px circles overlap when their centres
+          // are under 24 px apart (2.5.8's spacing).
+          if (!undersized(b) || inSentence(other)) return false;
+          return Math.hypot(b.left + b.width / 2 - cx, b.top + b.height / 2 - cy) < minTarget;
         });
         if (overlapped) smallTargets.push(`${describe(element)} is ${Math.round(box.width)} × ${Math.round(box.height)} px, too close to ${describe(overlapped.element)}`);
       }

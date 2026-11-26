@@ -40,6 +40,11 @@ test("it catches a page body wider than the phone", async ({ page: p }) => {
   expect(problems.sideways).toEqual([expect.stringMatching(/^the scrolling panel is \d+ px wide in \d+ px; widest: <table>/)]);
 });
 
+test("a wide table may scroll sideways inside its own scroller", async ({ page: p }) => {
+  const problems = await page(p, `<h1>Runs</h1><div style="overflow-x: auto"><table style="width: 640px; height: 400px"><tr><td>a very wide, tall table</td></tr></table></div><div style="height: 1200px"></div>`);
+  expect(problems.sideways).toEqual([]);
+});
+
 test("it catches a document wider than the phone", async ({ page: p }) => {
   await p.setContent(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><body style="margin: 0"><div style="width: 500px">wide</div></body>`);
   expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the document is 500 px wide in a 360 px viewport$/)]);
@@ -52,6 +57,15 @@ test("it catches small targets that crowd each other, not small ones with room",
   expect(problems.smallTargets).toEqual([
     '<button> "Edit" is 16 × 16 px, too close to <button> "Delete"',
     '<button> "Delete" is 16 × 16 px, too close to <button> "Edit"',
+  ]);
+});
+
+test("it catches small targets whose 24 px circles overlap, though neither circle reaches the other button", async ({ page: p }) => {
+  // Centres 22 px apart: each circle stops 2 px short of the other button, but the circles overlap.
+  const problems = await page(p, `<div style="display: flex; gap: 6px"><button aria-label="Up" style="width: 16px; height: 16px; padding: 0"></button><button aria-label="Down" style="width: 16px; height: 16px; padding: 0"></button></div>`);
+  expect(problems.smallTargets).toEqual([
+    '<button> "Up" is 16 × 16 px, too close to <button> "Down"',
+    '<button> "Down" is 16 × 16 px, too close to <button> "Up"',
   ]);
 });
 
