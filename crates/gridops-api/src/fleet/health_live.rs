@@ -740,7 +740,7 @@ mod tests {
     /// statement read io's whole history in under 100 ms), so the test also
     /// counts the work SQLite does: four more weeks of history must leave
     /// both reads' VM steps within 5 % of the week's. Reading the history
-    /// (`counts` instead of `live_counts`, `state!='released'` on the
+    /// (the whole-history count statement, `state!='released'` on the
     /// allocations, or the queue breakdown's queued jobs without the
     /// open-jobs index, which scanned every job ever recorded) multiplies
     /// them.
