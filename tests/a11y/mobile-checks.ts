@@ -9,9 +9,9 @@
  *   as 2.5.8 exempts them.
  * - `smallText`: visible text set under 11 px.
  * - `truncated`: an element that cuts its text off with an ellipsis, hiding more than a few
- *   characters, unless it is on the allow-list below (its full text is shown or reachable some
- *   other way). The hidden amount is estimated from the overflow width at half the font size per
- *   character.
+ *   characters, or clamps it to a number of lines (`line-clamp`) and hides any, unless it is on the
+ *   allow-list below (its full text is shown or reachable some other way). The hidden amount is
+ *   estimated from the overflow width at half the font size per character.
  */
 import type { Page } from "@playwright/test";
 
@@ -133,10 +133,17 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         if (size < minText - 0.01) smallText.add(`${size} px in ${describe(parent.closest("button, a, td, th, li, p, h1, h2, h3, label, div") ?? parent)}`);
       }
 
-      // 4. Ellipsis that hides more than a few characters, with no allow-list entry.
+      // 4. Ellipsis that hides more than a few characters, or lines clamped away, with no allow-list entry.
       const truncated: string[] = [];
       for (const element of document.querySelectorAll("body *")) {
         const style = getComputedStyle(element);
+        const clamp = style.getPropertyValue("-webkit-line-clamp");
+        if (clamp && clamp !== "none" && visible(element) && element.scrollHeight > element.clientHeight + 1) {
+          if (allowed.some((entry) => element.closest(entry))) continue;
+          const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+          truncated.push(`${describe(element)} clamped to ${clamp} lines hides about ${Math.max(1, Math.round((element.scrollHeight - element.clientHeight) / lineHeight))} more`);
+          continue;
+        }
         if (style.textOverflow !== "ellipsis" || !visible(element)) continue;
         const hidden = element.scrollWidth - element.clientWidth;
         if (hidden <= 1) continue;
