@@ -8,7 +8,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { type APIResponse, expect, type Page, type Request, type Route, test } from "@playwright/test";
 
 /** Who is signed in: an administrator, a member, or nobody (the sign-in page). */
 export type Role = "admin" | "member" | "anonymous";
@@ -20,6 +20,20 @@ type Fixtures = Record<string, Recorded>;
  * checked with data the recording lacks (long messages, more rows). Edited answers are never recorded.
  */
 export type EditAnswer = (path: string, body: unknown) => unknown;
+
+/**
+ * An edit's answer that replaces the status too: for a screen whose answer the seeded API can't
+ * give (the repository list comes from GitHub, so the seed answers it with a 500).
+ */
+export class Replaced {
+  constructor(readonly status: number, readonly body: unknown) {}
+}
+
+/** Fulfils `route` with `edit`'s answer, or `status` and the edited body. */
+function fulfilEdited(route: Route, status: number, edited: unknown, response?: APIResponse) {
+  if (edited instanceof Replaced) return route.fulfill({ status: edited.status, json: edited.body });
+  return response ? route.fulfill({ response, json: edited }) : route.fulfill({ status, json: edited });
+}
 
 export const LIVE = process.env.GRIDOPS_A11Y_BASE_URL;
 const RECORD = process.env.GRIDOPS_A11Y_RECORD;
@@ -50,7 +64,7 @@ export async function serveApi(page: Page, role: Role, edit?: EditAnswer) {
         const body = await response.json().catch(() => undefined);
         if (body === undefined) return route.fulfill({ response });
         const url = new URL(route.request().url());
-        await route.fulfill({ response, json: edit(`${url.pathname}${url.search}`, body) });
+        await fulfilEdited(route, response.status(), edit(`${url.pathname}${url.search}`, body), response);
       });
     } else if (RECORD) {
       page.on("response", async (response) => {
@@ -75,7 +89,7 @@ export async function serveApi(page: Page, role: Role, edit?: EditAnswer) {
       return;
     }
     const url = new URL(request.url());
-    await route.fulfill({ status: answer.status, json: edit ? edit(`${url.pathname}${url.search}`, structuredClone(answer.body)) : answer.body });
+    await fulfilEdited(route, answer.status, edit ? edit(`${url.pathname}${url.search}`, structuredClone(answer.body)) : answer.body);
   });
 }
 

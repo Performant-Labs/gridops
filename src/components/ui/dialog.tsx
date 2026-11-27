@@ -79,10 +79,11 @@ export function SheetContent({
           </>
         ) : (
         <>
-        <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
+        {/* On a phone the heading and its line wrap rather than being cut off (#277). */}
+        <header className="flex min-h-12 shrink-0 items-center gap-3 border-b border-border px-4 py-2 sm:h-12 sm:py-0">
           <div className="min-w-0 flex-1">
-            <DialogPrimitive.Title className="truncate text-sm font-medium">{heading}</DialogPrimitive.Title>
-            {description ? <DialogPrimitive.Description className="truncate text-2xs text-muted-foreground">{description}</DialogPrimitive.Description> : null}
+            <DialogPrimitive.Title className="text-sm font-medium [overflow-wrap:anywhere] sm:truncate">{heading}</DialogPrimitive.Title>
+            {description ? <DialogPrimitive.Description className="text-2xs text-muted-foreground [overflow-wrap:anywhere] sm:truncate">{description}</DialogPrimitive.Description> : null}
           </div>
           {actions}
           <DialogPrimitive.Close asChild>

@@ -6,7 +6,7 @@ export function Kbd({ className, ...props }: React.ComponentProps<"kbd">) {
   return (
     <kbd
       className={cn(
-        "inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[4px] border border-border-strong bg-panel-subtle px-1 font-sans text-[10px] font-medium leading-none text-muted-foreground",
+        "inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[4px] border border-border-strong bg-panel-subtle px-1 font-sans text-2xs font-medium leading-none text-muted-foreground",
         className,
       )}
       {...props}
@@ -30,7 +30,7 @@ export function Shortcut({ keys, className, alternatives = false }: { keys: stri
     <span className={cn("inline-flex items-center gap-1", className)}>
       {keys.map((key, index) => (
         <span className="inline-flex items-center gap-1" key={`${key}-${index}`}>
-          {sequence && index > 0 ? <span className="text-[10px] text-faint">then</span> : null}
+          {sequence && index > 0 ? <span className="text-2xs text-faint">then</span> : null}
           <Kbd>{platformKey(key)}</Kbd>
         </span>
       ))}

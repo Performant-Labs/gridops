@@ -22,7 +22,7 @@ async function page(page: Page, body: string, allowed?: Parameters<typeof findMo
   return findMobileProblems(page, allowed);
 }
 
-const NONE = { sideways: [], smallTargets: [], smallText: [], truncated: [] };
+const NONE = { sideways: [], smallTargets: [], smallText: [], squeezed: [], truncated: [] };
 
 test("a page with none of the problems passes", async ({ page: p }) => {
   expect(await page(p, `
@@ -71,6 +71,11 @@ test("it catches a document wider than the phone", async ({ page: p }) => {
   expect((await findMobileProblems(p)).sideways).toEqual([expect.stringMatching(/^the document is 500 px wide in a 360 px viewport$/)]);
 });
 
+test("it catches content spilling out of its box over what is beside it, not a glyph's overhang", async ({ page: p }) => {
+  const problems = await page(p, `<div style="display: flex; width: 300px"><div style="min-width: 0; flex: 1"><span style="display: flex; gap: 8px"><span style="flex: none">workflow_job · queued</span><span style="flex: none">GitHub</span></span></div><button style="flex: none; width: 140px; height: 32px">Copy JSON</button></div><div style="width: 17px"><span style="display: block; width: 22px">io</span></div>`);
+  expect(problems.sideways).toEqual([expect.stringMatching(/^<span> "workflow_job · queued GitHub" spills \d+ px out of its 160 px box$/)]);
+});
+
 test("it catches small targets that crowd each other, not small ones with room", async ({ page: p }) => {
   const problems = await page(p, `
     <div style="display: flex; gap: 2px"><button aria-label="Edit" style="width: 16px; height: 16px; padding: 0"></button><button aria-label="Delete" style="width: 16px; height: 16px; padding: 0"></button></div>
@@ -93,6 +98,12 @@ test("it catches small targets whose 24 px circles overlap, though neither circl
 test("it catches text under 11 px, once per place", async ({ page: p }) => {
   const problems = await page(p, `<div>Go to Runs <kbd style="font-size: 10px">G</kbd> then <kbd style="font-size: 10px">R</kbd></div><p style="font-size: 11px">fine</p>`);
   expect(problems.smallText).toEqual(['10 px in <div> "Go to Runs G then R"']);
+});
+
+test("it catches text squeezed into a sliver beside other content, not a short label or a wrapped sentence", async ({ page: p }) => {
+  const row = (name: string) => `<div style="display: flex; width: 200px; gap: 8px"><span style="min-width: 0; overflow-wrap: anywhere">${name}</span><span style="flex: none; width: 170px">Admin · Make member</span></div>`;
+  const problems = await page(p, `${row("Dana Ortiz")}${row("You")}<p style="width: 200px">Administrators manage credentials, backups and policy.</p>`);
+  expect(problems.squeezed).toEqual([expect.stringMatching(/^<span> "Dana Ortiz" is squeezed to \d+ px wide, \d+ lines tall$/)]);
 });
 
 test("it catches an ellipsis that hides more than a few characters", async ({ page: p }) => {
