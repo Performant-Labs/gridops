@@ -120,7 +120,7 @@ function PoolOverviewTab() {
             <span className="flex flex-wrap gap-1">{providers.map((provider) => <Badge dot={provider === "tart" ? "bg-[#bb87fc]" : "bg-info"} key={provider}>{providerLabel(provider, pool.macosRuntime)}</Badge>)}</span>
           </PropertyRow>
           <PropertyRow label="Mode"><span className="capitalize">{pool.mode}</span></PropertyRow>
-          {providers.includes("docker") ? <PropertyRow label="Image" title={dockerImage}><span className="truncate font-mono text-xs">{dockerImage}</span></PropertyRow> : null}
+          {providers.includes("docker") ? <PropertyRow label="Image" title={dockerImage}><span className="whitespace-normal font-mono text-xs [overflow-wrap:anywhere] sm:truncate">{dockerImage}</span></PropertyRow> : null}
           {providers.includes("tart") && pool.macosRuntime !== "native" ? <PropertyRow label="Base VM" title={pool.tartImage}><span className="truncate font-mono text-xs">{pool.tartImage}</span></PropertyRow> : null}
           <PropertyRow label="Per runner"><span className="tabular">{formatRunnerShape(pool.cpuLimit, pool.memoryLimitMb)}</span></PropertyRow>
           <PropertyRow label="Labels">

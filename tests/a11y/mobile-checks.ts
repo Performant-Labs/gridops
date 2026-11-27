@@ -4,10 +4,13 @@
  *
  * - `sideways`: the document, or the app's scrolling panel (the `overflow: auto` page body inside
  *   `#main`), is wider than its box, so the page scrolls sideways.
+ *   Or content spills out of a box that doesn't clip it, over what is beside it.
  * - `smallTargets`: a link, button or form control smaller than 24 × 24 px whose 24 px circle,
  *   centred on it, overlaps another target (WCAG 2.2 2.5.8). Links inside a sentence are exempt,
  *   as 2.5.8 exempts them.
  * - `smallText`: visible text set under 11 px.
+ * - `squeezed`: text in a box under 4 characters wide that runs to 3 or more lines, so its words
+ *   break a letter or two per line (a name beside controls that leave it no room).
  * - `truncated`: an element that cuts its text off with an ellipsis, hiding more than a few
  *   characters, or clamps it to a number of lines (`line-clamp`) and hides any, unless it is on the
  *   allow-list below (its full text is shown or reachable some other way). The hidden amount is
@@ -15,7 +18,7 @@
  */
 import type { Page } from "@playwright/test";
 
-export type MobileProblems = { sideways: string[]; smallTargets: string[]; smallText: string[]; truncated: string[] };
+export type MobileProblems = { sideways: string[]; smallTargets: string[]; smallText: string[]; squeezed: string[]; truncated: string[] };
 
 /**
  * Ellipsis that is fine on a phone: each entry's full text is visible, or a tap away, elsewhere.
@@ -88,6 +91,24 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         }
       }
 
+      // Content spilling out of its box (visible overflow) lies over whatever is beside it, as a
+      // sheet heading's badge did over its buttons. More than 8 px, so a glyph's overhang passes;
+      // the innermost box is named, not each box around it.
+      const spilled = [...document.querySelectorAll("body *")].filter((element) => {
+        const style = getComputedStyle(element);
+        if (style.overflowX !== "visible" || style.display === "inline" || !visible(element)) return false;
+        if (element.clientWidth === 0 || element.scrollWidth <= element.clientWidth + 8) return false;
+        // Reported above already when a box that scrolls or clips around it overflows too.
+        for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+          if (getComputedStyle(parent).overflowX !== "visible" && parent.scrollWidth > parent.clientWidth + 1) return false;
+        }
+        return true;
+      });
+      for (const element of spilled) {
+        if (spilled.some((other) => other !== element && element.contains(other))) continue;
+        sideways.push(`${describe(element)} spills ${element.scrollWidth - element.clientWidth} px out of its ${element.clientWidth} px box`);
+      }
+
       // 2. Targets: under 24 × 24 px, and its 24 px circle overlaps another target.
       const targetSelector = "a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=link], [role=tab], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=option]";
       const targets = [...document.querySelectorAll(targetSelector)].filter((element) => visible(element) && !element.closest("[inert], [aria-hidden=true]"));
@@ -121,8 +142,9 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         if (overlapped) smallTargets.push(`${describe(element)} is ${Math.round(box.width)} × ${Math.round(box.height)} px, too close to ${describe(overlapped.element)}`);
       }
 
-      // 3. Text under 11 px: each visible text node's own element.
+      // 3. Text under 11 px, and text squeezed into a sliver: each visible text node's own element.
       const smallText = new Set<string>();
+      const squeezed = new Set<string>();
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const text = (node.textContent ?? "").trim();
@@ -131,6 +153,10 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         const size = parseFloat(getComputedStyle(parent).fontSize);
         // One line per place: a row of small key caps is one problem, not one per key.
         if (size < minText - 0.01) smallText.add(`${size} px in ${describe(parent.closest("button, a, td, th, li, p, h1, h2, h3, label, div") ?? parent)}`);
+        // Under 4 characters wide (2 em, at half an em each) and 3 or more lines tall.
+        const box = parent.getBoundingClientRect();
+        const lineHeight = parseFloat(getComputedStyle(parent).lineHeight) || size * 1.2;
+        if (text.length >= 6 && box.width < size * 2 && box.height > lineHeight * 2.5) squeezed.add(`${describe(parent)} is squeezed to ${Math.round(box.width)} px wide, ${Math.round(box.height / lineHeight)} lines tall`);
       }
 
       // 4. Ellipsis that hides more than a few characters, or lines clamped away, with no allow-list entry.
@@ -153,7 +179,7 @@ export async function findMobileProblems(page: Page, allowed: { selector: string
         truncated.push(`${describe(element)} hides about ${chars} characters`);
       }
 
-      return { sideways, smallTargets, smallText: [...smallText], truncated };
+      return { sideways, smallTargets, smallText: [...smallText], squeezed: [...squeezed], truncated };
     },
     { allowed: allowed.map((entry) => entry.selector), hiddenCharsAllowed: HIDDEN_CHARS_ALLOWED, minTarget: MIN_TARGET, minText: MIN_TEXT_PX },
   );

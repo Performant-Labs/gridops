@@ -148,8 +148,9 @@ function PayloadSheet({ state }: { state: PayloadState }) {
       aria-describedby={undefined}
       description={`${delivery.id}${payload ? ` · ${formatBytes(payload.payloadBytes)}` : ""}`}
       heading={(
-        <span className="inline-flex min-w-0 items-center gap-2">
-          <span className="truncate font-mono">{delivery.event}{delivery.action ? ` · ${delivery.action}` : ""}</span>
+        // On a phone the badge wraps below a long event rather than running under the actions (#277).
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:flex-nowrap">
+          <span className="min-w-0 font-mono [overflow-wrap:anywhere] sm:truncate">{delivery.event}{delivery.action ? ` · ${delivery.action}` : ""}</span>
           <PlatformBadge descriptor={platformForDeliveryId(delivery.id)} />
         </span>
       )}

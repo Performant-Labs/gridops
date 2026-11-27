@@ -75,7 +75,7 @@ function AuditRow({ event }: { event: AuditEvent }) {
         {hasMetadata ? <button aria-expanded={open} aria-label="Toggle event details" className="absolute inset-0 outline-none" data-list-row="" onClick={() => setOpen((current) => !current)} type="button" /> : null}
         {system ? <span className="grid size-[18px] shrink-0 place-items-center rounded-full bg-selected text-muted-foreground"><Bot className="size-3" /></span> : <Avatar name={event.actorLabel} size={18} src={githubAvatar(event.actorLabel.replace(/^@/, ""))} />}
         <span className="hidden w-28 shrink-0 truncate text-xs text-muted-foreground sm:block">{system ? "GridOps" : event.actorLabel}</span>
-        <span className="min-w-0 shrink truncate font-mono text-xs font-medium text-foreground">{event.action}</span>
+        <span className="min-w-0 shrink font-mono text-xs font-medium text-foreground [overflow-wrap:anywhere] sm:truncate">{event.action}</span>
         <span className="flex-1" />
         <AuditTarget id={event.targetId} type={event.targetType} />
         <Tooltip content={new Date(event.createdAt).toLocaleString()}>

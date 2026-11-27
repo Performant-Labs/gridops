@@ -115,7 +115,8 @@ function RepositoryRow({ repository }: { repository: Repository }) {
   const [owner, name] = repository.fullName.split("/");
   return (
     <div className={cn(listRowClassName, "pr-2")}>
-      <span className="min-w-0 shrink truncate">
+      {/* On a phone a long name wraps rather than losing its end (#277). */}
+      <span className="min-w-0 shrink [overflow-wrap:anywhere] sm:truncate">
         <span className="text-muted-foreground">{owner}/</span><span className="font-medium text-foreground">{name}</span>
       </span>
       {repository.private ? <Tooltip content="Private repository"><Lock className="size-3.5 shrink-0 text-faint" /></Tooltip> : null}

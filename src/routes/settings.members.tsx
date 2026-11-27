@@ -49,18 +49,21 @@ function MembersSettings() {
               </Button>
             );
             return (
-              <div className="flex items-center gap-3 px-4 py-3" key={member.id}>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 sm:flex-nowrap" key={member.id}>
                 <Avatar name={member.login} size={32} src={member.avatarUrl} />
-                <div className="min-w-0 flex-1">
+                {/* On a phone the role and its button wrap below rather than squeezing the name (#279). */}
+                <div className="min-w-0 flex-1 basis-40">
                   <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">{member.name ?? member.login}</span>
+                    <span className="min-w-0 text-sm font-medium [overflow-wrap:anywhere] sm:truncate">{member.name ?? member.login}</span>
                     {member.id === user.id ? <span className="text-xs text-faint">You</span> : null}
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">@{member.login} · last signed in {formatRelativeTime(member.lastLoginAt)}</div>
+                  <div className="text-xs text-muted-foreground [overflow-wrap:anywhere] sm:truncate">@{member.login} · last signed in {formatRelativeTime(member.lastLoginAt)}</div>
                 </div>
-                <Badge dot={member.role === "admin" ? "bg-primary" : false} variant="secondary">{member.role === "admin" ? "Admin" : "Member"}</Badge>
-                {/* A disabled button ignores the pointer, so the tooltip hangs off a focusable wrapper. */}
-                {lastAdmin ? <Tooltip content="GridOps needs at least one administrator"><span className="inline-flex" tabIndex={0}>{roleButton}</span></Tooltip> : roleButton}
+                <span className="ml-auto flex shrink-0 items-center gap-3">
+                  <Badge dot={member.role === "admin" ? "bg-primary" : false} variant="secondary">{member.role === "admin" ? "Admin" : "Member"}</Badge>
+                  {/* A disabled button ignores the pointer, so the tooltip hangs off a focusable wrapper. */}
+                  {lastAdmin ? <Tooltip content="GridOps needs at least one administrator"><span className="inline-flex" tabIndex={0}>{roleButton}</span></Tooltip> : roleButton}
+                </span>
               </div>
             );
           })}

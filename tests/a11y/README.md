@@ -7,7 +7,7 @@ answer every `/api/v1` request from `api-fixtures.json`. CI runs them in the web
   settings, light and dark at 360 and 1280 px.
 - `mobile.spec.ts` (#269, epic #268): every route in `src/routes` at 360 and 390 px, light and
   dark, in each of its states, checked for sideways scrolling, targets under 24 px (WCAG 2.2 2.5.8),
-  text under 11 px and text cut off by an ellipsis or a line clamp. A screen that fails today is `fixme` with the
+  text under 11 px, text squeezed into a sliver a few characters wide, and text cut off by an ellipsis or a line clamp. A screen that fails today is `fixme` with the
   epic issue that fixes it; that issue removes the `fixme`.
   An entry's `edit` changes the recorded answers, to check a screen with data the recording lacks
   (the Overview's "busy" variant: long activity, machine speeds, many kinds of failure).

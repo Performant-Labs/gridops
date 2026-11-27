@@ -43,7 +43,7 @@ export function Avatar({
     <span
       aria-hidden="true"
       className={cn("inline-grid shrink-0 place-items-center font-semibold uppercase text-white", shape, className)}
-      style={{ width: size, height: size, backgroundColor: colorFor(name), fontSize: Math.max(8, Math.round(size * 0.45)) }}
+      style={{ width: size, height: size, backgroundColor: colorFor(name), fontSize: Math.max(11, Math.round(size * 0.45)) }}
     >
       {name.replace(/^@/, "").charAt(0) || "?"}
     </span>

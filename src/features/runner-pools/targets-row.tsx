@@ -189,7 +189,7 @@ export function TargetsRow({
         groups={groups}
         onValueChange={change}
         options={options}
-        placeholder="Choose where this pool’s runners register…"
+        placeholder="Choose where runners register…"
         searchPlaceholder="Search targets…"
         selectedNoun="targets"
         values={values}

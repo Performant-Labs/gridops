@@ -1,7 +1,8 @@
 /**
  * #269 (epic #268): every screen at phone width (360 and 390 px), light and dark, in each of its
  * states (empty, loaded, a row expanded, a dialog open), checked for what a script can check: no sideways
- * scrolling, targets of at least 24 px (WCAG 2.2 2.5.8), no text under 11 px, and no ellipsis
+ * scrolling, targets of at least 24 px (WCAG 2.2 2.5.8), no text under 11 px, no text squeezed
+ * into a sliver, and no ellipsis
  * hiding text that has no other form. The checks are in `mobile-checks.ts`; `mobile-checks.spec.ts`
  * shows each one catching its problem.
  *
@@ -18,7 +19,7 @@ import { mkdirSync } from "node:fs";
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { type EditAnswer, open, saveRecordingAfterAll, type Role, type Theme } from "./api";
+import { type EditAnswer, open, Replaced, saveRecordingAfterAll, type Role, type Theme } from "./api";
 import { findMobileProblems, saveScreens } from "./mobile-checks";
 
 const SHOTS = process.env.GRIDOPS_MOBILE_SHOTS;
@@ -116,6 +117,26 @@ const busyOverview: EditAnswer = (path, body) => {
   return overview;
 };
 
+/**
+ * The repository list (#277). It comes from GitHub, which the seeded API can't reach, so the
+ * recording holds a 500; these made-up repositories stand in, with a long name among them.
+ */
+const githubRepositories: EditAnswer = (path, body) => {
+  if (path.split("?")[0] !== "/api/v1/repositories") return body;
+  const repository = (id: number, accountLogin: string, name: string, poolCount: number, runCount: number) => ({
+    id, fullName: `${accountLogin}/${name}`, private: id % 2 === 0, archived: false, defaultBranch: "main",
+    htmlUrl: `https://github.com/${accountLogin}/${name}`, permission: "admin", connected: true, lastSyncedAt: new Date(Date.now() - 600_000).toISOString(),
+    installationId: 7, accountLogin, accountType: "Organization", repositorySelection: "all", poolCount, runCount,
+    lastRunAt: runCount ? new Date(Date.now() - 3_600_000).toISOString() : null,
+  });
+  const items = [
+    repository(101, "acme", "app", 1, 42),
+    repository(102, "acme", "infrastructure-terraform-modules-for-every-environment", 0, 0),
+    repository(103, "acme-research", "gpu-training", 2, 7),
+  ];
+  return new Replaced(200, { authenticated: true, items, total: items.length, page: 1, perPage: 50, query: "" });
+};
+
 export const SCREENS: Screen[] = [
   // #270: the app shell, navigation and sign-in.
   { issue: 270, route: "login.tsx", path: "/login", ready: heading("Log in to GridOps"), role: "anonymous" },
@@ -149,17 +170,17 @@ export const SCREENS: Screen[] = [
   { issue: 272, route: "_app/fleet.machines.$hostId.tsx", path: IO, ready: heading("io"), states: [{ name: "agent log open", act: dialog("Agent log") }] },
   // #273: runner pools.
   { issue: 273, route: "_app/runner-pools.index.tsx", path: "/runner-pools", ready: heading("Runner pools") },
-  { issue: 273, route: "_app/runner-pools.new.tsx", fixme: true, path: "/runner-pools/new", ready: heading("New pool") },
-  { issue: 273, route: "_app/runner-pools.$poolId.tsx", fixme: true, path: POOL, ready: heading("linux-docker") },
-  { issue: 273, route: "_app/runner-pools.$poolId.index.tsx", fixme: true, path: POOL, ready: heading("linux-docker") },
+  { issue: 273, route: "_app/runner-pools.new.tsx", path: "/runner-pools/new", ready: heading("New pool") },
+  { issue: 273, route: "_app/runner-pools.$poolId.tsx", path: POOL, ready: heading("linux-docker") },
+  { issue: 273, route: "_app/runner-pools.$poolId.index.tsx", path: POOL, ready: heading("linux-docker") },
   { issue: 273, route: "_app/runner-pools.$poolId.activity.tsx", path: `${POOL}/activity`, ready: heading("linux-docker") },
   { issue: 273, route: "_app/runner-pools.$poolId.settings.tsx", path: `${POOL}/settings`, ready: heading("linux-docker") },
   // #274: runners and queued jobs.
   { issue: 274, route: "_app/runners.tsx", path: "/runners", ready: heading("Runners") },
   { issue: 274, route: "_app/queued-jobs.tsx", path: "/queued-jobs", ready: heading("Queued jobs") },
   // #275: workflow runs, a run's page and live logs.
-  { issue: 275, route: "_app/workflow-runs.index.tsx", fixme: true, path: "/workflow-runs", ready: heading("Workflow runs") },
-  { issue: 275, route: "_app/workflow-runs.$runId.tsx", fixme: true, path: "/workflow-runs/960002", ready: "h1" },
+  { issue: 275, route: "_app/workflow-runs.index.tsx", path: "/workflow-runs", ready: heading("Workflow runs") },
+  { issue: 275, route: "_app/workflow-runs.$runId.tsx", path: "/workflow-runs/960002", ready: "h1" },
   { issue: 275, route: "_app/live-logs.tsx", path: "/live-logs", ready: heading("Live logs") },
   // #276: agent runs.
   { issue: 276, route: "_app/agent-runs.tsx", path: "/agent-runs", ready: heading("Agent runs"), states: [{ name: "run open", act: async (page) => {
@@ -172,19 +193,19 @@ export const SCREENS: Screen[] = [
       ? { ...body, ...("stage" in body ? { stage: "running the repository's tests" } : {}), ...("items" in body ? { items: (body as { items: object[] }).items.map((item) => ("stage" in item && (item as { stage: unknown }).stage ? { ...item, stage: "running the repository's tests" } : item)) } : {}) }
       : body },
   // #277: repositories, platform connections and webhooks.
-  { issue: 277, route: "_app/repositories.tsx", path: "/repositories", ready: heading("Repositories") },
-  { issue: 277, route: "_app/platform-connections.tsx", fixme: true, path: "/platform-connections", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
-  { issue: 277, route: "settings.connections.tsx", fixme: true, path: "/settings/connections", ready: 'h2:has-text("Connections")', states: [{ name: "add connection open", act: dialog("Add connection") }] },
-  { issue: 277, route: "settings.github.tsx", fixme: true, path: "/settings/github", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
-  { issue: 277, route: "settings.integrations.tsx", fixme: true, path: "/settings/integrations", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
-  { issue: 277, route: "_app/webhooks.tsx", fixme: true, path: "/webhooks", ready: heading("Webhooks"), states: [{ name: "a delivery inspected", act: dialog(/^Inspect delivery/) }] },
+  { issue: 277, route: "_app/repositories.tsx", path: "/repositories", ready: '#main :text-is("infrastructure-terraform-modules-for-every-environment"):visible', edit: githubRepositories },
+  { issue: 277, route: "_app/platform-connections.tsx", path: "/platform-connections", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
+  { issue: 277, route: "settings.connections.tsx", path: "/settings/connections", ready: 'h2:has-text("Connections")', states: [{ name: "add connection open", act: dialog("Add connection") }] },
+  { issue: 277, route: "settings.github.tsx", path: "/settings/github", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
+  { issue: 277, route: "settings.integrations.tsx", path: "/settings/integrations", lands: "/settings/connections", ready: 'h2:has-text("Connections")' },
+  { issue: 277, route: "_app/webhooks.tsx", path: "/webhooks", ready: heading("Webhooks"), states: [{ name: "a delivery inspected", act: dialog(/^Inspect delivery/) }] },
   // #278: the audit log.
   { issue: 278, route: "_app/audit-log.tsx", path: "/audit-log", ready: heading("Audit log"), states: [{ name: "an event expanded", act: expand("Toggle event details") }] },
   // #279: settings.
   { issue: 279, route: "settings.index.tsx", path: "/settings", lands: "/settings/general", ready: heading("General") },
   { issue: 279, route: "settings.general.tsx", path: "/settings/general", ready: heading("General") },
-  { issue: 279, route: "settings.preferences.tsx", fixme: true, path: "/settings/preferences", ready: heading("Preferences") },
-  { issue: 279, route: "settings.members.tsx", fixme: true, path: "/settings/members", ready: heading("Members") },
+  { issue: 279, route: "settings.preferences.tsx", path: "/settings/preferences", ready: heading("Preferences") },
+  { issue: 279, route: "settings.members.tsx", path: "/settings/members", ready: heading("Members") },
   { issue: 279, route: "settings.api-tokens.tsx", path: "/settings/api-tokens", ready: heading("API tokens"), states: [{ name: "a new token's secret shown", act: createToken }] },
   { issue: 279, route: "settings.runner-host.tsx", path: "/settings/runner-host", ready: heading("Runner host") },
   { issue: 279, route: "settings.ai.tsx", path: "/settings/ai", ready: heading("AI agent") },
@@ -218,6 +239,7 @@ async function expectReadableOnPhone(page: Page, state: string) {
   expect.soft(problems.sideways, `${state}: scrolls sideways`).toEqual([]);
   expect.soft(problems.smallTargets, `${state}: targets under 24 px, too close together`).toEqual([]);
   expect.soft(problems.smallText, `${state}: text under 11 px`).toEqual([]);
+  expect.soft(problems.squeezed, `${state}: text squeezed into a sliver`).toEqual([]);
   expect.soft(problems.truncated, `${state}: text cut off`).toEqual([]);
 }
 

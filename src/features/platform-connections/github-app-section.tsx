@@ -86,7 +86,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
   return (
     <SettingsRow label={label} stacked>
       <div className="flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-panel-subtle px-2.5 py-1.5 font-mono text-xs text-secondary-foreground">{value}</code>
+        <code className="min-w-0 flex-1 break-all rounded-md sm:truncate border border-border bg-panel-subtle px-2.5 py-1.5 font-mono text-xs text-secondary-foreground">{value}</code>
         <Tooltip content="Copy">
           <CopyButton label={label} size="icon-sm" value={value} variant="outline" />
         </Tooltip>
